@@ -96,6 +96,13 @@ uv run uvicorn maxicare_daniela.runtime:app --port 8080
   perfectamente aunque no tenga acceso a nada. Hay que compartir el calendario con su
   `client_email` dándole «Hacer cambios en los eventos». `CalendarioGoogle` lo comprueba
   **al construirse**, con una lectura real, y el mensaje nombra el correo.
+- **El calendario de la clínica es una cuenta personal de Gmail, y es una decisión tomada
+  a conciencia** (MaxiCare, 12/09/2026: «sí va a ser ese correo, no pasa nada»). Lo que
+  cuesta: las citas de los pacientes conviven con la agenda personal de esa persona —ya
+  hubo un evento suyo borrado a mano durante una prueba— y el día que esa cuenta no esté,
+  el calendario se va con ella. La salida, si algún día deja de ser aceptable, es barata:
+  crear un calendario secundario, compartirlo con la misma cuenta de servicio y cambiar
+  `MAXICARE_GOOGLE_CALENDAR_ID`. Ni una línea de código cambia.
 - **`calendario_desde_config` todavía no la llama nadie.** El chat web sigue con
   `CalendarioDoble` a propósito: probar en la pestaña Pruebas crearía eventos falsos en el
   calendario donde los doctores miran su día —el mismo error de categoría que `public` vs
