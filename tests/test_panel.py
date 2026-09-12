@@ -9,8 +9,9 @@ import os
 
 import psycopg
 import pytest
+from fastapi.testclient import TestClient
 
-from maxicare_daniela import contratos, panel, persistencia
+from maxicare_daniela import contratos, panel, persistencia, runtime
 from maxicare_daniela.config import cargar_dotenv
 
 CORE = ("precio", "duracion", "profesional")
@@ -157,3 +158,52 @@ def test_desactivar_lo_saca_del_vocabulario_pero_no_de_la_tabla(conn):
         assert any(f["clave"] == "bichectomia" for f in panel.listar_tratamientos(conn))
     finally:
         panel.cambiar_tratamiento(conn, "bichectomia", activo=True, usuario="prueba")
+
+
+# ==========================================================================================
+# Endpoints y control de rol (Tarea 6) -- offline, con un doble de `usuario_actual` por
+# `dependency_overrides`: no hace falta base de datos para probar quién puede tocar qué.
+# ==========================================================================================
+
+
+def _como(rol: str):
+    return lambda: {"usuario": f"x.{rol}", "nombre": "Prueba", "rol": rol}
+
+
+def test_recepcion_no_puede_editar_una_ficha():
+    runtime.app.dependency_overrides[runtime.usuario_actual] = _como("recepcion")
+    try:
+        c = TestClient(runtime.app)
+        r = c.put("/api/conocimiento", json={
+            "tratamiento": "implantes", "concepto": "precio",
+            "contenido": "$1", "aprobado": True, "nota_pendiente": None,
+        })
+        assert r.status_code == 403
+        assert "detalle" in r.json()
+    finally:
+        runtime.app.dependency_overrides.clear()
+
+
+def test_solo_admin_crea_un_tratamiento():
+    for rol, esperado in [("doctor", 403), ("recepcion", 403)]:
+        runtime.app.dependency_overrides[runtime.usuario_actual] = _como(rol)
+        try:
+            c = TestClient(runtime.app)
+            r = c.post("/api/tratamientos", json={"clave": "carillas", "etiqueta": "Carillas"})
+            assert r.status_code == esperado, f"{rol} obtuvo {r.status_code}"
+        finally:
+            runtime.app.dependency_overrides.clear()
+
+
+def test_un_error_del_servidor_llega_al_usuario_como_detalle():
+    """`api.ts` lee `cuerpo?.detalle`, pero `HTTPException` serializa `detail`. Sin este
+    manejador, ningún mensaje del servidor llega a la pantalla y todo se ve como un error
+    genérico."""
+    runtime.app.dependency_overrides[runtime.usuario_actual] = _como("recepcion")
+    try:
+        c = TestClient(runtime.app)
+        cuerpo = c.post("/api/tratamientos", json={"clave": "x", "etiqueta": "y"}).json()
+        assert cuerpo.get("detalle")
+        assert "admin" in cuerpo["detalle"].lower() or "permiso" in cuerpo["detalle"].lower()
+    finally:
+        runtime.app.dependency_overrides.clear()
