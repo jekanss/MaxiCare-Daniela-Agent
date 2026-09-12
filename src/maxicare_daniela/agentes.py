@@ -36,6 +36,7 @@ from __future__ import annotations
 from agents import Agent, ModelSettings
 from openai.types.shared import Reasoning
 
+from . import contratos
 from .config import MODELO_DANIELA, MODELO_LECTOR
 from .contratos import LecturaArchivo, RespuestaDaniela
 from .guardrails import (
@@ -97,6 +98,29 @@ formato de documento, sin emojis decorativos. Si necesitas dar varias opciones d
 máximo tres.\
 """
 
+
+def instrucciones_daniela(ctx, agente) -> str:
+    """Las instrucciones de siempre, con el vocabulario vivo pegado AL FINAL.
+
+    Al final, y no al principio, por dinero: `prompt_cache_retention="24h"` baja la entrada
+    de $2.00 a $0.20 por millón, y el caché funciona por prefijo idéntico. Si la lista
+    cambiara al comienzo del prompt, cada corrida pagaría el precio completo.
+
+    El SDK exige exactamente dos parámetros en este callable (`get_system_prompt` lanza
+    `TypeError` si no), aunque aquí no se use ninguno de los dos: el vocabulario vive en un
+    módulo, no en el contexto de la corrida.
+    """
+    ofrecidos = sorted(c for c in contratos.vocabulario() if c != "no_identificado")
+    return (
+        f"{INSTRUCCIONES_DANIELA}\n\n"
+        "TRATAMIENTOS QUE MAXICARE OFRECE HOY\n"
+        f"{', '.join(ofrecidos)}.\n"
+        "Usa exactamente una de esas claves al agendar y al registrar el estado de la "
+        "oportunidad. Si el paciente pregunta por algo que no está en la lista, no lo "
+        "ofrezcas: escala."
+    )
+
+
 #: `agentes[lector_archivos].instrucciones_esqueleto` del plan, literal.
 INSTRUCCIONES_LECTOR = """\
 Recibes un archivo que un paciente envió a MaxiCare. Devuelves exactamente un \
@@ -157,7 +181,7 @@ daniela = Agent(
     name="daniela",
     model=MODELO_DANIELA,
     model_settings=AJUSTES_DANIELA,
-    instructions=INSTRUCCIONES_DANIELA,
+    instructions=instrucciones_daniela,
     tools=list(TODAS),
     output_type=RespuestaDaniela,
     # En paralelo: el 99% de los mensajes son normales y no deben pagar la latencia de un
@@ -188,6 +212,7 @@ __all__ = [
     "AJUSTES_LECTOR",
     "INSTRUCCIONES_DANIELA",
     "INSTRUCCIONES_LECTOR",
+    "instrucciones_daniela",
     "daniela",
     "lector_archivos",
 ]
