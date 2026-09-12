@@ -985,7 +985,18 @@ function Bitacora({ cambios, fallo }: { cambios: CambioFila[] | null; fallo: str
 // La pantalla
 // ------------------------------------------------------------------------------------------
 
-export default function Tratamientos({ sesion }: { sesion: Sesion }) {
+export default function Tratamientos({
+  sesion,
+  alCaducarSesion,
+}: {
+  sesion: Sesion
+  /** Qué hacer cuando el servidor contesta 401 a una escritura. Es una llamada y no una
+   *  excepción a propósito: estas funciones se invocan desde un `onClick` asíncrono, y una
+   *  excepción lanzada ahí no la atrapa nadie -- React no tiene un `catch` río arriba para
+   *  una promesa rechazada--. Acabaría en la consola del navegador, que es el único sitio
+   *  donde la persona que está guardando un precio no va a mirar. */
+  alCaducarSesion: () => void
+}) {
   const [tratamientos, setTratamientos] = useState<TratamientoFila[]>([])
   const [fichas, setFichas] = useState<FichaFila[]>([])
   const [cambios, setCambios] = useState<CambioFila[] | null>(null)
@@ -1065,7 +1076,10 @@ export default function Tratamientos({ sesion }: { sesion: Sesion }) {
       await recargar()
       return true
     } catch (err) {
-      if (err instanceof SesionCaducada) throw err
+      if (err instanceof SesionCaducada) {
+        alCaducarSesion()
+        return false
+      }
       setError(mensajeDe(err))
       return false
     }
@@ -1075,10 +1089,11 @@ export default function Tratamientos({ sesion }: { sesion: Sesion }) {
      Quien las llama necesita esa respuesta para decidir si cierra su formulario, y el
      mensaje ya está donde tiene que estar: en la región `role="alert"` de arriba.
 
-     La excepción a la excepción es `SesionCaducada`: un 401 no es «el servidor dijo que no»
-     sino «ya no hay con quién hablar», y convertirlo en un `false` lo dejaría enterrado en
-     una franja roja de esta pantalla. Sube, para que el día que `App.tsx` sepa devolver al
-     ingreso no haya que volver a tocar estas tres funciones. */
+     `SesionCaducada` aparte: un 401 no es «el servidor dijo que no» sino «ya no hay con
+     quién hablar». Enseñarlo en la franja roja dejaría a alguien pulsando «Guardar» contra
+     un servidor que ya no le contesta, así que avisa a `App.tsx` y la aplicación vuelve al
+     ingreso. Se pierde lo que hubiera escrito en el formulario, y es inevitable: la sesión
+     ya no existe y no hay dónde guardarlo. */
   async function cambiarUno(
     clave: string,
     cambio: { etiqueta?: string; activo?: boolean },
@@ -1089,7 +1104,10 @@ export default function Tratamientos({ sesion }: { sesion: Sesion }) {
       await recargar()
       return true
     } catch (err) {
-      if (err instanceof SesionCaducada) throw err
+      if (err instanceof SesionCaducada) {
+        alCaducarSesion()
+        return false
+      }
       setError(mensajeDe(err))
       return false
     }
@@ -1107,7 +1125,10 @@ export default function Tratamientos({ sesion }: { sesion: Sesion }) {
       setNuevaEn(creado.clave)
       return true
     } catch (err) {
-      if (err instanceof SesionCaducada) throw err
+      if (err instanceof SesionCaducada) {
+        alCaducarSesion()
+        return false
+      }
       setError(mensajeDe(err))
       return false
     }
