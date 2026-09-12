@@ -95,6 +95,13 @@ def diagnosticar(config: Config) -> int:
 
 
 def main() -> int:
+    # Sin esto, el `fallos += 1` de la limpieza convierte `fallos` en una variable local de
+    # `main` y toda lectura previa revienta con `UnboundLocalError`. Costó un entregable que
+    # se murió DESPUÉS de pasar sus nueve comprobaciones, con el veredicto sin imprimir; y
+    # en el camino malo --una limpieza que falla-- habría reventado dentro del `finally`,
+    # tapando el aviso de que quedó un evento suelto en el calendario de los doctores.
+    global fallos
+
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--diagnosticar",
