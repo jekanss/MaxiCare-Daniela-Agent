@@ -24,6 +24,9 @@ llegue a la cita correcta.
 - El webhook en producción: `uv run python scripts/probar_webhook.py https://daniela.maxicarecol.com`
 - El cascarón web (entregable fase 5): `uv run python scripts/probar_web.py`
   Con `--chat` habla de verdad con Daniela y **gasta tokens**.
+- El panel de tratamientos (entregable fase 8, primera mitad):
+  `uv run python scripts/probar_panel.py`
+  Con `--chat` comprueba que Daniela cotiza el precio nuevo y **gasta tokens**.
 - Usuarios del panel: `uv run python scripts/crear_usuario.py` (`--listar`, `--quitar-acceso`)
 
 # Interfaz web
