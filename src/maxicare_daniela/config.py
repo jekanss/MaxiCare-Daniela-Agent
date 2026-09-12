@@ -139,7 +139,15 @@ class Config:
     whatsapp_app_secret: str
     telegram_bot_token: str
     telegram_chat_doctores: str
-    google_credentials_path: str
+    #: La cuenta de servicio entera, en base64 de una sola línea. NO una ruta a un archivo:
+    #: así el despliegue no tiene que copiar un JSON al VPS ni acertarle a sus permisos, y
+    #: la credencial viaja por el mismo camino que todas las demás. Un `.env` es una línea
+    #: por variable, y un JSON pegado tal cual deja la variable valiendo `{`.
+    google_sa_b64: str
+    #: Cuál de los calendarios. Es un correo: el principal de alguien (`x@gmail.com`) o uno
+    #: secundario (`c_...@group.calendar.google.com`). No basta con tenerlo: hay que
+    #: compartir ESE calendario con el `client_email` de la cuenta de servicio dándole
+    #: «Hacer cambios en los eventos», o la autenticación funciona y el calendario da 404.
     google_calendar_id: str
     modelo_daniela: str
     modelo_lector: str
@@ -165,7 +173,7 @@ class Config:
             whatsapp_app_secret=_opcional("WHATSAPP_APP_SECRET"),
             telegram_bot_token=_opcional("MAXICARE_TELEGRAM_BOT_TOKEN"),
             telegram_chat_doctores=_opcional("MAXICARE_TELEGRAM_CHAT_DOCTORES"),
-            google_credentials_path=_opcional("MAXICARE_GOOGLE_CREDENTIALS_PATH"),
+            google_sa_b64=_opcional("MAXICARE_GOOGLE_SA_B64"),
             google_calendar_id=_opcional("MAXICARE_GOOGLE_CALENDAR_ID"),
             modelo_daniela=_opcional("MAXICARE_MODELO_DANIELA", MODELO_DANIELA),
             modelo_lector=_opcional("MAXICARE_MODELO_LECTOR", MODELO_LECTOR),

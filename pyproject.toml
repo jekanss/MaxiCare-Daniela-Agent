@@ -8,6 +8,8 @@ dependencies = [
     # `sqlalchemy` es un extra real del paquete: lo exige `persistencia.tipo_sesion =
     # SQLAlchemySession` del plan. Sin él, el import de
     # `agents.extensions.memory.sqlalchemy_session` falla en el arranque, no en una prueba.
+    "google-api-python-client>=2.150",
+    "google-auth>=2.35",
     "httpx>=0.27",
     "openai-agents[sqlalchemy]>=0.22.1",
     # Driver de PostgreSQL para Neon (`restricciones.stack_obligatorio`).

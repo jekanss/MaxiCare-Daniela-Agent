@@ -454,8 +454,18 @@ def test_borrar_un_evento_que_ya_no_existe_no_es_un_error():
 
 
 def test_el_calendario_de_google_se_niega_a_existir_sin_credenciales():
-    """Falla al construirse, no tres pasos después con el cupo del paciente ya tomado."""
-    from maxicare_daniela.calendario import CalendarioGoogle
+    """Falla al construirse, no tres pasos después con el cupo del paciente ya tomado.
 
-    with pytest.raises(NotImplementedError, match="PENDIENTE"):
-        CalendarioGoogle()
+    Cuando `CalendarioGoogle` estaba PENDIENTE, esta prueba esperaba `NotImplementedError`.
+    La implementación cambió la excepción --ahora es `ErrorDeCalendario`, la misma que
+    atrapan las tools-- pero no la propiedad, que es lo que la prueba vigila: sin
+    credenciales el objeto no llega a existir. Si algún día alguien hace que el constructor
+    tolere una credencial vacía y falle al primer uso, esta prueba tiene que romperse.
+    """
+    from maxicare_daniela.calendario import CalendarioGoogle, ErrorDeCalendario
+
+    with pytest.raises(ErrorDeCalendario, match="MAXICARE_GOOGLE_CALENDAR_ID"):
+        CalendarioGoogle("", "")
+
+    with pytest.raises(ErrorDeCalendario, match="MAXICARE_GOOGLE_SA_B64"):
+        CalendarioGoogle("", "agenda@maxicare.example")

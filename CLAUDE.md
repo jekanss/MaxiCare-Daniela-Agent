@@ -32,6 +32,12 @@ llegue a la cita correcta.
   además escribe un precio y crea un tratamiento en `pruebas_web` y comprueba que Daniela lo
   cotiza de verdad; **gasta tokens**.
 - Usuarios del panel: `uv run python scripts/crear_usuario.py` (`--listar`, `--quitar-acceso`)
+- `CalendarioGoogle` contra el calendario real (no gasta tokens):
+  `uv run python scripts/probar_calendario.py`
+  Crea un evento en **2029 a las 3 a.m.**, lo mueve, comprueba que **no vuelve como
+  bloqueo**, y lo borra en un `finally` **verificando** que desapareció. Con
+  `--diagnosticar` solo lee: comprueba el acceso y lista los bloqueos de los próximos
+  14 días. Es lo primero que hay que correr cuando Calendar «no funciona».
 
 # Interfaz web
 
@@ -74,6 +80,28 @@ uv run uvicorn maxicare_daniela.runtime:app --port 8080
   releyendo Neon en bucle, porque `App.tsx` la pasa como una flecha nueva en cada render. No
   hay `eslint-plugin-react-hooks` ni arnés de pruebas de frontend que lo atrape: se vería
   como una pantalla lenta y una factura rara.
+
+# Google Calendar
+
+- **Una cita de Daniela NO es un bloqueo del doctor.** Es la trampa central de
+  `CalendarioGoogle` y con `CalendarioDoble` era invisible: el doble guarda eventos y
+  bloqueos en listas separadas, Google los devuelve juntos. Sin filtrarlos, la primera cita
+  de una hora taparía el bloque y la clínica atendería **uno** por hora en vez de dos. Cada
+  evento que crea Daniela lleva `extendedProperties.private.origen = "daniela"` y
+  `bloqueos()` lo descarta. Un evento sin marca es de los doctores y sí tapa.
+- **La credencial es `MAXICARE_GOOGLE_SA_B64`, no una ruta a un archivo.** `config.py`
+  decía `MAXICARE_GOOGLE_CREDENTIALS_PATH`, que no existía en ningún `.env`; nadie lo notó
+  porque ningún módulo leía ese campo. El nombre correcto es el que documenta `.env.ejemplo`.
+- **El 404 casi nunca es el código: es el permiso.** La cuenta de servicio se autentica
+  perfectamente aunque no tenga acceso a nada. Hay que compartir el calendario con su
+  `client_email` dándole «Hacer cambios en los eventos». `CalendarioGoogle` lo comprueba
+  **al construirse**, con una lectura real, y el mensaje nombra el correo.
+- **`calendario_desde_config` todavía no la llama nadie.** El chat web sigue con
+  `CalendarioDoble` a propósito: probar en la pestaña Pruebas crearía eventos falsos en el
+  calendario donde los doctores miran su día —el mismo error de categoría que `public` vs
+  `pruebas_web`—. El cableado real es de la fase 6, en el camino de WhatsApp.
+- `ZONA_BOGOTA` vive en `calendario.py` y `herramientas.py` la reexporta. Una sola
+  definición: dos copias de un desfase horario son dos cosas que un día divergen.
 
 # Trampas de este entorno
 

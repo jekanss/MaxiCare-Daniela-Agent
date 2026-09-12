@@ -47,13 +47,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from typing import Any, Callable
 
 from agents import RunContextWrapper, function_tool
 
 from . import contratos, persistencia
-from .calendario import ErrorDeCalendario, bloques_del_dia
+from .calendario import ZONA_BOGOTA, ErrorDeCalendario, bloques_del_dia
 from .canales import Telegram
 from .guardrails import cifras_de, horas_de, identidad_antes_de_datos
 from .contratos import (
@@ -68,9 +68,11 @@ from .contratos import (
 
 log = logging.getLogger("maxicare.herramientas")
 
-#: Colombia no tiene horario de verano, así que un desplazamiento fijo es exacto --y evita
-#: depender de la base de datos de zonas horarias del sistema, que en Windows no viene.
-ZONA_BOGOTA = timezone(timedelta(hours=-5))
+#: `ZONA_BOGOTA` se importa de `calendario.py`, donde vive desde que `CalendarioGoogle`
+#: también la necesita para traducir lo que devuelve Google. Se sigue reexportando desde
+#: aquí --`from .calendario import ZONA_BOGOTA`, arriba-- porque las pruebas y los scripts
+#: la venían usando como `herramientas.ZONA_BOGOTA` y no hay motivo para romperlos. Una sola
+#: definición: dos copias de un desfase horario son dos cosas que un día divergen.
 
 #: Tope de intentos de identificación por conversación (`herramientas[].valida`). Al
 #: tercero no se sigue preguntando: se escala. Insistir convierte una atención en un
