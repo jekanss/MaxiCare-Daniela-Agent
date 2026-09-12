@@ -17,9 +17,11 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timedelta
+from typing import get_args
 
 import pytest
 
+from maxicare_daniela import contratos
 from maxicare_daniela import herramientas as h
 from maxicare_daniela import persistencia
 from maxicare_daniela.calendario import Bloqueo, CalendarioDoble, bloques_del_dia
@@ -292,6 +294,56 @@ def test_no_se_programa_un_seguimiento_hacia_atras():
     texto = asyncio.run(h._programar_seguimiento(ctx, "reactivacion", pasado))
 
     assert "ya pasó" in texto
+
+
+# ==========================================================================================
+# registrar_estado_oportunidad -- valida contra el vocabulario vivo, no contra el Literal
+# ==========================================================================================
+
+
+def test_registrar_estado_rechaza_lo_que_no_esta_en_el_vocabulario():
+    """La validación va ANTES de tocar la base: un tratamiento inválido no debe llegar a
+    escribirse, y esta prueba lo comprueba sin necesitar Neon ni un doble de `_con_base`."""
+    ctx = contexto()
+
+    with pytest.raises(ValueError, match="no es un tratamiento"):
+        asyncio.run(
+            h._registrar_estado_oportunidad(
+                ctx,
+                estado="explorando",
+                barrera="ninguna",
+                tratamiento="lo_que_sea",
+                fuera_de_alcance=False,
+                nota=None,
+            )
+        )
+
+
+def test_registrar_estado_acepta_un_tratamiento_nuevo_del_vocabulario(monkeypatch):
+    """Con el vocabulario recortado por la clínica, un tratamiento que no está en el
+    `Literal` original --pero sí en la lista viva-- tiene que pasar igual."""
+    ctx = contexto()
+
+    async def base_falsa(_ctx, trabajo):
+        return None
+
+    monkeypatch.setattr(h, "_con_base", base_falsa)
+
+    contratos.fijar_vocabulario(["carillas", "implantes"])
+    try:
+        texto = asyncio.run(
+            h._registrar_estado_oportunidad(
+                ctx,
+                estado="explorando",
+                barrera="ninguna",
+                tratamiento="carillas",
+                fuera_de_alcance=False,
+                nota=None,
+            )
+        )
+        assert "guardado" in texto.lower()
+    finally:
+        contratos.fijar_vocabulario(get_args(contratos.Tratamiento))
 
 
 # ==========================================================================================

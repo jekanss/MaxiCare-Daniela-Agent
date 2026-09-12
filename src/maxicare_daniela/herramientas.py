@@ -52,7 +52,7 @@ from typing import Any, Callable
 
 from agents import RunContextWrapper, function_tool
 
-from . import persistencia
+from . import contratos, persistencia
 from .calendario import ErrorDeCalendario, bloques_del_dia
 from .canales import Telegram
 from .guardrails import cifras_de, horas_de, identidad_antes_de_datos
@@ -63,7 +63,6 @@ from .contratos import (
     SolicitudCancelacion,
     SolicitudCita,
     SolicitudEscalamiento,
-    Tratamiento,
     rechazar_documento_de_identidad,
 )
 
@@ -705,13 +704,22 @@ async def _registrar_estado_oportunidad(
     fuera_de_alcance: bool,
     nota: str | None,
 ) -> str:
+    # Se valida contra la lista viva, ANTES de tocar la base: un tratamiento que la clínica
+    # ya no ofrece no debe llegar a escribirse, y la prueba del rechazo no necesita Neon.
+    clave = (tratamiento or "").strip().lower()
+    if clave not in contratos.vocabulario():
+        raise ValueError(
+            f"'{tratamiento}' no es un tratamiento que MaxiCare ofrezca. "
+            f"Los actuales son: {', '.join(sorted(contratos.vocabulario()))}."
+        )
+
     def trabajo(conn) -> None:
         persistencia.upsert_estado_oportunidad(
             conn,
             ctx.id_conversacion,
             estado=estado,
             barrera=barrera,
-            tratamiento=tratamiento,
+            tratamiento=clave,
             fuera_de_alcance=fuera_de_alcance,
             notas=nota,
         )
@@ -725,7 +733,7 @@ async def registrar_estado_oportunidad(
     wrapper: RunContextWrapper[ContextoDaniela],
     estado: EstadoOportunidad,
     barrera: Barrera,
-    tratamiento: Tratamiento,
+    tratamiento: str,
     fuera_de_alcance: bool,
     nota: str,
 ) -> str:
@@ -736,7 +744,8 @@ async def registrar_estado_oportunidad(
     Args:
         estado: en qué punto está el paciente.
         barrera: qué lo está frenando, o 'ninguna'.
-        tratamiento: de qué trata la conversación, o 'no_identificado'.
+        tratamiento: de qué trata la conversación, o 'no_identificado'. Uno de los
+            tratamientos que MaxiCare ofrece; la lista va al final de tus instrucciones.
         fuera_de_alcance: si pidió algo que MaxiCare no ofrece.
         nota: una línea de contexto operativo, sin contenido clínico.
     """
