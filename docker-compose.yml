@@ -1,0 +1,52 @@
+# Daniela en el VPS.
+#
+# Se apoya en lo que ya existe ahí y no lo duplica: el túnel de Cloudflare y Traefik viven
+# en `/opt/sinpiloto` y ya enrutan `daniela.maxicarecol.com`. Este compose solo añade el
+# contenedor que responde detrás de ese nombre.
+#
+#   docker compose up -d --build
+#
+# NO publica ningún puerto en el host a propósito. La única forma de llegar a Daniela es
+# Cloudflare → túnel → Traefik → esta red interna. Un `ports:` aquí abriría una segunda
+# puerta, en claro y sin el WAF de Cloudflare delante — y nadie se acordaría de que existe.
+
+name: maxicare-daniela
+
+services:
+  daniela:
+    build: .
+    image: maxicare-daniela:local
+    restart: unless-stopped
+
+    # Los secretos entran por aquí (Neon, OpenAI, WhatsApp, Telegram) y no se escriben en
+    # este archivo, que sí se versiona.
+    env_file: .env
+
+    environment:
+      TZ: America/Bogota
+
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.daniela.rule=Host(`daniela.maxicarecol.com`)
+      - traefik.http.routers.daniela.entrypoints=web
+      - traefik.http.services.daniela.loadbalancer.server.port=8080
+      # Traefik solo manda tráfico a un contenedor sano: durante un despliegue, los webhooks
+      # de Meta siguen yendo al anterior hasta que el nuevo responde `/salud`.
+      - traefik.http.services.daniela.loadbalancer.healthcheck.path=/salud
+      - traefik.http.services.daniela.loadbalancer.healthcheck.interval=15s
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+    networks: [interna]
+
+networks:
+  # Creada por el compose de `/opt/sinpiloto`. `external: true` porque este archivo la usa
+  # pero no la posee: si la declarara propia, `docker compose down` se llevaría por delante
+  # la red de la que cuelgan Traefik y el túnel.
+  interna:
+    external: true
+    name: maxicare_interna

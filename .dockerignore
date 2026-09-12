@@ -1,0 +1,20 @@
+# El `.env` NO entra en la imagen. Entra en tiempo de ejecución por `env_file` del compose:
+# una imagen con secretos dentro los lleva a cualquier registro donde se suba, y quedan en
+# las capas aunque después se borre el archivo.
+.env
+
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.git/
+.claude/
+
+# No hacen falta para correr.
+docs/
+tests/
+
+# La imagen compila el frontend en su propia etapa: copiar node_modules de la
+# maquina de desarrollo meteria binarios de Windows en una imagen Debian.
+web/node_modules/
+web/dist/

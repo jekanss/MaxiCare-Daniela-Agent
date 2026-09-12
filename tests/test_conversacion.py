@@ -1,0 +1,278 @@
+"""El turno de Daniela: lo que pasa cuando sale bien y, sobre todo, cuando sale mal.
+
+Offline. El modelo es el `ModeloGuionizado` de `dobles.py`, así que `Runner.run` corre de
+verdad --con su `output_type` y su ciclo completo-- sin tocar la red.
+
+La propiedad que estas pruebas sostienen es la regla de `fallos.escalamiento`:
+
+    PASE LO QUE PASE sale un mensaje al paciente.
+
+Por eso casi todas terminan comprobando que hay texto, y no solo que se registró un fallo.
+
+Son funciones síncronas que llaman a `asyncio.run`, igual que `test_agentes.py`: el proyecto
+no tiene `pytest-asyncio` y añadirlo por unas pruebas sería una dependencia nueva para lo que
+una línea resuelve.
+"""
+
+from __future__ import annotations
+
+import asyncio
+
+import pytest
+from agents import Agent, MaxTurnsExceeded, ModelBehaviorError, RunConfig, UserError
+
+from maxicare_daniela import conversacion
+from maxicare_daniela.calendario import CalendarioDoble
+from maxicare_daniela.contratos import ContextoDaniela, RespuestaDaniela
+
+from .dobles import ModeloGuionizado, responde, respuesta_daniela
+
+SIN_RED = RunConfig(tracing_disabled=True)
+
+
+@pytest.fixture(autouse=True)
+def sin_base(monkeypatch):
+    """Ninguna de estas pruebas escribe en Neon.
+
+    `responder` persiste el estado al terminar y se traga el fallo si la base no responde,
+    así que sin esto pasarían igual -- pero cada una esperaría a que se agotara un intento de
+    conexión. Una suite lenta es una suite que se deja de correr.
+    """
+    monkeypatch.setattr(conversacion, "_guardar_estado", lambda ctx, resultado: None)
+
+
+def contexto() -> ContextoDaniela:
+    return ContextoDaniela(
+        id_conversacion="conv-de-prueba",
+        telefono_completo="573001112233",
+        database_url="postgresql://no-se-usa/na",
+        calendario=CalendarioDoble(),
+    )
+
+
+def agente_con(*turnos) -> Agent:
+    """Un agente mínimo con el `output_type` real de Daniela pero sin tools ni guardrails.
+
+    Lo que se prueba aquí es el orquestador, no el agente: mezclarlos haría que un fallo de
+    esta suite no dijera cuál de los dos se rompió.
+    """
+    return Agent(
+        name="daniela_de_prueba",
+        model=ModeloGuionizado(*turnos),
+        instructions="Responde.",
+        output_type=RespuestaDaniela,
+    )
+
+
+def turno(entrada: str, agente: Agent, ctx: ContextoDaniela, **extra):
+    return asyncio.run(
+        conversacion.responder(entrada, ctx=ctx, agente=agente, run_config=SIN_RED, **extra)
+    )
+
+
+# ==========================================================================================
+# El camino normal
+# ==========================================================================================
+
+
+def test_un_turno_normal_devuelve_lo_que_dijo_el_modelo():
+    agente = agente_con(responde(respuesta_daniela("Claro, con mucho gusto.")))
+
+    r = turno("hola", agente, contexto())
+
+    assert r.respuesta.mensaje_al_paciente == "Claro, con mucho gusto."
+    assert r.tripwires == []
+    assert r.regenerado is False
+    assert r.escalado_por is None
+
+
+def test_el_turno_se_cuenta_y_los_datos_del_turno_se_vacian():
+    """`DatosDelTurno` se vacía ANTES de correr, no después.
+
+    Es lo que impide que un precio consultado hace diez mensajes siga autorizando esa cifra
+    hoy -- el fallo exacto contra el que existe `sin_cifra_no_documentada`.
+    """
+    ctx = contexto()
+    ctx.turno.cifras_autorizadas = {"1900000"}
+    ctx.turno.hubo_adjunto = True
+
+    r = turno("hola", agente_con(responde(respuesta_daniela("Hola."))), ctx)
+
+    assert ctx.turno.cifras_autorizadas == set()
+    assert ctx.turno.hubo_adjunto is False
+    assert ctx.turno_actual == 1 and r.turno == 1
+
+
+def test_el_escalamiento_que_pide_el_modelo_se_recoge():
+    agente = agente_con(
+        responde(
+            respuesta_daniela(
+                "Le paso tu caso al doctor.",
+                requiere_escalamiento=True,
+                motivo_escalamiento="clinico",
+            )
+        )
+    )
+
+    assert turno("me duele mucho", agente, contexto()).escalado_por == "clinico"
+
+
+def test_se_avisa_al_transporte_cuando_hay_que_escalar():
+    """`al_escalar` es lo que en WhatsApp avisará a los doctores por Telegram. Aquí solo se
+    comprueba que se llama, y con el motivo correcto."""
+    avisos: list[tuple] = []
+
+    async def anotar(ctx, motivo, mensaje):
+        avisos.append((motivo, mensaje))
+
+    agente = agente_con(
+        responde(
+            respuesta_daniela(
+                "Ya le aviso.", requiere_escalamiento=True, motivo_escalamiento="agenda_llena"
+            )
+        )
+    )
+    turno("no hay cupo?", agente, contexto(), al_escalar=anotar)
+
+    assert avisos == [("agenda_llena", "Ya le aviso.")]
+
+
+def test_un_escalamiento_fallido_no_deja_al_paciente_sin_respuesta():
+    """Que no se pueda avisar al doctor es grave, pero menos que dejar mudo al paciente."""
+
+    async def revienta(ctx, motivo, mensaje):
+        raise RuntimeError("Telegram no responde")
+
+    agente = agente_con(
+        responde(
+            respuesta_daniela(
+                "Ya le aviso.", requiere_escalamiento=True, motivo_escalamiento="clinico"
+            )
+        )
+    )
+
+    r = turno("hola", agente, contexto(), al_escalar=revienta)
+
+    assert r.respuesta.mensaje_al_paciente == "Ya le aviso."
+
+
+# ==========================================================================================
+# Los caminos que importan: cuando algo falla
+# ==========================================================================================
+
+
+class ModeloQueRevienta(ModeloGuionizado):
+    """Lanza la excepción que se le diga, tantas veces como se le diga, y luego responde."""
+
+    def __init__(self, excepcion: Exception, veces: int, *turnos) -> None:
+        super().__init__(*turnos)
+        self._excepcion = excepcion
+        self._quedan = veces
+
+    async def get_response(self, *args, **kwargs):
+        if self._quedan > 0:
+            self._quedan -= 1
+            raise self._excepcion
+        return await super().get_response(*args, **kwargs)
+
+
+def agente_que_revienta(excepcion: Exception, veces: int, *turnos) -> Agent:
+    return Agent(
+        name="daniela_de_prueba",
+        model=ModeloQueRevienta(excepcion, veces, *turnos),
+        instructions="Responde.",
+        output_type=RespuestaDaniela,
+    )
+
+
+def test_max_turns_no_se_reintenta_y_sale_un_mensaje():
+    """`fallos.excepciones_manejadas` es tajante: si no cerró en el límite, más turnos no van
+    a cerrarlo. Se escala y se le dice algo al paciente."""
+    r = turno("hola", agente_que_revienta(MaxTurnsExceeded("se acabaron"), 99), contexto())
+
+    assert r.respuesta.mensaje_al_paciente == conversacion.MENSAJE_LIMITE_TURNOS
+    assert r.escalado_por is not None
+    assert "MaxTurnsExceeded" in (r.fallo or "")
+    assert r.regenerado is False, "no se reintenta, y esta es la prueba de que no se reintenta"
+
+
+def test_model_behavior_error_se_reintenta_una_vez_y_se_recupera():
+    agente = agente_que_revienta(
+        ModelBehaviorError("json invalido"), 1, responde(respuesta_daniela("Ya está."))
+    )
+
+    r = turno("hola", agente, contexto())
+
+    assert r.respuesta.mensaje_al_paciente == "Ya está."
+    assert r.regenerado is True
+    assert r.escalado_por is None
+
+
+def test_model_behavior_error_repetido_escala_con_mensaje_seguro():
+    r = turno("hola", agente_que_revienta(ModelBehaviorError("otra vez"), 99), contexto())
+
+    assert r.respuesta.mensaje_al_paciente == conversacion.MENSAJE_FALLO_TECNICO
+    assert r.escalado_por is not None
+
+
+def test_user_error_sube_y_no_se_disfraza_de_mensaje_amable():
+    """La única excepción que `responder` NO traduce.
+
+    Un `UserError` es un defecto de configuración --un `output_type` imposible, una tool mal
+    declarada--, y taparlo con «se me complicó revisar eso» lo esconde hasta producción.
+    Hereda de `AgentsException`, así que sin el `except UserError` puesto ANTES, la red de
+    seguridad se lo tragaría: esta prueba es lo que impide que alguien reordene esos dos
+    `except` sin darse cuenta.
+    """
+    with pytest.raises(UserError):
+        turno("hola", agente_que_revienta(UserError("tool mal declarada"), 99), contexto())
+
+
+@pytest.mark.parametrize(
+    "excepcion",
+    [MaxTurnsExceeded("x"), ModelBehaviorError("x")],
+    ids=["max_turns", "model_behavior"],
+)
+def test_siempre_sale_un_mensaje_al_paciente(excepcion):
+    """La regla de `fallos.escalamiento`, comprobada sobre cada rama de `except`.
+
+    Si mañana alguien agrega una rama nueva y se le olvida poner texto, esta es la prueba que
+    lo dice."""
+    r = turno("hola", agente_que_revienta(excepcion, 99), contexto())
+
+    assert r.respuesta.mensaje_al_paciente.strip(), f"{excepcion!r} dejó al paciente sin texto"
+    assert r.respuesta.requiere_escalamiento is True
+
+
+# ==========================================================================================
+# La sesión en memoria
+# ==========================================================================================
+
+
+def test_la_sesion_en_memoria_conserva_el_historial():
+    """Sin historial, Daniela no recuerda el mensaje anterior y el chat de pruebas no sirve
+    para lo único que existe: iterar el prompt sobre una conversación."""
+    sesion = conversacion.SesionEnMemoria("conv-1")
+
+    turno("primero", agente_con(responde(respuesta_daniela("Hola."))), contexto(), sesion=sesion)
+    guardado = asyncio.run(sesion.get_items())
+
+    assert any("primero" in str(item) for item in guardado)
+    assert len(guardado) >= 2, "debe guardar lo que dijo el paciente y lo que respondió Daniela"
+
+
+def test_la_sesion_devuelve_los_ultimos_items_no_los_primeros():
+    """`limit` es «los últimos N en orden cronológico».
+
+    Confundirlo le daría al modelo el principio de la conversación y nunca el final, que es
+    justo el trozo que importa."""
+
+    async def comprobar():
+        sesion = conversacion.SesionEnMemoria("conv-1")
+        await sesion.add_items([{"n": 1}, {"n": 2}, {"n": 3}])
+        assert await sesion.get_items(limit=2) == [{"n": 2}, {"n": 3}]
+        assert len(await sesion.get_items()) == 3
+        await sesion.clear_session()
+        assert await sesion.get_items() == []
+
+    asyncio.run(comprobar())

@@ -1,0 +1,505 @@
+{
+  "meta": {
+    "cliente": "MaxiCare — clínica dental en Puente Largo, Bogotá. Agente conversacional llamado «Daniela».",
+    "fecha": "2026-09-12",
+    "autor": "oai-diseno-solucion, conducido bloque por bloque con el dueño del proyecto.",
+    "nombre_proyecto": "maxicare-daniela"
+  },
+  "agentes": [
+    {
+      "nombre": "daniela",
+      "responsabilidad": "Atiende al paciente por WhatsApp y por el chat web de principio a fin: responde con información aprobada por MaxiCare, detecta qué busca y qué lo frena, agenda, reprograma y cancela citas reales, hace seguimiento y sostiene la continuidad después de la atención. NO interpreta material clínico, NO recibe el contenido clínico de ningún archivo, NO concede excepciones comerciales y NO responde temas ajenos a MaxiCare.",
+      "instrucciones_esqueleto": "Eres Daniela, de MaxiCare (clínica dental en Puente Largo, Bogotá). Hablas español colombiano, tuteas siempre —nunca «usted»— y das las horas en formato am/pm. Tu meta no es acumular citas: es que el paciente llegue a la cita correcta, pueda asistir y reciba continuidad. La seguridad clínica prevalece sobre cualquier objetivo comercial.\nNUNCA afirmas un precio, una condición o una disponibilidad que no venga de una tool en este mismo turno. Si no tienes el dato, lo dices y escalas; no estimas ni extrapolas de tratamientos parecidos.\nNUNCA le dices a un paciente qué tiene, ni interpretas síntomas, fotos, radiografías o remisiones. Orientas hasta el límite seguro y derivas el resto a los doctores.\nAntes de pedir datos sensibles, informas que al continuar acepta la política de tratamiento de datos de MaxiCare. Nunca pides cédula ni documentos de identidad.\nEscalar no detiene la conversación: dices que lo estás revisando y sigues ofreciendo alternativas.\nSolo atiendes temas de MaxiCare. Ante algo ajeno, lo reconoces con naturalidad y calidez —nunca con un mensaje de bloqueo— y reconduces a lo que sí puedes resolver.\nNo repites un argumento que el paciente ya rechazó.",
+      "output_type": "RespuestaDaniela",
+      "tools": [
+        "consultar_base_conocimiento",
+        "consultar_disponibilidad",
+        "identificar_paciente",
+        "crear_cita",
+        "reprogramar_cita",
+        "cancelar_cita",
+        "registrar_estado_oportunidad",
+        "programar_seguimiento",
+        "escalar_a_doctores"
+      ],
+      "modelo": "Clase general con visión desactivada en la práctica (no recibe imágenes). El identificador exacto se confirma contra el catálogo del proveedor al construir: `Agent(model=...)` acepta cualquier string y el SDK no valida que exista. Se eligió la clase general contra el default económico del plugin. VERIFICADO 2026-09-12 (fase 4): identificador confirmado contra el catalogo de la cuenta y la documentacion de precios de OpenAI, como pedia este mismo campo. La familia 5.6 se reparte en tres tiers que los nombres no revelan: `gpt-5.6-sol` es el flagship ($4/$20 por millon), `gpt-5.6-terra` el mini ($2/$12) y `gpt-5.6-luna` el nano ($0.20/$1.20) -- la documentacion dice literalmente que luna «roughly corresponds to the nano model tier». Decidido: `daniela` en `terra` con razonamiento `low`, `lector_archivos` en `sol` con razonamiento `medium`, y los DOS evaluadores de guardrail en `luna`. Los evaluadores son un tercer consumidor de modelo que el plan no contaba: `uso_indebido` corre en cada mensaje entrante y casi duplica las llamadas por conversacion, y para responder una pregunta cerrada de si o no el tier nano sobra. Tres ajustes de `ModelSettings` ahorran mas que cambiar de modelo: `prompt_cache_retention='24h'` (el prompt de sistema y los nueve esquemas de tools son identicos cada turno y son la mayor parte de la entrada: cacheados cuestan $0.20 en vez de $2.00), `reasoning=low` (los tokens de razonamiento se facturan como SALIDA, el lado caro) y `verbosity='low'` (menos salida, y mejor para WhatsApp). Costo estimado: ~$0.12 por conversacion de ocho mensajes, ~$0.018 por archivo leido. Queda abierto y se decide con datos, no con opinion: `daniela` en `luna` costaria 10x menos. La suite de evals de la fase 9 corre los 50 casos reales de MaxiCare con los dos y compara. Hasta entonces, `terra`.",
+      "modalidad": "texto",
+      "sandbox": false
+    },
+    {
+      "nombre": "lector_archivos",
+      "responsabilidad": "Recibe un archivo enviado por el paciente (imagen o PDF) y devuelve un LecturaArchivo con dos mitades que nunca se mezclan: contexto clínico fiel destinado al doctor, y datos no clínicos destinados a la conversación. No tiene tools, no le habla a nadie y no decide nada más. No procesa video (se reenvía sin interpretar) ni audio (se transcribe en la ingesta).",
+      "instrucciones_esqueleto": "Recibes un archivo que un paciente envió a MaxiCare. Devuelves exactamente un LecturaArchivo.\nEn `contexto_clinico` escribes lo que el documento dice, con fidelidad, incluido su contenido clínico: esto lo lee un doctor. Cita el documento, no opines. Si es una imagen sin texto, describe qué tipo de imagen es y nada más: NO emitas hallazgos propios sobre una radiografía o una foto — el doctor ya recibe la imagen y tu lectura podría anclarle el criterio.\nEn los demás campos escribes solo lo NO clínico: qué tratamiento se menciona (uno de la lista cerrada), de qué clínica o profesional viene, qué fecha trae.\n`confianza` es 'alta' solo si el tratamiento está dicho explícitamente en el documento.",
+      "output_type": "LecturaArchivo",
+      "tools": [],
+      "modelo": "Clase general con visión. El identificador exacto se confirma contra el catálogo del proveedor al construir. Debe aceptar imágenes y PDF.",
+      "modalidad": "texto",
+      "sandbox": false
+    }
+  ],
+  "orquestacion": {
+    "patron": "codigo",
+    "justificacion": "Hay dos agentes por una frontera de `usuario_canal.usuario_final`: del mismo archivo salen dos salidas con dos destinatarios y umbrales opuestos de qué se puede decir — contexto clínico para el doctor, datos no clínicos para el paciente. Un solo agente tendría que sostener esa separación como instrucción condicional sobre datos de salud; partido, la separación es enrutamiento en código y el campo clínico nunca entra al contexto de daniela. La coordinación es `codigo` porque el flujo no tiene ningún rombo: las tres bifurcaciones (¿hay doctor con la conversación tomada?, ¿el mensaje trae adjunto?, ¿el output pide escalar?) son `if` sobre campos que ya existen — una columna de Neon, el `type` del webhook de WhatsApp y un booleano de `RespuestaDaniela`. Ninguna exige leer la intención del usuario. `lector_archivos` corre en la capa de ingesta ANTES de `Runner.run(daniela)`, no como tool suya. El relevo se activa con un botón de Telegram (`callback_query`) y no con un comando de texto, porque el cliente fijó que los doctores no saben de tecnología y el sistema no puede tener comandos ni modos que haya que recordar. Eso no cambia el patrón: un `callback_query` llega con un identificador, no con una intención que haya que interpretar, así que sigue siendo un `if` y no un rombo. Una comprobación empírica acota lo que el `if` del `callback_query` puede hacer: Telegram rechaza `answerCallbackQuery(url=...)` hacia un tema del propio supergrupo (`URL_INVALID`), así que el botón no puede navegar al doctor. El código responde el callback, abre el tema, escribe en él —lo que dispara la notificación que sí lleva al doctor— y edita el mensaje original para dejar un botón-enlace al chat.",
+    "alternativa_descartada": "`agentes_como_tools` era el candidato natural y es el default de la matriz cuando dos opciones parecen aplicar, pero es técnicamente imposible aquí: para que daniela llame al lector pasándole la imagen, tendría que tener la imagen en su contexto — y eso destruye la separación entera. `handoffs` es peor: le entregaría el turno al único agente que sí tiene el contenido clínico, poniéndolo a hablar con el paciente, que es exactamente el escenario que el diseño existe para impedir, y su fallo es silencioso (no lanza excepción, solo produce una respuesta que no debía existir). `hibrido` no tiene un rombo real que lo justifique y cuesta una regla de «cuál mecanismo aplica cuándo» que vive en la cabeza de quien lo escribió. El costo de `codigo` es real: cada rama nueva es un cambio de código y un despliegue.",
+    "condicion_revision": "Cuando aparezca un rombo de verdad: un punto donde haya que leer la intención del paciente para elegir ruta y no baste un campo. El caso concreto que lo dispararía es que MaxiCare quiera especialistas con voz propia —un agente de ortodoncia y uno de cirugía hablándole directo al paciente con tono distinto—; ahí `handoffs` vuelve a la mesa. También si el número de `if` del orquestador crece hasta parecer una máquina de estados que nadie entiende."
+  },
+  "contratos": [
+    {
+      "nombre_modelo": "LecturaArchivo",
+      "aplica_a": "lector_archivos",
+      "tipo": "output_type_agente",
+      "campos": [
+        {
+          "nombre": "tipo_documento",
+          "tipo": "Literal['remision_externa','radiografia','foto_clinica','examen','cotizacion','video','otro']",
+          "descripcion": "Qué clase de archivo llegó."
+        },
+        {
+          "nombre": "tratamiento",
+          "tipo": "Literal['cordales','implantes','blanqueamiento','ortodoncia','diseno_sonrisa','microdiseno','coronas','periodoncia','gingivectomia','bichectomia','limpieza','endodoncia','protesis','no_identificado']",
+          "descripcion": "El tratamiento que el documento menciona. Literal cerrado a propósito: es el campo que cruza hacia el paciente y no puede admitir una frase clínica."
+        },
+        {
+          "nombre": "origen",
+          "tipo": "str | None",
+          "descripcion": "Clínica o profesional que emite el documento. Dato administrativo, no clínico."
+        },
+        {
+          "nombre": "fecha_documento",
+          "tipo": "date | None",
+          "descripcion": "Fecha del documento, si la trae."
+        },
+        {
+          "nombre": "confianza",
+          "tipo": "Literal['alta','media','baja']",
+          "descripcion": "Qué tan explícito estaba el tratamiento en el documento. Por debajo de 'alta', la ingesta fuerza tratamiento='no_identificado'."
+        },
+        {
+          "nombre": "contexto_clinico",
+          "tipo": "str",
+          "descripcion": "Único campo de texto libre. Lo que el documento dice, citado con fidelidad. DESTINO EXCLUSIVO: Telegram. El código nunca lo pasa a daniela ni lo persiste en Neon."
+        }
+      ],
+      "donde_vive_validacion": "schema",
+      "justificacion": "Que `tratamiento` sea un `Literal` cerrado y no un `str` es lo que convierte la regla de `autonomia.requiere_aprobacion_humana` («describirle al paciente el contenido clínico de una imagen, un video o una remisión») de una instrucción que hay que cumplir en una imposibilidad de tipo: no hay forma de que quepa una frase clínica en ese campo. El reparto en código de `contexto_clinico` hacia Telegram y del resto hacia daniela es el muro del diseño.",
+      "alternativa_descartada": "`tratamiento: str`, más flexible y sin necesidad de mantener el enum sincronizado con la base de conocimiento que la clínica edita. Cuesta abrir el hueco exacto por donde pasa la frase clínica al paciente, y con eso la frontera entre los dos agentes se vuelve decorativa.",
+      "condicion_revision": "Cuando MaxiCare agregue un tratamiento nuevo desde la interfaz web, el `Literal` deja de reflejar la base de conocimiento: hay que decidir si se genera desde la base o se mantiene a mano. También cuando la revisión legal de `restricciones.legales` (hoy PENDIENTE) se pronuncie sobre `contexto_clinico`."
+    },
+    {
+      "nombre_modelo": "RespuestaDaniela",
+      "aplica_a": "daniela",
+      "tipo": "output_type_agente",
+      "campos": [
+        {
+          "nombre": "mensaje_al_paciente",
+          "tipo": "str",
+          "descripcion": "El texto que se envía por WhatsApp o por el chat web."
+        },
+        {
+          "nombre": "estado_oportunidad",
+          "tipo": "Literal['explorando','comparando','con_barrera','listo_para_agendar','agendado','post_atencion']",
+          "descripcion": "Estado comercial y operativo que pide `trabajo.pasos`, no una temperatura de lead."
+        },
+        {
+          "nombre": "barrera_detectada",
+          "tipo": "Literal['precio','miedo','tiempo','desplazamiento','confianza','comparacion','ninguna']",
+          "descripcion": "La preocupación concreta detectada. Permite no repetir un argumento ya rechazado."
+        },
+        {
+          "nombre": "requiere_escalamiento",
+          "tipo": "bool",
+          "descripcion": "Es el `if` del orquestador que dispara Telegram."
+        },
+        {
+          "nombre": "motivo_escalamiento",
+          "tipo": "Literal['clinico','excepcion_comercial','agenda_llena','archivo_recibido','dato_faltante','ninguno']",
+          "descripcion": "Cuál de las rutas de `fallos.escalamiento_humano` aplica."
+        },
+        {
+          "nombre": "fuera_de_alcance",
+          "tipo": "bool",
+          "descripcion": "El paciente preguntó algo ajeno a MaxiCare. Mide el criterio de éxito correspondiente sin necesidad de un guardrail que bloquee."
+        }
+      ],
+      "donde_vive_validacion": "schema",
+      "justificacion": "Sin estructura, el `if` de escalamiento del bloque de orquestación necesitaría otra llamada de modelo para saber si hay que escalar, y seis de las siete métricas de `observabilidad.metricas` dejarían de ser calculables con SQL sobre Neon. Ningún campo de `datos.datos_sensibles` aparece aquí.",
+      "alternativa_descartada": "`output_type = str`: más barato en tokens y más natural para el modelo. Cuesta que el orquestador no pueda ramificar sin volver a parsear el texto, y que las métricas del brief se vuelvan estimaciones.",
+      "condicion_revision": "Si aparece una métrica nueva en `exito.criterios_exito` que no se pueda derivar de estos seis campos, o si el modelo empieza a producir salidas que no encajan en alguno de los `Literal` (señal de que el enum quedó demasiado estrecho para la realidad de las conversaciones)."
+    },
+    {
+      "nombre_modelo": "SolicitudCita",
+      "aplica_a": "crear_cita, reprogramar_cita",
+      "tipo": "entrada_tool",
+      "campos": [
+        {
+          "nombre": "nombre_completo",
+          "tipo": "str",
+          "descripcion": "Lo dicta el paciente en la conversación, así que sí lo llena el modelo."
+        },
+        {
+          "nombre": "inicio",
+          "tipo": "datetime",
+          "descripcion": "Inicio del bloque. La duración sale de la configuración operativa (1 hora por defecto), no del modelo."
+        },
+        {
+          "nombre": "tratamiento",
+          "tipo": "Literal['cordales','implantes','blanqueamiento','ortodoncia','diseno_sonrisa','microdiseno','coronas','periodoncia','gingivectomia','bichectomia','limpieza','endodoncia','protesis','no_identificado']",
+          "descripcion": "El mismo enum cerrado de LecturaArchivo."
+        },
+        {
+          "nombre": "clave_idempotencia",
+          "tipo": "str",
+          "descripcion": "telefono + inicio. La construye el orquestador antes de llamar y la guarda en Neon; el modelo no la inventa."
+        }
+      ],
+      "donde_vive_validacion": "codigo_tool",
+      "justificacion": "No hay campo de teléfono ni de cédula, y las dos ausencias son decisiones. La cédula, porque `datos.quien_ve_que` la prohíbe expresamente: un campo que no existe no se puede llenar por error. El teléfono, porque viene del webhook de WhatsApp y vive en el contexto local: si el modelo lo escribiera, podría escribir otro — el caso real es la hija agendando por su madre y el recordatorio yéndose al número equivocado. La validación es `codigo_tool` porque la regla que importa («ese horario ya tiene 2 pacientes») solo se conoce consultando Neon y cambia entre un turno y el siguiente.",
+      "alternativa_descartada": "Validar la capacidad en el schema. Cuesta que un horario lleno llegue al modelo como error de forma: ante un error de forma el modelo cambia el argumento y vuelve a llamar, a ciegas, gastando turnos contra `max_turns` hasta que el SDK corta la conversación. Una regla de negocio se devuelve como resultado de la tool, con su explicación y con alternativas. También se descartó un modelo de entrada por tool: crear y reprogramar tienen hoy la misma forma, y compartir cuesta acoplamiento cuando una necesite un campo nuevo.",
+      "condicion_revision": "Si aparece un segundo calendario (por doctor o por silla), `telefono + inicio` deja de identificar una cita de forma única y la clave hay que rehacerla. También si crear y reprogramar dejan de tener la misma forma de entrada."
+    },
+    {
+      "nombre_modelo": "SolicitudCancelacion",
+      "aplica_a": "cancelar_cita",
+      "tipo": "entrada_tool",
+      "campos": [
+        {
+          "nombre": "id_cita",
+          "tipo": "str",
+          "descripcion": "Identificador de la cita en Neon."
+        },
+        {
+          "nombre": "motivo",
+          "tipo": "str | None",
+          "descripcion": "Lo que dijo el paciente, si lo dijo. Alimenta la métrica de recuperaciones."
+        },
+        {
+          "nombre": "clave_idempotencia",
+          "tipo": "str",
+          "descripcion": "id_cita. Cancelar dos veces deja la cita cancelada, igual que cancelarla una vez."
+        }
+      ],
+      "donde_vive_validacion": "codigo_tool",
+      "justificacion": "La cita a cancelar tiene que pertenecer al paciente identificado, y eso solo se sabe consultando Neon. Va en el código de la tool, no en un guardrail, porque está más cerca del efecto y no se le puede olvidar a nadie.",
+      "alternativa_descartada": "Argumentos sueltos sin modelo, aceptable para tools de lectura con hasta dos parámetros. Aquí hay escritura con efecto externo, y `sistemas.lista[].acceso` de escritura exige modelo de entrada y clave de idempotencia.",
+      "condicion_revision": "Si MaxiCare decide que cancelar exige un motivo obligatorio para alimentar la métrica de recuperaciones, `motivo` deja de ser opcional."
+    },
+    {
+      "nombre_modelo": "SolicitudEscalamiento",
+      "aplica_a": "escalar_a_doctores",
+      "tipo": "entrada_tool",
+      "campos": [
+        {
+          "nombre": "motivo",
+          "tipo": "Literal['clinico','excepcion_comercial','agenda_llena','archivo_recibido','dato_faltante']",
+          "descripcion": "Las rutas de `fallos.escalamiento_humano`, cerradas."
+        },
+        {
+          "nombre": "resumen_para_doctor",
+          "tipo": "str",
+          "descripcion": "Contexto suficiente para que el doctor no empiece de cero."
+        },
+        {
+          "nombre": "pregunta_concreta",
+          "tipo": "str",
+          "descripcion": "Qué se le está pidiendo decidir. Sin esto, el doctor recibe un aviso y no una pregunta."
+        },
+        {
+          "nombre": "clave_idempotencia",
+          "tipo": "str",
+          "descripcion": "id_conversacion + turno_actual, desde el contexto local. El mismo turno solo puede escalar una vez."
+        }
+      ],
+      "donde_vive_validacion": "schema",
+      "justificacion": "`fallos.escalamiento_humano` exige que cada escalamiento lleve contexto suficiente, responsable, estado y respuesta al paciente. Los dos campos de texto obligatorios fuerzan lo primero; el `Literal` de motivo permite medir escalamientos por ruta en `observabilidad.metricas` sin interpretar prosa.",
+      "alternativa_descartada": "Un solo campo de texto libre con todo el contexto. Más simple para el modelo. Cuesta que el doctor reciba un párrafo del que tiene que deducir qué se le pregunta, y que la métrica de escalamientos por ruta se vuelva un ejercicio de clasificación manual.",
+      "condicion_revision": "Si aparece una sexta ruta de escalamiento —por ejemplo, una queja formal— el `Literal` se queda corto y hay que ampliarlo junto con `RespuestaDaniela.motivo_escalamiento`."
+    }
+  ],
+  "herramientas": [
+    {
+      "nombre": "consultar_base_conocimiento",
+      "tipo": "function_tool",
+      "descripcion": "Consulta la información aprobada por MaxiCare sobre un tratamiento: precio y sus condiciones, proceso, especialistas, ubicación y horarios.",
+      "valida": "Argumentos sueltos con type hints (tratamiento y pregunta), sin modelo de entrada: dos parámetros escalares. La regla que importa es de contenido y vive en el código de la tool: cuando no hay dato documentado devuelve el literal «SIN DATO DOCUMENTADO» con la instrucción de escalar, nunca una cadena vacía ni null.",
+      "manejo_fallo": "`failure_error_function` propia: le devuelve al modelo «no pudiste consultar la base de conocimiento, no respondas con información de memoria, escala». `timeout` explícito con `error_as_result`.",
+      "idempotente": true,
+      "justificacion": "Devolver vacío ante un tratamiento sin precio documentado —endodoncia y prótesis, según la sección 2.12 del documento maestro— es una invitación a que el modelo complete el hueco con algo razonable, y «algo razonable» sobre un precio es el fallo que rompe el primer objetivo del brief. La ausencia de dato tiene que ser un dato explícito.",
+      "alternativa_descartada": "Una `hosted` tool de búsqueda web para responder lo que no está en la base de conocimiento. Muy barata de agregar y resolvería el hueco. Cuesta el objetivo 1 entero: Daniela empezaría a responder con información que MaxiCare no aprobó, y además el dato de entrada saldría de la infraestructura propia, que con `restricciones.legales` en PENDIENTE no es el momento.",
+      "condicion_revision": "Si MaxiCare pide que Daniela conteste algo que no está en la base de conocimiento, vuelve la discusión de la tool `hosted` — y la respuesta debería seguir siendo no; lo que corresponde es cargar el dato en la base."
+    },
+    {
+      "nombre": "consultar_disponibilidad",
+      "tipo": "function_tool",
+      "descripcion": "Devuelve los bloques realmente libres dentro del horario de atención, cruzando los bloqueos que los doctores pusieron en Google Calendar con las reservas ya tomadas en Neon.",
+      "valida": "Argumentos sueltos (desde, hasta). En código: descuenta los bloques que ya alcanzaron el tope de capacidad configurado y los que los doctores bloquearon manualmente en Calendar.",
+      "manejo_fallo": "`failure_error_function` propia: «no pudiste verificar disponibilidad, NO ofrezcas ningún horario, escala a los doctores y dile al paciente que lo estás revisando». `timeout` con `error_as_result`.",
+      "idempotente": true,
+      "justificacion": "`sistemas.lista[Google Calendar].notas` define la disponibilidad de forma negativa: un hueco vacío dentro del horario significa cupo libre, y cualquier bloqueo de los doctores saca ese horario de la oferta. Pero Calendar no sabe contar hasta 2, así que el conteo de cupos sale de Neon y Calendar aporta solo los bloqueos manuales.",
+      "alternativa_descartada": "Leer la disponibilidad únicamente de Google Calendar. Es lo obvio y lo que se escribe primero. Cuesta que el conteo de capacidad sea optimista y que tres conversaciones simultáneas vean cupo donde ya no lo hay.",
+      "condicion_revision": "Si aparece un segundo calendario (por doctor o por silla), el cruce Calendar+Neon cambia de forma."
+    },
+    {
+      "nombre": "identificar_paciente",
+      "tipo": "function_tool",
+      "descripcion": "Verifica la identidad de quien escribe contra Neon, usando nombre completo y el teléfono con el que el paciente está registrado.",
+      "valida": "En código: compara contra Neon y escribe `identidad_verificada` e `id_paciente` en el contexto local. Nunca solicita ni acepta cédula ni documento de identidad. Máximo dos intentos por conversación, contados en `intentos_identificacion` del contexto local.",
+      "manejo_fallo": "`failure_error_function` propia. Tras dos intentos fallidos no se sigue preguntando: se escala a los doctores.",
+      "idempotente": true,
+      "justificacion": "`datos.quien_ve_que` exige aislar el contexto de una cuenta del de un paciente cuando alguien escribe por un familiar, y el canal solo trae un identificador débil (un número de teléfono). El tope de dos intentos sale de `trabajo.pasos` («sin interrogatorio») cruzado con la línea base de 50% de conversaciones perdidas: un tercer intento es una persona que se va.",
+      "alternativa_descartada": "Que el modelo «reconozca» al paciente por la conversación. Parece gratis y no lo es: no hay nada que auditar el día que alguien reclame, y alguien que afirme ser otro con suficiente naturalidad pasa. También se descartó doble factor con código enviado aparte: `restricciones.legales` no lo exige hoy y son dos o tres turnos más de fricción sobre una conversión que está en 2%.",
+      "condicion_revision": "Si la revisión legal de `restricciones.legales` exige doble factor para datos de salud, o si dos intentos resultan claramente insuficientes en producción."
+    },
+    {
+      "nombre": "crear_cita",
+      "tipo": "function_tool",
+      "descripcion": "Reserva un bloque para un paciente: toma el cupo en Neon y crea el evento en Google Calendar.",
+      "valida": "Entrada por `SolicitudCita`. En código y en este orden: (1) INSERT en la tabla de reservas de Neon con UNIQUE sobre (inicio, cupo_num), cupo_num acotado al tope configurado; si el INSERT falla, el horario está lleno y eso se devuelve como RESULTADO con alternativas libres, no como error; (2) solo con el cupo tomado, se crea el evento en Calendar. Guardrail de tool `identidad_antes_de_datos` antes de todo.",
+      "manejo_fallo": "Dos caminos distintos. Horario lleno: resultado normal con alternativas. Cupo tomado en Neon pero Calendar falla: se libera la reserva y `failure_error_function=None` corta la corrida; el orquestador atrapa la excepción, escala a los doctores y nunca le confirma la cita al paciente.",
+      "idempotente": true,
+      "justificacion": "`sistemas.lista[Google Calendar].notas` lo exige textualmente: «el control de capacidad tiene que ser real y no optimista». Google Calendar no sabe contar hasta 2 ni tiene candados; el UNIQUE de Neon es atómico y resuelve la carrera sin candados que mantener. Es la única tool con `failure_error_function=None` porque seguir adelante significaría decirle al paciente que quedó agendado cuando el calendario que miran los doctores no lo tiene — y `trabajo.pasos` dice «confirmarla al paciente únicamente cuando la operación quedó realmente ejecutada». VERIFICADO 2026-09-12 (fase 3): Google Calendar quedo detras de una costura (`calendario.Calendario`, un Protocol) con dos implementaciones: `CalendarioDoble` en memoria y `CalendarioGoogle` marcado PENDIENTE, que falla AL CONSTRUIRSE nombrando las dos variables que faltan. Fallar al construirse y no al llamarse es deliberado: un objeto que se crea bien y revienta tres pasos despues --con el cupo del paciente ya tomado en Neon-- deja exactamente el estado a medias que `crear_cita` existe para evitar. El doble es hostil por diseño (`fallar_en`): sin poder forzar la caida de Calendar, el camino de compensacion de `crear_cita` --liberar el cupo y NO confirmarle nada al paciente-- quedaria sin recorrer, y es el unico que puede mandar a alguien a una clinica donde nadie lo espera. Ese camino se prueba en cada corrida. La instancia del calendario viaja en `ContextoDaniela` y no se importa dentro de la tool: por eso la misma tool corre contra el doble y contra Google sin un solo `if`.",
+      "alternativa_descartada": "Contar el cupo leyendo Google Calendar directamente. Es lo que se escribe primero y con 10 conversaciones al día la carrera es improbable — hasta el día que dos personas escriben al tiempo y un paciente llega a una cita que no existe.",
+      "condicion_revision": "Si el UNIQUE de Neon empieza a rebotar seguido, el tope de 2 se quedó corto — y eso se configura desde la interfaz web, no se cambia en código."
+    },
+    {
+      "nombre": "reprogramar_cita",
+      "tipo": "function_tool",
+      "descripcion": "Mueve una cita existente a un bloque nuevo, liberando el cupo viejo y tomando el nuevo.",
+      "valida": "Entrada por `SolicitudCita` más el id de la cita. Mismo mecanismo de cupo que `crear_cita`. La clave de idempotencia usa el VALOR DESTINO (`id_cita + inicio_destino`), nunca un delta. Guardrail `identidad_antes_de_datos`.",
+      "manejo_fallo": "`failure_error_function` propia: si el bloque destino está lleno, resultado con alternativas; si Calendar falla tras tomar el cupo nuevo, se revierte y se escala.",
+      "idempotente": true,
+      "justificacion": "«Muévela dos horas más tarde» aplicado dos veces son cuatro horas; «ponla a las 2pm» aplicado dos veces son las 2pm. La clave por valor destino es lo que hace seguro el reintento que `fallos.reintentos` permite.",
+      "alternativa_descartada": "Clave de idempotencia por delta (`id_cita + desplazamiento`). Más natural de leer en el código, y produce una cita en la hora equivocada en cuanto haya un reintento.",
+      "condicion_revision": "Igual que `crear_cita`: un segundo calendario rompe la unicidad de la clave."
+    },
+    {
+      "nombre": "cancelar_cita",
+      "tipo": "function_tool",
+      "descripcion": "Cancela una cita, libera su cupo en Neon y elimina el evento de Google Calendar.",
+      "valida": "Entrada por `SolicitudCancelacion`. En código: la cita tiene que pertenecer al paciente identificado en el contexto local. Guardrail `identidad_antes_de_datos`.",
+      "manejo_fallo": "`failure_error_function` propia; si Calendar no responde, el cupo se libera igual en Neon y se escala para que alguien limpie el evento a mano.",
+      "idempotente": true,
+      "justificacion": "Cancelar es idempotente por naturaleza con `id_cita` como clave: hacerlo dos veces deja la cita cancelada. Es la tool donde el reintento es más seguro y donde `fallos.escalamiento_humano` importa menos.",
+      "alternativa_descartada": "Exigir aprobación humana para cancelar. El cliente decidió en `autonomia.decide_solo` que las tres operaciones de agenda las hace Daniela sola; pedir permiso para cancelar reintroduce la espera que el proyecto quiere eliminar.",
+      "condicion_revision": "Si aparecen cancelaciones abusivas o cancelaciones de terceros pese al guardrail de identidad."
+    },
+    {
+      "nombre": "registrar_estado_oportunidad",
+      "tipo": "function_tool",
+      "descripcion": "Guarda en Neon el estado comercial y operativo de la conversación: necesidad, intención, barrera, compromisos y la nota corta no clínica de cualquier archivo recibido.",
+      "valida": "En código: upsert por `id_conversacion`. La nota de archivo es corta y no clínica por construcción; el contenido de `LecturaArchivo.contexto_clinico` nunca llega hasta aquí.",
+      "manejo_fallo": "`failure_error_function` propia. Un fallo aquí no detiene la conversación pero se registra, porque de esta tabla salen seis de las siete métricas.",
+      "idempotente": true,
+      "justificacion": "Es la memoria longitudinal del sistema. `persistencia` recorta el historial crudo por cantidad; lo que no se degrada nunca es este estado estructurado, y es lo que permite que Daniela retome a María meses después con seis campos en vez de ocho meses de chat en el prompt.",
+      "alternativa_descartada": "Derivar el estado leyendo el historial con otra llamada de modelo cuando haga falta. Cuesta una llamada por conversación retomada y un resumen en prosa que puede perder justo el dato que importaba.",
+      "condicion_revision": "Si `exito.criterios_exito` incorpora un criterio que no se pueda derivar de los campos que esta tool escribe."
+    },
+    {
+      "nombre": "programar_seguimiento",
+      "tipo": "function_tool",
+      "descripcion": "Deja programado un recordatorio, un seguimiento o una reactivación para que otro proceso lo ejecute en su momento.",
+      "valida": "En código: no programa nada sobre una conversación tomada por un doctor. Clave `id_conversacion + tipo + fecha_objetivo`.",
+      "manejo_fallo": "`failure_error_function` propia. Si falla, se escala: un recordatorio que no se programó es una inasistencia que nadie previó.",
+      "idempotente": true,
+      "justificacion": "`autonomia.decide_solo` le da a Daniela programar y enviar recordatorios sin revisión previa, y `exito.criterios_exito` mide la baja de inasistencias. La clave impide que un reintento le mande al paciente el mismo recordatorio tres veces.",
+      "alternativa_descartada": "Enviar los recordatorios de forma síncrona dentro del turno. Más simple, y no funciona: el recordatorio tiene que salir días después, cuando no hay conversación abierta.",
+      "condicion_revision": "Si el proceso que ejecuta los seguimientos empieza a acumular cola, o si los recordatorios represados por un relevo se vuelven un problema recurrente."
+    },
+    {
+      "nombre": "escalar_a_doctores",
+      "tipo": "function_tool",
+      "descripcion": "Manda a los doctores, al tema General del grupo de Telegram, el contexto de algo que Daniela no puede decidir sola, con un botón «Hablar yo con el paciente». Deja el pendiente abierto sin detener la conversación.",
+      "valida": "Entrada por `SolicitudEscalamiento`. En código: clave `id_conversacion + turno_actual`, de modo que el mismo turno solo escale una vez. El mensaje va SIEMPRE al tema General, nunca directo al tema del paciente, porque General es donde los doctores pueden discutir sin que el paciente vea nada. Incluye contexto, responsable, estado y el botón de relevo.",
+      "manejo_fallo": "`failure_error_function` propia. Si Telegram no responde, se reintenta una vez con la misma clave y se registra; el paciente igual recibe el mensaje de «lo estoy revisando». Si falla la creación o reapertura del tema tras el botón, el doctor recibe el aviso en General y el relevo NO se activa: es preferible que tenga que repetir el clic a que quede un relevo a medias en el que Daniela calla y nadie está escribiendo. Y una vez el relevo está activo, TODA escritura en el tema del paciente puede fallar porque el tema ya no existe: Telegram no avisa cuando alguien borra un tema, así que el único momento en que se puede detectar es al escribir. Ese fallo no se reintenta ni se registra en silencio: termina el relevo por la misma ruta que el botón y el reloj, devuelve la conversación a Daniela y lo dice en el tema General.",
+      "idempotente": true,
+      "justificacion": "Sin clave, un reintento tras un fallo de red le manda al doctor la misma alerta tres veces, y a la cuarta deja de mirarlas — que es exactamente cómo muere un sistema de escalamiento. `fallos.escalamiento_humano` exige además que escalar no equivalga a abandonar la conversación. El reparto General / tema del paciente es lo que separa la discusión interna entre doctores del mensaje que lee el paciente, sin pedirle al doctor que recuerde en qué modo está: la separación es física, son dos hilos distintos. REVISION 2026-09-12 (tema cerrado): se reviso porque el cliente pidio agrupar los archivos por paciente desde el primero, y tenia razon -- los archivos sueltos en General se mezclan entre pacientes y el doctor no puede reconstruir el historial de nadie. Lo que NO se podia hacer era crear el tema abierto: el tema del paciente es un canal en vivo durante el relevo, asi que un tema abierto de antemano tendria dos significados segun el momento --archivo interno antes, canal al paciente despues-- y un comentario clinico crudo escrito en modo archivo saldria disparado al WhatsApp del paciente en cuanto alguien tocara el boton. Nacer cerrado da la agrupacion sin abrir esa puerta.",
+      "alternativa_descartada": "`needs_approval=True` en las tools que requieren autorización, que es el mecanismo que el SDK trae para esto. Cuesta que la corrida se interrumpa hasta que alguien apruebe: si el doctor abre Telegram a las 7pm, el paciente pasa la noche sin respuesta. Choca de frente con `autonomia.criterio_limite`. REVISION 2026-09-12 (tema cerrado): se descarto crear el tema abierto desde el primer archivo (lo obvio, y lo que se pidio de entrada). Cuesta la separacion fisica entre la discusion interna y el mensaje al paciente, que es justamente la garantia por la que el reparto General / tema del paciente existe. Tambien se descarto seguir mandando los archivos solo a General y confiar en el buscador de Telegram: funciona para encontrar UN archivo cuando ya sabes que existe, no para ver de un vistazo todo lo que un paciente ha mandado.",
+      "condicion_revision": "Si los doctores empiezan a responder de forma consistente en menos de cinco minutos, `needs_approval` deja de ser inviable y vale la pena volver a mirarlo: sería más seguro. Y si Telegram cambiara el comportamiento de los temas cerrados —que hoy impiden escribir a quien no es administrador— habría que sustituir esa garantía por otra, porque es la única que impide que un doctor le escriba al paciente fuera del relevo."
+    }
+  ],
+  "contexto": {
+    "contexto_local": "En el objeto propio que viaja en `Runner.run(context=...)` y llega a tools, guardrails y hooks envuelto en `RunContextWrapper`, sin serializarse nunca al modelo: `id_conversacion`, `id_paciente`, `telefono_completo`, `identidad_verificada`, `intentos_identificacion`, `turno_actual`, `tomada_por` (el doctor que tiene el relevo), `topic_id` (el tema de ese paciente en Telegram), la configuración operativa leída de Neon (`capacidad_por_hora`, `duracion_cita`, `tiempo_cierre_relevo`) y las credenciales de Neon, Google Calendar, WhatsApp y Telegram. `LecturaArchivo.contexto_clinico` NO está aquí tampoco: la capa de ingesta lo envía a Telegram y muere ahí, antes de que `Runner.run` arranque, porque una tool podría leerlo del contexto y ponerlo en un mensaje.",
+    "visible_al_llm": "Nombre de pila del paciente para el saludo; si está identificado o no (para que sepa qué puede hacer); los campos no clínicos de `LecturaArchivo` (tipo de documento, tratamiento, origen, fecha); las reglas de `autonomia.criterio_limite` en el prompt; el estado estructurado de la oportunidad recuperado de Neon; y los resultados de las tools, que es por donde entran los datos frescos. No ve: teléfono completo, identificadores internos, credenciales, ni contenido clínico de ningún archivo.",
+    "identidad_solicitante": "El canal trae un identificador débil: el número de WhatsApp. Si ese número ya está en Neon, la identidad queda verificada sin fricción y ese es el caso común. Si el número es nuevo o la persona pregunta por un tercero, `identificar_paciente` pide nombre completo y el teléfono con el que el paciente está registrado y lo verifica contra Neon, con un máximo de dos intentos; al tercero se escala en vez de seguir preguntando. Nunca se pide cédula ni documento de identidad. Mientras `identidad_verificada` sea False, `is_enabled` oculta `crear_cita`, `reprogramar_cita` y `cancelar_cita`, y el guardrail `identidad_antes_de_datos` las bloquea si de alguna forma se llaman igual.",
+    "acciones_con_aprobacion_humana": [
+      "Agendar sobre un horario que ya alcanzó el tope de capacidad configurado — se registra la solicitud con `escalar_a_doctores` y la conversación sigue ofreciendo alternativas.",
+      "Conceder una excepción comercial: descuento, ajuste de precio o condición que no esté documentada — se registra la solicitud y nunca se le promete al paciente antes de que la aprueben.",
+      "Resolver algo que exige criterio clínico individual: diagnosticar a partir de síntomas, fotos o radiografías, modificar medicamentos, reinterpretar un plan médico o afirmar que un procedimiento es indicado para una persona concreta — se registra la solicitud y se orienta hasta el límite seguro.",
+      "Agendar cuando Google Calendar no responde y no se puede verificar disponibilidad real — se registra la solicitud pidiendo explícitamente al doctor que ponga la cita a mano, y no se le promete un horario al paciente.",
+      "Decidir qué hacer con un archivo de contenido clínico recibido — se registra la solicitud con el contexto clínico adjunto y se le dice al paciente que un doctor lo va a revisar.",
+      "NO ES APROBABLE, es prohibición: describirle al paciente el contenido clínico de una imagen, un video o una remisión. Lo impide el guardrail `sin_lectura_clinica` y, estructuralmente, que `daniela` nunca reciba ese contenido."
+    ],
+    "justificacion": "Ninguna acción usa `needs_approval=True` porque ese mecanismo interrumpe la corrida hasta que alguien apruebe con `RunState.approve()`, y `autonomia.criterio_limite` dice textualmente que «una consulta escalada no detiene la conversación». Con `needs_approval`, una paciente que manda su remisión a las 7pm queda congelada hasta que un doctor abra Telegram — exactamente el problema que Daniela vino a resolver, dado que hoy el 50% de las conversaciones no recibe respuesta. Se usa el mecanismo de registrar la solicitud y seguir, salvo la última línea, que no es una aprobación pendiente sino algo que nunca debe ocurrir y por tanto es un guardrail que niega.",
+    "alternativa_descartada": "`needs_approval=True` en `crear_cita` para el caso de horario lleno y en las rutas de excepción comercial. Es el mecanismo que el SDK trae para esto y es más seguro: el efecto no puede ocurrir sin un humano. Cuesta conversaciones congeladas, estado de corrida que hay que persistir entre procesos, y una respuesta a «¿y si nadie aprueba en dos horas?» que el brief no tiene. El costo de no usarlo es que Daniela puede seguir hablando mientras el doctor no ha respondido, y eso lo acotan los guardrails.",
+    "condicion_revision": "Si los doctores empiezan a responder de forma consistente en menos de cinco minutos, `needs_approval` deja de ser inviable. Si la revisión legal de `restricciones.legales` exige doble factor, se reabre el mecanismo de identidad completo."
+  },
+  "persistencia": {
+    "tipo_sesion": "SQLAlchemySession",
+    "compactacion": "`SessionSettings(limit=N)` con N alrededor de 40 mensajes (≈5 conversaciones completas). Recorte por cantidad, cero llamadas de modelo. La memoria larga NO vive en la sesión: vive en el estado estructurado que escribe `registrar_estado_oportunidad` en Neon (estado de la oportunidad, barrera, citas, asistencias, seguimientos, notas de archivos), que no se degrada porque son campos y no prosa, y que se inyecta al prompt cuando el paciente vuelve.",
+    "cifrado": "DECISIÓN PROVISIONAL. Cifrado del almacén subyacente: Neon cifra en reposo y TLS en tránsito; cero costo por turno, se resuelve en infraestructura. Provisional porque `restricciones.legales` está en PENDIENTE y la regla dice que la decisión de cifrado no se declara resuelta en silencio mientras ese hueco exista.",
+    "justificacion": "Las tres preguntas se responden así: (1) hay más de un proceso —webhook de WhatsApp, scheduler de recordatorios y listener de Telegram tocan la misma conversación—, y dos procesos escribiendo el mismo archivo SQLite es corrupción o bloqueo por diseño, así que `SQLiteSession` queda fuera aunque el volumen sea bajo; (2) el historial tiene que sobrevivir reinicios porque la continuidad longitudinal es el objetivo 4 del brief, así que `ninguna` queda fuera; (3) son datos de salud con `restricciones.legales` en PENDIENTE, así que `OpenAIConversationsSession` queda fuera porque el historial viviría del lado del proveedor. `SQLAlchemySession` sobre la Neon Postgres que ya está en `restricciones.stack_obligatorio` no agrega infraestructura nueva. Exige `pip install 'openai-agents[sqlalchemy]'`: sin ese extra el import falla en el arranque, no en una prueba.",
+    "alternativa_descartada": "`EncryptedSession` envolviendo la sesión, que sería lo correcto si el requisito fuera que el historial no sea legible desde el almacén. Se descarta por un detalle concreto: su `ttl` es de 600 segundos por defecto y los ítems vencidos se saltan EN SILENCIO al leer el historial. Las conversaciones de MaxiCare duran días —el paciente escribe el lunes, el doctor responde el martes—, así que Daniela perdería contexto a mitad de una conversación legítima sin que nada lo reportara como error. También se descartó `OpenAIResponsesCompactionSession`: pagar una llamada de modelo para producir un resumen en prosa que puede perder el dato que importaba, cuando el estado estructurado ya tiene esos datos como campos, es pagar dos veces por algo peor.",
+    "condicion_revision": "Cuando se haga la revisión legal de `restricciones.legales`, que tiene que cubrir tres cosas y no una: el consentimiento por continuación de la conversación, el envío de archivos clínicos a Telegram, y que Neon es Postgres administrado fuera del VPS y probablemente fuera de Colombia — una transferencia internacional de datos personales sensibles. Si concluye que el historial no puede ser legible desde el almacén, vuelve `EncryptedSession` con un TTL dimensionado a conversaciones de días. Si objeta la ubicación de Neon, se reabre `restricciones.stack_obligatorio`. Y si `limit=40` empieza a cortar conversaciones vivas, sube el número antes de pensar en compactación con modelo."
+  },
+  "guardrails": [
+    {
+      "nombre": "identidad_antes_de_datos",
+      "ambito": "tool",
+      "mecanismo": "deterministico",
+      "ejecucion": "bloqueante",
+      "descripcion": "Antes de ejecutar `crear_cita`, `reprogramar_cita` o `cancelar_cita`, comprueba `identidad_verificada` en el contexto local. Si es False, dispara el tripwire y el efecto externo no ocurre.",
+      "justificacion": "`datos.quien_ve_que` exige que el contexto de una cuenta y el de un paciente no se mezclen cuando alguien escribe por un familiar. Es redundante con el `is_enabled` de esas tools a propósito: `is_enabled` es un callable que puede tener un bug, y el guardrail de tool es el último punto antes del efecto externo. Cuesta comprobar un booleano.",
+      "alternativa_descartada": "Confiar solo en `is_enabled`. Ahorra un guardrail y cuesta que un fallo del callable abra la puerta al efecto externo sin nada detrás.",
+      "condicion_revision": "Si aparece una cuarta tool de escritura sobre datos de un paciente, hay que agregarla a la lista que este guardrail protege."
+    },
+    {
+      "nombre": "sin_cifra_no_documentada",
+      "ambito": "salida",
+      "mecanismo": "deterministico",
+      "ejecucion": "bloqueante",
+      "descripcion": "Extrae toda cifra de dinero de `mensaje_al_paciente` y comprueba que cada una haya sido devuelta por `consultar_base_conocimiento` en este mismo turno. Cualquier número que no esté en ese conjunto dispara el tripwire.",
+      "justificacion": "Es el guardrail que protege el primer objetivo del brief y es determinista: una regex más una comparación de conjuntos, cero tokens, mismo veredicto siempre. Cubre además el caso de endodoncia y prótesis, donde la tool devuelve «SIN DATO DOCUMENTADO» y ninguna cifra, de modo que cualquier número en la respuesta salta. VERIFICADO 2026-09-12 (fase 4): implementado. Se apoya en `DatosDelTurno`, que vive en `ContextoDaniela` y se VACIA en cada turno: cada tool de lectura anota ahi lo que devolvio, y el guardrail exige que toda cifra u hora del mensaje este en ese conjunto. El vaciado es la parte que importa -- acumulando, el caso real que esto impide seguiria pasando: el paciente pregunta por implantes, Daniela consulta y responde bien, y tres mensajes despues repite esa cifra al hablar de coronas «de memoria». Limite conocido y aceptado a conciencia, con una prueba que lo documenta (`test_el_limite_conocido_queda_documentado_por_una_prueba`): la comparacion es de DIGITOS, asi que un precio escrito en letras no se detecta. Se acepta porque inventar una cifra se escribe practicamente siempre en numeros, y porque un guardrail que interprete texto libre deja de ser determinista -- y un freno probabilistico no es un freno.",
+      "alternativa_descartada": "Un evaluador LLM que juzgue si la respuesta tiene un precio inventado. Es lo que se escribe por instinto. Cuesta una llamada de modelo por turno, veredictos que cambian entre corridas, y peor detección: el evaluador puede dejar pasar un número que suena razonable, mientras que la comparación de conjuntos no sabe qué es razonable, solo sabe si el número salió de la base de conocimiento.",
+      "condicion_revision": "Si empieza a saltar en respuestas legítimas —por ejemplo con fechas escritas con formato numérico— hay que afinar la extracción de cifras, no quitar el guardrail."
+    },
+    {
+      "nombre": "sin_hora_no_verificada",
+      "ambito": "salida",
+      "mecanismo": "deterministico",
+      "ejecucion": "bloqueante",
+      "descripcion": "Extrae toda fecha y hora concreta de `mensaje_al_paciente` y comprueba que provenga de un resultado exitoso de `consultar_disponibilidad`, `crear_cita` o `reprogramar_cita` en este mismo turno.",
+      "justificacion": "Una sola regla determinista cierra dos de los peores escenarios del brief a la vez: ofrecer un horario que no existe (`fallos.que_pasa_si_falla`: «Daniela no inventa un horario bajo ninguna circunstancia») y confirmar una cita que no se creó (`trabajo.pasos`: «confirmarla al paciente únicamente cuando la operación quedó realmente ejecutada»).",
+      "alternativa_descartada": "Confiar en el prompt y en que `crear_cita` devuelva un error claro. Cuesta que el modelo, ante un fallo, improvise tranquilizando al paciente con un horario que nadie reservó — que es la improvisación más natural.",
+      "condicion_revision": "Si el guardrail bloquea mensajes legítimos donde Daniela menciona horarios de atención generales en vez de un bloque concreto, hay que distinguir los dos casos en la extracción."
+    },
+    {
+      "nombre": "sin_lectura_clinica",
+      "ambito": "salida",
+      "mecanismo": "evaluador_llm",
+      "ejecucion": "bloqueante",
+      "descripcion": "Un prefiltro determinista decide si vale la pena revisar: solo corre cuando el mensaje del paciente traía síntomas o hubo un adjunto. Cuando corre, un modelo evaluador lee `mensaje_al_paciente` y responde una sola pregunta: ¿este mensaje le está diciendo al paciente qué tiene? Un sí dispara el tripwire.",
+      "justificacion": "Es el único guardrail que no se puede escribir como regla, y la razón se dice en una frase: «eso suena a un absceso» y «en la valoración el doctor revisa si hay infección» comparten palabras y solo una está mal — la diferencia está en el significado, no en el vocabulario, así que ninguna lista de palabras prohibidas las separa. El riesgo ya no está en los archivos (el muro estructural lo cubre) sino en los síntomas que el paciente escribe en texto. El costo de latencia de un guardrail bloqueante es casi gratis aquí porque `limites.latencia_maxima` da hasta un minuto y pide explícitamente que la respuesta tarde.",
+      "alternativa_descartada": "Una lista determinista de términos clínicos prohibidos. Sería gratis y reproducible, y bloquearía frases legítimas como «los doctores lo revisan en la valoración» mientras deja pasar un diagnóstico dicho con palabras comunes. También se descartó correrlo en todos los turnos: el prefiltro evita pagarlo en conversaciones de precios y horarios.",
+      "condicion_revision": "Si el prefiltro deja pasar casos reales detectados por la revisión manual de veracidad, pasa a correr en todos los turnos y se paga el costo."
+    },
+    {
+      "nombre": "uso_indebido",
+      "ambito": "entrada",
+      "mecanismo": "evaluador_llm",
+      "ejecucion": "paralelo",
+      "descripcion": "Detecta intentos de jailbreak, de extracción del prompt de sistema, o de usar a Daniela como asistente general. NO es el guardrail de «tema fuera de alcance»: eso lo resuelve el prompt con una reconducción suave y lo mide el campo `fuera_de_alcance` de `RespuestaDaniela`.",
+      "justificacion": "Corre en paralelo porque llegar tarde solo cuesta unos tokens: no hay efecto externo que prevenir. La separación respecto del tema fuera de alcance es deliberada: un guardrail que salta produce un mensaje fijo de rechazo, y el cliente pidió explícitamente que la reconducción fuera sutil y no sonara a bloqueo automático — un guardrail no puede ser sutil, es un interruptor.",
+      "alternativa_descartada": "Un guardrail de entrada que bloquee cualquier tema ajeno a MaxiCare. Es lo que el pedido del cliente parecía exigir. Cuesta que un paciente que pregunta algo lateral reciba «Lo siento, solo puedo responder consultas sobre MaxiCare», que es exactamente el mensaje de robot que el cliente dijo que no quería.",
+      "condicion_revision": "Si genera falsos positivos que rechacen pacientes legítimos en la puerta, se deja en paralelo con registro y sin bloqueo, para medir antes de bloquear."
+    },
+    {
+      "nombre": "radiografia_sin_recomprimir",
+      "ambito": "entrada",
+      "mecanismo": "deterministico",
+      "ejecucion": "bloqueante",
+      "descripcion": "Si un archivo llega con `tipo == \"image\"`, WhatsApp ya lo recomprimio en el celular del paciente antes de subirlo, y el detalle perdido no se recupera. El archivo se registra y se reenvia igual --nunca se descarta-- pero se marca como recomprimido en el aviso al doctor y Daniela pide que lo reenvien adjuntandolo como Documento, explicando como. Si llega con `tipo == \"document\"`, paso sin tocar nada.",
+      "justificacion": "Verificado el 2026-09-12 con dos envios reales al numero de la clinica. Por la galeria: 72.880 bytes, `image/jpeg`. Como documento: `image/png` intacto -- un PNG sobrevivio siendo PNG, y WhatsApp convierte a JPEG todo lo que sube por la galeria, asi que esa supervivencia prueba que la ruta de documento no toca el archivo. Una radiografia recomprimida se ve nitida en pantalla: el doctor no tiene como saber que le falta el borde de una lesion o una linea de fractura fina. Por el principio que decide los empates --la seguridad clinica prevalece sobre cualquier objetivo comercial-- el sistema no puede callarse esto. Y no hace falta preguntarle a nadie: el propio campo `tipo` del webhook lo dice.",
+      "alternativa_descartada": "Rechazar el archivo comprimido y no reenviarlo hasta que llegue bien. Se descarto porque deja al doctor sin nada: una radiografia comprimida sigue sirviendo para muchas cosas --ver de que diente se trata, si hay un implante-- y negarsela al doctor para forzar al paciente cambia un riesgo por otro peor. Tambien se descarto confiarlo solo a las instrucciones del agente: pedir amablemente que la manden como documento no detecta cuando no lo hicieron.",
+      "condicion_revision": "Si WhatsApp deja de recomprimir por la galeria, o si la clinica decide que recibir la radiografia importa mas que recibirla intacta. Tambien si aparece un caso real donde el paciente no logra adjuntar como documento desde su celular: ahi el problema no es el guardrail sino la instruccion, y se reescribe esa."
+    }
+  ],
+  "fallos": {
+    "excepciones_manejadas": "`except` explícito para: `MaxTurnsExceeded` (escalar, no reintentar — si no cerró en el límite, más turnos no van a cerrarlo); las cuatro de tripwire `InputGuardrailTripwireTriggered`, `OutputGuardrailTripwireTriggered`, `ToolInputGuardrailTripwireTriggered` y `ToolOutputGuardrailTripwireTriggered` (política única: regenerar UNA vez con la corrección explícita y, si vuelve a saltar, mensaje seguro al paciente más `escalar_a_doctores`); `ModelTimeoutError` y `ToolTimeoutError` (reintento, el segundo solo porque todas las escrituras tienen clave de idempotencia); `ModelBehaviorError` (un reintento acotado; si se repite en el trace, el problema es el prompt o un `output_type` demasiado estrecho, no la red); `ModelRefusalError` (sin reintento: da la misma negativa y cuesta otra llamada). Al final, `AgentsException` como red de seguridad que registra y escala, nunca como único `except`. `UserError` se deja subir: es un bug de configuración, no un incidente, y taparlo con un mensaje amable esconde el defecto. `RunConfig.tool_not_found_behavior` queda en `'raise_error'`: una tool que no existe es un bug del plan, no algo que el modelo deba resolver improvisando nombres.",
+    "reintentos": "Tools de solo lectura (`consultar_base_conocimiento`, `consultar_disponibilidad`, `identificar_paciente`): hasta dos reintentos, son idempotentes por naturaleza y el único costo es tiempo. Tools de escritura: un solo reintento, y únicamente porque todas llevan clave de idempotencia; la regla queda escrita para el día que alguien agregue una tool de escritura sin clave, que entonces no se reintenta nunca. Timeout del modelo: `model_settings.retry` con `ModelRetrySettings`, no un bucle propio. Nunca se reintenta un tripwire de guardrail (produce el mismo tripwire y gasta otro turno) ni un `UserError`.",
+    "idempotencia": "Todas las claves las construye el orquestador ANTES de llamar a la tool y las guarda en Neon. `crear_cita`: `telefono` (del contexto local, no del modelo) + `inicio`. `reprogramar_cita`: `id_cita` + `inicio_destino` — valor destino, nunca delta, porque «muévela dos horas» aplicado dos veces son cuatro horas mientras que «ponla a las 2pm» aplicado dos veces son las 2pm. `cancelar_cita`: `id_cita`. `escalar_a_doctores`: `id_conversacion` + `turno_actual`, de modo que el mismo turno solo escale una vez y el doctor no reciba la misma alerta tres veces. `programar_seguimiento`: `id_conversacion` + `tipo` + `fecha_objetivo`. `registrar_estado_oportunidad`: upsert por `id_conversacion`. Las tres tools de lectura no necesitan clave.",
+    "escalamiento": "Cuatro disparadores, todos hacia los doctores por Telegram con el contexto adjunto: tras el reintento fallido de una operación crítica; `MaxTurnsExceeded`; el segundo tripwire del mismo guardrail en la misma conversación; y la petición explícita del paciente. La regla que atraviesa todo: PASE LO QUE PASE sale un mensaje al paciente — nunca un error técnico, nunca silencio, nunca una confirmación falsa. El texto vive en el vocabulario de `fallos.que_pasa_si_no_sabe`. Dos casos particulares ya resueltos: (1) si la descarga del archivo falla, Daniela no finge haberlo recibido — le pide al paciente que lo reenvíe, porque el enlace de WhatsApp caduca y no hay segunda oportunidad; (2) el relevo vive en un tema por paciente del supergrupo de Telegram y tiene cierre automático — a las 2 horas sin mensaje del doctor se le recuerda por Telegram, y al cumplirse el tiempo de cierre configurado (3 horas por defecto, ajustable desde la interfaz web) la conversación vuelve sola a Daniela, se le avisa al doctor, y Daniela responde los mensajes represados y dispara los recordatorios cuya cita no haya pasado, sin mencionarle al paciente que el doctor no respondió. Al cerrar, Daniela cierra también el tema en Telegram: un tema cerrado no admite escritura de quien no sea administrador, así que ningún doctor puede escribirle al paciente fuera de un relevo activo. Por eso los doctores tienen que ser miembros normales del grupo y el bot el único administrador. El reloj cuenta desde el último mensaje del doctor, no desde que tomó la conversación. (3) El relevo tiene una tercera forma de terminar, además del botón y del reloj: un tema borrado. La API de Telegram no emite ningún evento al borrar un tema, así que el sistema solo se entera al intentar escribir en él. La regla es que si Daniela no puede escribir en el tema, el relevo se acabó — mismo camino de salida que las otras dos formas, para que no exista un estado en el que Daniela quede callada sin que nadie se entere. Que sea un único camino de salida es la propiedad que importa, no el detalle de cada disparador.",
+    "limite_turnos": 15,
+    "justificacion": "15 y no el default de 10 porque el peor caso legítimo del flujo ya consume 12: identificar, consultar precio, consultar disponibilidad, recibir «lleno», intentar otro bloque, recibir «se acaba de llenar» porque otra conversación ganó la carrera, agendar, registrar estado, programar seguimiento, redactar, más una regeneración por guardrail. Con 10, esa conversación se corta en el turno 6 —justo cuando Daniela iba a ofrecer la alternativa— y el paciente no recibe nada. Como `limites.costo_por_turno` no tiene techo, el margen es barato; lo caro es cortar a alguien que sí iba a agendar, con una línea base de 50% de conversaciones sin respuesta.",
+    "alternativa_descartada": "Heredar `max_turns=10` sin mirarlo, que corta el caso de arriba a la mitad. Y 20 o más, que no está justificado por ninguna señal: si Daniela no resolvió en 15 turnos el problema no es el límite sino que se confundió, y lo que necesita es escalar a un humano, no dar más vueltas. `None` no se considera: quita el único límite que acota un loop desbocado y su costo es proporcional al tiempo que nadie esté mirando.",
+    "condicion_revision": "Si `MaxTurnsExceeded` aparece en los traces de producción, 15 se quedó corto — pero antes de subirlo hay que mirar POR QUÉ dio tantas vueltas. Si las alertas de 2h y 24h del relevo se vuelven ruido que los doctores ignoran, hay que cambiar el mecanismo y no la frecuencia. Y si alguien agrega una tool de escritura sin clave de idempotencia, este bloque se reabre antes de que se despliegue."
+  },
+  "observabilidad": {
+    "tracing": "`workflow_name = 'maxicare-daniela'` (el `meta.nombre_proyecto`), fijo y estable. `group_id = id_conversacion`, el UUID de Neon y NO el número de teléfono: meterlo en el trace sería sacar por la puerta de atrás el dato que el contexto local metió adentro. `trace_metadata` con canal (whatsapp o web) y versión del prompt, porque sin esa versión comparar «antes y después» se hace a ojo. `trace_include_sensitive_data = False`, obligatorio: `datos.datos_sensibles` tiene contenido y `LecturaArchivo.contexto_clinico` es la excepción declarada en `contratos`. Consecuencia que hay que asumir: el trace muestra la FORMA de la conversación (qué tools, en qué orden, cuánto tardaron, qué guardrail saltó, cuántos tokens) y no el CONTENIDO; para leer qué se dijo se va a Neon. Dos lugares a propósito: el trace se exporta fuera, Neon no. `tracing_disabled = False`. Sin hooks al inicio: las métricas salen de Neon con SQL, y un hook corre dentro del turno sumando a `limites.latencia_maxima`.",
+    "metricas": "Siete, una por cada criterio de `exito.criterios_exito`, ni una más, todas en percentiles cuando aplique porque un promedio esconde la cola que es justo la que el paciente nota: (1) tasa de agendamiento autónomo — citas creadas ÷ conversaciones con intención de agendar, línea base 2 de 97 = 2%; (2) tasa de asistencia — asistió ÷ citas que llegaron a su fecha, sin línea base porque el cliente no la entregó, así que el primer mes de operación ES la línea base; (3) autonomía — conversaciones cerradas sin escalar ÷ total; (4) tasa de respuesta — conversaciones con respuesta ÷ total, línea base 50% sin responder; (5) p50 y p95 del tiempo hasta la primera respuesta, línea base de minutos a un día completo; (6) integridad de archivos y seguridad clínica — archivos entregados a Telegram ÷ recibidos, más conteo de tripwires de `sin_lectura_clinica`; (7) conteo de `fuera_de_alcance = True` más muestreo. Seis de las siete salen de SQL sobre Neon porque `RespuestaDaniela` las dejó como campos; la de asistencia sale de la interfaz web. Además, y declaradas como lo que son: «valor agendado» —suma del precio del tratamiento consultado de cada cita que asistió, nombrado así y no como facturación, porque Daniela nunca sabe qué le hizo el doctor al paciente— es métrica del documento de caso de éxito y no del tablero de operación; y la revisión manual de veracidad, que no se puede hacer con SQL y es el único control que protege el primer objetivo del brief: alguien lee una muestra de conversaciones y verifica que cada dato afirmado salió de la base de conocimiento aprobada, que ninguna lectura de imagen cruzó la línea clínica y que ninguna pregunta fuera de alcance se respondió.",
+    "evals": "Veintidós casos derivados de `guardrails[]` y de `fallos.excepciones_manejadas`: 5 de camino feliz (pregunta precio y agenda; llega remisión, escala y agenda; reprograma; cancela; vuelve después de la atención para un control); 5 de guardrail, uno por cada uno y todos DEBEN disparar su tripwire; 6 de ruta de fallo (Calendar caído, cupo lleno en carrera, descarga de archivo fallida, 15 turnos agotados, timeout del modelo, doctor que no devuelve la conversación en el tiempo configurado); 5 de escalamiento, uno por cada acción de `contexto.acciones_con_aprobacion_humana` y todos DEBEN terminar en pendiente y nunca en el efecto; y 1 fuera de alcance que debe reconducir con naturalidad y no con un mensaje de bloqueo. La suite se parte en dos porque una suite que tarda veinte minutos es una suite que nadie corre: una rápida (~1 min, los 5 de guardrail y los 5 de escalamiento, casi todos deterministas) que corre en cada cambio, y la completa (~10 min, las 22) antes de cada despliegue. DEPENDENCIA EXTERNA que hay que conseguir de MaxiCare: un lote de al menos 50 radiografías, fotos y remisiones REALES y anonimizadas. Sin ellas, el guardrail más delicado del sistema se desplegaría sin haberse probado nunca contra material de verdad, y la primera prueba real sería una paciente. Ese mismo lote es el que decide si se puede bajar a la clase económica de modelo: si la pasa al 100%, se cambia y se ahorra ese dinero.",
+    "justificacion": "`exito.criterios_exito` y `exito.metricas` del brief son la fuente directa: una métrica que no viene de un criterio de éxito es una métrica que a nadie del lado del cliente le importa medir, y que alguien va a tener que instrumentar, guardar y mirar igual. La suite de evals no se decide por número de casos sino derivándola de los guardrails y de las rutas de fallo: un guardrail sin caso es un guardrail que nadie sabe si funciona.",
+    "alternativa_descartada": "`trace_include_sensitive_data = True`, que haría la depuración muchísimo más fácil porque se vería la conversación completa en el trace; cuesta que el contenido clínico y los datos de salud queden exportados fuera de la infraestructura propia, justo lo que el contexto local y la persistencia evitaron. También se descartó `RunHooks` desde el inicio, que daría métricas más finas a cambio de latencia dentro del turno para algo que hoy sale de Neon con un SELECT; y una sola suite de evals, más simple de mantener y que nadie correría durante el desarrollo por tardar diez minutos.",
+    "condicion_revision": "Si una métrica deja de poder calcularse desde Neon, entran `RunHooks`. Si la revisión manual de veracidad encuentra fallos que ningún guardrail atrapó, esa clase de fallo se convierte en un guardrail nuevo y en un caso de eval. Si la suite rápida deja de atrapar regresiones que la completa sí atrapa, hay que rebalancear el reparto."
+  },
+  "fases": [
+    {
+      "orden": 1,
+      "nombre": "Esqueleto, contratos y base de conocimiento",
+      "entregable_verificable": "Los cinco modelos Pydantic de `contratos[]` se instancian y rechazan los casos inválidos en un `pytest` que corre. La base de conocimiento del documento maestro está cargada en Neon y `consultar_base_conocimiento('endodoncia','precio')` devuelve el literal «SIN DATO DOCUMENTADO», no una cadena vacía.",
+      "justificacion": "Es la única fase que no depende de ninguna otra, y los contratos fijan las firmas que las tools van a usar. El caso de endodoncia está en el entregable a propósito: es la sección 2.12 del documento maestro y es el comportamiento que protege el primer objetivo del brief.",
+      "alternativa_descartada": "Empezar por las tools. Cuesta rehacer sus firmas en cuanto un contrato cambie.",
+      "condicion_revision": "Si el `Literal` de tratamientos resulta insuficiente al cargar la base de conocimiento real."
+    },
+    {
+      "orden": 2,
+      "nombre": "WhatsApp y el viaje del archivo",
+      "entregable_verificable": "Alguien manda una radiografía desde un celular real y el archivo aparece en el tema General del grupo de Telegram de los doctores. Sin agente, sin modelo: solo recepción, descarga antes de que el enlace caduque, y reenvío. Un adjunto puede traer texto propio en `caption`, y entonces WhatsApp manda UN solo mensaje; si el paciente escribe aparte, son dos mensajes independientes sin relacion declarada entre ellos.",
+      "justificacion": "Se rompe el orden por defecto (vertical delgada) y se pone el riesgo primero, porque `sistemas.lista[WhatsApp].notas` dice dos cosas sin verificar: que el proveedor exacto no se especificó, y que los enlaces de media caducan. Si esto no funciona, el lector de archivos, el muro y el segundo agente completo no tienen sentido — y eso no se puede descubrir en la semana ocho.",
+      "alternativa_descartada": "Vertical delgada pura, con WhatsApp al final, que daría algo demostrable antes. Cuesta descubrir tarde que los archivos no se pueden recuperar y rehacer el diseño de dos agentes entero.",
+      "condicion_revision": "Si esta fase falla, hay que rehacer `orquestacion`, el segundo agente y los contratos de lectura antes de seguir. Es exactamente para eso que va segunda. VERIFICADO 2026-09-12: la fase cerro con un envio real desde un celular. Cinco hallazgos que no estaban en el diseño y que valen para todo lo que venga: (1) WhatsApp recomprime en el celular del paciente lo que se manda por la galeria; la ruta intacta es adjuntar como Documento, y el campo `tipo` del webhook distingue las dos sin preguntar -- de ahi sale el guardrail `radiografia_sin_recomprimir`. (2) Telegram rechaza `sendMessage` con `message_thread_id=1` hacia el tema General (`Bad Request: message thread not found`); al General se escribe OMITIENDO el campo, y por eso `telegram_topic_general` vale `0`. Fallaba en silencio despues de haber respondido 200 a Meta. (3) httpx registra la URL completa en INFO y el token del bot de Telegram va DENTRO de la URL; en el VPS eso acababa en journald. Los loggers de httpx y httpcore van a WARNING. (4) Cloudflare responde `error code 1010` al User-Agent `Python-urllib`; no es huella TLS ni un problema del servidor, es el cliente. (5) La app de Meta ya apuntaba a `/whatsapp` y el plan decia `/webhook/whatsapp`: se sirven las dos, porque cambiar la URL en la consola de Meta obliga a revalidar y abre una ventana sin recibir mensajes."
+    },
+    {
+      "orden": 3,
+      "nombre": "Las nueve tools contra un doble",
+      "entregable_verificable": "Cada tool de `herramientas[]` se llama desde una prueba contra Neon de pruebas y un calendario de pruebas, y devuelve o escribe lo esperado. La prueba que cierra la fase: tres llamadas simultáneas a `crear_cita` sobre el mismo horario producen exactamente dos citas.",
+      "justificacion": "La prueba de concurrencia es el entregable porque `sistemas.lista[Google Calendar].notas` exige que el control de capacidad sea real y no optimista, y esa es la única forma de demostrarlo con un hecho en vez de con una afirmación.",
+      "alternativa_descartada": "Probar las tools de a una sin el caso concurrente. Más rápido, y deja sin verificar justo el mecanismo que el brief señaló como crítico.",
+      "condicion_revision": "Si el tope de capacidad deja de ser 2 o aparece un segundo calendario. VERIFICADO 2026-09-12 (fase 3): la fase cerro con el hecho que pedia el entregable -- tres llamadas simultaneas a `crear_cita` sobre el mismo horario produjeron exactamente dos citas, y seis hilos saliendo de una barrera contra el mismo bloque se llevaron dos cupos, no mas. El control de capacidad es la restriccion `uq_reservas_cupo UNIQUE (inicio, cupo_num)`: `tomar_cupo` intenta cada numero de cupo y deja que Postgres decida, sin un solo `SELECT count(*)` de por medio. Cuatro cosas que no estaban en el diseño: (1) El pooler de Neon rechaza `options` como parametro de arranque (`unsupported startup parameter in options: search_path`), asi que el esquema aislado de pruebas exige la conexion DIRECTA --quitarle el `-pooler.` al host--, que ademas es lo correcto para medir concurrencia: el pooler comparte sesiones y falsearia el choque. (2) La logica de cada tool vive en una funcion con prefijo `_` y la `@function_tool` es una envoltura de una linea; un `FunctionTool` ya construido solo se puede invocar con un JSON serializado y un contexto de corrida completo, que es justo el andamiaje que las pruebas existen para no necesitar. (3) El atributo donde el SDK 0.22.2 guarda el manejador de fallo se llama `_failure_error_function`, con guion bajo. (4) Colombia no tiene horario de verano, asi que `timezone(timedelta(hours=-5))` es exacto y evita depender de `zoneinfo`, que en Windows no trae la base de zonas."
+    },
+    {
+      "orden": 4,
+      "nombre": "Los dos agentes con sus guardrails",
+      "entregable_verificable": "Una conversación de prueba recorre `trabajo.pasos`, y cada uno de los cinco guardrails de `guardrails[]` dispara su tripwire en el caso que lo debe disparar.",
+      "justificacion": "Un agente antes de sus tools solo se puede probar hablando, y hablar no demuestra que el efecto ocurra. Con las tools ya verificadas en la fase 3, esta fase puede exigir que los guardrails salten de verdad.",
+      "alternativa_descartada": "Construir los agentes y afinar los guardrails después. Cuesta que los guardrails se escriban contra un agente que ya aprendió a esquivarlos.",
+      "condicion_revision": "Si un guardrail no se puede hacer saltar en una prueba, es señal de que no está bien enganchado. VERIFICADO 2026-09-12 en la fase 2, con mensajes reales: el orden de llegada a Telegram NO coincide con el orden en que el paciente los mando. Un documento recibido a las 19:03:28 se entrego despues de un texto recibido a las 19:03:29, porque el texto no tenia nada que descargar. Consecuencia directa para esta fase: Daniela necesita una ventana de agrupacion --esperar unos segundos de silencio antes de procesar-- o contestaria sobre una radiografia que todavia no ha visto. Responder sobre un archivo no visto es exactamente el fallo que el principio del proyecto existe para impedir, asi que esto es requisito de la fase, no una mejora. VERIFICADO 2026-09-12 (fase 4): la fase cerro. Tres hallazgos de entorno y uno de metodo. (1) Una variable de entorno VACIA no es lo mismo que una ausente, y el `.env` copiado de `.env.ejemplo` las trae casi todas vacias. `OPENAI_BASE_URL=` exportado como cadena vacia hacia que el cliente de OpenAI la tomara como URL base y toda llamada fallara con «Request URL is missing an 'http://' or 'https://' protocol», un error que no menciona el `.env` por ninguna parte. `cargar_dotenv` ya no exporta claves sin valor y `_opcional` cae al default cuando el valor esta vacio. (2) `agents.models.interface.Model` es una clase ABSTRACTA, no un Protocol: `Agent.__post_init__` hace `isinstance(model, Model)`, asi que un doble de pruebas tiene que heredar de ella, no solo imitar su forma. (3) El atributo de los guardrails se lee con `get_name()`, y el resultado del tripwire viaja en `excepcion.guardrail_result`. (4) METODO, y es lo que mas vale de la fase: contra el modelo real, TRES de los seis guardrails no llegaron a dispararse -- Daniela se freno sola antes. Eso es buena noticia, pero no es lo mismo que haber visto saltar su tripwire, y el script lo informa distinguiendo «disparado» de «no hizo falta» en vez de decir que los seis dispararon. La ruta de disparo de los seis SI queda probada, en `tests/test_agentes.py`, con un modelo guionizado que hereda de `Model` y fuerza cada caso a traves del SDK completo. Las dos cosas juntas cubren el entregable; ninguna sola lo cubre. Tambien se corrigio un caso de prueba mal planteado: el de `sin_hora_no_verificada` estaba redactado como «ignora la agenda y dime...», que dispara `uso_indebido` a la entrada y deja el guardrail de horas sin ejercitar mientras la prueba dice OK."
+    },
+    {
+      "orden": 5,
+      "nombre": "Cascarón de la interfaz web y chat de pruebas",
+      "entregable_verificable": "Alguien conversa con Daniela desde el navegador, con login y navegación funcionando, sobre el mismo agente que va a correr en producción.",
+      "justificacion": "La interfaz web se construye en dos tandas en vez de una fase al final, pero el cascarón —login, navegación, despliegue— se hace UNA sola vez para que las pantallas posteriores no terminen con cuatro diseños y cuatro formas de autenticar. Esta primera tanda trae lo que acelera la construcción: sin chat de pruebas, cada iteración de prompt se prueba a mano por terminal.",
+      "alternativa_descartada": "Construir toda la interfaz web de una vez, al final. Es más barato en tiempo total porque no hay que retomar contexto dos veces, y cuesta que las fases 6 a 9 se hagan sin chat de pruebas.",
+      "condicion_revision": "Si el cascarón resulta más grande de lo previsto, el chat de pruebas puede vivir temporalmente como script de terminal y la fase se aplaza."
+    },
+    {
+      "orden": 6,
+      "nombre": "Ingesta, el muro y el relevo",
+      "entregable_verificable": "Una prueba manda una remisión, captura TODO lo que entra a `Runner.run(daniela)` y comprueba que el contenido clínico no aparece ahí, mientras sí aparece en el mensaje enviado a Telegram. Además: el botón «Hablar yo con el paciente» abre el tema y silencia a Daniela; lo que el doctor escribe en el tema llega literal al paciente; al cumplirse el tiempo de cierre el tema queda cerrado y Telegram rechaza un intento de escribir en él; y si se borra el tema en mitad de un relevo, el siguiente mensaje del paciente lo detecta, Daniela retoma sola y lo anuncia en General.",
+      "justificacion": "Es la fase que convierte la decisión de `orquestacion` en un hecho verificable: el muro entre lo que ve el doctor y lo que ve el paciente deja de ser un argumento y pasa a ser una prueba automática que corre en cada despliegue.",
+      "alternativa_descartada": "Verificar el muro leyendo el código. Cuesta que un cambio futuro lo rompa sin que nada avise.",
+      "condicion_revision": "Si el cierre automático del relevo genera fricción real con los doctores, el tiempo se ajusta desde la interfaz web sin tocar esta fase. REVISION 2026-09-12 (tema cerrado): el tema del paciente ya no se crea al activarse el relevo, sino al llegar su PRIMER archivo (`image`, `document`, `audio`, `voice`, `video`), y nace CERRADO con `closeForumTopic`. Un texto suelto nunca crea tema: si cada saludo abriera uno, el grupo seria inservible en una semana. El aviso de que llego un archivo sigue yendo al tema General --ahi es donde los doctores miran-- pero el archivo en si se deposita en el tema del paciente, agrupado desde el primero. La garantia que sostiene todo esto se verifico en este proyecto: un tema cerrado impide FISICAMENTE escribir a quien no es administrador del grupo, mientras que el bot, que si lo es, sigue pudiendo depositar. De ahi que el modo deje de ser algo que el doctor tenga que recordar: si puede escribir, esta en relevo; si no puede, esta mirando el archivo. El candado lo pone Telegram, no nuestra disciplina. El relevo pasa entonces a ser `reopenForumTopic` sobre un tema que ya existe, y su final `closeForumTopic` otra vez -- las tres salidas (boton del doctor, tiempo agotado, tema perdido) cierran por la misma ruta. Hueco conocido que NO cierra esto: Telegram no permite quitarle privilegios al creador del grupo, asi que esa persona puede escribir en un tema cerrado y su mensaje llegaria al paciente fuera de relevo. Es el mismo hueco que ya estaba documentado; no lo agrava ni lo resuelve."
+    },
+    {
+      "orden": 7,
+      "nombre": "Persistencia y observabilidad",
+      "entregable_verificable": "Una conversación sobrevive a reiniciar el proceso y Daniela la retoma con su contexto. Su trace aparece agrupado por `group_id` y no contiene una sola línea de texto de la conversación.",
+      "justificacion": "Antes de que haya conversación que persistir no hay nada que comprobar. El entregable incluye la ausencia de contenido en el trace porque `trace_include_sensitive_data = False` es una promesa del bloque de contratos y tiene que verificarse, no asumirse.",
+      "alternativa_descartada": "Dejar la observabilidad para después del piloto. Cuesta llegar al primer reclamo sin nada que mirar.",
+      "condicion_revision": "Si el recorte de historial por cantidad empieza a cortar conversaciones vivas."
+    },
+    {
+      "orden": 8,
+      "nombre": "Pantallas de operación de la interfaz web",
+      "entregable_verificable": "Alguien de la clínica cambia un precio desde la interfaz y Daniela cotiza el nuevo en la siguiente conversación, sin desplegar nada. Alguien marca una asistencia y la métrica correspondiente se mueve. Las tres perillas (capacidad por hora, duración de cita, tiempo de cierre del relevo) cambian el comportamiento sin tocar código.",
+      "justificacion": "Segunda tanda de la interfaz web: lo que le sirve a la clínica para operar sola. Durante la construcción un script SQL reemplaza a casi todas estas pantallas, así que no bloquean nada — salvo marcar asistencia, que no tiene otra fuente y sin la cual la métrica de asistencia no existe. Es un requisito de lanzamiento, no de construcción: la interfaz web es la autonomía de MaxiCare respecto de quien construye.",
+      "alternativa_descartada": "Fusionarla dentro del piloto. Ahorraría una fase, y cuesta que un producto de cinco funciones se construya «en un rato» mientras se lanza.",
+      "condicion_revision": "Si resulta más grande de lo previsto, se parte en un mínimo para el piloto (marcar asistencia y editar precios) y el resto después."
+    },
+    {
+      "orden": 9,
+      "nombre": "Evals y piloto real",
+      "entregable_verificable": "Las 22 evals pasan. Después, las primeras conversaciones reales se pueden leer en el tracing y las siete métricas de `observabilidad.metricas` se calculan sobre ellas.",
+      "justificacion": "Un piloto antes de las evals convierte a los pacientes reales en la suite de pruebas. `exito.criterios_exito` solo se puede empezar a demostrar aquí.",
+      "alternativa_descartada": "Arrancar el piloto con la suite rápida y dejar la completa para después. Cuesta desplegar sin haber probado las rutas de fallo, que son justo las que aparecen en producción.",
+      "condicion_revision": "Si el piloto arranca sin el lote de 50 archivos reales que pide `observabilidad.evals`, esta fase queda incompleta y hay que decirlo, no darla por buena."
+    },
+    {
+      "orden": 10,
+      "nombre": "Documento de caso de éxito",
+      "entregable_verificable": "Existe un documento que explica la arquitectura —agentes, tools, guardrails, tracing— y compara un mes de operación contra la línea base congelada en el brief: 97 conversaciones al mes, ~8 mensajes por conversación, 50% sin responder, primera respuesta entre minutos y un día, 2 citas agendadas, todas de personas nuevas.",
+      "justificacion": "El manual dice que «documentación» no es una fase, y tiene razón cuando se trata de escribir al final sobre lo que ya nadie recuerda. Esto es otra cosa: un entregable comercial comprometido por el cliente, con un hecho comprobable detrás (el documento existe y contiene la comparación) y con una dependencia real que obliga a ponerlo último — no se puede escribir hasta que el piloto haya producido datos. La mitad más valiosa del caso ya existe: la línea base, que solo vale porque se capturó antes de lanzar.",
+      "alternativa_descartada": "Escribirlo en paralelo al piloto con números parciales. Cuesta publicar una comparación sobre una muestra que todavía no es representativa, y un caso de éxito que se cae bajo escrutinio es peor que no tenerlo.",
+      "condicion_revision": "Si el primer mes de operación no alcanza volumen suficiente para comparar con las 97 conversaciones de la línea base, se espera al segundo antes de escribirlo."
+    }
+  ]
+}

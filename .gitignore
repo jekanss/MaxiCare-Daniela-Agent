@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+# Nunca. `.env.ejemplo` sí se versiona; `.env` con los valores reales, jamás.
+.env
+
+# La interfaz web: dependencias y compilado. `web/dist` se genera con
+# `npm run build` y se reconstruye en la imagen; versionarlo solo produce
+# conflictos de fusion en archivos que nadie lee.
+web/node_modules/
+web/dist/
