@@ -10,8 +10,10 @@ import os
 import psycopg
 import pytest
 
-from maxicare_daniela import persistencia
+from maxicare_daniela import contratos, panel, persistencia
 from maxicare_daniela.config import cargar_dotenv
+
+CORE = ("precio", "duracion", "profesional")
 
 
 def _url_de_pruebas() -> str:
@@ -68,3 +70,90 @@ def test_postgres_rechaza_una_clave_que_no_es_una_clave(conn):
                 "INSERT INTO tratamientos (clave, etiqueta) VALUES (%s, %s)", (clave, "x")
             )
         conn.rollback()
+
+
+def test_validar_clave_rechaza_lo_que_no_es_una_clave():
+    """Offline: la misma regla que el CHECK de Postgres, para poder dar un mensaje decente
+    antes de llegar a la base."""
+    for mala in ["Carillas", "carillas esteticas", "absceso-periapical", "ca", "1carillas"]:
+        with pytest.raises(ValueError):
+            panel.validar_clave(mala)
+    assert panel.validar_clave("  Carillas  ".strip().lower()) == "carillas"
+    assert panel.validar_clave("carillas_esteticas") == "carillas_esteticas"
+
+
+@pytest.mark.neon
+def test_listar_tratamientos_dice_cuales_estan_en_el_muro(conn):
+    # Corrección 1 sobre el brief: el esquema `pruebas` persiste entre corridas. Sin el
+    # try/finally, la segunda vez que alguien corra esta prueba `crear_tratamiento` lanzaría
+    # «ya existe» sobre un tratamiento que nadie quiso dejar ahí.
+    try:
+        filas = {f["clave"]: f for f in panel.listar_tratamientos(conn)}
+        assert filas["implantes"]["en_el_muro"] is True
+        panel.crear_tratamiento(conn, clave="carillas", etiqueta="Carillas", usuario="prueba")
+        filas = {f["clave"]: f for f in panel.listar_tratamientos(conn)}
+        assert filas["carillas"]["en_el_muro"] is False
+    finally:
+        with conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM cambios_configuracion WHERE tabla = 'tratamientos' "
+                "AND clave = 'carillas'"
+            )
+            cur.execute("DELETE FROM tratamientos WHERE clave = 'carillas'")
+        conn.commit()
+
+
+@pytest.mark.neon
+def test_listar_tratamientos_cuenta_lo_que_falta(conn):
+    # Corrección 3 sobre el brief: en el esquema `pruebas` `base_conocimiento` está VACÍA
+    # -las migraciones se aplican pero la semilla no se carga-, así que los 14 tratamientos
+    # salen con `fichas=0` y `faltan` con los tres conceptos. Eso pasaría igual si `faltan`
+    # devolviera siempre los tres, para todos: no probaría nada. Se prueban las dos caras,
+    # como pide `.claude/rules/pruebas.md`: el tratamiento CON ficha ya no debe listar ese
+    # concepto como faltante, y uno SIN ficha sí. `guardar_ficha` es idempotente (ON CONFLICT
+    # DO UPDATE), así que no hace falta deshacerla al terminar.
+    panel.guardar_ficha(
+        conn, tratamiento="endodoncia", concepto="precio",
+        contenido="$1.200.000 conducto simple", aprobado=True,
+        nota_pendiente=None, usuario="prueba",
+    )
+    filas = {f["clave"]: f for f in panel.listar_tratamientos(conn)}
+
+    assert filas["endodoncia"]["fichas"] == 1
+    assert "precio" not in filas["endodoncia"]["faltan"]
+    assert set(filas["endodoncia"]["faltan"]) == {"duracion", "profesional"}
+
+    assert filas["protesis"]["fichas"] == 0
+    assert set(filas["protesis"]["faltan"]) >= set(CORE)
+
+
+@pytest.mark.neon
+def test_guardar_ficha_y_su_bitacora_son_una_sola_transaccion(conn):
+    panel.guardar_ficha(
+        conn, tratamiento="implantes", concepto="precio",
+        contenido="$1.900.000 la fase quirurgica", aprobado=True,
+        nota_pendiente=None, usuario="dra.prueba",
+    )
+    registros = panel.historial(conn, limite=5)
+    assert registros[0]["clave"] == "implantes/precio"
+    assert registros[0]["usuario"] == "dra.prueba"
+    assert registros[0]["valor_nuevo"].startswith("$1.900.000")
+
+
+@pytest.mark.neon
+def test_crear_un_tratamiento_que_ya_existe_no_lo_pisa(conn):
+    with pytest.raises(ValueError, match="ya existe"):
+        panel.crear_tratamiento(conn, clave="implantes", etiqueta="Otro", usuario="prueba")
+
+
+@pytest.mark.neon
+def test_desactivar_lo_saca_del_vocabulario_pero_no_de_la_tabla(conn):
+    # Corrección 2 sobre el brief: la reactivación va en `finally`. Si una aserción falla
+    # antes de llegar a ella, `bichectomia` se queda desactivado y contamina toda prueba
+    # posterior que dependa del vocabulario completo de los catorce.
+    try:
+        panel.cambiar_tratamiento(conn, "bichectomia", activo=False, usuario="prueba")
+        assert "bichectomia" not in panel.vocabulario_activo(conn)
+        assert any(f["clave"] == "bichectomia" for f in panel.listar_tratamientos(conn))
+    finally:
+        panel.cambiar_tratamiento(conn, "bichectomia", activo=True, usuario="prueba")
