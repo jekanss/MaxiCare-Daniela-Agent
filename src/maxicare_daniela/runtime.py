@@ -29,6 +29,7 @@ import logging
 from pathlib import Path
 
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request, Response
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -68,6 +69,76 @@ async def _error_en_el_vocabulario_del_frontend(request: Request, exc: HTTPExcep
     return JSONResponse(
         {"detalle": exc.detail}, status_code=exc.status_code, headers=exc.headers
     )
+
+
+#: Los campos de los cuerpos del panel, con el nombre que usa quien llena el formulario.
+#: Sin esta tabla el mensaje diría «clave» o «nota_pendiente», que son nombres de columna.
+_NOMBRE_DEL_CAMPO = {
+    "clave": "la clave del tratamiento",
+    "etiqueta": "el nombre visible del tratamiento",
+    "tratamiento": "el tratamiento de la ficha",
+    "concepto": "el concepto de la ficha",
+    "contenido": "el contenido de la ficha",
+    "nota_pendiente": "la nota de qué falta por definir",
+    "usuario": "el usuario",
+    "contrasena": "la contraseña",
+    "mensaje": "el mensaje",
+}
+
+
+def _en_castellano(error: dict) -> str:
+    """Un error de Pydantic dicho como se lo diría una persona a otra."""
+    campo = next(
+        (p for p in reversed(error.get("loc", ())) if isinstance(p, str) and p != "body"), ""
+    )
+    nombre = _NOMBRE_DEL_CAMPO.get(campo) or (f"«{campo}»" if campo else "uno de los datos")
+    ctx = error.get("ctx") or {}
+    tipo = error.get("type", "")
+    # `str.capitalize()` no sirve: pasa a minúsculas TODO lo demás, y el nombre de un campo
+    # desconocido llega entre comillas angulares.
+    en_mayuscula = nombre[:1].upper() + nombre[1:]
+
+    if tipo == "missing":
+        frase = f"Falta {nombre}."
+    elif tipo == "string_too_short" and ctx.get("min_length") == 1:
+        frase = f"{en_mayuscula} no puede ir vacío."
+    elif tipo == "string_too_short":
+        frase = f"{en_mayuscula} necesita al menos {ctx['min_length']} caracteres."
+    elif tipo == "string_too_long":
+        frase = f"{en_mayuscula} no puede pasar de {ctx['max_length']} caracteres."
+    else:
+        frase = f"{en_mayuscula} no tiene un valor válido."
+
+    # La clave es el único campo con una forma que hay que explicar, y ya está explicada en
+    # `panel.AYUDA_CLAVE`: la misma frase que da el 400 de `validar_clave` cuando el largo
+    # sí pasa y lo que falla son las mayúsculas o los espacios. Repetirla aquí a mano haría
+    # que el mismo error de la misma persona se explicara de dos maneras según cuál de los
+    # dos validadores lo atrapara primero.
+    if campo == "clave":
+        frase = f"{frase} {panel.AYUDA_CLAVE}"
+    return frase
+
+
+@app.exception_handler(RequestValidationError)
+async def _validacion_en_el_vocabulario_del_frontend(
+    request: Request, exc: RequestValidationError
+):
+    """Lo que rechaza Pydantic ANTES de llegar al endpoint, dicho para una persona.
+
+    `RequestValidationError` no es una `HTTPException`, así que el manejador de arriba no la
+    cubre: la mitad de los 422 del servidor seguían saliendo con `detail` y con el volcado
+    crudo de Pydantic dentro. `pedir()` lee `detalle` y no lo encontraba, de modo que teclear
+    una clave de dos letras --que la pantalla deja pulsar, porque solo exige que no esté
+    vacía-- daba «No se pudo completar la operación (422)» en vez del mensaje que alguien
+    redactó para ese caso exacto. Lo mismo con un contenido de más de 4000 caracteres.
+
+    Se responden dos frases como mucho, no la lista entera: los cuerpos del panel tienen
+    cinco campos y quien los llena arregla de uno en uno.
+    """
+    errores = exc.errors()
+    frases = [_en_castellano(e) for e in errores[:2]]
+    return JSONResponse({"detalle": " ".join(frases) or "El servidor no entendió la petición."},
+                        status_code=422)
 
 
 _whatsapp = WhatsApp(config.whatsapp_token, config.whatsapp_phone_number_id)

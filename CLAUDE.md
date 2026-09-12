@@ -65,7 +65,9 @@ uv run uvicorn maxicare_daniela.runtime:app --port 8080
 - **Dos personas editando la misma ficha: la segunda pisa a la primera.** No hay bloqueo
   optimista, es deliberado. Lo que lo hace aceptable no es que sea improbable, sino que
   `cambios_configuracion` guarda el valor anterior: una edición pisada es recuperable, no
-  perdida.
+  perdida. Eso vale para el contenido **y para `aprobado`**, que se registra en su propia
+  fila. Si algún día se añade un campo editable a la ficha, tiene que anotarse también, o
+  esta frase vuelve a ser mentira para ese campo y el límite deja de ser aceptable.
 - **En `web/src/pantallas/Tratamientos.tsx`, el `useCallback` de `recargar` tiene
   dependencias vacías a propósito, y `alCaducarSesion` se consume por una `ref`.** Meter esa
   prop en las dependencias —lo que pediría cualquier regla de hooks— deja la pantalla

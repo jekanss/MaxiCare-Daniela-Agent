@@ -225,6 +225,16 @@ function EditorFicha({
 
   const vacio = contenido.trim() === ''
 
+  /* Aprobar vacía la nota. El campo se esconde al aprobar, pero escondido no es vaciado: sin
+     esto se enviaba lo que hubiera dentro y quedaba una ficha aprobada con un «falta
+     confirmarlo con la doctora» invisible, que reaparece el día que alguien la desapruebe.
+     `panel.guardar_ficha` hace lo mismo en el servidor, que es donde no se puede esquivar;
+     aquí sirve para que `sucio` y lo que se ve concuerden con lo que se va a guardar. */
+  function aprobar(v: boolean) {
+    setAprobado(v)
+    if (v) setNota('')
+  }
+
   async function guardar() {
     setGuardando(true)
     try {
@@ -275,7 +285,7 @@ function EditorFicha({
       />
 
       <div className="flex flex-wrap items-start justify-between gap-4 mt-3">
-        <Aprobacion aprobado={aprobado} cambiar={setAprobado} puedeEditar={puedeEditar} porQueNo={porQueNo} />
+        <Aprobacion aprobado={aprobado} cambiar={aprobar} puedeEditar={puedeEditar} porQueNo={porQueNo} />
 
         <button
           type="button"
@@ -383,6 +393,13 @@ function NuevaFicha({
   const chocaCon = existentes.find((f) => f.concepto === conceptoReal) ?? null
   const listo = conceptoReal !== '' && contenido.trim() !== ''
 
+  /* Igual que en `EditorFicha`: el campo de la nota se esconde al aprobar, así que también
+     se vacía. Lo escondido que igual se envía es la peor clase de dato. */
+  function aprobar(v: boolean) {
+    setAprobado(v)
+    if (v) setNota('')
+  }
+
   async function guardar() {
     setGuardando(true)
     try {
@@ -485,7 +502,7 @@ function NuevaFicha({
       />
 
       <div className="mt-3">
-        <Aprobacion aprobado={aprobado} cambiar={setAprobado} puedeEditar={puedeEditar} porQueNo={porQueNo} />
+        <Aprobacion aprobado={aprobado} cambiar={aprobar} puedeEditar={puedeEditar} porQueNo={porQueNo} />
       </div>
 
       {!aprobado && (
@@ -586,6 +603,12 @@ function FilaTratamiento({
         opacity: t.activo ? 1 : 0.65,
       }}
     >
+      {/* Todo lo de dentro son `span`, no `div` ni `p`: el contenido permitido de un
+          `button` es phrasing content, y un `div` ahí es HTML inválido. React no avisa y
+          los navegadores lo pintan igual, pero el parseo de un elemento mal anidado es de
+          lo poco que todavía se comporta distinto entre motores, y esta cabecera la lleva
+          TODAS las filas de la lista. `className="block"` devuelve el salto de línea que
+          daba el `div`. */}
       <button
         onClick={alternar}
         aria-expanded={abierta}
@@ -595,11 +618,11 @@ function FilaTratamiento({
           {abierta ? '▾' : '▸'}
         </span>
 
-        <div className="min-w-0">
-          <div className="flex items-center gap-2 flex-wrap">
-            <p className="text-sm font-semibold" style={{ color: '#111827' }}>
+        <span className="block min-w-0">
+          <span className="flex items-center gap-2 flex-wrap">
+            <span className="block text-sm font-semibold" style={{ color: '#111827' }}>
               {t.etiqueta}
-            </p>
+            </span>
             <code className="text-[11px]" style={{ color: '#9CA3AF' }}>
               {t.clave}
             </code>
@@ -627,9 +650,9 @@ function FilaTratamiento({
                 titulo="Se puede cotizar y agendar, pero una radiografía sobre él se clasifica como «no identificado» hasta que se incorpore al muro con un cambio de código."
               />
             )}
-          </div>
+          </span>
 
-          <div className="flex items-center gap-2 mt-1 flex-wrap">
+          <span className="flex items-center gap-2 mt-1 flex-wrap">
             <span className="text-xs" style={{ color: '#6B7280' }}>
               {t.fichas === 0 ? 'sin fichas' : t.fichas === 1 ? '1 ficha' : `${t.fichas} fichas`}
             </span>
@@ -646,8 +669,8 @@ function FilaTratamiento({
                 ✓ precio, duración y profesional
               </span>
             )}
-          </div>
-        </div>
+          </span>
+        </span>
 
         <span className="ml-auto shrink-0 text-xs" style={{ color: '#9CA3AF' }}>
           {abierta ? 'Cerrar' : 'Abrir'}
@@ -1088,9 +1111,30 @@ export default function Tratamientos({
 
   const deLaClinica = useMemo(() => fichas.filter((f) => f.tratamiento === GENERAL), [fichas])
 
-  const sinAprobar = fichas.filter((f) => !f.aprobado).length
+  /* La cabecera cuenta lo que la pantalla enseña, y nada más.
+   *
+   * `sinPrecio` excluye los desactivados: un tratamiento que la clínica decidió dejar de
+   * ofrecer no le falta un precio, le sobra la fila. Contarlo mantenía la alarma encendida
+   * sobre algo que ya nadie cotiza, que es la manera más rápida de enseñarle a la clínica a
+   * ignorar la alarma.
+   *
+   * Las fichas se cuentan contra el vocabulario real --los tratamientos de la tabla, más
+   * `_general`-- porque el cuerpo solo pinta esas. Desde que `panel.guardar_ficha` valida el
+   * tratamiento no deberían existir fichas huérfanas, pero las que hubiera quedado de antes
+   * siguen en la tabla y no se pueden borrar desde el producto: que las cuente la cabecera
+   * sin que nadie pueda encontrarlas manda a alguien a buscar una ficha que no existe. */
+  const conocidos = useMemo(
+    () => new Set<string>([GENERAL, ...tratamientos.map((t) => t.clave)]),
+    [tratamientos],
+  )
+  const fichasVisibles = useMemo(
+    () => fichas.filter((f) => conocidos.has(f.tratamiento)),
+    [fichas, conocidos],
+  )
+
+  const sinAprobar = fichasVisibles.filter((f) => !f.aprobado).length
   const sinPrecio = tratamientos.filter(
-    (t) => t.clave !== CLASIFICACION && t.faltan.includes('precio'),
+    (t) => t.activo && t.clave !== CLASIFICACION && t.faltan.includes('precio'),
   ).length
 
   async function guardarUnaFicha(f: {
@@ -1175,7 +1219,7 @@ export default function Tratamientos({
             <p className="text-sm" style={{ color: '#6B7280' }}>
               {cargando
                 ? 'Leyendo la base…'
-                : `${fichas.length} fichas · ${sinAprobar} sin aprobar · ${sinPrecio} tratamientos sin precio`}
+                : `${fichasVisibles.length} fichas · ${sinAprobar} sin aprobar · ${sinPrecio} tratamientos sin precio`}
             </p>
           </div>
 

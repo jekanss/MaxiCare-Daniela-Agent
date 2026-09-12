@@ -24,8 +24,30 @@ from .contratos import Tratamiento
 #: antes de que la base rechace la fila con un error que nadie entiende.
 CLAVE = re.compile(r"^[a-z][a-z0-9_]{2,23}$")
 
+#: Lo que hay que decirle a una persona cuando su clave no pasa. Vive aquí, junto al regex
+#: que la impone, porque hay DOS sitios que rechazan una clave mala: este validador y el
+#: `Field(min_length=3, max_length=24)` de `runtime.Ficha`, que corre antes y ni siquiera
+#: llega hasta aquí. Si cada uno redacta su propia frase, teclear `ca` da un mensaje y
+#: teclear `Carillas` da otro, para el mismo error de la misma persona.
+AYUDA_CLAVE = (
+    "Usa minúsculas sin espacios ni tildes, de 3 a 24 caracteres; por ejemplo 'carillas' "
+    "o 'carillas_esteticas'."
+)
+
 #: Los conceptos que hacen útil una ficha. Si faltan, la pantalla lo muestra.
 CONCEPTOS_MINIMOS = ("precio", "duracion", "profesional")
+
+#: Los hechos de la clínica --horario, sede, EPS, medios de pago, urgencias-- viven en
+#: `base_conocimiento` bajo este tratamiento, que NO es una fila de `tratamientos`: nadie
+#: agenda una cita de «_general».
+#:
+#: El frontend tiene su propia copia (`web/src/pantallas/Tratamientos.tsx`, `const GENERAL`)
+#: y la usa para llevarse estas fichas a la pestaña «La clínica». La copia es deliberada
+#: --el `.tsx` no puede importar de Python-- y por eso la constante se declara aquí, en el
+#: módulo que decide qué se acepta: `guardar_ficha` valida contra la tabla, y sin esta
+#: excepción explícita rechazaría las 12 fichas de esa pestaña por no existir el
+#: «tratamiento» `_general`. Si algún día cambia el nombre, hay que cambiarlo en los dos.
+GENERAL = "_general"
 
 
 def validar_clave(clave: str) -> str:
@@ -43,10 +65,7 @@ def validar_clave(clave: str) -> str:
     """
     limpia = (clave or "").strip()
     if not CLAVE.match(limpia):
-        raise ValueError(
-            f"'{clave}' no sirve como clave. Usa minúsculas sin espacios ni tildes, de 3 a "
-            "24 caracteres; por ejemplo 'carillas' o 'carillas_esteticas'."
-        )
+        raise ValueError(f"'{clave}' no sirve como clave. {AYUDA_CLAVE}")
     return limpia
 
 
@@ -196,6 +215,13 @@ def guardar_ficha(
     `aprobado=False` NO esconde la ficha: `formatear_conocimiento` igual se la entrega al
     modelo, precedida de la advertencia de aprobación. El interruptor significa «esto
     todavía no es un compromiso comercial», no «esto no se ve».
+
+    `nota_pendiente` se borra al aprobar. La nota dice qué falta por definir; una ficha
+    aprobada ya no tiene nada por definir, y la pantalla esconde el campo al aprobar pero
+    sigue mandando lo que hubiera escrito. Guardarlo dejaría un «falta confirmarlo con la
+    doctora» invisible, listo para reaparecer el día que alguien desapruebe la ficha meses
+    después y se encuentre una advertencia que ya nadie sabe de dónde salió. Se decide aquí
+    --no en la pantalla-- porque aquí no se puede esquivar.
     """
     trat = (tratamiento or "").strip().lower()
     conc = (concepto or "").strip().lower()
@@ -208,14 +234,36 @@ def guardar_ficha(
             "esa información, deja la ficha sin crear: Daniela dirá «SIN DATO DOCUMENTADO» "
             "y escalará, que es el comportamiento correcto."
         )
+    if aprobado:
+        nota_pendiente = None
 
     with conn.cursor() as cur:
+        # Contra TODAS las filas, no solo las activas: editar la ficha de un tratamiento que
+        # la clínica dejó de ofrecer es legítimo --el precio viejo sigue siendo el precio
+        # viejo-- y desactivar uno no puede volver sus fichas irreparables.
+        #
+        # Sin esto, `base_conocimiento.tratamiento` era la única escritura del panel sin
+        # control de vocabulario: un TEXT de 60 caracteres, sin clave foránea y sin CHECK,
+        # donde cabe una frase clínica entera. La fila resultante no se ve en ninguna
+        # pantalla, cuenta en la cabecera y no se puede borrar desde el producto.
         cur.execute(
-            "SELECT contenido FROM base_conocimiento WHERE tratamiento = %s AND concepto = %s",
+            "SELECT 1 FROM tratamientos WHERE clave = %s", (trat,)
+        )
+        if trat != GENERAL and cur.fetchone() is None:
+            raise ValueError(
+                f"'{trat}' no es un tratamiento de MaxiCare. Una ficha se cuelga de un "
+                "tratamiento que ya existe en la tabla; si hace falta uno nuevo, créalo "
+                "primero desde «Nuevo tratamiento»."
+            )
+
+        cur.execute(
+            "SELECT contenido, aprobado FROM base_conocimiento "
+            "WHERE tratamiento = %s AND concepto = %s",
             (trat, conc),
         )
         fila = cur.fetchone()
         anterior = fila[0] if fila else None
+        antes_aprobado = fila[1] if fila else None
 
         cur.execute(
             "INSERT INTO base_conocimiento (tratamiento, concepto, contenido, aprobado, "
@@ -226,6 +274,23 @@ def guardar_ficha(
             "  nota_pendiente = EXCLUDED.nota_pendiente, actualizado_en = now()",
             (trat, conc, texto, aprobado, nota_pendiente),
         )
+        # `aprobado` es el único campo del sistema con significado comercial declarado: la
+        # pantalla lo escribe como «Es un compromiso comercial» / «Todavía no lo es». Sin
+        # este registro, convertir un precio tentativo en un compromiso no dejaba rastro, y
+        # el límite de concurrencia que esta rama aceptó --dos ediciones simultáneas, gana
+        # la última-- se aceptó *porque* la bitácora guarda el valor anterior. Era cierto
+        # del texto y falso de la aprobación.
+        #
+        # Fila propia, con el mismo vocabulario que el de `activo` en `cambiar_tratamiento`:
+        # dos booleanos de la misma pantalla, escritos por el mismo módulo, no pueden
+        # registrarse de dos maneras distintas en la misma tabla. Va ANTES que la del
+        # contenido para que la del contenido siga siendo la más reciente de las dos: es la
+        # que la bitácora enseña arriba y la que responde «qué decía antes».
+        if antes_aprobado is not None and aprobado != antes_aprobado:
+            _anotar(cur, tabla="base_conocimiento", clave=f"{trat}/{conc}",
+                    anterior="aprobado" if antes_aprobado else "sin aprobar",
+                    nuevo="aprobado" if aprobado else "sin aprobar", usuario=usuario)
+
         _anotar(cur, tabla="base_conocimiento", clave=f"{trat}/{conc}",
                 anterior=anterior, nuevo=texto, usuario=usuario)
     conn.commit()
@@ -234,11 +299,19 @@ def guardar_ficha(
 
 
 def historial(conn, limite: int = 100) -> list[dict[str, Any]]:
-    """Lo más reciente primero. Sin paginación: cien cambios cubren meses de esta clínica."""
+    """Lo más reciente primero. Sin paginación: cien cambios cubren meses de esta clínica.
+
+    El desempate por `id` no es adorno. Un solo cambio de la pantalla puede escribir DOS
+    filas en la misma transacción --contenido y aprobación, o nombre y activo--, y
+    `cambiado_en` es `now()`, que en Postgres es el instante de la TRANSACCIÓN: las dos
+    filas llevan exactamente la misma marca de tiempo. Ordenando solo por ella, cuál sale
+    arriba lo decide el planificador, y la bitácora contaría la historia al revés de vez en
+    cuando.
+    """
     with conn.cursor() as cur:
         cur.execute(
             "SELECT tabla, clave, valor_anterior, valor_nuevo, usuario, cambiado_en "
-            "FROM cambios_configuracion ORDER BY cambiado_en DESC LIMIT %s",
+            "FROM cambios_configuracion ORDER BY cambiado_en DESC, id DESC LIMIT %s",
             (max(1, min(limite, 500)),),
         )
         return [

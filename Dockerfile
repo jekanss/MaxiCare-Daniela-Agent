@@ -79,7 +79,17 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=20s --retries=3 \
     CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/salud',timeout=8).status==200 else 1)"
 
 # Un solo worker a propósito. El volumen de una clínica no lo necesita, y con varios habría
-# que sacar el estado en memoria (`_tema_general`) a un sitio compartido para nada.
+# que sacar a un sitio compartido los DOS estados en memoria del proceso:
+#
+#   - `runtime._tema_general`, el tema del supergrupo de Telegram, que se lee al arrancar.
+#   - `contratos._VOCABULARIO`, los tratamientos que la clínica ofrece hoy, que el panel
+#     reescribe en caliente con cada POST o PATCH de `/api/tratamientos`.
+#
+# El segundo es el que no se puede dejar pasar. Con `--workers 2`, un tratamiento creado
+# desde el panel lo conocería solo el worker que atendió esa petición: Daniela lo cotizaría
+# o diría que no existe según a qué worker le tocara el siguiente mensaje de WhatsApp. Eso
+# no se lee como una decisión de despliegue, se lee como un modelo caprichoso, y se
+# depuraría durante días en el sitio equivocado.
 CMD ["uv", "run", "uvicorn", "maxicare_daniela.runtime:app", \
      "--host", "0.0.0.0", "--port", "8080", "--workers", "1", \
      "--proxy-headers", "--forwarded-allow-ips", "*"]
