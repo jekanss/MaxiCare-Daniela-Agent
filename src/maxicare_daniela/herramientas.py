@@ -47,13 +47,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from typing import Any, Callable
 
 from agents import RunContextWrapper, function_tool
 
-from . import persistencia
-from .calendario import ErrorDeCalendario, bloques_del_dia
+from . import contratos, persistencia
+from .calendario import ZONA_BOGOTA, ErrorDeCalendario, bloques_del_dia
 from .canales import Telegram
 from .guardrails import cifras_de, horas_de, identidad_antes_de_datos
 from .contratos import (
@@ -63,15 +63,16 @@ from .contratos import (
     SolicitudCancelacion,
     SolicitudCita,
     SolicitudEscalamiento,
-    Tratamiento,
     rechazar_documento_de_identidad,
 )
 
 log = logging.getLogger("maxicare.herramientas")
 
-#: Colombia no tiene horario de verano, así que un desplazamiento fijo es exacto --y evita
-#: depender de la base de datos de zonas horarias del sistema, que en Windows no viene.
-ZONA_BOGOTA = timezone(timedelta(hours=-5))
+#: `ZONA_BOGOTA` se importa de `calendario.py`, donde vive desde que `CalendarioGoogle`
+#: también la necesita para traducir lo que devuelve Google. Se sigue reexportando desde
+#: aquí --`from .calendario import ZONA_BOGOTA`, arriba-- porque las pruebas y los scripts
+#: la venían usando como `herramientas.ZONA_BOGOTA` y no hay motivo para romperlos. Una sola
+#: definición: dos copias de un desfase horario son dos cosas que un día divergen.
 
 #: Tope de intentos de identificación por conversación (`herramientas[].valida`). Al
 #: tercero no se sigue preguntando: se escala. Insistir convierte una atención en un
@@ -705,13 +706,22 @@ async def _registrar_estado_oportunidad(
     fuera_de_alcance: bool,
     nota: str | None,
 ) -> str:
+    # Se valida contra la lista viva, ANTES de tocar la base: un tratamiento que la clínica
+    # ya no ofrece no debe llegar a escribirse, y la prueba del rechazo no necesita Neon.
+    clave = (tratamiento or "").strip().lower()
+    if clave not in contratos.vocabulario():
+        raise ValueError(
+            f"'{tratamiento}' no es un tratamiento que MaxiCare ofrezca. "
+            f"Los actuales son: {', '.join(sorted(contratos.vocabulario()))}."
+        )
+
     def trabajo(conn) -> None:
         persistencia.upsert_estado_oportunidad(
             conn,
             ctx.id_conversacion,
             estado=estado,
             barrera=barrera,
-            tratamiento=tratamiento,
+            tratamiento=clave,
             fuera_de_alcance=fuera_de_alcance,
             notas=nota,
         )
@@ -725,7 +735,7 @@ async def registrar_estado_oportunidad(
     wrapper: RunContextWrapper[ContextoDaniela],
     estado: EstadoOportunidad,
     barrera: Barrera,
-    tratamiento: Tratamiento,
+    tratamiento: str,
     fuera_de_alcance: bool,
     nota: str,
 ) -> str:
@@ -736,7 +746,8 @@ async def registrar_estado_oportunidad(
     Args:
         estado: en qué punto está el paciente.
         barrera: qué lo está frenando, o 'ninguna'.
-        tratamiento: de qué trata la conversación, o 'no_identificado'.
+        tratamiento: de qué trata la conversación, o 'no_identificado'. Uno de los
+            tratamientos que MaxiCare ofrece; la lista va al final de tus instrucciones.
         fuera_de_alcance: si pidió algo que MaxiCare no ofrece.
         nota: una línea de contexto operativo, sin contenido clínico.
     """

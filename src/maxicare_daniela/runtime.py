@@ -29,11 +29,13 @@ import logging
 from pathlib import Path
 
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request, Response
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
+from starlette.exceptions import HTTPException as HTTPExceptionStarlette
 
-from . import autenticacion, conversacion, ingesta, persistencia
+from . import autenticacion, contratos, conversacion, ingesta, panel, persistencia
 from .calendario import CalendarioDoble
 from .canales import Telegram, WhatsApp
 from .config import Config, cargar_dotenv
@@ -57,6 +59,87 @@ cargar_dotenv()
 config = Config.desde_entorno()
 
 app = FastAPI(title="MaxiCare · Daniela", version="0.5.0", docs_url=None, redoc_url=None)
+
+
+@app.exception_handler(HTTPExceptionStarlette)
+async def _error_en_el_vocabulario_del_frontend(request: Request, exc: HTTPExceptionStarlette):
+    """`api.ts` lee `detalle`; FastAPI (y Starlette, para el 404 y el 405 que no pasan por
+    una `HTTPException` nuestra) serializan `detail`. Sin esto, ningún mensaje del servidor
+    llega a la pantalla: todo cae al texto genérico de `pedir()`."""
+    return JSONResponse(
+        {"detalle": exc.detail}, status_code=exc.status_code, headers=exc.headers
+    )
+
+
+#: Los campos de los cuerpos del panel, con el nombre que usa quien llena el formulario.
+#: Sin esta tabla el mensaje diría «clave» o «nota_pendiente», que son nombres de columna.
+_NOMBRE_DEL_CAMPO = {
+    "clave": "la clave del tratamiento",
+    "etiqueta": "el nombre visible del tratamiento",
+    "tratamiento": "el tratamiento de la ficha",
+    "concepto": "el concepto de la ficha",
+    "contenido": "el contenido de la ficha",
+    "nota_pendiente": "la nota de qué falta por definir",
+    "usuario": "el usuario",
+    "contrasena": "la contraseña",
+    "mensaje": "el mensaje",
+}
+
+
+def _en_castellano(error: dict) -> str:
+    """Un error de Pydantic dicho como se lo diría una persona a otra."""
+    campo = next(
+        (p for p in reversed(error.get("loc", ())) if isinstance(p, str) and p != "body"), ""
+    )
+    nombre = _NOMBRE_DEL_CAMPO.get(campo) or (f"«{campo}»" if campo else "uno de los datos")
+    ctx = error.get("ctx") or {}
+    tipo = error.get("type", "")
+    # `str.capitalize()` no sirve: pasa a minúsculas TODO lo demás, y el nombre de un campo
+    # desconocido llega entre comillas angulares.
+    en_mayuscula = nombre[:1].upper() + nombre[1:]
+
+    if tipo == "missing":
+        frase = f"Falta {nombre}."
+    elif tipo == "string_too_short" and ctx.get("min_length") == 1:
+        frase = f"{en_mayuscula} no puede ir vacío."
+    elif tipo == "string_too_short":
+        frase = f"{en_mayuscula} necesita al menos {ctx['min_length']} caracteres."
+    elif tipo == "string_too_long":
+        frase = f"{en_mayuscula} no puede pasar de {ctx['max_length']} caracteres."
+    else:
+        frase = f"{en_mayuscula} no tiene un valor válido."
+
+    # La clave es el único campo con una forma que hay que explicar, y ya está explicada en
+    # `panel.AYUDA_CLAVE`: la misma frase que da el 400 de `validar_clave` cuando el largo
+    # sí pasa y lo que falla son las mayúsculas o los espacios. Repetirla aquí a mano haría
+    # que el mismo error de la misma persona se explicara de dos maneras según cuál de los
+    # dos validadores lo atrapara primero.
+    if campo == "clave":
+        frase = f"{frase} {panel.AYUDA_CLAVE}"
+    return frase
+
+
+@app.exception_handler(RequestValidationError)
+async def _validacion_en_el_vocabulario_del_frontend(
+    request: Request, exc: RequestValidationError
+):
+    """Lo que rechaza Pydantic ANTES de llegar al endpoint, dicho para una persona.
+
+    `RequestValidationError` no es una `HTTPException`, así que el manejador de arriba no la
+    cubre: la mitad de los 422 del servidor seguían saliendo con `detail` y con el volcado
+    crudo de Pydantic dentro. `pedir()` lee `detalle` y no lo encontraba, de modo que teclear
+    una clave de dos letras --que la pantalla deja pulsar, porque solo exige que no esté
+    vacía-- daba «No se pudo completar la operación (422)» en vez del mensaje que alguien
+    redactó para ese caso exacto. Lo mismo con un contenido de más de 4000 caracteres.
+
+    Se responden dos frases como mucho, no la lista entera: los cuerpos del panel tienen
+    cinco campos y quien los llena arregla de uno en uno.
+    """
+    errores = exc.errors()
+    frases = [_en_castellano(e) for e in errores[:2]]
+    return JSONResponse({"detalle": " ".join(frases) or "El servidor no entendió la petición."},
+                        status_code=422)
+
 
 _whatsapp = WhatsApp(config.whatsapp_token, config.whatsapp_phone_number_id)
 _telegram = Telegram(config.telegram_bot_token, config.telegram_chat_doctores)
@@ -515,6 +598,139 @@ async def reiniciar_prueba(entrada: ReinicioDePrueba, quien: dict = Depends(usua
     if entrada.conversacion:
         _conversaciones_de_prueba.pop(entrada.conversacion, None)
     return {"ok": True}
+
+
+# ------------------------------------------------------------------------------------------
+# Panel: tratamientos y base de conocimiento
+# ------------------------------------------------------------------------------------------
+
+
+def exigir_rol(*roles: str):
+    """Dependencia que restringe una ruta a ciertos roles. Devuelve 403, no 404.
+
+    El botón se esconde en el frontend por comodidad, pero el control vive aquí: un botón
+    que desaparece no es un control de acceso.
+    """
+    def comprobar(quien: dict = Depends(usuario_actual)) -> dict:
+        if quien["rol"] not in roles:
+            raise HTTPException(
+                status_code=403,
+                detail=f"Hace falta permiso de {' o '.join(roles)} para esto.",
+            )
+        return quien
+    return comprobar
+
+
+def _refrescar_vocabulario(conn) -> None:
+    """Deja el vocabulario del proceso igual a la tabla. Se llama al arrancar y después de
+    cada cambio, para que no haga falta reiniciar nada."""
+    contratos.fijar_vocabulario(panel.vocabulario_activo(conn))
+
+
+@app.get("/api/tratamientos")
+async def api_tratamientos(quien: dict = Depends(usuario_actual)) -> dict:
+    with persistencia.conectar(config.database_url) as conn:
+        return {"tratamientos": panel.listar_tratamientos(conn)}
+
+
+class TratamientoNuevo(BaseModel):
+    clave: str = Field(min_length=3, max_length=24)
+    etiqueta: str = Field(min_length=1, max_length=120)
+
+
+@app.post("/api/tratamientos")
+async def api_crear_tratamiento(
+    cuerpo: TratamientoNuevo, quien: dict = Depends(exigir_rol("admin"))
+) -> dict:
+    try:
+        with persistencia.conectar(config.database_url) as conn:
+            creado = panel.crear_tratamiento(
+                conn, clave=cuerpo.clave, etiqueta=cuerpo.etiqueta, usuario=quien["usuario"]
+            )
+            _refrescar_vocabulario(conn)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    log.info("%s creó el tratamiento %s", quien["usuario"], creado["clave"])
+    return creado
+
+
+class TratamientoCambio(BaseModel):
+    etiqueta: str | None = Field(default=None, max_length=120)
+    activo: bool | None = None
+
+
+@app.patch("/api/tratamientos/{clave}")
+async def api_cambiar_tratamiento(
+    clave: str, cuerpo: TratamientoCambio, quien: dict = Depends(exigir_rol("admin"))
+) -> dict:
+    try:
+        with persistencia.conectar(config.database_url) as conn:
+            cambiado = panel.cambiar_tratamiento(
+                conn, clave, etiqueta=cuerpo.etiqueta, activo=cuerpo.activo,
+                usuario=quien["usuario"],
+            )
+            _refrescar_vocabulario(conn)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    return cambiado
+
+
+@app.get("/api/conocimiento")
+async def api_conocimiento(quien: dict = Depends(usuario_actual)) -> dict:
+    with persistencia.conectar(config.database_url) as conn:
+        return {"fichas": panel.listar_conocimiento(conn)}
+
+
+class Ficha(BaseModel):
+    tratamiento: str = Field(min_length=1, max_length=60)
+    concepto: str = Field(min_length=1, max_length=60)
+    contenido: str = Field(min_length=1, max_length=4000)
+    aprobado: bool = True
+    nota_pendiente: str | None = Field(default=None, max_length=400)
+
+
+@app.put("/api/conocimiento")
+@app.post("/api/conocimiento")
+async def api_guardar_ficha(
+    ficha: Ficha, quien: dict = Depends(exigir_rol("admin", "doctor"))
+) -> dict:
+    try:
+        with persistencia.conectar(config.database_url) as conn:
+            guardada = panel.guardar_ficha(
+                conn, tratamiento=ficha.tratamiento, concepto=ficha.concepto,
+                contenido=ficha.contenido, aprobado=ficha.aprobado,
+                nota_pendiente=ficha.nota_pendiente, usuario=quien["usuario"],
+            )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    log.info("%s editó %s/%s", quien["usuario"], ficha.tratamiento, ficha.concepto)
+    return guardada
+
+
+@app.get("/api/historial")
+async def api_historial(quien: dict = Depends(usuario_actual)) -> dict:
+    with persistencia.conectar(config.database_url) as conn:
+        return {"cambios": panel.historial(conn)}
+
+
+@app.on_event("startup")
+def _cargar_vocabulario_de_tratamientos() -> None:
+    """Reemplaza los catorce del `Literal` por los tratamientos activos de la tabla, para que
+    Daniela (y esta pantalla) hablen del mismo vocabulario sin reiniciar nada.
+
+    Envuelto en `try/except` a propósito: si Neon no responde al encender, el proceso se
+    queda con los catorce del `Literal` y **el webhook de WhatsApp sigue vivo**. Una
+    excepción sin capturar aquí tumbaría producción por una tabla que solo usa el panel.
+    """
+    try:
+        with persistencia.conectar(config.database_url) as conn:
+            _refrescar_vocabulario(conn)
+        log.info("vocabulario de tratamientos cargado desde la base")
+    except Exception:  # noqa: BLE001
+        log.warning(
+            "no se pudo leer la tabla de tratamientos al arrancar; se usan los catorce del "
+            "Literal. El webhook sigue funcionando.", exc_info=True
+        )
 
 
 # ------------------------------------------------------------------------------------------

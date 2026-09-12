@@ -24,7 +24,20 @@ llegue a la cita correcta.
 - El webhook en producción: `uv run python scripts/probar_webhook.py https://daniela.maxicarecol.com`
 - El cascarón web (entregable fase 5): `uv run python scripts/probar_web.py`
   Con `--chat` habla de verdad con Daniela y **gasta tokens**.
+- El panel de tratamientos (entregable fase 8, primera mitad):
+  `uv run python scripts/probar_panel.py`
+  Dos mitades: la MITAD A cambia un precio por HTTP contra `public` —la base real de la
+  clínica— y sin gastar un token, y **restaura ese precio en un `finally`, comprobando la
+  restauración con una aserción** (nunca se la da por hecha). Con `--chat`, la MITAD B
+  además escribe un precio y crea un tratamiento en `pruebas_web` y comprueba que Daniela lo
+  cotiza de verdad; **gasta tokens**.
 - Usuarios del panel: `uv run python scripts/crear_usuario.py` (`--listar`, `--quitar-acceso`)
+- `CalendarioGoogle` contra el calendario real (no gasta tokens):
+  `uv run python scripts/probar_calendario.py`
+  Crea un evento en **2029 a las 3 a.m.**, lo mueve, comprueba que **no vuelve como
+  bloqueo**, y lo borra en un `finally` **verificando** que desapareció. Con
+  `--diagnosticar` solo lee: comprueba el acceso y lista los bloqueos de los próximos
+  14 días. Es lo primero que hay que correr cuando Calendar «no funciona».
 
 # Interfaz web
 
@@ -44,6 +57,58 @@ uv run uvicorn maxicare_daniela.runtime:app --port 8080
   Es deliberado: WhatsApp está en producción y no puede caerse por una variable del panel.
 - La ruta comodín que sirve `index.html` va **al final** de `runtime.py`. Antes se tragaría
   `/api`, `/salud` y el webhook.
+- **El `Literal` de tratamientos está partido en dos.** `LecturaArchivo` conserva los 14
+  escritos a mano —es el muro, y tiene su prueba `test_tratamiento_no_admite_una_frase_clinica`—;
+  el vocabulario de negocio vive en la tabla `tratamientos` y lo carga `runtime.py` al
+  arrancar. Crear un tratamiento desde la pantalla **no** lo mete en el muro: una
+  radiografía suya se clasifica `no_identificado`. Verificado por `probar_panel.py`.
+- **LA TRAMPA QUE MÁS VA A COSTAR: el panel escribe en `public`, el chat de pruebas lee de
+  `pruebas_web`.** Son dos bases distintas. Editar un precio en la pantalla y preguntarle a
+  Daniela en la pestaña Pruebas **no** sirve para comprobar el cambio: ella cita el valor de
+  la semilla y parece un fallo. Ya hizo que el entregable de esta fase se escribiera mal la
+  primera vez. Para comprobar el camino completo: `probar_panel.py --chat`, que prueba cada
+  mitad por su lado.
+- **Dos personas editando la misma ficha: la segunda pisa a la primera.** No hay bloqueo
+  optimista, es deliberado. Lo que lo hace aceptable no es que sea improbable, sino que
+  `cambios_configuracion` guarda el valor anterior: una edición pisada es recuperable, no
+  perdida. Eso vale para el contenido **y para `aprobado`**, que se registra en su propia
+  fila. Si algún día se añade un campo editable a la ficha, tiene que anotarse también, o
+  esta frase vuelve a ser mentira para ese campo y el límite deja de ser aceptable.
+- **En `web/src/pantallas/Tratamientos.tsx`, el `useCallback` de `recargar` tiene
+  dependencias vacías a propósito, y `alCaducarSesion` se consume por una `ref`.** Meter esa
+  prop en las dependencias —lo que pediría cualquier regla de hooks— deja la pantalla
+  releyendo Neon en bucle, porque `App.tsx` la pasa como una flecha nueva en cada render. No
+  hay `eslint-plugin-react-hooks` ni arnés de pruebas de frontend que lo atrape: se vería
+  como una pantalla lenta y una factura rara.
+
+# Google Calendar
+
+- **Una cita de Daniela NO es un bloqueo del doctor.** Es la trampa central de
+  `CalendarioGoogle` y con `CalendarioDoble` era invisible: el doble guarda eventos y
+  bloqueos en listas separadas, Google los devuelve juntos. Sin filtrarlos, la primera cita
+  de una hora taparía el bloque y la clínica atendería **uno** por hora en vez de dos. Cada
+  evento que crea Daniela lleva `extendedProperties.private.origen = "daniela"` y
+  `bloqueos()` lo descarta. Un evento sin marca es de los doctores y sí tapa.
+- **La credencial es `MAXICARE_GOOGLE_SA_B64`, no una ruta a un archivo.** `config.py`
+  decía `MAXICARE_GOOGLE_CREDENTIALS_PATH`, que no existía en ningún `.env`; nadie lo notó
+  porque ningún módulo leía ese campo. El nombre correcto es el que documenta `.env.ejemplo`.
+- **El 404 casi nunca es el código: es el permiso.** La cuenta de servicio se autentica
+  perfectamente aunque no tenga acceso a nada. Hay que compartir el calendario con su
+  `client_email` dándole «Hacer cambios en los eventos». `CalendarioGoogle` lo comprueba
+  **al construirse**, con una lectura real, y el mensaje nombra el correo.
+- **El calendario de la clínica es una cuenta personal de Gmail, y es una decisión tomada
+  a conciencia** (MaxiCare, 12/09/2026: «sí va a ser ese correo, no pasa nada»). Lo que
+  cuesta: las citas de los pacientes conviven con la agenda personal de esa persona —ya
+  hubo un evento suyo borrado a mano durante una prueba— y el día que esa cuenta no esté,
+  el calendario se va con ella. La salida, si algún día deja de ser aceptable, es barata:
+  crear un calendario secundario, compartirlo con la misma cuenta de servicio y cambiar
+  `MAXICARE_GOOGLE_CALENDAR_ID`. Ni una línea de código cambia.
+- **`calendario_desde_config` todavía no la llama nadie.** El chat web sigue con
+  `CalendarioDoble` a propósito: probar en la pestaña Pruebas crearía eventos falsos en el
+  calendario donde los doctores miran su día —el mismo error de categoría que `public` vs
+  `pruebas_web`—. El cableado real es de la fase 6, en el camino de WhatsApp.
+- `ZONA_BOGOTA` vive en `calendario.py` y `herramientas.py` la reexporta. Una sola
+  definición: dos copias de un desfase horario son dos cosas que un día divergen.
 
 # Trampas de este entorno
 
@@ -53,7 +118,9 @@ uv run uvicorn maxicare_daniela.runtime:app --port 8080
   bajo `scripts/` empieza con `sys.stdout.reconfigure(encoding="utf-8", errors="replace")`
   y usa marcadores ASCII (`OK` / `FALLA` / `->`). El mismo script corre en el VPS.
 - `uv run` avisa de que `VIRTUAL_ENV` no coincide. Es ruido, se ignora.
-- **No es un repositorio git**, así que las búsquedas NO respetan `.gitignore`.
+- Es un repositorio git desde el commit `7e12d6b`, que congela las fases 1 a 5. Las
+  búsquedas respetan `.gitignore`: `.venv/`, `web/node_modules/`, `web/dist/` y `.env`
+  no aparecen. No hay remoto todavía.
 - **El pooler de Neon rechaza `options` como parámetro de arranque** (`unsupported startup
   parameter in options: search_path`). Para fijar un `search_path` —o para una prueba de
   concurrencia de verdad— hay que usar la conexión directa: quitarle el `-pooler.` al host.
@@ -61,6 +128,11 @@ uv run uvicorn maxicare_daniela.runtime:app --port 8080
   las claves presentes y sin valor. `cargar_dotenv` ya no exporta las vacías y `_opcional`
   cae al default: sin eso, `OPENAI_BASE_URL=` rompía toda llamada al modelo con un error
   que no menciona el `.env` por ninguna parte.
+- **La herramienta `Write` interpreta las secuencias `\uXXXX` del contenido como caracteres
+  de verdad.** A un implementador le dejó un byte NUL dentro de un `.tsx` y caracteres
+  combinantes invisibles dentro de un regex. Se esquiva escribiendo esos archivos con
+  here-strings de PowerShell, y conviene comprobar el resultado (contar bytes NUL y
+  caracteres de categoría `Cc`/`Cf`/`Mn`) cuando el contenido lleve `\u`.
 
 # Reglas duras
 

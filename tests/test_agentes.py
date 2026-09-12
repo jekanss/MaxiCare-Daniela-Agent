@@ -15,16 +15,19 @@ tokens y corre bajo demanda.
 from __future__ import annotations
 
 import asyncio
+from typing import get_args
 
 import pytest
 from agents import (
     OutputGuardrailTripwireTriggered,
     RunConfig,
+    RunContextWrapper,
     Runner,
     ToolInputGuardrailTripwireTriggered,
 )
 
 from maxicare_daniela import agentes
+from maxicare_daniela import contratos
 from maxicare_daniela import guardrails as g
 from maxicare_daniela.calendario import CalendarioDoble
 from maxicare_daniela.contratos import ContextoDaniela, LecturaArchivo, RespuestaDaniela
@@ -110,6 +113,31 @@ def test_las_instrucciones_no_perdieron_las_prohibiciones_del_plan():
     assert "Nunca pides cédula ni documentos de identidad" in texto
     assert "NUNCA le dices a un paciente qué tiene" in texto
     assert "no venga de una tool en este mismo turno" in texto
+
+
+def test_las_instrucciones_traen_el_vocabulario_vivo():
+    contratos.fijar_vocabulario(["carillas", "implantes"])
+    try:
+        texto = asyncio.run(
+            agentes.daniela.get_system_prompt(RunContextWrapper(context=None))
+        )
+        assert "carillas" in texto
+    finally:
+        contratos.fijar_vocabulario(get_args(contratos.Tratamiento))
+
+
+def test_el_vocabulario_va_al_final_para_no_romper_el_cache():
+    """`prompt_cache_retention="24h"` baja la entrada de $2.00 a $0.20 por millón y funciona
+    por prefijo idéntico. Una lista que cambia al principio lo invalidaría en cada corrida."""
+    texto = asyncio.run(agentes.daniela.get_system_prompt(RunContextWrapper(context=None)))
+    assert texto.startswith(agentes.INSTRUCCIONES_DANIELA[:200])
+    # No ".index('implantes')": esa palabra puede aparecer dentro de INSTRUCCIONES_DANIELA
+    # el día que alguien la mencione en el cuerpo del prompt, y entonces esta prueba fallaría
+    # por una razón que no tiene nada que ver con lo que dice probar. Se comprueba la
+    # posición del encabezado del bloque añadido, que solo aparece una vez.
+    assert texto.index("TRATAMIENTOS QUE MAXICARE OFRECE HOY") >= len(
+        agentes.INSTRUCCIONES_DANIELA
+    ) - 5
 
 
 def test_los_tres_modelos_son_de_familias_distintas_a_proposito():

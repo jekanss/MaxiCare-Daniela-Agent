@@ -49,6 +49,10 @@ MODULOS_SIN_TRANSPORTE = (
     # en una cookie. Esa ignorancia es lo que permite probar que un token vencido se rechaza
     # sin levantar un servidor ni esperar ocho horas.
     "autenticacion.py",
+    # `panel.py` (fase 8) recibe una conexión y devuelve diccionarios. No sabe que alguien
+    # los va a serializar como JSON detrás de una cookie, y por eso sus pruebas pueden
+    # comprobar que la bitácora es atómica sin levantar un servidor.
+    "panel.py",
 )
 
 #: Solo `runtime.py` importa el framework web. Si FastAPI aparece en cualquier otro módulo,

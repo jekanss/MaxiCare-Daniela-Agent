@@ -32,7 +32,7 @@ export const SECCIONES: Seccion[] = [
   { id: 'bandeja', etiqueta: 'Bandeja', icono: '💬', fase: 6 },
   { id: 'agenda', etiqueta: 'Agenda', icono: '📅', fase: null },
   { id: 'leads', etiqueta: 'Leads', icono: '👥', fase: 8 },
-  { id: 'tratamientos', etiqueta: 'Tratamientos', icono: '🦷', fase: 8 },
+  { id: 'tratamientos', etiqueta: 'Tratamientos', icono: '🦷', fase: null },
   { id: 'metricas', etiqueta: 'Métricas', icono: '📊', fase: 9 },
   { id: 'estado', etiqueta: 'Estado del sistema', icono: '🔌', fase: 7 },
 ]

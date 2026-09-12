@@ -100,9 +100,17 @@ def main() -> int:
             cur.execute(
                 """
                 SELECT COUNT(*) FROM pg_constraint
-                WHERE conname = 'uq_reservas_cupo' AND contype = 'u'
+                WHERE conname = 'uq_reservas_cupo'
+                  AND contype = 'u'
+                  AND connamespace = 'public'::regnamespace
                 """
             )
+            # Filtrado por esquema, y no `COUNT(*) == 1` a secas: los esquemas `pruebas` y
+            # `pruebas_web` tienen su propia copia de la restricción, así que sin el filtro
+            # esto contaba 3 y declaraba FALLA con la base perfectamente sana. Un
+            # verificador que grita en rojo cuando todo está bien es uno al que nadie le va
+            # a creer el día que tenga razón -- y este vigila el invariante que impide que
+            # dos pacientes ocupen el mismo cupo.
             tiene_unique = cur.fetchone()[0] == 1
         print(f"\n  UNIQUE (inicio, cupo_num) en reservas → {'OK' if tiene_unique else 'FALLA'}")
         if not tiene_unique:

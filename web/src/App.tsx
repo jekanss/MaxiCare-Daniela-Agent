@@ -3,6 +3,7 @@ import Sidebar, { CONFIGURACION, PRUEBAS, SECCIONES, type Seccion, type SeccionI
 import Ingreso from '@/pantallas/Ingreso'
 import Agenda from '@/pantallas/Agenda'
 import Pruebas from '@/pantallas/Pruebas'
+import Tratamientos from '@/pantallas/Tratamientos'
 import PantallaPendiente from '@/pantallas/Pendiente'
 import { salir, sesionActual, type Sesion } from '@/api'
 
@@ -66,6 +67,14 @@ export default function App() {
         <Agenda />
       ) : activa === 'pruebas' ? (
         <Pruebas />
+      ) : activa === 'tratamientos' ? (
+        // La única pantalla que necesita la sesión: el formulario de crear tratamiento solo
+        // lo ve `admin`, y el de editar fichas también deja fuera a recepción.
+        //
+        // Y la única que escribe, así que es la única que puede toparse con un 401 a mitad
+        // de la tarde. Devolverla al ingreso se hace desde aquí y no allí: `sesion` vive en
+        // este estado, y con `null` la rama de arriba ya renderiza `<Ingreso />` sola.
+        <Tratamientos sesion={sesion} alCaducarSesion={() => setSesion(null)} />
       ) : (
         <PantallaPendiente seccion={seccion} />
       )}

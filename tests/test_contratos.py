@@ -10,11 +10,13 @@ del plan quedó expresada como una restricción de tipo y no como una intención
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, timezone
+from typing import get_args
 
 import pytest
 from pydantic import ValidationError
 
+from maxicare_daniela import contratos
 from maxicare_daniela.contratos import (
     LecturaArchivo,
     RespuestaDaniela,
@@ -250,3 +252,47 @@ def test_solicitud_escalamiento_completa():
         clave_idempotencia="conv-441-turno-3",
     )
     assert e.motivo == "archivo_recibido"
+
+
+# ==========================================================================================
+# El vocabulario vivo — separado del muro
+# ==========================================================================================
+
+
+def test_el_muro_no_se_abre_con_el_vocabulario():
+    """LA PRUEBA QUE SOSTIENE TODA LA DECISIÓN.
+
+    Meter un tratamiento nuevo en el vocabulario de negocio lo hace cotizable y agendable.
+    NO lo hace válido en `LecturaArchivo`, que es contenido clínico que cruza hacia el
+    paciente. Si esta prueba empieza a fallar, la pantalla de tratamientos abrió el muro.
+    """
+    contratos.fijar_vocabulario(["carillas", "implantes"])
+    try:
+        # Sí se puede agendar.
+        SolicitudCita(
+            nombre_completo="Maria Rodriguez",
+            inicio=datetime(2026, 10, 1, 9, 0, tzinfo=timezone.utc),
+            tratamiento="carillas",
+            clave_idempotencia="573001112233-2026-10-01T09:00",
+        )
+        # No se puede clasificar un documento clínico con él.
+        with pytest.raises(ValidationError):
+            LecturaArchivo(**(REMISION_DE_MARIA | {"tratamiento": "carillas"}))
+    finally:
+        contratos.fijar_vocabulario(get_args(contratos.Tratamiento))
+
+
+def test_el_vocabulario_arranca_con_los_catorce_del_literal():
+    """Sin base de datos, sin `runtime`, sin nada: importar el módulo basta. Es lo que hace
+    que las pruebas offline y los scripts sigan funcionando igual."""
+    assert contratos.vocabulario() == frozenset(get_args(contratos.Tratamiento))
+
+
+def test_una_cita_con_un_tratamiento_fuera_del_vocabulario_se_rechaza():
+    with pytest.raises(ValidationError):
+        SolicitudCita(
+            nombre_completo="Maria Rodriguez",
+            inicio=datetime(2026, 10, 1, 9, 0, tzinfo=timezone.utc),
+            tratamiento="lo_que_sea",
+            clave_idempotencia="573001112233-2026-10-01T09:00",
+        )

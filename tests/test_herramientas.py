@@ -17,9 +17,11 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timedelta
+from typing import get_args
 
 import pytest
 
+from maxicare_daniela import contratos
 from maxicare_daniela import herramientas as h
 from maxicare_daniela import persistencia
 from maxicare_daniela.calendario import Bloqueo, CalendarioDoble, bloques_del_dia
@@ -295,6 +297,56 @@ def test_no_se_programa_un_seguimiento_hacia_atras():
 
 
 # ==========================================================================================
+# registrar_estado_oportunidad -- valida contra el vocabulario vivo, no contra el Literal
+# ==========================================================================================
+
+
+def test_registrar_estado_rechaza_lo_que_no_esta_en_el_vocabulario():
+    """La validación va ANTES de tocar la base: un tratamiento inválido no debe llegar a
+    escribirse, y esta prueba lo comprueba sin necesitar Neon ni un doble de `_con_base`."""
+    ctx = contexto()
+
+    with pytest.raises(ValueError, match="no es un tratamiento"):
+        asyncio.run(
+            h._registrar_estado_oportunidad(
+                ctx,
+                estado="explorando",
+                barrera="ninguna",
+                tratamiento="lo_que_sea",
+                fuera_de_alcance=False,
+                nota=None,
+            )
+        )
+
+
+def test_registrar_estado_acepta_un_tratamiento_nuevo_del_vocabulario(monkeypatch):
+    """Con el vocabulario recortado por la clínica, un tratamiento que no está en el
+    `Literal` original --pero sí en la lista viva-- tiene que pasar igual."""
+    ctx = contexto()
+
+    async def base_falsa(_ctx, trabajo):
+        return None
+
+    monkeypatch.setattr(h, "_con_base", base_falsa)
+
+    contratos.fijar_vocabulario(["carillas", "implantes"])
+    try:
+        texto = asyncio.run(
+            h._registrar_estado_oportunidad(
+                ctx,
+                estado="explorando",
+                barrera="ninguna",
+                tratamiento="carillas",
+                fuera_de_alcance=False,
+                nota=None,
+            )
+        )
+        assert "guardado" in texto.lower()
+    finally:
+        contratos.fijar_vocabulario(get_args(contratos.Tratamiento))
+
+
+# ==========================================================================================
 # escalar_a_doctores
 # ==========================================================================================
 
@@ -402,8 +454,18 @@ def test_borrar_un_evento_que_ya_no_existe_no_es_un_error():
 
 
 def test_el_calendario_de_google_se_niega_a_existir_sin_credenciales():
-    """Falla al construirse, no tres pasos después con el cupo del paciente ya tomado."""
-    from maxicare_daniela.calendario import CalendarioGoogle
+    """Falla al construirse, no tres pasos después con el cupo del paciente ya tomado.
 
-    with pytest.raises(NotImplementedError, match="PENDIENTE"):
-        CalendarioGoogle()
+    Cuando `CalendarioGoogle` estaba PENDIENTE, esta prueba esperaba `NotImplementedError`.
+    La implementación cambió la excepción --ahora es `ErrorDeCalendario`, la misma que
+    atrapan las tools-- pero no la propiedad, que es lo que la prueba vigila: sin
+    credenciales el objeto no llega a existir. Si algún día alguien hace que el constructor
+    tolere una credencial vacía y falle al primer uso, esta prueba tiene que romperse.
+    """
+    from maxicare_daniela.calendario import CalendarioGoogle, ErrorDeCalendario
+
+    with pytest.raises(ErrorDeCalendario, match="MAXICARE_GOOGLE_CALENDAR_ID"):
+        CalendarioGoogle("", "")
+
+    with pytest.raises(ErrorDeCalendario, match="MAXICARE_GOOGLE_SA_B64"):
+        CalendarioGoogle("", "agenda@maxicare.example")

@@ -37,7 +37,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from datetime import date, datetime
-from typing import Any, Literal
+from typing import Any, Iterable, Literal, get_args
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -71,6 +71,46 @@ Tratamiento = Literal[
     "protesis",
     "no_identificado",
 ]
+
+# ---------------------------------------------------------------------------------------
+# El vocabulario vivo
+# ---------------------------------------------------------------------------------------
+#
+# `Tratamiento` (arriba) hace dos trabajos distintos, y solo uno es de seguridad:
+#
+#   - En `LecturaArchivo.tratamiento` es EL MURO. Contenido clínico que cruza hacia el
+#     paciente. Cerrado, escrito a mano, y no se abre desde ninguna pantalla.
+#   - En `SolicitudCita` y en `registrar_estado_oportunidad` es vocabulario de negocio: qué
+#     tratamientos ofrece la clínica hoy. Eso cambia sin que cambie nada de seguridad.
+#
+# Este conjunto es la segunda mitad. Arranca con los catorce del Literal --así las pruebas
+# offline y los scripts no necesitan base de datos-- y `runtime.py` lo reemplaza al arrancar
+# con los tratamientos activos de la tabla `tratamientos`.
+#
+# Por qué un módulo global y no una consulta: `contratos.py` NO puede importar la base de
+# datos. Rompería las pruebas offline, los scripts, y la frontera que vigila
+# `tests/test_estructura.py`.
+
+_VOCABULARIO: frozenset[str] = frozenset(get_args(Tratamiento))
+
+
+def vocabulario() -> frozenset[str]:
+    """Los tratamientos que la clínica ofrece ahora mismo."""
+    return _VOCABULARIO
+
+
+def fijar_vocabulario(claves: Iterable[str]) -> None:
+    """Reemplaza el vocabulario. Lo llama `runtime.py` al arrancar y cada vez que la pantalla
+    crea o desactiva un tratamiento.
+
+    `no_identificado` se añade siempre: no es un tratamiento que se ofrezca, es el valor que
+    usa el sistema cuando no sabe de cuál se trata, y quitarlo rompería el registro de
+    oportunidad de cualquier conversación que todavía no tenga claro qué busca el paciente.
+    """
+    global _VOCABULARIO
+    limpias = {c.strip().lower() for c in claves if c and c.strip()}
+    _VOCABULARIO = frozenset(limpias | {"no_identificado"})
+
 
 TipoDocumento = Literal[
     "remision_externa",
@@ -295,8 +335,11 @@ class SolicitudCita(BaseModel):
             "Inicio del bloque. La duración la pone la configuración operativa, no el modelo."
         ),
     )
-    tratamiento: Tratamiento = Field(
-        description="El tratamiento para el que se agenda.",
+    tratamiento: str = Field(
+        description=(
+            "El tratamiento para el que se agenda. Tiene que ser uno de los que la clínica "
+            "ofrece hoy; la lista viva va al final de las instrucciones del agente."
+        ),
     )
     clave_idempotencia: str = Field(
         min_length=8,
@@ -311,6 +354,20 @@ class SolicitudCita(BaseModel):
     @classmethod
     def _nombre_sin_documento(cls, v: str) -> str:
         return _rechazar_documento_de_identidad(v, "nombre_completo")
+
+    @field_validator("tratamiento")
+    @classmethod
+    def _tratamiento_del_vocabulario(cls, v: str) -> str:
+        # Se valida contra la lista viva, no contra el Literal: la clínica agrega
+        # tratamientos desde la interfaz web sin que nadie despliegue código. El muro sigue
+        # siendo el Literal, y vive en `LecturaArchivo`, no aquí.
+        clave = v.strip().lower()
+        if clave not in vocabulario():
+            raise ValueError(
+                f"'{v}' no es un tratamiento que MaxiCare ofrezca. "
+                f"Los actuales son: {', '.join(sorted(vocabulario()))}."
+            )
+        return clave
 
 
 class SolicitudCancelacion(BaseModel):

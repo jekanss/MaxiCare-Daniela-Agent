@@ -229,7 +229,10 @@ def test_sin_secreto_el_panel_da_503_pero_el_webhook_sigue_funcionando(monkeypat
 
     panel = cliente.get("/api/sesion")
     assert panel.status_code == 503
-    assert "MAXICARE_SECRETO_SESION" in panel.json()["detail"]
+    # `detalle`, no `detail`: la Tarea 6 añadió el manejador que traduce toda `HTTPException`
+    # a la clave que lee `api.ts`. Antes de ese manejador este 503 no llegaba legible a la
+    # pantalla -- era exactamente el bug que la Tarea 6 existe para cerrar.
+    assert "MAXICARE_SECRETO_SESION" in panel.json()["detalle"]
 
     assert cliente.get("/salud").status_code == 200
     assert cliente.get("/whatsapp", params={"hub.mode": "subscribe"}).status_code == 403
