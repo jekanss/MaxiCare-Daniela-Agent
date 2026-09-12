@@ -79,3 +79,93 @@ export async function reiniciarChat(conversacion: string | null): Promise<void> 
     body: JSON.stringify({ conversacion }),
   })
 }
+
+// ------------------------------------------------------------------------------------------
+// Tratamientos y base de conocimiento
+// ------------------------------------------------------------------------------------------
+
+export type TratamientoFila = {
+  clave: string
+  etiqueta: string
+  activo: boolean
+  /** Si la clave está en el `Literal` que clasifica radiografías. Se calcula en el servidor
+   *  a partir del código, no de una columna, así que no puede desincronizarse. */
+  en_el_muro: boolean
+  fichas: number
+  /** Los conceptos mínimos que este tratamiento todavía no tiene. */
+  faltan: string[]
+}
+
+export type FichaFila = {
+  tratamiento: string
+  concepto: string
+  contenido: string
+  aprobado: boolean
+  nota_pendiente: string | null
+  actualizado_en: string
+}
+
+export type CambioFila = {
+  tabla: string
+  clave: string
+  valor_anterior: string | null
+  valor_nuevo: string
+  usuario: string
+  cambiado_en: string
+}
+
+export async function listarTratamientos(): Promise<TratamientoFila[]> {
+  const r = await pedir<{ tratamientos: TratamientoFila[] }>('/api/tratamientos')
+  return r.tratamientos
+}
+
+/** La clave viaja tal cual se escribió. No se pasa a minúsculas aquí a propósito: el
+ *  servidor la valida y devuelve un 400 legible, y silenciar 'Carillas' convirtiéndola en
+ *  'carillas' escondería justo el descuido que esa validación existe para atrapar. */
+export async function crearTratamiento(clave: string, etiqueta: string): Promise<TratamientoFila> {
+  return pedir<TratamientoFila>('/api/tratamientos', {
+    method: 'POST',
+    body: JSON.stringify({ clave, etiqueta }),
+  })
+}
+
+export async function cambiarTratamiento(
+  clave: string,
+  cambio: { etiqueta?: string; activo?: boolean },
+): Promise<TratamientoFila> {
+  return pedir<TratamientoFila>(`/api/tratamientos/${encodeURIComponent(clave)}`, {
+    method: 'PATCH',
+    body: JSON.stringify(cambio),
+  })
+}
+
+export async function listarFichas(): Promise<FichaFila[]> {
+  const r = await pedir<{ fichas: FichaFila[] }>('/api/conocimiento')
+  return r.fichas
+}
+
+/** El PUT devuelve la ficha SIN `actualizado_en` -- `panel.guardar_ficha` no lo incluye en
+ *  su diccionario de vuelta--. Se declara así en vez de prometer una `FichaFila` completa:
+ *  un tipo que afirma un campo que el servidor no manda es una mentira que el compilador
+ *  no puede atrapar. La pantalla recarga la lista después de guardar, que además es lo
+ *  único que actualiza el `faltan` del tratamiento. */
+export async function guardarFicha(f: {
+  tratamiento: string
+  concepto: string
+  contenido: string
+  aprobado: boolean
+  nota_pendiente: string | null
+}): Promise<Omit<FichaFila, 'actualizado_en'>> {
+  return pedir<Omit<FichaFila, 'actualizado_en'>>('/api/conocimiento', {
+    method: 'PUT',
+    body: JSON.stringify(f),
+  })
+}
+
+/** La bitácora. `panel.py` la escribe en la misma transacción que cada cambio desde el
+ *  primer día; sin esta función nadie podía leerla, y una bitácora que solo se escribe no
+ *  sirve para reconstruir quién cambió un precio. */
+export async function listarHistorial(): Promise<CambioFila[]> {
+  const r = await pedir<{ cambios: CambioFila[] }>('/api/historial')
+  return r.cambios
+}

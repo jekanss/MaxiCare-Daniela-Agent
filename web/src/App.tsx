@@ -3,6 +3,7 @@ import Sidebar, { CONFIGURACION, PRUEBAS, SECCIONES, type Seccion, type SeccionI
 import Ingreso from '@/pantallas/Ingreso'
 import Agenda from '@/pantallas/Agenda'
 import Pruebas from '@/pantallas/Pruebas'
+import Tratamientos from '@/pantallas/Tratamientos'
 import PantallaPendiente from '@/pantallas/Pendiente'
 import { salir, sesionActual, type Sesion } from '@/api'
 
@@ -66,6 +67,10 @@ export default function App() {
         <Agenda />
       ) : activa === 'pruebas' ? (
         <Pruebas />
+      ) : activa === 'tratamientos' ? (
+        // La única pantalla que necesita la sesión: el formulario de crear tratamiento solo
+        // lo ve `admin`, y el de editar fichas también deja fuera a recepción.
+        <Tratamientos sesion={sesion} />
       ) : (
         <PantallaPendiente seccion={seccion} />
       )}
