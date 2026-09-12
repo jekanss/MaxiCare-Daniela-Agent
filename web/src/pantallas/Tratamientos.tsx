@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useId, useMemo, useState } from 'react'
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import {
   cambiarTratamiento,
   crearTratamiento,
@@ -1013,6 +1013,17 @@ export default function Tratamientos({
   const porQueNoFichas = 'Hace falta permiso de admin o doctor para editar fichas.'
   const porQueNoTratamientos = 'Hace falta permiso de admin para crear o cambiar tratamientos.'
 
+  /* `alCaducarSesion` llega por una `ref` a las dos funciones memoizadas de abajo, y directo
+     a las tres escrituras, que se recrean en cada render y no lo necesitan.
+     La razón no es estilo: `App.tsx` lo pasa como una flecha nueva en cada render, así que
+     meterlo en las dependencias de `recargar` cambiaría su identidad en cada render, y el
+     efecto que depende de ella volvería a leer la base sin parar. La `ref` deja `recargar`
+     estable y aun así llama siempre a la última versión del callback. */
+  const caducar = useRef(alCaducarSesion)
+  useEffect(() => {
+    caducar.current = alCaducarSesion
+  })
+
   const recargar = useCallback(async () => {
     try {
       const [t, f] = await Promise.all([listarTratamientos(), listarFichas()])
@@ -1020,6 +1031,14 @@ export default function Tratamientos({
       setFichas(f)
       setError(null)
     } catch (err) {
+      /* El momento más común para descubrir que una sesión caducó es este --volver a la
+         pestaña después de comer y que la pantalla cargue--, no pulsar «Guardar». Dejarlo
+         solo en la franja roja era el caso principal, no una incoherencia cosmética con las
+         escrituras. */
+      if (err instanceof SesionCaducada) {
+        caducar.current()
+        return
+      }
       setError(mensajeDe(err))
     } finally {
       setCargando(false)
@@ -1040,6 +1059,17 @@ export default function Tratamientos({
         setFalloBitacora(null)
       })
       .catch((err) => {
+        /* El 401 sale al ingreso como en todas partes, y esto NO deshace lo que arregló B-3.
+           La comprobación es `instanceof SesionCaducada`, que es exactamente el 401 y nada
+           más: una caída de red, un 500 o un error del pooler siguen cayendo abajo, que es
+           la clase de fallo por la que la bitácora tiene que distinguir «no hay cambios» de
+           «no se pudo leer». Lo que se evita es lo contrario: decir «no se pudo leer la
+           bitácora» cuando lo cierto y más útil es «ya no tienes sesión», y dejar a alguien
+           en una pantalla cuyo botón de guardar ya no sirve. */
+        if (err instanceof SesionCaducada) {
+          caducar.current()
+          return
+        }
         // Se olvida lo que hubiera: enseñar una lista vieja junto a un fallo diría que eso
         // es todo lo que ha pasado, y puede no serlo.
         setCambios(null)
