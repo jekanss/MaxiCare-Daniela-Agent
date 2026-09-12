@@ -48,8 +48,19 @@ def test_el_hash_no_contiene_la_contrasena():
     lista de contraseñas de la clínica."""
     guardado = hash_contrasena(CLAVE)
     assert CLAVE not in guardado
+
+    # Solo las palabras de cuatro letras o más. Una de dos --«si», «de»-- aparece por azar
+    # dentro de la sal aleatoria en base64 cerca del 1,6% de las veces, así que comprobarlas
+    # hacía fallar la suite entera una de cada sesenta corridas, siempre aquí y siempre sin
+    # motivo. Una prueba que falla sola es peor que no tenerla: enseña a reintentar en vez de
+    # investigar, y el día que esta tenga razón nadie va a creerle.
+    #
+    # No se pierde nada de lo que la prueba existe para detectar: un hash que filtrara la
+    # contraseña filtraría las palabras largas, que son las que la identifican. Con 4
+    # caracteres la probabilidad de coincidencia por azar baja de 1,6% a menos de 1 en 10.000.
     for palabra in CLAVE.split():
-        assert palabra not in guardado
+        if len(palabra) >= 4:
+            assert palabra not in guardado
 
 
 def test_dos_hashes_de_la_misma_contrasena_son_distintos():
