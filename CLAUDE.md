@@ -26,7 +26,11 @@ llegue a la cita correcta.
   Con `--chat` habla de verdad con Daniela y **gasta tokens**.
 - El panel de tratamientos (entregable fase 8, primera mitad):
   `uv run python scripts/probar_panel.py`
-  Con `--chat` comprueba que Daniela cotiza el precio nuevo y **gasta tokens**.
+  Dos mitades: la MITAD A cambia un precio por HTTP contra `public` —la base real de la
+  clínica— y sin gastar un token, y **restaura ese precio en un `finally`, comprobando la
+  restauración con una aserción** (nunca se la da por hecha). Con `--chat`, la MITAD B
+  además escribe un precio y crea un tratamiento en `pruebas_web` y comprueba que Daniela lo
+  cotiza de verdad; **gasta tokens**.
 - Usuarios del panel: `uv run python scripts/crear_usuario.py` (`--listar`, `--quitar-acceso`)
 
 # Interfaz web

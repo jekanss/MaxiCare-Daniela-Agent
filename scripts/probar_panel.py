@@ -126,30 +126,41 @@ def main() -> int:
     precio_anterior = filas_antes[0] if filas_antes else None
     revisar("hay una ficha de implantes/precio que respaldar", precio_anterior is not None)
 
-    print("\n1. Dos usuarios temporales: uno admin, uno recepcion")
-    with persistencia.conectar(url_public) as conn:
-        persistencia.crear_usuario(
-            conn, usuario=ADMIN, nombre="Verificacion Panel Admin",
-            hash_contrasena=autenticacion.hash_contrasena(CLAVE), rol="admin",
-        )
-        persistencia.crear_usuario(
-            conn, usuario=RECEPCION, nombre="Verificacion Panel Recepcion",
-            hash_contrasena=autenticacion.hash_contrasena(CLAVE), rol="recepcion",
-        )
-        fila_admin = persistencia.buscar_usuario(conn, ADMIN)
-        fila_recepcion = persistencia.buscar_usuario(conn, RECEPCION)
-    revisar(
-        "el admin temporal quedo activo con rol admin",
-        bool(fila_admin and fila_admin["activo"] and fila_admin["rol"] == "admin"),
-    )
-    revisar(
-        "el recepcion temporal quedo activo con rol recepcion",
-        bool(fila_recepcion and fila_recepcion["activo"] and fila_recepcion["rol"] == "recepcion"),
-    )
-
     precio_pruebas_anterior = None
 
     try:
+        # Los dos usuarios se crean DENTRO del try -- no antes -- porque
+        # `persistencia.crear_usuario` hace su propio `commit()` (persistencia.py:683). Si el
+        # ADMIN quedara confirmado y la creacion del RECEPCION lanzara, un `finally` que
+        # arrancara despues de este bloque nunca se ejecutaria, y el ADMIN quedaria huerfano
+        # en `public.usuarios` para siempre. Con los dos aqui dentro, cualquier fallo en
+        # cualquiera de las dos altas cae en el mismo `finally` que los borra a los dos.
+        print("\n1. Dos usuarios temporales: uno admin, uno recepcion")
+        with persistencia.conectar(url_public) as conn:
+            # `ON CONFLICT (usuario) DO UPDATE` (persistencia.crear_usuario) ya resuelve la
+            # idempotencia frente a una corrida anterior interrumpida: si quedo un `zzz.*`
+            # huerfano, esta llamada lo reutiliza -- le resetea la clave y el rol -- en vez de
+            # chocar. Verificado corriendo el script dos veces seguidas sin borrar nada entre
+            # medio; no hizo falta un DELETE previo.
+            persistencia.crear_usuario(
+                conn, usuario=ADMIN, nombre="Verificacion Panel Admin",
+                hash_contrasena=autenticacion.hash_contrasena(CLAVE), rol="admin",
+            )
+            persistencia.crear_usuario(
+                conn, usuario=RECEPCION, nombre="Verificacion Panel Recepcion",
+                hash_contrasena=autenticacion.hash_contrasena(CLAVE), rol="recepcion",
+            )
+            fila_admin = persistencia.buscar_usuario(conn, ADMIN)
+            fila_recepcion = persistencia.buscar_usuario(conn, RECEPCION)
+        revisar(
+            "el admin temporal quedo activo con rol admin",
+            bool(fila_admin and fila_admin["activo"] and fila_admin["rol"] == "admin"),
+        )
+        revisar(
+            "el recepcion temporal quedo activo con rol recepcion",
+            bool(fila_recepcion and fila_recepcion["activo"] and fila_recepcion["rol"] == "recepcion"),
+        )
+
         cliente_admin = TestClient(runtime.app)
         cliente_recepcion = TestClient(runtime.app)
 
@@ -283,17 +294,34 @@ def main() -> int:
             print("\nMITAD B -- omitida. Anade --chat para probarla (gasta tokens de verdad).")
 
         print("\n12. Crear un tratamiento NO abrio el muro: LecturaArchivo sigue rechazando 'carillas'")
-        muro_sigue_cerrado = False
+        # Sin `--chat` nadie llamo nunca a `contratos.fijar_vocabulario` con 'carillas' dentro
+        # (eso solo pasa en el paso 10, adentro del `if args.chat`). Si se comprobara el muro
+        # tal cual, `carillas` seria rechazada porque NO EXISTE en el vocabulario de negocio,
+        # no porque el muro haya resistido -- la corrida sin --chat reportaria OK en el punto
+        # mas importante del script sin haberlo probado de verdad. Por eso se fuerza aqui,
+        # a mano y sin tocar ninguna base (`fijar_vocabulario` es un global de modulo): la
+        # prueba tiene que decir que un tratamiento SI presente en el vocabulario de negocio
+        # sigue sin poder entrar por el Literal cerrado de `LecturaArchivo`.
+        vocabulario_antes_del_muro = contratos.vocabulario()
         try:
-            contratos.LecturaArchivo(
-                tipo_documento="otro",
-                tratamiento="carillas",
-                confianza="alta",
-                contexto_clinico="prueba de probar_panel.py -- no es un documento real",
+            contratos.fijar_vocabulario(list(vocabulario_antes_del_muro) + ["carillas"])
+            muro_sigue_cerrado = False
+            try:
+                contratos.LecturaArchivo(
+                    tipo_documento="otro",
+                    tratamiento="carillas",
+                    confianza="alta",
+                    contexto_clinico="prueba de probar_panel.py -- no es un documento real",
+                )
+            except ValidationError:
+                muro_sigue_cerrado = True
+            revisar(
+                "LecturaArchivo(tratamiento='carillas') sigue lanzando ValidationError "
+                "aunque 'carillas' SI este en el vocabulario de negocio",
+                muro_sigue_cerrado,
             )
-        except ValidationError:
-            muro_sigue_cerrado = True
-        revisar("LecturaArchivo(tratamiento='carillas') sigue lanzando ValidationError", muro_sigue_cerrado)
+        finally:
+            contratos.fijar_vocabulario(vocabulario_antes_del_muro)
 
     finally:
         print("\n" + "=" * 78)
@@ -320,6 +348,10 @@ def main() -> int:
             print(f"  (no se pudo restaurar el precio de implantes en public: {e})")
 
         # 2. Limpiar 'carillas' y el precio de implantes en pruebas_web, si la MITAD B corrio.
+        #    Cada fallo de esta limpieza pasa por `revisar(..., False, ...)` -- no un simple
+        #    `print` -- porque a diferencia de `public`, pruebas_web NO tiene una asercion
+        #    final independiente que lo respalde: un `print` aqui dejaria 'carillas' o un
+        #    precio equivocado en pruebas_web y el script diria "OK" de todas formas.
         if args.chat:
             try:
                 with persistencia.conectar(runtime._url_de_pruebas()) as conn:
@@ -335,12 +367,34 @@ def main() -> int:
                             nota_pendiente=precio_pruebas_anterior.nota_pendiente,
                             usuario=ADMIN,
                         )
+                    else:
+                        with conn.cursor() as cur:
+                            cur.execute(
+                                "DELETE FROM base_conocimiento WHERE tratamiento = %s AND concepto = %s",
+                                ("implantes", "precio"),
+                            )
+                        conn.commit()
                     with conn.cursor() as cur:
                         cur.execute("SELECT count(*) FROM tratamientos WHERE clave = %s", ("carillas",))
                         quedan = cur.fetchone()[0]
+                    filas_pruebas_despues = persistencia.leer_conocimiento(conn, "implantes", "precio")
                 revisar("no quedo 'carillas' en pruebas_web", quedan == 0)
+                precio_pruebas_despues = filas_pruebas_despues[0] if filas_pruebas_despues else None
+                if precio_pruebas_anterior is not None:
+                    revisar(
+                        "el precio de implantes en pruebas_web quedo igual que al empezar la MITAD B",
+                        precio_pruebas_despues is not None
+                        and precio_pruebas_despues.contenido == precio_pruebas_anterior.contenido
+                        and precio_pruebas_despues.aprobado == precio_pruebas_anterior.aprobado
+                        and precio_pruebas_despues.nota_pendiente == precio_pruebas_anterior.nota_pendiente,
+                    )
+                else:
+                    revisar(
+                        "no quedo en pruebas_web una ficha de implantes/precio que no existia antes",
+                        precio_pruebas_despues is None,
+                    )
             except Exception as e:  # noqa: BLE001
-                print(f"  (no se pudo limpiar pruebas_web: {e})")
+                revisar("limpieza de pruebas_web", False, str(e))
 
         # 3. El vocabulario vivo del proceso vuelve a reflejar solo lo activo en public.
         try:
@@ -376,9 +430,15 @@ def main() -> int:
                 filas_despues = persistencia.leer_conocimiento(conn, "implantes", "precio")
                 precio_despues = filas_despues[0] if filas_despues else None
                 if precio_anterior is not None:
+                    # Los tres campos, no solo `contenido`: la restauracion tambien reescribe
+                    # `aprobado` y `nota_pendiente`, y un `aprobado` mal restaurado no haria
+                    # fallar nada si solo se comparara el precio.
                     revisar(
                         "el precio de implantes en public quedo igual que antes de empezar",
-                        precio_despues is not None and precio_despues.contenido == precio_anterior.contenido,
+                        precio_despues is not None
+                        and precio_despues.contenido == precio_anterior.contenido
+                        and precio_despues.aprobado == precio_anterior.aprobado
+                        and precio_despues.nota_pendiente == precio_anterior.nota_pendiente,
                     )
                 else:
                     revisar(
