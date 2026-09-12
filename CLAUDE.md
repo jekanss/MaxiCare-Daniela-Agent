@@ -53,7 +53,9 @@ uv run uvicorn maxicare_daniela.runtime:app --port 8080
   bajo `scripts/` empieza con `sys.stdout.reconfigure(encoding="utf-8", errors="replace")`
   y usa marcadores ASCII (`OK` / `FALLA` / `->`). El mismo script corre en el VPS.
 - `uv run` avisa de que `VIRTUAL_ENV` no coincide. Es ruido, se ignora.
-- **No es un repositorio git**, así que las búsquedas NO respetan `.gitignore`.
+- Es un repositorio git desde el commit `7e12d6b`, que congela las fases 1 a 5. Las
+  búsquedas respetan `.gitignore`: `.venv/`, `web/node_modules/`, `web/dist/` y `.env`
+  no aparecen. No hay remoto todavía.
 - **El pooler de Neon rechaza `options` como parámetro de arranque** (`unsupported startup
   parameter in options: search_path`). Para fijar un `search_path` —o para una prueba de
   concurrencia de verdad— hay que usar la conexión directa: quitarle el `-pooler.` al host.
