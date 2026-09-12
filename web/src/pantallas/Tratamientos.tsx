@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useId, useMemo, useState } from 'react'
 import {
   cambiarTratamiento,
   crearTratamiento,
@@ -6,6 +6,7 @@ import {
   listarFichas,
   listarHistorial,
   listarTratamientos,
+  SesionCaducada,
   type CambioFila,
   type FichaFila,
   type Sesion,
@@ -208,6 +209,7 @@ function EditorFicha({
     nota_pendiente: string | null
   }) => Promise<boolean>
 }) {
+  const campo = useId()
   const [contenido, setContenido] = useState(ficha.contenido)
   const [aprobado, setAprobado] = useState(ficha.aprobado)
   const [nota, setNota] = useState(ficha.nota_pendiente ?? '')
@@ -293,10 +295,11 @@ function EditorFicha({
 
       {!aprobado && (
         <div className="mt-3">
-          <label className="block text-xs font-semibold mb-1" style={{ color: '#374151' }}>
+          <label htmlFor={`${campo}-nota`} className="block text-xs font-semibold mb-1" style={{ color: '#374151' }}>
             Qué falta por definir
           </label>
           <input
+            id={`${campo}-nota`}
             value={nota}
             onChange={(e) => setNota(e.target.value)}
             disabled={!puedeEditar}
@@ -323,7 +326,7 @@ const OTRO = '__otro__'
 function NuevaFicha({
   tratamiento,
   conceptos,
-  yaTiene,
+  existentes,
   puedeEditar,
   porQueNo,
   alGuardar,
@@ -331,7 +334,9 @@ function NuevaFicha({
 }: {
   tratamiento: string
   conceptos: string[]
-  yaTiene: string[]
+  /** Las fichas que este tratamiento ya tiene. Enteras, no solo sus conceptos: hace falta
+   *  el contenido para poder enseñar qué se estaría reemplazando. */
+  existentes: FichaFila[]
   puedeEditar: boolean
   porQueNo: string
   alGuardar: (f: {
@@ -343,6 +348,8 @@ function NuevaFicha({
   }) => Promise<boolean>
   alCerrar: () => void
 }) {
+  const campo = useId()
+  const yaTiene = existentes.map((f) => f.concepto)
   const disponibles = conceptos.filter((c) => !yaTiene.includes(c))
   const [elegido, setElegido] = useState(disponibles[0] ?? OTRO)
   const [otro, setOtro] = useState('')
@@ -351,8 +358,30 @@ function NuevaFicha({
   const [nota, setNota] = useState('')
   const [guardando, setGuardando] = useState(false)
 
+  /* Si mientras este formulario está abierto se guarda otra ficha del mismo tratamiento,
+     `recargar()` encoge `disponibles` y el `<option>` que casaba con `elegido` desaparece.
+     El navegador enseña entonces el primero de la lista, pero el estado sigue apuntando al
+     viejo: se enviaría un concepto que la pantalla ya no ofrece. Se resincroniza por el
+     contenido de la lista, no por su identidad, que cambia en cada render. */
+  const listaDisponibles = disponibles.join('|')
+  useEffect(() => {
+    setElegido((e) => (e === OTRO || disponibles.includes(e) ? e : (disponibles[0] ?? OTRO)))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [listaDisponibles])
+
+  /* El servidor recorta y pasa a minúsculas antes de escribir (`panel.guardar_ficha`), así
+     que «Precio » y «precio» son la MISMA fila. La comprobación de choque tiene que usar la
+     misma regla o avisaría de menos justo en el caso que más duele. */
   const concepto = elegido === OTRO ? otro : elegido
-  const listo = concepto.trim() !== '' && contenido.trim() !== ''
+  const conceptoReal = concepto.trim().toLowerCase()
+
+  /* El `PUT` es un upsert: `ON CONFLICT (tratamiento, concepto) DO UPDATE SET contenido =
+     EXCLUDED.contenido`. Escribir a mano un concepto que ya existe NO crea una segunda
+     ficha: reemplaza la que hay, y si esa era el precio, el precio anterior desaparece sin
+     que nadie lo haya pedido. El `<select>` ya filtra los tomados; «otro concepto…» es
+     texto libre y se le escapaban. */
+  const chocaCon = existentes.find((f) => f.concepto === conceptoReal) ?? null
+  const listo = conceptoReal !== '' && contenido.trim() !== ''
 
   async function guardar() {
     setGuardando(true)
@@ -382,10 +411,11 @@ function NuevaFicha({
         Nueva ficha
       </p>
 
-      <label className="block text-xs font-semibold mb-1" style={{ color: '#374151' }}>
+      <label htmlFor={`${campo}-concepto`} className="block text-xs font-semibold mb-1" style={{ color: '#374151' }}>
         Concepto
       </label>
       <select
+        id={`${campo}-concepto`}
         value={elegido}
         onChange={(e) => setElegido(e.target.value)}
         disabled={!puedeEditar}
@@ -422,10 +452,29 @@ function NuevaFicha({
         </div>
       )}
 
-      <label className="block text-xs font-semibold mb-1 mt-3" style={{ color: '#374151' }}>
+      {/* El aviso vecino de arriba es el de duplicar. Este es el de destruir, y por eso va
+          en ámbar, con el texto que se perdería delante. */}
+      {chocaCon !== null && (
+        <div role="alert" className="mt-2 rounded-lg px-3 py-2.5" style={{ backgroundColor: '#FFFBEB', border: '1px solid #FDE68A' }}>
+          <p className="text-xs font-semibold" style={{ color: '#92400E' }}>
+            «{conceptoReal.replace(/_/g, ' ')}» ya existe en este tratamiento. Guardar no crea
+            una segunda ficha: reemplaza la que hay.
+          </p>
+          <p className="text-xs mt-1.5 whitespace-pre-wrap" style={{ color: '#92400E' }}>
+            Hoy dice: <span style={{ color: '#78350F' }}>{chocaCon.contenido}</span>
+          </p>
+          <p className="text-[11px] mt-1.5" style={{ color: '#B45309' }}>
+            Si lo que querías era corregirla, ciérrala y edítala arriba: así ves lo que
+            cambias. La bitácora guarda el texto anterior de todas formas.
+          </p>
+        </div>
+      )}
+
+      <label htmlFor={`${campo}-contenido`} className="block text-xs font-semibold mb-1 mt-3" style={{ color: '#374151' }}>
         Contenido
       </label>
       <textarea
+        id={`${campo}-contenido`}
         value={contenido}
         onChange={(e) => setContenido(e.target.value)}
         disabled={!puedeEditar}
@@ -458,9 +507,9 @@ function NuevaFicha({
           disabled={!puedeEditar || !listo || guardando}
           title={puedeEditar ? undefined : porQueNo}
           className="px-4 py-2 rounded-lg text-sm font-bold transition-all disabled:opacity-40 disabled:cursor-not-allowed hover:brightness-95"
-          style={{ backgroundColor: '#7C3AED', color: '#FFFFFF' }}
+          style={{ backgroundColor: chocaCon !== null ? '#D97706' : '#7C3AED', color: '#FFFFFF' }}
         >
-          {guardando ? 'Guardando…' : 'Crear ficha'}
+          {guardando ? 'Guardando…' : chocaCon !== null ? 'Reemplazar la ficha existente' : 'Crear ficha'}
         </button>
         <button
           type="button"
@@ -632,7 +681,7 @@ function FilaTratamiento({
             <NuevaFicha
               tratamiento={t.clave}
               conceptos={conceptos}
-              yaTiene={fichas.map((f) => f.concepto)}
+              existentes={fichas}
               puedeEditar={puedeFichas}
               porQueNo={porQueNoFichas}
               alGuardar={alGuardarFicha}
@@ -735,6 +784,7 @@ function NuevoTratamiento({
 }: {
   alCrear: (clave: string, etiqueta: string) => Promise<boolean>
 }) {
+  const campo = useId()
   const [abierto, setAbierto] = useState(false)
   const [etiqueta, setEtiqueta] = useState('')
   const [clave, setClave] = useState('')
@@ -782,10 +832,11 @@ function NuevoTratamiento({
 
       <div className="flex flex-wrap gap-3">
         <div className="flex-1 min-w-[14rem]">
-          <label className="block text-xs font-semibold mb-1" style={{ color: '#374151' }}>
+          <label htmlFor={`${campo}-etiqueta`} className="block text-xs font-semibold mb-1" style={{ color: '#374151' }}>
             Nombre visible
           </label>
           <input
+            id={`${campo}-etiqueta`}
             value={etiqueta}
             onChange={(e) => escribirEtiqueta(e.target.value)}
             placeholder="Carillas estéticas"
@@ -795,13 +846,14 @@ function NuevoTratamiento({
         </div>
 
         <div className="flex-1 min-w-[14rem]">
-          <label className="block text-xs font-semibold mb-1" style={{ color: '#374151' }}>
+          <label htmlFor={`${campo}-clave`} className="block text-xs font-semibold mb-1" style={{ color: '#374151' }}>
             Clave
           </label>
           {/* Se sugiere, no se impone: lo que se envía es lo que quede escrito. Si alguien
               lo sobrescribe con mayúsculas, el servidor devuelve su 400 y esa clave nunca
               entra a `citas.tratamiento` disfrazada de minúscula. */}
           <input
+            id={`${campo}-clave`}
             value={clave}
             onChange={(e) => {
               setTocada(true)
@@ -859,7 +911,10 @@ function NuevoTratamiento({
 // La bitácora
 // ------------------------------------------------------------------------------------------
 
-function Bitacora({ cambios }: { cambios: CambioFila[] }) {
+/* `cambios === null` NO es «no hay cambios»: es «todavía no se ha podido leer». Colapsar
+ * los dos estados hacía que un fallo de red se leyera como «aquí nunca ha pasado nada»
+ * sobre la única estructura del sistema que existe para saber qué pasó de verdad. */
+function Bitacora({ cambios, fallo }: { cambios: CambioFila[] | null; fallo: string | null }) {
   return (
     <div className="rounded-2xl overflow-hidden" style={{ backgroundColor: '#FFFFFF', border: '1px solid #E5E7EB' }}>
       <div className="px-5 py-3" style={{ borderBottom: '1px solid #F3F4F6' }}>
@@ -872,7 +927,21 @@ function Bitacora({ cambios }: { cambios: CambioFila[] }) {
         </p>
       </div>
 
-      {cambios.length === 0 ? (
+      {fallo !== null ? (
+        <div role="alert" className="px-5 py-4">
+          <p className="text-xs font-semibold" style={{ color: '#991B1B' }}>
+            No se pudo leer la bitácora. Esto no quiere decir que no haya cambios: quiere
+            decir que no sabemos cuáles son.
+          </p>
+          <p className="text-xs mt-1" style={{ color: '#B91C1C' }}>
+            {fallo}
+          </p>
+        </div>
+      ) : cambios === null ? (
+        <p className="px-5 py-4 text-xs" style={{ color: '#9CA3AF' }}>
+          Leyendo la bitácora…
+        </p>
+      ) : cambios.length === 0 ? (
         <p className="px-5 py-4 text-xs" style={{ color: '#9CA3AF' }}>
           Todavía no hay cambios registrados.
         </p>
@@ -920,6 +989,7 @@ export default function Tratamientos({ sesion }: { sesion: Sesion }) {
   const [tratamientos, setTratamientos] = useState<TratamientoFila[]>([])
   const [fichas, setFichas] = useState<FichaFila[]>([])
   const [cambios, setCambios] = useState<CambioFila[] | null>(null)
+  const [falloBitacora, setFalloBitacora] = useState<string | null>(null)
   const [cargando, setCargando] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [pestana, setPestana] = useState<'tratamientos' | 'clinica'>('tratamientos')
@@ -954,8 +1024,17 @@ export default function Tratamientos({ sesion }: { sesion: Sesion }) {
   useEffect(() => {
     if (!verBitacora) return
     listarHistorial()
-      .then(setCambios)
-      .catch((err) => setError(mensajeDe(err)))
+      .then((c) => {
+        setCambios(c)
+        setFalloBitacora(null)
+      })
+      .catch((err) => {
+        // Se olvida lo que hubiera: enseñar una lista vieja junto a un fallo diría que eso
+        // es todo lo que ha pasado, y puede no serlo.
+        setCambios(null)
+        setFalloBitacora(mensajeDe(err))
+        setError(mensajeDe(err))
+      })
   }, [verBitacora, fichas, tratamientos])
 
   /* Los conceptos que ya existen, sacados de la base y no de una lista escrita aquí. Los
@@ -986,6 +1065,7 @@ export default function Tratamientos({ sesion }: { sesion: Sesion }) {
       await recargar()
       return true
     } catch (err) {
+      if (err instanceof SesionCaducada) throw err
       setError(mensajeDe(err))
       return false
     }
@@ -993,7 +1073,12 @@ export default function Tratamientos({ sesion }: { sesion: Sesion }) {
 
   /* Las tres escrituras devuelven si el servidor aceptó, en vez de propagar la excepción.
      Quien las llama necesita esa respuesta para decidir si cierra su formulario, y el
-     mensaje ya está donde tiene que estar: en la región `role="alert"` de arriba. */
+     mensaje ya está donde tiene que estar: en la región `role="alert"` de arriba.
+
+     La excepción a la excepción es `SesionCaducada`: un 401 no es «el servidor dijo que no»
+     sino «ya no hay con quién hablar», y convertirlo en un `false` lo dejaría enterrado en
+     una franja roja de esta pantalla. Sube, para que el día que `App.tsx` sepa devolver al
+     ingreso no haya que volver a tocar estas tres funciones. */
   async function cambiarUno(
     clave: string,
     cambio: { etiqueta?: string; activo?: boolean },
@@ -1004,6 +1089,7 @@ export default function Tratamientos({ sesion }: { sesion: Sesion }) {
       await recargar()
       return true
     } catch (err) {
+      if (err instanceof SesionCaducada) throw err
       setError(mensajeDe(err))
       return false
     }
@@ -1021,6 +1107,7 @@ export default function Tratamientos({ sesion }: { sesion: Sesion }) {
       setNuevaEn(creado.clave)
       return true
     } catch (err) {
+      if (err instanceof SesionCaducada) throw err
       setError(mensajeDe(err))
       return false
     }
@@ -1095,7 +1182,7 @@ export default function Tratamientos({ sesion }: { sesion: Sesion }) {
             </div>
           )}
 
-          {verBitacora && <Bitacora cambios={cambios ?? []} />}
+          {verBitacora && <Bitacora cambios={cambios} fallo={falloBitacora} />}
 
           {cargando ? (
             <p className="text-sm" style={{ color: '#9CA3AF' }}>
@@ -1150,7 +1237,7 @@ export default function Tratamientos({ sesion }: { sesion: Sesion }) {
                 <NuevaFicha
                   tratamiento={GENERAL}
                   conceptos={conceptos}
-                  yaTiene={deLaClinica.map((f) => f.concepto)}
+                  existentes={deLaClinica}
                   puedeEditar={puedeFichas}
                   porQueNo={porQueNoFichas}
                   alGuardar={guardarUnaFicha}
