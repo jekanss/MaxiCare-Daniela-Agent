@@ -368,7 +368,7 @@ def sesion_de_agente(
     *,
     database_url: str,
     esquema: str | None = None,
-    limite: int | None = None,
+    limite: int | None = -1,
 ):
     """El historial de una conversación, guardado en Neon y no en la memoria del proceso.
 
@@ -383,8 +383,20 @@ def sesion_de_agente(
     SQLAlchemy cualifica las sentencias al COMPILARLAS, así que el pooler no ve nada raro.
 
     `limite` recorta el historial que se le manda al modelo, contando ITEMS y no mensajes
-    -- una llamada a tool y su resultado son dos. Mientras valga `None` el historial va
-    entero: es el paso 1 de los tres de la fase (persistir, medir, fijar).
+    -- una llamada a tool y su resultado son dos. Por omisión sale de
+    `config.LIMITE_HISTORIAL_SESION`, que hoy vale `None`: el historial va entero, que es el
+    paso 1 de los tres de la fase (persistir, medir, fijar). Ver el docstring de la constante
+    para qué lo desbloquea.
+
+    El centinela del parámetro es `-1` y NO `None`, aunque `None` sea lo que parecería
+    natural: `None` es un valor legítimo --«sin límite»-- y las pruebas del borde necesitan
+    poder pedirlo aunque `config` traiga un número. Con `None` como centinela, «no recortes»
+    y «usa el default» serían la misma llamada.
+
+    El import va DENTRO por la misma razón que el del SDK: `config` se lee en el momento de
+    construir la sesión y no al importar el módulo, así que una prueba puede sustituir la
+    constante y el cambio llega hasta aquí. Con el import arriba, el valor quedaría pegado
+    al primer import del proceso y el cableado dejaría de ser cableado.
 
     Lo que vuelve NO es una `SQLAlchemySession` pelada: es la subclase que filtra la salida
     de tool cuya llamada se cayó por delante de la ventana, porque el recorte del SDK no
@@ -392,11 +404,15 @@ def sesion_de_agente(
     """
     from agents.memory.session_settings import SessionSettings
 
+    from .config import LIMITE_HISTORIAL_SESION
+
+    efectivo = LIMITE_HISTORIAL_SESION if limite == -1 else limite
+
     return _clase_con_corte_seguro()(
         id_conversacion,
         engine=_engine_de(database_url, esquema),
         create_tables=False,
-        session_settings=SessionSettings(limit=limite),
+        session_settings=SessionSettings(limit=efectivo),
         # Sin esto los acentos quedan escapados (`ó`) en `message_data`. El ida y vuelta
         # es correcto igual; lo que se pierde es poder leer un historial a ojo el día que
         # haga falta mirarlo, y ese día no se avisa con antelación.

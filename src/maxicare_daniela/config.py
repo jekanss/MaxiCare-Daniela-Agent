@@ -122,7 +122,25 @@ def config_de_corrida(
 
 #: `persistencia.compactacion`: recorte del historial por cantidad, cero llamadas de modelo.
 #: La memoria larga no vive aquí: vive en el estado estructurado de Neon, que no se degrada.
-LIMITE_HISTORIAL_SESION = 40
+#:
+#: EL SDK CUENTA ITEMS, NO MENSAJES. Una llamada a tool y su resultado son dos items, y un
+#: turno en que Daniela consulte el conocimiento, mire la agenda y registre el estado gasta
+#: seis o siete él solo. Por eso el 40 del plan --justificado como «5 conversaciones
+#: completas»-- era falso: podían ser cinco o seis TURNOS.
+#:
+#: Medido con `scripts/medir_historial.py` el PENDIENTE sobre PENDIENTE conversaciones reales:
+#:   items por turno, media: PENDIENTE   peor caso: PENDIENTE
+#:   items por conversación, p95: PENDIENTE   máximo: PENDIENTE
+#: El número será <peor caso> x 6 turnos, que es una conversación de agendamiento completa
+#: --saludo, tratamiento, fecha, disponibilidad, nombre y consentimiento, confirmación--.
+#:
+#: `None` mientras tanto, y `None` NO es un descuido: es el paso 1 de los tres del spec
+#: --persistir sin límite, medir items/turno, fijar el número con el dato al lado--. Sale de
+#: `None` cuando `scripts/medir_historial.py` tenga al menos VEINTE turnos reales que contar
+#: en `public.agent_messages`, lo que exige desplegar primero. Con menos, el percentil no
+#: significa nada y estaríamos sustituyendo una suposición por otra más cara. El `40` de
+#: antes era exactamente esa suposición, y por eso se fue.
+LIMITE_HISTORIAL_SESION: int | None = None
 
 #: `limites.latencia_maxima`: "nunca instantánea... retardo variable... tope máximo de un
 #: minuto". El retardo se sortea dentro de este rango antes de responder.

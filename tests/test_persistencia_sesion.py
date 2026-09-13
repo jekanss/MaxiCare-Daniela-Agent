@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pytest
 
-from maxicare_daniela import persistencia
+from maxicare_daniela import config, persistencia
 
 URL_NEON = (
     "postgresql://usuario:clave@ep-algo-pooler.c-5.us-east-2.aws.neon.tech/neondb"
@@ -126,9 +126,66 @@ def test_el_engine_usa_el_dialecto_asincrono():
 
 
 def test_sin_limite_el_historial_va_entero():
-    """Paso 1 de los tres del spec: persistir SIN límite. Medir viene después, y fijar el
-    número viene después de medir. Un límite puesto ahora sería otra suposición."""
+    """Paso 1 de los tres del spec --persistir, medir, fijar-- y sigue siendo el paso 1.
+
+    Esta prueba NO sobrevive porque nadie se haya acordado de borrarla: sobrevive porque
+    `config.LIMITE_HISTORIAL_SESION` vale `PENDIENTE` --o sea `None`-- y eso es lo correcto
+    hoy. El `40` que había era una estimación («40 items = 5 conversaciones completas») y era
+    falsa: el SDK cuenta ITEMS, no mensajes, y un turno en que Daniela consulte el
+    conocimiento, mire la agenda y registre el estado gasta seis o siete él solo. Un límite
+    puesto ahora sustituiría una suposición por otra.
+
+    Qué la va a cambiar, y es lo único que puede: `scripts/medir_historial.py` sobre al menos
+    veinte turnos reales en `public.agent_messages` --que exigen desplegar primero--. Cuando
+    ese número exista, la constante deja de ser `None` y esta prueba pasa a afirmar el
+    recorte en vez de su ausencia.
+
+    Lo que se prueba aquí es la AUSENCIA de límite por defecto, no el cableado: el cableado
+    --que el default salga de `config` y no de un `None` escrito en la firma-- lo prueba
+    `test_sin_limite_explicito_el_default_sale_de_config`, que es la única que cae si alguien
+    desconecta la constante.
+    """
     sesion = persistencia.sesion_de_agente("conv-1", database_url=URL_NEON)
+
+    assert sesion.session_settings.limit is None
+
+
+def test_un_limite_explicito_gana_al_de_config():
+    """Para poder probar el borde del recorte sin depender del número de producción."""
+    sesion = persistencia.sesion_de_agente("conv-1", database_url=URL_NEON, limite=4)
+
+    assert sesion.session_settings.limit == 4
+
+
+def test_sin_limite_explicito_el_default_sale_de_config(monkeypatch):
+    """La que caza el cableado, y por eso no mira el número de producción sino uno inventado.
+
+    Con la constante cableada, cambiarla cambia lo que la sesión recorta. Sin cablear
+    --`limite: int | None = None` en la firma, que es como estuvo toda la fase-- la sesión
+    saldría con `None` pase lo que pase en `config`, y el día que la Tarea 13b escriba el
+    número medido no pasaría absolutamente nada: el historial seguiría yendo entero y nadie
+    se enteraría hasta que a un paciente se le reventara el turno por contexto.
+
+    El `12` no significa nada y es a propósito: esta prueba tiene que seguir en verde cuando
+    la 13b sustituya el `PENDIENTE` por el número real.
+    """
+    monkeypatch.setattr(config, "LIMITE_HISTORIAL_SESION", 12)
+
+    sesion = persistencia.sesion_de_agente("conv-1", database_url=URL_NEON)
+
+    assert sesion.session_settings.limit == 12
+
+
+def test_limite_none_explicito_no_recorta(monkeypatch):
+    """`None` es un valor legítimo --«sin límite»-- y NO puede significar «usa el default».
+
+    Por eso el centinela del parámetro es `-1` y no `None`: las pruebas del borde necesitan
+    poder pedir un historial sin recortar aunque `config` traiga un número, y con `None` como
+    centinela esa petición sería indistinguible de no pedir nada.
+    """
+    monkeypatch.setattr(config, "LIMITE_HISTORIAL_SESION", 12)
+
+    sesion = persistencia.sesion_de_agente("conv-1", database_url=URL_NEON, limite=None)
 
     assert sesion.session_settings.limit is None
 
