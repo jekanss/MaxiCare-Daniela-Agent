@@ -966,6 +966,9 @@ def _contexto_de_prueba(quien: dict, id_conversacion: str | None) -> tuple[Conte
         # el flujo de identificación, que es donde más se equivoca un prompt.
         identidad_verificada=False,
         tema_general=_tema_general or 0,
+        # El chat de pruebas del panel, no WhatsApp: separa en el dashboard de trazas las
+        # conversaciones reales de las pruebas de la clínica.
+        canal="web",
         # Sin credenciales de Telegram: `escalar_a_doctores` no puede avisar a nadie desde
         # aquí. Una prueba no le hace sonar el teléfono a un doctor.
         telegram_bot_token="",

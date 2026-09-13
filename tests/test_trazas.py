@@ -51,3 +51,66 @@ def test_la_version_del_lector_es_la_suya():
     assert agentes.VERSION_PROMPT_LECTOR == config.version_de_prompt(
         agentes.INSTRUCCIONES_LECTOR
     )
+
+
+# ==========================================================================================
+# Tarea 10: `config_de_corrida()` con argumentos
+# ==========================================================================================
+
+
+def test_el_group_id_es_la_conversacion_y_no_el_telefono():
+    """La distinción importa y está decidida: un teléfono agrupa a una persona para siempre;
+    una conversación agrupa un EPISODIO, que es la unidad que alguien va a querer leer
+    cuando llegue un reclamo."""
+    corrida = config.config_de_corrida(group_id="b3f1c2d4-0000-4000-8000-000000000001")
+
+    assert corrida.group_id == "b3f1c2d4-0000-4000-8000-000000000001"
+
+
+def test_el_metadata_lleva_canal_y_version_de_prompt():
+    corrida = config.config_de_corrida(
+        group_id="conv-1", canal="web", version_prompt="abc123def456"
+    )
+
+    assert corrida.trace_metadata == {"canal": "web", "version_prompt": "abc123def456"}
+
+
+def test_sin_version_de_prompt_el_metadata_no_la_inventa():
+    """Los evaluadores de guardrail tienen su propio prompt, que no es el de Daniela. Poner
+    el de Daniela ahí sería un dato plausible y falso, que es peor que no tenerlo."""
+    corrida = config.config_de_corrida(group_id="conv-1", canal="whatsapp")
+
+    assert corrida.trace_metadata == {"canal": "whatsapp"}
+
+
+def test_sigue_sin_subir_el_contenido_de_la_conversacion():
+    """LA PRUEBA QUE NO SE PUEDE RELAJAR. `RunConfig()` nace en la 0.22.2 con
+    `trace_include_sensitive_data=True`, y desde la fase 6A hasta el 13/09/2026 cada
+    conversación de WhatsApp subió íntegra al dashboard de OpenAI. Añadirle argumentos a
+    esta función no puede reabrir esa puerta."""
+    corrida = config.config_de_corrida(group_id="conv-1")
+
+    assert corrida.trace_include_sensitive_data is False
+    assert corrida.workflow_name == config.WORKFLOW_NAME
+
+
+def test_sin_argumentos_sigue_funcionando_como_antes():
+    """Los tres llamadores se cablean uno a uno; mientras tanto, ninguno se rompe."""
+    corrida = config.config_de_corrida()
+
+    assert corrida.group_id is None
+    assert corrida.trace_include_sensitive_data is False
+
+
+def test_el_contexto_sabe_por_que_canal_habla():
+    from maxicare_daniela.contratos import ContextoDaniela
+    from maxicare_daniela.calendario import CalendarioDoble
+
+    ctx = ContextoDaniela(
+        id_conversacion="conv-1",
+        telefono_completo="573001112233",
+        database_url="postgresql://x/y",
+        calendario=CalendarioDoble(),
+    )
+
+    assert ctx.canal == "whatsapp", "el default es el canal de producción"
