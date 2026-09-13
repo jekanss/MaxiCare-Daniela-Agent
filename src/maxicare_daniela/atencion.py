@@ -75,7 +75,7 @@ from typing import Any, Awaitable, Callable
 from . import conversacion, guardrails, ingesta
 from . import lectura as lectura_mod
 from . import persistencia
-from .calendario import CalendarioCaido, CalendarioDoble, calendario_desde_config
+from .calendario import CalendarioCaido, CalendarioDoble, Jornada, calendario_desde_config
 from .canales import Telegram, WhatsApp
 from .config import (
     MARGEN_LECTURA_SEGUNDOS,
@@ -888,6 +888,12 @@ async def atender(
             capacidad_por_hora=operativa.get("capacidad_por_hora", 2),
             duracion_cita_minutos=operativa.get("duracion_cita_minutos", 60),
             cierre_relevo_minutos=operativa.get("cierre_relevo_minutos", 180),
+            jornada=Jornada(
+                apertura=operativa.get("hora_apertura", 8),
+                cierre=operativa.get("hora_cierre", 17),
+                cierre_sabado=operativa.get("hora_cierre_sabado", 15),
+                atiende_domingo=bool(operativa.get("atiende_domingo", 0)),
+            ),
             tema_general=operativa.get("telegram_topic_general", 0),
             # El chat de pruebas web los deja vacíos a propósito: allí no hay a quién avisar.
             # Copiar eso aquí dejaría a `escalar_a_doctores` construyendo un `Telegram("", "")`

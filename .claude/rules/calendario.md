@@ -16,6 +16,22 @@ El `CLAUDE.md` raíz lleva la regla en una línea. Aquí está el porqué.
   de una hora taparía el bloque y la clínica atendería **uno** por hora en vez de dos. Cada
   evento que crea Daniela lleva `extendedProperties.private.origen = "daniela"` y
   `bloqueos()` lo descarta. Un evento sin marca es de los doctores y sí tapa.
+- **La rejilla tiene horario, y hasta el 13/09/2026 no lo tenía.** `_huecos_libres` cruzaba
+  tres cosas —la rejilla, el cupo de Neon y los bloqueos del doctor— y la rejilla salía tal
+  cual de la ventana que el modelo pidiera: **la ventana ERA la oferta**. Se vio en
+  producción a las 6:22 p. m.: el paciente pidió cita «el próximo martes 15», el modelo
+  consultó el día completo (`{"desde":"2026-09-15T00:00:00-05:00","hasta":"2026-09-15T23:59:59-05:00"}`,
+  leído de `agent_messages`) y Daniela ofreció «12:00 am, 1:00 am o 2:00 am» — la traducción
+  CORRECTA de 00:00, 01:00 y 02:00. El modelo no alucinó: el sistema le dio esas horas.
+  Ahora `calendario.Jornada` filtra, y las tres tools de agenda la respetan. Pedir el día
+  entero sigue siendo razonable; acotar la respuesta es trabajo del código.
+- **El horario vive en DOS sitios y se mueven juntos.** Los números (`hora_apertura`,
+  `hora_cierre`, `hora_cierre_sabado`, `atiende_domingo`, tabla `configuracion`, migración
+  012) filtran la rejilla; la fila `_general`/`horario` de la base de conocimiento es la que
+  Daniela **recita** cuando le preguntan. Si divergen, dice una cosa y ofrece otra.
+  `test_la_jornada_configurada_coincide_con_el_horario_que_daniela_recita` caza la mitad
+  —quien cambie los defaults del código sin tocar el documento—; la otra mitad, entre la fila
+  de Neon y ese texto, hoy no la caza nadie.
 - **Google Calendar manda también al ESCRIBIR, no solo al ofrecer.**
   `consultar_disponibilidad` respeta los bloqueos desde la fase 3, pero hasta el 13/09/2026
   `crear_cita` y `reprogramar_cita` no los miraban: comprobaban la hora pasada y el cupo de

@@ -168,6 +168,23 @@ async def _bloqueo_que_tapa(ctx: ContextoDaniela, inicio: datetime) -> Bloqueo |
     return None
 
 
+def _texto_fuera_de_horario(ctx: ContextoDaniela, inicio: datetime) -> str:
+    """Lo que el modelo lee cuando pide una hora con la clínica cerrada. RESULTADO, no error.
+
+    Le dice el horario para que pueda corregir en el mismo turno en vez de volver a probar a
+    ciegas. Sale de `ctx.jornada`, no de una constante: si la clínica cambia el horario desde
+    el panel, este texto cambia con él.
+    """
+    j = ctx.jornada
+    return (
+        f"Esa hora ({_formatear_hora(inicio)}) está fuera del horario: la clínica no atiende "
+        f"en ese momento. Atiende de lunes a viernes de {j.apertura}:00 a {j.cierre}:00 y los "
+        f"sábados de {j.apertura}:00 a {j.cierre_sabado}:00"
+        + ("." if j.atiende_domingo else ", y los domingos no abre.")
+        + " NO agendes ahí. Consulta la disponibilidad y ofrécele al paciente lo que salga."
+    )
+
+
 def _texto_bloqueado(inicio: datetime, bloqueo: Bloqueo) -> str:
     """Lo que el modelo lee cuando el doctor apartó esa hora. RESULTADO, no excepción.
 
@@ -203,6 +220,9 @@ def _huecos_libres(
         # Un bloque que ya empezó no es un hueco libre. El filtro va aquí, en el único sitio
         # por el que pasan las tres consultas de agenda, y no en cada una.
         no_antes_de=ctx.ahora,
+        # Y un bloque fuera del horario de la clínica tampoco. Sin esto, la ventana que pida
+        # el modelo ES la oferta: una consulta del día completo devolvía 00:00, 01:00, 02:00.
+        jornada=ctx.jornada,
     )
     ocupados = persistencia.bloques_ocupados(conn, desde, hasta)
     bloqueos = ctx.calendario.bloqueos(desde, hasta)
@@ -543,6 +563,12 @@ async def _crear_cita(ctx: ContextoDaniela, solicitud: SolicitudCita) -> str:
             "fecha futura quiere y consulta la disponibilidad de nuevo."
         )
 
+    # Fuera del horario de la clínica no se agenda, lo pida quien lo pida. Va antes del
+    # bloqueo del doctor por lo mismo que la hora pasada: es local, y `bloqueos()` es una
+    # llamada a Google.
+    if not ctx.jornada.cabe(inicio, ctx.duracion_cita_minutos):
+        return _texto_fuera_de_horario(ctx, inicio)
+
     # Google Calendar es la fuente de la disponibilidad, y eso vale también en el momento de
     # escribir. Ver `_bloqueo_que_tapa`: sin esto, una hora que el doctor apartó se podía
     # agendar igual y el evento acababa encima de su cirugía.
@@ -768,6 +794,10 @@ async def _reprogramar_cita(ctx: ContextoDaniela, id_cita: str, nuevo_inicio: st
             f"{_formatear_hora(ctx.ahora)}. NO muevas la cita ahí; sigue donde estaba. "
             "Confirma con el paciente qué fecha futura quiere y consulta la disponibilidad."
         )
+
+    # Mover una cita fuera del horario es el mismo defecto que crearla ahí.
+    if not ctx.jornada.cabe(destino, ctx.duracion_cita_minutos):
+        return _texto_fuera_de_horario(ctx, destino)
 
     # Mover una cita a una hora que el doctor apartó es el mismo defecto que crearla ahí, y
     # se comprueba en el mismo sitio: antes de tocar la base. Ver `_bloqueo_que_tapa`.
