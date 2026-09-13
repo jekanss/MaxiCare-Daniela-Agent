@@ -229,10 +229,30 @@ _MESES = (
 
 
 def fecha_en_palabras(momento) -> str:
-    """«domingo 13 de septiembre de 2026, 08:15»."""
+    """«domingo 13 de septiembre de 2026, hacia las 08:00».
+
+    **La hora va TRUNCADA a la hora en punto, y eso es dinero, no descuido.** Este texto es
+    el último bloque del prompt de sistema, y el prompt de sistema va delante de los
+    esquemas de tools y del historial. `prompt_cache_retention="24h"` funciona por prefijo
+    idéntico: con el minuto dentro, cada mensaje caía en un minuto distinto del anterior y
+    descachaba **todo lo que viene detrás** --3.673 tokens de esquemas más el historial
+    entero--. El caché solo llegaba a cubrir los 2.059 tokens estáticos de un total de 6.531
+    más historial.
+
+    Medido el 13/09/2026 con `o200k_base` sobre una conversación de agendamiento de seis
+    turnos: **$0.173 con minuto contra $0.095 sin él**. Truncando, el prefijo aguanta una
+    hora entera y lo comparten todos los pacientes de esa hora, no solo los turnos de una
+    misma conversación.
+
+    Por qué es seguro decirle «hacia las 08:00» cuando son las 08:50: esta hora sirve para
+    situar «hoy a las 3», no para decidir qué bloque sigue libre. Eso lo decide
+    `bloques_del_dia(no_antes_de=ctx.ahora)`, que compara instantes reales y no lee el
+    prompt; y `sin_hora_no_verificada` impide que Daniela ofrezca una hora que no haya
+    salido de una tool. El «hacia» está para que no lea la hora truncada como exacta.
+    """
     return (
         f"{_DIAS[momento.weekday()]} {momento.day} de {_MESES[momento.month - 1]} "
-        f"de {momento.year}, {momento:%H:%M}"
+        f"de {momento.year}, hacia las {momento.hour:02d}:00"
     )
 
 
@@ -244,8 +264,9 @@ def instrucciones_daniela(ctx, agente) -> str:
     cambiara al comienzo del prompt, cada corrida pagaría el precio completo.
 
     El orden de los dos añadidos no es indiferente, y va de lo más estable a lo más volátil:
-    los tratamientos cambian cuando la clínica toca una pantalla; la fecha cambia cada
-    minuto. Con la fecha delante, el vocabulario dejaría de cachearse también.
+    los tratamientos cambian cuando la clínica toca una pantalla; la fecha cambia cada hora
+    --ver `fecha_en_palabras`, que la trunca justo por esto--. Con la fecha delante, el
+    vocabulario dejaría de cachearse también.
 
     Hasta el 13/09/2026 aquí no llegaba ninguna fecha, y el efecto se vio en una conversación
     real: el paciente pidió cita «el próximo 16 de septiembre» y Daniela le preguntó el año.

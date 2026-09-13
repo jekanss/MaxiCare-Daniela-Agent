@@ -20,9 +20,11 @@ No gasta un solo token: aquí no hay modelo, solo Google.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
@@ -39,6 +41,7 @@ from maxicare_daniela.calendario import (  # noqa: E402
     a_bloqueo,
 )
 from maxicare_daniela.config import Config, cargar_dotenv  # noqa: E402
+from maxicare_daniela.herramientas import _bloqueo_que_tapa  # noqa: E402
 
 #: Las pruebas se hacen en 2029, a las 3 de la mañana. Ningún paciente se cita ahí, así que
 #: un evento que sobreviviera a la limpieza sería obvio a simple vista y no chocaría con
@@ -217,8 +220,39 @@ def main() -> int:
             titulos = [b.titulo for b in bloqueos]
             revisar("un evento sin marca sí aparece como bloqueo",
                     any("bloqueo del doctor" in t for t in titulos), str(titulos))
+
+            # -------------------------------------------------------------------------
+            print("\n6b. Y ese bloqueo IMPIDE agendar, no solo ofrecer")
+            # -------------------------------------------------------------------------
+            # Lo que pidió la clínica: «el doctor bloquea de 2 a 5 y el agente no puede
+            # citar ahí». `consultar_disponibilidad` lo respetaba desde la fase 3, pero
+            # `crear_cita` y `reprogramar_cita` no miraban los bloqueos: el paciente que
+            # pedía una hora concreta --o que aceptaba minutos después de que el doctor
+            # bloqueara-- acababa citado encima de la cirugía. Esto comprueba el guardia
+            # nuevo contra Google de verdad, sin base de datos y sin gastar un token.
+            ctx_falso = SimpleNamespace(calendario=calendario, duracion_cita_minutos=60)
+            dentro = CUANDO + timedelta(hours=3)
+            fuera = CUANDO + timedelta(hours=5)
+
+            tapa = asyncio.run(_bloqueo_que_tapa(ctx_falso, dentro))
+            revisar("una hora DENTRO del bloqueo se rechaza", tapa is not None,
+                    tapa.titulo if tapa else "no la vio")
+
+            libre = asyncio.run(_bloqueo_que_tapa(ctx_falso, fuera))
+            revisar("una hora FUERA del bloqueo sigue agendándose", libre is None,
+                    libre.titulo if libre else "")
         finally:
             calendario.eliminar_evento(id_doctor)
+
+        # -----------------------------------------------------------------------------
+        print("\n6c. Borrado el bloqueo, la hora se libera sola")
+        # -----------------------------------------------------------------------------
+        # La otra mitad de la petición. No hay caché que invalidar ni nada que sincronizar:
+        # cada consulta le pregunta a Google. Si alguien mete un caché «para la latencia»,
+        # este paso es lo que lo caza.
+        liberada = asyncio.run(_bloqueo_que_tapa(ctx_falso, dentro))
+        revisar("la hora vuelve a estar disponible sin tocar nada",
+                liberada is None, liberada.titulo if liberada else "")
 
         # -----------------------------------------------------------------------------
         print("\n7. Borrar dos veces no es un error")
