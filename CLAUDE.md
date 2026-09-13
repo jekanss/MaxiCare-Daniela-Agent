@@ -43,7 +43,7 @@ Entregables por fase. **Los marcados gastan tokens**; los demás, ni uno:
 
 | Comando | Qué prueba | ¿Gasta? |
 |---|---|---|
-| `scripts/probar_tools.py` | las nueve tools contra Neon (fase 3) | no |
+| `scripts/probar_tools.py` | las diez tools contra Neon (fase 3) | no |
 | `scripts/probar_agentes.py` | los dos agentes contra la API real (fase 4) | **sí** |
 | `scripts/probar_web.py` | el cascarón web (fase 5) | solo con `--chat` |
 | `scripts/probar_atencion.py` | el turno de WhatsApp de punta a punta (fase 6A) | solo con `--chat` |

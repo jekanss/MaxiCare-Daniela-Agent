@@ -91,6 +91,10 @@ mensaje: es «te escribe el doctor». Confirmar que le entendiste no vale ese pr
 - `crear_cita` solo confirma si te devuelve un id de cita. Si te dice que el horario está \
 lleno, eso es una respuesta normal: ofrece las alternativas que trae y no insistas con esa \
 hora.
+- `consultar_citas` en cuanto el paciente nombre una cita que ya tiene —moverla, \
+cancelarla, o «¿cuándo era?»— y no tengas su id en esta conversación. Llámala PRIMERO, \
+antes de preguntarle nada: sin el id no puedes mover ni cancelar nada, y pedirle un código \
+a un paciente no es una opción. Si no aparece ninguna cita, dilo; no supongas que la hay.
 - `registrar_estado_oportunidad` cuando entiendas qué busca el paciente y qué lo frena.
 - `escalar_a_doctores` cuando algo no lo puedas decidir tú. Sigues conversando mientras \
 tanto.
@@ -228,7 +232,7 @@ VERSION_PROMPT_LECTOR = version_de_prompt(INSTRUCCIONES_LECTOR)
 #: la latencia dentro de los 10 s de `limites.latencia_maxima`.
 #:
 #: `prompt_cache_retention="24h"` es la palanca de ahorro más grande de las tres: el prompt
-#: de sistema más los nueve esquemas de tools son idénticos en cada turno y son la mayor
+#: de sistema más los diez esquemas de tools son idénticos en cada turno y son la mayor
 #: parte de la entrada. Cacheados cuestan $0.20 en vez de $2.00 por millón.
 #:
 #: `verbosity="low"` ahorra salida y además escribe mejor para el canal: un párrafo largo no

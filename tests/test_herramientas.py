@@ -676,6 +676,124 @@ def test_crear_cita_no_le_da_al_modelo_un_texto_cuando_falla():
 
 
 # ==========================================================================================
+# consultar_citas -- encontrar la cita sin que el paciente recite el UUID
+# ==========================================================================================
+
+
+def _cita(**cambios) -> dict:
+    base = {
+        "id": "cita-1",
+        "nombre_completo": "Ana Ruiz",
+        "telefono": "573001112233",
+        "tratamiento": "limpieza",
+        "inicio": INICIO,
+        "estado": "confirmada",
+    }
+    base.update(cambios)
+    return base
+
+
+def test_sin_citas_no_se_inventa_ninguna(monkeypatch):
+    """El texto tiene que servirle al modelo para seguir, no para rellenar el hueco.
+
+    Y no autoriza ninguna hora: si Daniela nombrara una después de esto, saldría de su
+    memoria y el guardrail debe frenarla.
+    """
+    ctx = contexto(identidad_verificada=True)
+
+    async def base_falsa(_ctx, trabajo):
+        return []
+
+    monkeypatch.setattr(h, "_con_base", base_falsa)
+
+    texto = asyncio.run(h._consultar_citas(ctx))
+
+    assert "no tiene" in texto.lower()
+    assert not re.search(r"\d{1,2}:\d{2}", texto), "no puede aparecer una hora de la nada"
+    assert ctx.turno.horas_autorizadas == set()
+
+
+def test_una_cita_futura_vuelve_con_su_hora_su_tratamiento_y_su_id(monkeypatch):
+    """El id es lo que `reprogramar_cita` y `cancelar_cita` necesitan para existir."""
+    ctx = contexto(identidad_verificada=True)
+
+    async def base_falsa(_ctx, trabajo):
+        return [_cita(id="c49b580e", tratamiento="ortodoncia")]
+
+    monkeypatch.setattr(h, "_con_base", base_falsa)
+
+    texto = asyncio.run(h._consultar_citas(ctx))
+
+    assert "09:00" in texto
+    assert "ortodoncia" in texto
+    assert "Ana Ruiz" in texto
+    assert "c49b580e" in texto
+
+
+def test_consultar_citas_autoriza_las_horas_que_nombra(monkeypatch):
+    """Sin esto, «tu cita es el martes a las 9» bloquea la respuesta ENTERA.
+
+    Es el mismo defecto que costó el arreglo del 13/09/2026 en `reprogramar` y `cancelar`:
+    una hora que sale de la base en este mismo turno y que nadie autorizó. La consecuencia
+    aquí es más tonta y más visible -- el paciente pregunta cuándo es su cita y recibe «te
+    escribe el doctor».
+    """
+    ctx = contexto(identidad_verificada=True)
+
+    async def base_falsa(_ctx, trabajo):
+        return [_cita(), _cita(id="cita-2", inicio=INICIO + timedelta(days=1, hours=5))]
+
+    monkeypatch.setattr(h, "_con_base", base_falsa)
+
+    asyncio.run(h._consultar_citas(ctx))
+
+    assert {"09:00", "14:00"} <= ctx.turno.horas_autorizadas
+
+
+def test_la_busqueda_va_anclada_al_TELEFONO_del_contexto_y_al_reloj(monkeypatch):
+    """El modelo no escribe teléfonos. Nunca.
+
+    Es lo que hace la consulta incapaz por construcción de devolver la cita de otra persona:
+    no hay ningún argumento que el modelo pueda torcer. Y el corte por `ctx.ahora` es lo que
+    impide ofrecerle mover una cita que ya pasó.
+    """
+    ctx = contexto(identidad_verificada=True, ahora=INICIO - timedelta(days=2))
+    visto: dict = {}
+
+    def falsa(conn, telefono, *, desde):
+        visto["telefono"] = telefono
+        visto["desde"] = desde
+        return []
+
+    monkeypatch.setattr(persistencia, "citas_activas_de_telefono", falsa)
+
+    async def base_falsa(_ctx, trabajo):
+        return trabajo(BaseFalsa())
+
+    monkeypatch.setattr(h, "_con_base", base_falsa)
+
+    asyncio.run(h._consultar_citas(ctx))
+
+    assert visto["telefono"] == "573001112233"
+    assert visto["desde"] == ctx.ahora
+
+
+def test_consultar_citas_exige_identidad_como_las_tres_de_escritura():
+    """Lee datos de un paciente, así que cae del lado estricto del guardrail.
+
+    No estorba el caso normal: desde que `crear_cita` registra al paciente, todo teléfono con
+    cita tiene ficha, y con ficha la identidad queda verificada sola. Y NO entra en la lista
+    blanca de desconocidos: esa sigue teniendo una sola tool.
+    """
+    from maxicare_daniela import guardrails
+
+    nombres = {g.name for g in h.consultar_citas.tool_input_guardrails or []}
+
+    assert "identidad_antes_de_datos" in nombres
+    assert "consultar_citas" not in guardrails._ESCRITURAS_PARA_DESCONOCIDO
+
+
+# ==========================================================================================
 # reprogramar_cita -- la clave por valor destino
 # ==========================================================================================
 

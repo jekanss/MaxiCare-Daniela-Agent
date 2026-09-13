@@ -1019,6 +1019,46 @@ def leer_cita(conn, id_cita: str) -> dict[str, Any] | None:
     return dict(zip(columnas, fila))
 
 
+def citas_activas_de_telefono(
+    conn, telefono: str, *, desde: datetime, limite: int = 5
+) -> list[dict[str, Any]]:
+    """Las citas vivas y futuras de ese número, de la más próxima a la más lejana.
+
+    Es la consulta que faltaba. `leer_cita` necesita el UUID y `cita_viva_de_reserva` necesita
+    la reserva: las dos exigen algo que solo está en la conversación donde la cita se creó, y
+    esa conversación muere a las 24 horas (`conversacion_viva`). Sin esto, el paciente que
+    agenda el lunes y escribe el miércoles «muéveme la cita» pedía algo que Daniela no tenía
+    forma de encontrar.
+
+    El filtro va por TELÉFONO y no por `paciente_id`: es el criterio más estrecho de los dos
+    --una ficha puede tener citas pedidas desde otro número-- y es el mismo al que
+    `herramientas._es_ajena` ancla la pertenencia para escribir.
+
+    `desde` corta el pasado. Una cita de ayer no se puede mover ni cancelar, y ofrecerla solo
+    sirve para que el modelo proponga algo imposible.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT id, reserva_id, conversacion_id, paciente_id, nombre_completo, telefono,
+                   tratamiento, inicio, duracion_minutos, evento_calendar_id, estado
+              FROM citas
+             WHERE telefono = %s
+               AND estado IN ('confirmada', 'reprogramada')
+               AND inicio >= %s
+             ORDER BY inicio
+             LIMIT %s
+            """,
+            (telefono, desde, limite),
+        )
+        filas = cur.fetchall()
+    columnas = (
+        "id", "reserva_id", "conversacion_id", "paciente_id", "nombre_completo", "telefono",
+        "tratamiento", "inicio", "duracion_minutos", "evento_calendar_id", "estado",
+    )
+    return [dict(zip(columnas, fila)) for fila in filas]
+
+
 def mover_cita(conn, id_cita: str, *, reserva_id: int, inicio: datetime) -> None:
     """Apunta la cita al cupo nuevo. El cupo viejo lo libera quien llama."""
     with conn.cursor() as cur:

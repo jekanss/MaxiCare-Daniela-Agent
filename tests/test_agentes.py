@@ -78,7 +78,13 @@ def correr(agente, entrada, ctx, guion):
 # ==========================================================================================
 
 
-def test_daniela_tiene_las_nueve_tools_del_plan():
+def test_daniela_tiene_las_nueve_tools_del_plan_y_la_decima():
+    """`consultar_citas` no está en el plan y se añade en esta lista a conciencia.
+
+    Sin ella, `reprogramar_cita` y `cancelar_cita` solo funcionan dentro de la conversación
+    donde la cita se creó: son las únicas dos tools cuya entrada obligatoria --el UUID-- no
+    puede salir de ninguna otra.
+    """
     nombres = {t.name for t in agentes.daniela.tools}
 
     assert nombres == {
@@ -91,6 +97,7 @@ def test_daniela_tiene_las_nueve_tools_del_plan():
         "registrar_estado_oportunidad",
         "programar_seguimiento",
         "escalar_a_doctores",
+        "consultar_citas",
     }
 
 
@@ -256,7 +263,7 @@ def test_el_modelo_recibe_las_tools_y_las_instrucciones():
     correr(agentes.daniela, "hola", ctx, guion)
 
     recibido = guion.recibido[0]
-    assert len(recibido["tools"]) == 9
+    assert len(recibido["tools"]) == 10
     assert "MaxiCare" in recibido["instrucciones"]
 
 

@@ -1,4 +1,4 @@
-"""Corre las nueve tools contra Neon y un calendario de pruebas, y lo cuenta en claro.
+"""Corre las diez tools contra Neon y un calendario de pruebas, y lo cuenta en claro.
 
     uv run python scripts/probar_tools.py
 
@@ -328,11 +328,42 @@ def corridas(url: str) -> int:
     print(f"   el mismo turno otra vez -> {marca(len(telegram.enviados) == 1)} "
           f"no se volvio a avisar")
 
+    # -- 10. encontrar la cita cuando la conversacion ya murio ---------------------------
+    print("\n10. consultar_citas (la decima, la que no esta en el plan)")
+    ctx4 = contexto(url, "573009994004", "Marta Regresa")
+    inicio4 = hora(40)
+    asyncio.run(
+        h._crear_cita(
+            ctx4,
+            SolicitudCita(
+                nombre_completo="Marta Regresa",
+                inicio=inicio4,
+                tratamiento="blanqueamiento",
+                clave_idempotencia=f"{ctx4.telefono_completo}:{inicio4.isoformat()}",
+            ),
+        )
+    )
+
+    # Dos dias despues. Otra conversacion, sin historial y sin el id a la vista: es
+    # exactamente lo que le pasa a un paciente real, porque `conversacion_viva` dura 24 h.
+    regreso = contexto(url, "573009994004", "Marta Regresa")
+    encontrada = asyncio.run(h._consultar_citas(regreso))
+    print(f"   conversacion nueva    -> {marca('blanqueamiento' in encontrada)} "
+          f"la encuentra sin que el paciente dicte el id")
+    autorizada = f"{inicio4:%H:%M}" in regreso.turno.horas_autorizadas
+    print(f"   la hora que nombra    -> {marca(autorizada)} queda autorizada, asi que "
+          f"puede decirsela al paciente")
+
+    ajeno = contexto(url, "573009995005", "Otro Numero")
+    vacio = asyncio.run(h._consultar_citas(ajeno))
+    ok_ajeno = "no tiene" in vacio and "blanqueamiento" not in vacio
+    print(f"   otro numero           -> {marca(ok_ajeno)} no ve la cita de nadie mas")
+
     print()
     if fallos:
         print(f"{fallos} comprobacion(es) fallaron.")
         return 1
-    print("Las nueve tools funcionan. Tres llamadas simultaneas -> exactamente 2 citas.")
+    print("Las diez tools funcionan. Tres llamadas simultaneas -> exactamente 2 citas.")
     return 0
 
 

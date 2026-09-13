@@ -1,0 +1,21 @@
+-- =========================================================================================
+-- Buscar las citas de un teléfono
+--
+-- La 001 indexó `citas` por `inicio` (la agenda del día) y por `paciente_id` (el historial
+-- de una ficha). Faltaba el tercer acceso, que resultó ser el que usa el paciente:
+-- «¿cuándo es mi cita?», «muévela», «cancélala» -- todo eso entra por el número de WhatsApp
+-- desde el que escribe, que es lo único que el canal trae.
+--
+-- Hasta ahora esa pregunta no se podía hacer: `leer_cita` exige el UUID y
+-- `cita_viva_de_reserva` exige la reserva, y los dos solo existen dentro de la conversación
+-- donde la cita se creó. Esa conversación muere a las 24 horas.
+--
+-- El índice va sobre `(telefono, inicio)` y no sobre `telefono` a secas porque la consulta
+-- de `citas_activas_de_telefono` filtra por número Y ordena por fecha: con las dos columnas,
+-- Postgres puede resolver el ORDER BY sin ordenar aparte. El precedente de esta misma base
+-- es `ix_mensajes_sin_responder`, que también indexa por la columna de orden.
+--
+-- Idempotente, como las anteriores.
+-- =========================================================================================
+
+CREATE INDEX IF NOT EXISTS ix_citas_telefono ON citas (telefono, inicio);

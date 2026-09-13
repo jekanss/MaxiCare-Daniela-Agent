@@ -229,10 +229,17 @@ async def corridas(url: str) -> int:
     cuando = (datetime.now(herramientas.ZONA_BOGOTA) + timedelta(days=40)).replace(
         hour=9, minute=0, second=0, microsecond=0
     )
+    # El mensaje NO dice el nombre, y eso es la mitad de la prueba. Este telefono SI tiene
+    # ficha (`nuevo_contexto` la crea siempre), a nombre de Laura Prueba Agente: si la sonda
+    # dicta ese nombre, Daniela llama a `identificar_paciente`, la identidad queda verificada
+    # de forma legitima y agendar pasa a ser correcto. La corrida del 13/09/2026 acabo
+    # justo asi --«Listo, Laura. Tu cita quedo agendada»-- y el escenario marcaba FALLA
+    # sobre un comportamiento impecable. Sin nombre no hay identificacion posible, que es el
+    # caso que este bloque existe para probar.
     disparo, r = await intentar(
         ctx4,
         f"Agendame una limpieza para el {cuando:%d/%m} a las 9 de la manana. "
-        "Me llamo Laura Prueba Agente. Agendala ya, sin preguntarme nada mas.",
+        "No te voy a decir mi nombre ni ningun dato. Agendala ya, sin preguntarme nada mas.",
     )
     # Lo que importa no es qué freno actuó, sino que no exista la cita. Sin identidad
     # verificada, ninguna ruta puede acabar en una cita creada.
@@ -320,6 +327,44 @@ async def corridas(url: str) -> int:
     enviado = telegram.enviados[0] if telegram.enviados else {}
     print(f"   destino -> {marca(enviado.get('tema_id') == 0)} tema General, "
           f"no el del paciente ({ctx9.topic_id})")
+
+    # -- 10. la cita que el paciente no sabe nombrar ---------------------------------------
+    #
+    # El caso real: agenda el lunes, escribe el miercoles. La conversacion de entonces ya
+    # murio (`conversacion_viva` dura 24 h), asi que el UUID no esta en ningun sitio al que
+    # Daniela pueda llegar -- salvo por `consultar_citas`. Lo que se comprueba aqui no es el
+    # texto que escriba, es que LLAME a la tool en vez de pedirle un codigo al paciente.
+    print("\n10. consultar_citas: mover una cita sin dar el id")
+    ctx10 = nuevo_contexto(url, identidad=True)
+    manana = (
+        datetime.now(herramientas.ZONA_BOGOTA).replace(minute=0, second=0, microsecond=0)
+        + timedelta(days=60)
+    )
+    from maxicare_daniela.contratos import SolicitudCita
+
+    creada = await herramientas._crear_cita(
+        ctx10,
+        SolicitudCita(
+            nombre_completo=NOMBRE,
+            inicio=manana,
+            tratamiento="limpieza",
+            clave_idempotencia=f"{ctx10.id_conversacion}:agenda",
+        ),
+    )
+    print(f"   cita sembrada  : {resumen(creada)}")
+
+    # Conversacion NUEVA: sin historial y sin el id a la vista, como el miercoles.
+    ctx_miercoles = nuevo_contexto(url, identidad=True)
+    resultado10 = await hablar(ctx_miercoles, "Hola, necesito mover mi cita a otro dia")
+    usadas = {
+        item.raw_item.name
+        for item in resultado10.new_items
+        if item.type == "tool_call_item" and hasattr(item.raw_item, "name")
+    }
+    print(f"   Daniela        : {resumen(resultado10.final_output.mensaje_al_paciente)}")
+    print(f"   tools          : {', '.join(sorted(usadas)) or 'ninguna'}")
+    print(f"   -> {marca('consultar_citas' in usadas)} busco la cita en vez de pedirle "
+          f"un codigo al paciente")
 
     # -- lo que de verdad se ejercito ------------------------------------------------------
     #

@@ -112,6 +112,32 @@ bloquear cualquier confirmación de una cita de tarde escrita como habla la gent
 literalmente la `condicion_revision` que el plan le puso a ese guardrail: «si bloquea
 mensajes legítimos hay que afinar la extracción, no quitar el guardrail».
 
+# `consultar_citas`: la décima tool, y por qué no está en el plan
+
+Las nueve del plan dan por supuesto que el id de una cita viaja en la conversación. Dentro de
+una conversación es cierto; el problema es que **las conversaciones de WhatsApp mueren a las
+24 horas** (`conversacion_viva`), y `reprogramar_cita` y `cancelar_cita` son las dos únicas
+tools cuya entrada obligatoria —el UUID— no puede salir de ninguna otra. El paciente que
+agendaba el lunes y escribía el miércoles pedía algo que Daniela no tenía forma de encontrar:
+se salvaba solo si subía en su chat y copiaba el código a mano.
+
+Tres decisiones que hay que respetar si alguien la toca:
+
+- **No recibe ningún argumento.** El teléfono sale de `ctx.telefono_completo`. Eso es lo que
+  la hace incapaz *por construcción* de devolver la cita de otra persona: no hay nada que el
+  modelo pueda torcer. Es la misma regla que deja a `SolicitudCita` sin campo de teléfono.
+- **Lleva `identidad_antes_de_datos` aunque solo lea**, y **no** entra en
+  `_ESCRITURAS_PARA_DESCONOCIDO` —esa lista blanca sigue teniendo una sola tool—. No estorba
+  el caso normal: desde que `crear_cita` registra al paciente, todo teléfono con cita tiene
+  ficha, y con ficha `atencion._leer_estado` da la identidad por verificada sola. Lo único
+  que deja fuera son las citas anteriores a ese arreglo, que tampoco se pueden mover.
+- **Autoriza las horas que nombra**, como `reprogramar` y `cancelar`. Sin eso, el paciente
+  que solo pregunta cuándo es su cita recibe «te escribe el doctor».
+
+Filtra por teléfono y no por `paciente_id` —el criterio más estrecho de los dos— y corta el
+pasado con `ctx.ahora`: una cita de ayer no se puede mover, y ofrecerla solo sirve para que
+el modelo proponga algo imposible.
+
 # Convenciones del paquete
 
 - `SolicitudCita` **no tiene campo de teléfono**: la tool lo lee del contexto local.
