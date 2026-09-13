@@ -20,6 +20,11 @@ llegue a la cita correcta.
 - Desplegar en el VPS: `bash scripts/desplegar.sh`
 - Usuarios del panel: `uv run python scripts/crear_usuario.py` (`--listar`, `--quitar-acceso`)
 - Revisar el grupo de Telegram: `uv run python scripts/obtener_chat_telegram.py`
+- Resetear un número a primer contacto: que ese número le escriba `/clearstate` a Daniela
+  por WhatsApp. Solo funciona si está en `MAXICARE_TELEFONOS_PRUEBA`; **con esa variable
+  vacía —su default— el comando no existe para nadie**. Borra paciente, conversaciones,
+  mensajes, citas (y sus eventos de Calendar) y el tema de Telegram, en `public` y en
+  `pruebas_web`. Es irreversible. Ver `.claude/rules/atencion-whatsapp.md`.
 
 Entregables por fase. **Los marcados gastan tokens**; los demás, ni uno:
 

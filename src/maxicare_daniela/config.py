@@ -101,6 +101,16 @@ def _requerida(nombre: str) -> str:
     return valor
 
 
+def _lista(nombre: str) -> tuple[str, ...]:
+    """Una variable con varios valores separados por coma, o una tupla vacía.
+
+    Vacía tiene significado propio aquí y no es lo mismo que «sin configurar»: es la que
+    deja `/clearstate` sin existir. Ver `telefonos_prueba`.
+    """
+    crudo = os.environ.get(nombre, "").strip()
+    return tuple(parte.strip() for parte in crudo.split(",") if parte.strip())
+
+
 def _opcional(nombre: str, default: str = "") -> str:
     """El valor de la variable, o el default si no está **o está vacía**.
 
@@ -199,6 +209,17 @@ class Config:
     #: los doctores sin recibir radiografías -- que es lo que pasaría apagando el servicio.
     daniela_responde: bool
 
+    #: Los números que pueden resetearse a sí mismos con `/clearstate` (ver `reseteo.py`).
+    #:
+    #: **Vacía por defecto, y eso es la política, no un descuido**: con la tupla vacía el
+    #: comando no existe para nadie y el texto `/clearstate` llega a Daniela como cualquier
+    #: otro mensaje. Desplegar esto en producción no abre ninguna puerta; hay que listar un
+    #: número a propósito para que la puerta exista, y solo para ese número.
+    #:
+    #: Se compara por dígitos, así que da igual cómo se escriba: `+57 300 123 4567` y
+    #: `573001234567` son el mismo número.
+    telefonos_prueba: tuple[str, ...] = ()
+
     @classmethod
     def desde_entorno(cls) -> Config:
         return cls(
@@ -227,6 +248,7 @@ class Config:
             # de otra forma la apagaría sin que nadie lo hubiera pedido, y el fallo sería
             # silencioso: pacientes escribiendo y nadie contestando.
             daniela_responde=_opcional("MAXICARE_DANIELA_RESPONDE", "1") != "0",
+            telefonos_prueba=_lista("MAXICARE_TELEFONOS_PRUEBA"),
         )
 
 

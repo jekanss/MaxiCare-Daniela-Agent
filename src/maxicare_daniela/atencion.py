@@ -70,7 +70,9 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 
-from . import conversacion, guardrails, ingesta, persistencia
+from . import conversacion, guardrails, ingesta
+from . import lectura as lectura_mod
+from . import persistencia
 from .calendario import CalendarioCaido, CalendarioDoble, calendario_desde_config
 from .canales import Telegram, WhatsApp
 from .config import (
@@ -408,6 +410,39 @@ def _candado_de(telefono: str, ahora: float) -> asyncio.Lock:
     candado = guardado[0] if guardado else asyncio.Lock()
     _candados[telefono] = (candado, ahora)
     return candado
+
+
+def candado_de(telefono: str) -> asyncio.Lock:
+    """El candado del turno de ese número, para quien necesite serializarse con él.
+
+    Existe para `reseteo.resetear`, que borra la conversación de un teléfono y no puede
+    hacerlo mientras un turno de ese mismo teléfono está en vuelo: el turno tiene una fila de
+    `conversaciones` leída en la mano y escribiría sobre algo que ya no existe. Es el mismo
+    candado que coge `atender`, no uno paralelo -- dos candados distintos para el mismo
+    recurso no serializan nada.
+    """
+    return _candado_de(telefono, time.monotonic())
+
+
+def olvidar(telefono: str) -> None:
+    """Saca de la memoria del proceso todo lo de este número. Parte de `/clearstate`.
+
+    Lo que borra de verdad es el búfer: uno que sobreviviera al reseteo metería en el turno
+    siguiente --el primero de la conversación «nueva»-- los mensajes de la anterior, y la
+    prueba de que Daniela no recuerda nada fallaría por el único sitio que no es la base.
+
+    Las sesiones NO hace falta borrarlas y por eso no se tocan: `_sesiones` se indexa por
+    `id_conversacion`, y como la conversación se borró, la siguiente nace con un id nuevo y
+    una sesión vacía. La vieja queda inalcanzable y se poda sola a las 24 h.
+
+    Se llama con el candado del teléfono cogido; el candado en sí se deja donde está, porque
+    quien llama lo tiene tomado en ese momento.
+    """
+    _buferes.pop(telefono, None)
+    # El candado de tema del lector, que también se indexa por teléfono. Si se quedara,
+    # seguiría serializando a un paciente que ya no existe -- inofensivo, pero sería memoria
+    # colgando de un número que el sistema dice no conocer.
+    lectura_mod._candados_de_tema.pop(telefono, None)
 
 
 def _sesion_de(id_conversacion: str, ahora: float) -> conversacion.SesionEnMemoria:

@@ -271,3 +271,36 @@ class Telegram:
         datos = r.json()
         if not datos.get("ok"):
             raise ErrorDeCanal(f"Telegram no cerró el tema: {datos.get('description')}")
+
+    async def borrar_tema(self, tema_id: int) -> None:
+        """Borra un tema del supergrupo, con todos los mensajes que tenga dentro.
+
+        Lo usa `/clearstate` y nada más. Es irreversible y se lleva por delante los archivos
+        y las lecturas clínicas que se depositaron ahí, que es exactamente lo que se le pide:
+        un número reseteado no puede conservar el hilo de la persona que era antes.
+
+        Necesita que el bot sea administrador **con `can_delete_messages`**. Hoy
+        `scripts/obtener_chat_telegram.py` solo comprueba `can_manage_topics`, así que este
+        permiso puede faltar sin que nada lo haya avisado: el fallo se informa y el resto del
+        borrado continúa -- quedarse sin borrar el tema no puede impedir borrar la base.
+        """
+        cuerpo = {"chat_id": self._chat_id, "message_thread_id": tema_id}
+        async with httpx.AsyncClient(timeout=TIMEOUT_NORMAL) as cliente:
+            r = await cliente.post(self._url("deleteForumTopic"), json=cuerpo)
+        datos = r.json()
+        if not datos.get("ok"):
+            raise ErrorDeCanal(f"Telegram no borró el tema: {datos.get('description')}")
+
+    async def borrar_mensaje(self, mensaje_id: int) -> None:
+        """Borra un mensaje suelto del grupo. Para los que quedaron en el General.
+
+        Los que están dentro del tema de un paciente no hace falta borrarlos uno a uno:
+        `borrar_tema` se los lleva. Estos son los otros -- el aviso de «llegó un archivo de
+        X» y los escalamientos--, que van al General y llevan nombre y teléfono en el texto.
+        """
+        cuerpo = {"chat_id": self._chat_id, "message_id": mensaje_id}
+        async with httpx.AsyncClient(timeout=TIMEOUT_NORMAL) as cliente:
+            r = await cliente.post(self._url("deleteMessage"), json=cuerpo)
+        datos = r.json()
+        if not datos.get("ok"):
+            raise ErrorDeCanal(f"Telegram no borró el mensaje: {datos.get('description')}")
