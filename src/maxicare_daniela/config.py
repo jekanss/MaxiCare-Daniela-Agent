@@ -161,6 +161,19 @@ class Config:
     #: nadie la toca, la cookie solo viaja por HTTPS.
     permitir_cookie_insegura: bool
 
+    #: ¿Daniela contesta por WhatsApp? Activo por defecto, que es lo que pidió el cliente:
+    #: la clínica no despliega nada para que su asistente conteste.
+    #:
+    #: El interruptor existe para lo contrario -- poder callarla en diez segundos sin
+    #: desplegar código. Con `MAXICARE_DANIELA_RESPONDE=0` el webhook sigue haciendo
+    #: exactamente lo que lleva meses haciendo: registra el mensaje y le reenvía el archivo a
+    #: los doctores por Telegram. Lo único que se apaga es la respuesta al paciente.
+    #:
+    #: Es el freno de mano de esta fase. Un prompt que se porte mal un lunes por la mañana se
+    #: corta con una variable de entorno y un reinicio, sin tocar el repositorio y sin dejar a
+    #: los doctores sin recibir radiografías -- que es lo que pasaría apagando el servicio.
+    daniela_responde: bool
+
     @classmethod
     def desde_entorno(cls) -> Config:
         return cls(
@@ -184,6 +197,11 @@ class Config:
             # una variable que solo le importa a `runtime.py`.
             secreto_sesion=_opcional("MAXICARE_SECRETO_SESION"),
             permitir_cookie_insegura=_opcional("MAXICARE_COOKIE_INSEGURA", "0") == "1",
+            # `!= "0"` y no `== "1"`: el default es responder, así que cualquier cosa que no
+            # sea un 0 explícito la deja encendida. Al revés, un `.env` con la clave escrita
+            # de otra forma la apagaría sin que nadie lo hubiera pedido, y el fallo sería
+            # silencioso: pacientes escribiendo y nadie contestando.
+            daniela_responde=_opcional("MAXICARE_DANIELA_RESPONDE", "1") != "0",
         )
 
 
