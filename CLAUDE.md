@@ -29,12 +29,17 @@ Entregables por fase. **Los marcados gastan tokens**; los demás, ni uno:
 | `scripts/probar_agentes.py` | los dos agentes contra la API real (fase 4) | **sí** |
 | `scripts/probar_web.py` | el cascarón web (fase 5) | solo con `--chat` |
 | `scripts/probar_atencion.py` | el turno de WhatsApp de punta a punta (fase 6A) | solo con `--chat` |
+| `scripts/probar_lectura.py` | el muro y el tema del paciente (fase 6B) | solo con `--chat` |
 | `scripts/probar_panel.py` | el panel de tratamientos (fase 8) | solo con `--chat` |
 | `scripts/probar_calendario.py` | `CalendarioGoogle` contra el calendario real | no |
 | `scripts/probar_webhook.py <url>` | el webhook en producción | **sí** (despierta a Daniela) |
 
 - `probar_atencion.py` escribe en `pruebas_atencion` —lo crea y lo borra comprobando el
   borrado— y su WhatsApp es falso: no le llega nada a ningún paciente.
+- `probar_lectura.py` escribe en `pruebas_lectura` —mismo patrón de creación y borrado
+  comprobado—; su Telegram y su WhatsApp son falsos, y el lector va doblado salvo con
+  `--chat`, donde además corre una vez de verdad sobre un PDF generado en el momento (no
+  versionado) y el evaluador clínico corre sobre dos frases fijas.
 - `probar_panel.py` MITAD A cambia un precio por HTTP contra `public`, la base real de la
   clínica, y **lo restaura en un `finally` comprobando la restauración con una aserción**.
 - `probar_calendario.py --diagnosticar` **solo lee**: es lo primero que hay que correr

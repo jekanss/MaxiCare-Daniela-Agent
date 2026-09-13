@@ -93,6 +93,40 @@ número y espera `VENTANA_SILENCIO_SEGUNDOS` (20) sin mensajes nuevos, con tope 
   como antes, y lo único que se apaga es la respuesta al paciente. Existe para poder callarla
   en diez segundos sin desplegar código.
 
+## El muro
+
+La fase 6B le añadió un archivo al turno de WhatsApp: cuando llega una radiografía o una
+remisión, un lector automático la lee y el contenido clínico va SOLO a los doctores por
+Telegram, mientras Daniela recibe únicamente lo no clínico. Tres cosas de ese camino no se
+pueden mover.
+
+- **El reparto es un TIPO sin el campo, no una instrucción que alguien podría desobedecer.**
+  `lectura.repartir` parte lo que devolvió el lector en dos: `contexto_clinico` (texto libre,
+  destino Telegram) y `LecturaNoClinica` (`tipo_documento`, `tratamiento`, `origen`,
+  `fecha_documento`, `confianza` — sin `contexto_clinico`). Esa ausencia no es que el código
+  se acuerde de no copiarlo: es que la clase no tiene dónde ponerlo, y lleva
+  `extra="forbid"` para que ni un `**lectura.model_dump()` a medio pensar lo cuele como
+  atributo extra. `atencion._entrada_para_el_modelo` solo puede leer de `LecturaNoClinica`
+  porque es literalmente lo único que le llega: `leer_y_repartir` nunca devuelve la lectura
+  entera, sea cual sea el prompt del lector ese día.
+
+- **El archivo nunca espera al modelo.** `ingesta.procesar_mensaje` entrega el archivo al
+  tema del paciente y avisa al General ANTES de arrancar el lector — el `asyncio.create_task`
+  del lector es lo último que pasa en esa función, no lo primero. Es la misma garantía de la
+  fase 2 (nada de lo que se escriba puede retrasar la entrega al doctor) y sigue vigente: si
+  el lector se cayera, se colgara o tardara un minuto, el doctor ya tiene el archivo en su
+  tema desde antes de que la tarea existiera.
+
+- **El lector corre en PARALELO con la ventana del búfer, nunca delante.** La tarea nace en
+  `procesar_mensaje` y viaja como `Resultado.lectura`; `atencion.atender` no la espera al
+  recibirla, la guarda en `bufer.lecturas[wamid]` y solo la recoge (`_recoger_lecturas`,
+  `asyncio.shield` con un margen corto) DESPUÉS de que la ventana de silencio cierra.
+  Encadenarla delante sumaría los 4-8 s que tarda el lector a los 20 s de la ventana, y
+  contra `limites.latencia_maxima` (un minuto) no cabe: medido el 12/09, un documento recibido
+  a las 19:03:28 se entregó después de un texto recibido a las 19:03:29 — si el lector hubiera
+  ido delante, Daniela habría contestado el texto sin saber todavía que había una foto. Lo que
+  no llegue a tiempo se descarta con un `log.info`, nunca con una excepción que tumbe el turno.
+
 ## Lo que la suite offline NO caza
 
 **`uv run pytest -q` a secas no caza una regresión en el SQL de `tocar_conversacion`.** Está
