@@ -210,7 +210,6 @@ def _construir_el_calendario() -> None:
     global _calendario
     try:
         _calendario = calendario_desde_config(config)
-        log.info("calendario listo · %s", type(_calendario).__name__)
     except Exception as e:  # noqa: BLE001 -- ver docstring
         _calendario = CalendarioCaido(motivo=str(e))
         log.error(
@@ -220,6 +219,37 @@ def _construir_el_calendario() -> None:
             "compartido con la cuenta de servicio.",
             e,
         )
+        return
+
+    # La OTRA mitad de la puerta, y es la que de verdad podía pasar.
+    #
+    # `calendario_desde_config` NO LANZA cuando faltan las credenciales: devuelve un
+    # `CalendarioDoble()` y lo deja en un `warning`. Eso está bien en una máquina de
+    # desarrollo y es letal aquí, porque en este proyecto **una variable presente y vacía no
+    # es una variable ausente**: el `.env` trae casi todas las claves escritas y sin valor,
+    # así que un `MAXICARE_GOOGLE_SA_B64=` en el VPS --un despliegue a medias, un copiado
+    # incompleto-- no da error de arranque: da un doble en producción.
+    #
+    # Con ese doble, `crear_cita` toma el cupo en Neon, «crea» el evento en un diccionario en
+    # memoria, `registrar_cita` guarda un `evento_calendar_id` que no existe en ningún
+    # calendario, y Daniela le confirma la cita al paciente. **El paciente llega a una
+    # clínica donde nadie lo espera**, y el único rastro es un INFO diciendo que el
+    # calendario está listo. Por eso aquí el doble se degrada a caído: lanzar es seguro,
+    # fingir no lo es.
+    if isinstance(_calendario, CalendarioDoble):
+        _calendario = CalendarioCaido(
+            motivo="faltan MAXICARE_GOOGLE_SA_B64 o MAXICARE_GOOGLE_CALENDAR_ID"
+        )
+        log.error(
+            "EL CALENDARIO NO ESTÁ CONFIGURADO (falta MAXICARE_GOOGLE_SA_B64 o "
+            "MAXICARE_GOOGLE_CALENDAR_ID, o están presentes y VACÍAS). Daniela puede "
+            "conversar, cotizar y responder, pero NO va a poder agendar: cada intento "
+            "escala a los doctores. Se usa un calendario CAÍDO y nunca uno de mentira, "
+            "porque el de mentira le confirmaría al paciente una cita que no existe."
+        )
+        return
+
+    log.info("calendario listo · %s", type(_calendario).__name__)
 
 
 # ==========================================================================================
@@ -320,19 +350,32 @@ def _escapar(texto: str) -> str:
 def _registrar_escalamiento(
     ctx: ContextoDaniela, motivo: str, resumen: str, pregunta: str
 ) -> int | None:
-    """Sincrónico a propósito: `persistencia` es psycopg. Siempre dentro de `to_thread`."""
+    """El id del escalamiento que hay que avisar, o `None` si el doctor YA fue avisado.
+
+    Sincrónico a propósito: `persistencia` es psycopg. Siempre dentro de `to_thread`.
+
+    Las dos consultas van en la misma conexión, y la segunda es la que convierte la
+    deduplicación en algo honesto: `insertar_escalamiento` devuelve `None` tanto si el aviso
+    salió como si solo se intentó. Cuando la fila existe pero se quedó sin
+    `telegram_message_id`, no hay nada que duplicar --hay un aviso que falta-- y se devuelve
+    su id para mandarlo ahora. **Un aviso que no salió no es un aviso duplicado.**
+    """
+    # La clave la arma el orquestador, nunca el modelo. Y es LA MISMA que construye
+    # `herramientas._escalar_a_doctores`, que es lo único que hace que este aviso y el de la
+    # tool se reconozcan como el mismo escalamiento.
+    clave = ctx.clave("escalamiento", ctx.turno_actual)
     with persistencia.conectar(ctx.database_url) as conn:
-        return persistencia.insertar_escalamiento(
+        nuevo = persistencia.insertar_escalamiento(
             conn,
             id_conversacion=ctx.id_conversacion,
             motivo=motivo,
             resumen=resumen,
             pregunta=pregunta,
-            # La clave la arma el orquestador, nunca el modelo. Y es LA MISMA que construye
-            # `herramientas._escalar_a_doctores`, que es lo único que hace que este aviso y
-            # el de la tool se reconozcan como el mismo escalamiento.
-            clave_idempotencia=ctx.clave("escalamiento", ctx.turno_actual),
+            clave_idempotencia=clave,
         )
+        if nuevo is not None:
+            return nuevo
+        return persistencia.escalamiento_pendiente_de_aviso(conn, clave)
 
 
 def _anotar_telegram(ctx: ContextoDaniela, escalamiento_id: int, message_id: int) -> None:
@@ -360,13 +403,28 @@ async def _avisar_a_doctores(
     relevo. Repetirlo no es ruido inocente: a la cuarta alerta repetida el doctor deja de
     mirarlas, y ahí es donde muere un sistema de escalamiento.
 
-    La defensa es la clave de idempotencia, no un `if`. `insertar_escalamiento` devuelve
-    `None` cuando esa clave ya existe, y ese `None` es la respuesta: ese turno ya escaló, no
-    se manda nada. Funciona porque las dos rutas --la tool y esta-- arman exactamente la
-    misma clave, `ctx.clave("escalamiento", ctx.turno_actual)`, y porque `turno_actual` se
-    persiste en Neon (`persistencia.tocar_conversacion`): con el turno congelado en 0 todos
-    los mensajes de una conversación compartirían clave y el doctor se enteraría del primer
-    escalamiento y de ninguno más.
+    La defensa es la clave de idempotencia, no un `if`. Funciona porque las dos rutas --la
+    tool y esta-- arman exactamente la misma clave, `ctx.clave("escalamiento",
+    ctx.turno_actual)`, y porque `turno_actual` se persiste en Neon
+    (`persistencia.tocar_conversacion`): con el turno congelado en 0 todos los mensajes de
+    una conversación compartirían clave y el doctor se enteraría del primer escalamiento y
+    de ninguno más.
+
+    -------------------------------------------------------------------------------------
+    Y lo que TAMPOCO puede hacer: callarse porque alguien lo intentó y falló
+    -------------------------------------------------------------------------------------
+
+    La primera versión de esto se callaba en cuanto la clave existía, y eso quemaba la clave
+    al INTENTAR en vez de al CONSEGUIR. Basta un paciente llamado «Ana <3 Gómez» para verlo:
+    la tool escribe su fila, Telegram rechaza el HTML mal cerrado, `failure_error_function`
+    se traga el `ErrorDeCanal` para que el modelo siga conversando, y al cerrar el turno esto
+    encontraba la clave quemada y no decía nada. Dos filas de escalamiento en Neon y CERO
+    Telegram: un paciente con dolor «escalado» en una tabla que nadie mira.
+
+    Por eso `_registrar_escalamiento` distingue los dos casos con
+    `persistencia.escalamiento_pendiente_de_aviso`: si la fila existe pero se quedó sin
+    `telegram_message_id`, el aviso se manda ahora. Un aviso que no salió no es un aviso
+    duplicado.
 
     No propaga. `conversacion.responder` ya se traga lo que salga de aquí para que un fallo
     avisando al doctor no deje al paciente sin respuesta, pero un error tragado en silencio
@@ -374,11 +432,12 @@ async def _avisar_a_doctores(
     """
     try:
         nombre = ctx.nombre_paciente or "paciente sin identificar"
-        # Esta fila solo llega a existir cuando la clave es nueva, es decir, cuando la tool
-        # NO escaló este turno: el resumen puede afirmarlo sin más matices.
+        # Sin afirmar que el modelo no llamó a la tool: puede haberla llamado y haber fallado
+        # antes de escribir su fila, y entonces esta sería la primera. Lo único que se sabe
+        # con certeza es que el turno cerró escalado y qué se le dijo al paciente.
         resumen = (
-            "El turno escaló sin que el modelo llamara a la tool, así que no hay resumen "
-            f"suyo. Esto fue lo que se le respondió al paciente: {mensaje_al_paciente}"
+            f"El turno cerró escalado (motivo: {motivo}). Esto fue lo que se le respondió "
+            f"al paciente: {mensaje_al_paciente}"
         )
         pregunta = "¿Alguien puede revisar esta conversación y retomarla si hace falta?"
 
@@ -387,7 +446,7 @@ async def _avisar_a_doctores(
         )
         if escalamiento_id is None:
             log.info(
-                "el turno %s de %s ya estaba escalado; no se repite el aviso",
+                "el turno %s de %s ya estaba escalado Y avisado; no se repite el aviso",
                 ctx.turno_actual,
                 ctx.id_conversacion,
             )
@@ -405,7 +464,14 @@ async def _avisar_a_doctores(
         )
         # SIEMPRE al General: es donde los doctores pueden hablar de un caso sin que el
         # paciente lea una palabra.
-        message_id = await _telegram.enviar_mensaje(texto, tema_id=ctx.tema_general or _tema_general)
+        #
+        # `ctx.tema_general` a secas, igual que hace la tool, y NUNCA
+        # `ctx.tema_general or _tema_general`: en el General ese valor es `0`, el `or` lo
+        # cambiaría por el `_tema_general` del proceso --normalmente `1`-- y Telegram
+        # respondería `Bad Request: message thread not found`. El aviso no llegaría. Que `0`
+        # signifique «el General» es justo lo que `canales.enviar_mensaje` resuelve con su
+        # `if tema_id:`.
+        message_id = await _telegram.enviar_mensaje(texto, tema_id=ctx.tema_general)
 
         await asyncio.to_thread(_anotar_telegram, ctx, escalamiento_id, message_id)
     except Exception:  # noqa: BLE001 -- ver docstring

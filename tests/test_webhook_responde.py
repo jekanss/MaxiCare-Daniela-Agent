@@ -217,6 +217,57 @@ def test_el_orden_es_primero_el_doctor_y_luego_daniela(cliente, espias):
     assert espias.orden == ["doctor", "daniela"]
 
 
+def test_si_la_entrega_al_doctor_revienta_Daniela_contesta_igual(cliente, espias, monkeypatch):
+    """La garantía espejo, y no es simétrica por gusto.
+
+    `procesar_mensaje` NO atrapa todo: los fallos de Neon de su `_registrar` salen crudos.
+    Con las dos llamadas en el mismo `try`, un parpadeo de la base al registrar el mensaje
+    dejaría al paciente sin respuesta --sin que nada lo avisara, porque el webhook seguiría
+    devolviendo 200--. Que cada una tenga el suyo es lo que hace que el fallo de una no se
+    lleve a la otra en NINGUNA de las dos direcciones.
+    """
+
+    async def procesar_revienta(m, **_kwargs):
+        espias.orden.append("doctor")
+        raise RuntimeError("Neon no responde al registrar el mensaje")
+
+    # Pisa al espía del fixture, con `monkeypatch` para que se deshaga solo: una prueba no
+    # le cambia el entorno a las demás.
+    monkeypatch.setattr(ingesta, "procesar_mensaje", procesar_revienta)
+
+    r = _enviar(cliente, _mensaje_de_texto("wamid.neon.caido"))
+
+    assert r.status_code == 200
+    assert [m.wamid for m in espias.atendidos] == ["wamid.neon.caido"], (
+        "un fallo registrando el mensaje dejó al paciente sin respuesta"
+    )
+    assert espias.orden == ["doctor", "daniela"]
+
+
+def test_a_daniela_se_le_pasa_el_calendario_construido_al_arrancar(cliente, espias, monkeypatch):
+    """Sin el argumento `calendario=`, `atender` cae a construir uno POR MENSAJE.
+
+    `CalendarioGoogle.__init__` hace una lectura real contra Google --es su comprobación de
+    acceso--, así que eso es una llamada a Google por cada WhatsApp que entre. No se vería
+    como un fallo: se vería como latencia y como una factura rara.
+    """
+    recibidos: list[object] = []
+
+    async def atender_falso(m, **kwargs):
+        recibidos.append(kwargs.get("calendario", "NO VINO"))
+        return atencion.Atendido(wamid=m.wamid, id_conversacion="conv-1", respondido=True)
+
+    monkeypatch.setattr(atencion, "atender", atender_falso)
+    centinela = object()
+    monkeypatch.setattr(runtime, "_calendario", centinela)
+
+    _enviar(cliente, _mensaje_de_texto("wamid.calendario"))
+
+    assert recibidos == [centinela], (
+        "atender no recibió el calendario del arranque: lo construiría por mensaje"
+    )
+
+
 def test_un_webhook_sin_mensajes_no_llama_a_daniela(cliente, espias):
     """Meta manda un webhook por cada cambio de estado de lo que NOSOTROS enviamos: enviado,
     entregado, leído. Llegan constantemente, y cada uno que llegara a Daniela sería una
@@ -296,6 +347,51 @@ def test_un_calendario_que_no_arranca_queda_CAIDO_y_jamas_un_doble(monkeypatch):
     assert not isinstance(runtime._calendario, CalendarioDoble)
     with pytest.raises(ErrorDeCalendario):
         runtime._calendario.bloqueos(datetime.now(), datetime.now())
+
+
+def test_con_las_credenciales_de_google_VACIAS_tampoco_queda_un_doble(monkeypatch):
+    """La otra mitad de la puerta, y la que de verdad iba a pasar en producción.
+
+    `calendario_desde_config` NO LANZA cuando faltan las credenciales: devuelve un
+    `CalendarioDoble()` y lo deja en un `warning`. La prueba de arriba solo cubría la rama
+    que lanza, así que este camino --el realista-- estaba abierto con su nombre puesto.
+
+    Y es realista porque en este proyecto **una variable presente y vacía no es una variable
+    ausente**: el `.env` trae casi todas las claves escritas y sin valor. Un
+    `MAXICARE_GOOGLE_SA_B64=` en el VPS no da error de arranque; daría un doble en
+    producción, y con él `crear_cita` toma el cupo, «crea» el evento en un diccionario,
+    guarda un `evento_calendar_id` que no existe en ningún calendario y Daniela confirma la
+    cita. El paciente llega a una clínica donde nadie lo espera, y el único rastro es un INFO
+    diciendo que el calendario está listo.
+
+    Aquí NO se sustituye `calendario_desde_config`: se la deja correr de verdad con las
+    credenciales vacías, que es justo lo que la prueba tiene que ejercitar.
+    """
+    monkeypatch.setattr(
+        runtime, "config", replace(runtime.config, google_sa_b64="", google_calendar_id="")
+    )
+    monkeypatch.setattr(runtime, "_calendario", "sin tocar")
+
+    runtime._construir_el_calendario()
+
+    assert not isinstance(runtime._calendario, CalendarioDoble), (
+        "arrancó con un calendario de mentira: confirmaría citas que no existen"
+    )
+    assert isinstance(runtime._calendario, CalendarioCaido)
+    with pytest.raises(ErrorDeCalendario):
+        runtime._calendario.crear_evento(inicio=datetime.now(), duracion_minutos=60, titulo="x")
+
+
+def test_atencion_tampoco_cae_a_un_doble_con_las_credenciales_vacias():
+    """El mismo hueco vivía en `atencion._calendario_por_defecto`, que es por donde entra el
+    calendario cuando `runtime` no le pasa ninguno. Cerrar solo uno de los dos dejaba la
+    puerta abierta por el otro lado."""
+    config_vacia = replace(runtime.config, google_sa_b64="", google_calendar_id="")
+
+    calendario = atencion._calendario_por_defecto(config_vacia)
+
+    assert not isinstance(calendario, CalendarioDoble)
+    assert isinstance(calendario, CalendarioCaido)
 
 
 # ==========================================================================================
@@ -380,6 +476,41 @@ def test_el_aviso_del_orquestador_usa_la_clave_del_turno_y_no_una_inventada(
     assert base_falsa[0]["clave_idempotencia"] == "conv-441:escalamiento:3"
 
 
+def test_el_aviso_al_doctor_escapa_de_verdad_lo_que_escribio_el_modelo(monkeypatch, base_falsa):
+    """`_escapar` tenía que hacer algo, no solo existir: devolver el texto tal cual dejaba
+    toda la suite en verde. Telegram rechaza el mensaje entero si el HTML no cierra, y un
+    aviso rechazado es un doctor que no se entera."""
+    ctx = _contexto(nombre_paciente="Ana <3 Gómez")
+    telegram = TelegramFalso()
+    monkeypatch.setattr(runtime, "_telegram", telegram)
+
+    asyncio.run(
+        runtime._avisar_a_doctores(ctx, "clinico", "Te paso con el doctor <ya mismo>.")
+    )
+
+    texto = telegram.enviados[0]["texto"]
+    assert "&lt;3" in texto
+    assert "&lt;ya mismo&gt;" in texto
+    assert "<3" not in texto
+    assert "<ya mismo>" not in texto
+    # Y sin romper el formato propio.
+    assert texto.startswith("<b>Escalamiento")
+
+
+def test_el_aviso_va_al_General_y_el_cero_no_se_convierte_en_el_tema_1(monkeypatch, base_falsa):
+    """`0` significa «el General». Un `or` lo cambiaba por el tema del proceso --que suele
+    ser `1`-- y Telegram contesta `Bad Request: message thread not found`: el aviso no
+    llega. `canales.enviar_mensaje` ya resuelve el `0` con su `if tema_id:`."""
+    ctx = _contexto(tema_general=0)
+    telegram = TelegramFalso()
+    monkeypatch.setattr(runtime, "_telegram", telegram)
+    monkeypatch.setattr(runtime, "_tema_general", 1)
+
+    asyncio.run(runtime._avisar_a_doctores(ctx, "clinico", "Ya te confirmo."))
+
+    assert telegram.enviados[0]["tema_id"] == 0
+
+
 def test_un_turno_que_ya_escalo_no_manda_un_segundo_telegram(monkeypatch):
     """`insertar_escalamiento` devuelve `None` cuando esa clave ya existe, y ese `None` es
     toda la defensa: significa que la tool `escalar_a_doctores` ya avisó en este mismo turno.
@@ -393,6 +524,60 @@ def test_un_turno_que_ya_escalo_no_manda_un_segundo_telegram(monkeypatch):
     asyncio.run(runtime._avisar_a_doctores(ctx, "clinico", "Ya te confirmo."))
 
     assert telegram.enviados == [], "se le avisó dos veces al doctor del mismo turno"
+
+
+def test_un_escalamiento_escrito_pero_NUNCA_avisado_se_reintenta(monkeypatch):
+    """La clave se quema al CONSEGUIR, no al INTENTAR.
+
+    El caso real: la tool escribe su fila y el Telegram no sale --Telegram rechazó el HTML
+    porque el paciente se llama «Ana <3 Gómez», o devolvió un 5xx, o hubo límite de tasa--.
+    `failure_error_function` se traga el `ErrorDeCanal` para que el modelo siga conversando, y
+    al cerrar el turno este aviso encontraba la clave ya escrita y se callaba. Resultado
+    medido antes del arreglo: dos filas de escalamiento en Neon y CERO Telegram al doctor.
+
+    Un aviso que no salió no es un aviso duplicado. Lo que distingue los dos casos es
+    `telegram_message_id`, que hasta ahora nadie consultaba.
+    """
+    ctx = _contexto()
+    telegram = TelegramFalso()
+    anotados: list[tuple[int, int]] = []
+
+    monkeypatch.setattr(runtime, "_telegram", telegram)
+    monkeypatch.setattr(persistencia, "conectar", lambda url: ConexionFalsa())
+    # La clave ya existe: `insertar_escalamiento` no escribe nada.
+    monkeypatch.setattr(persistencia, "insertar_escalamiento", lambda _conn, **kw: None)
+    # ...pero esa fila se quedó sin Telegram.
+    monkeypatch.setattr(
+        persistencia, "escalamiento_pendiente_de_aviso", lambda _conn, clave: 31
+    )
+    monkeypatch.setattr(
+        persistencia,
+        "anotar_telegram_en_escalamiento",
+        lambda conn, eid, mid: anotados.append((eid, mid)),
+    )
+
+    asyncio.run(runtime._avisar_a_doctores(ctx, "clinico", "Ya te confirmo."))
+
+    assert len(telegram.enviados) == 1, "el doctor se quedó sin enterarse del escalamiento"
+    assert anotados == [(31, 4242)], "el reintento no quedó anotado; se repetiría para siempre"
+
+
+def test_un_escalamiento_YA_avisado_no_se_reintenta(monkeypatch):
+    """La otra mitad, y hace falta: si `escalamiento_pendiente_de_aviso` devolviera un id
+    para una fila que sí se avisó, el arreglo de arriba habría cambiado un aviso perdido por
+    un aviso repetido, que es la otra forma de que el doctor deje de mirarlos."""
+    ctx = _contexto()
+    telegram = TelegramFalso()
+    monkeypatch.setattr(runtime, "_telegram", telegram)
+    monkeypatch.setattr(persistencia, "conectar", lambda url: ConexionFalsa())
+    monkeypatch.setattr(persistencia, "insertar_escalamiento", lambda _conn, **kw: None)
+    monkeypatch.setattr(
+        persistencia, "escalamiento_pendiente_de_aviso", lambda _conn, clave: None
+    )
+
+    asyncio.run(runtime._avisar_a_doctores(ctx, "clinico", "Ya te confirmo."))
+
+    assert telegram.enviados == []
 
 
 def test_la_tool_y_el_orquestador_arman_exactamente_la_misma_clave(monkeypatch, base_falsa):

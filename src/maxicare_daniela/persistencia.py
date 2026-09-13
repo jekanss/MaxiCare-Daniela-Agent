@@ -762,8 +762,42 @@ def insertar_escalamiento(
     return fila[0] if fila else None
 
 
+def escalamiento_pendiente_de_aviso(conn, clave_idempotencia: str) -> int | None:
+    """El id del escalamiento con esa clave si se escribió pero NUNCA se avisó; si no, `None`.
+
+    ------------------------------------------------------------------------------------
+    La diferencia entre «ya se avisó» y «se intentó avisar»
+    ------------------------------------------------------------------------------------
+
+    `insertar_escalamiento` devuelve `None` en los dos casos, porque lo único que mira es si
+    la clave ya existe. Y no son lo mismo:
+
+    - La fila existe **y tiene `telegram_message_id`**: el doctor ya recibió su alerta.
+      Volver a mandarla es el ruido que hace que a la cuarta deje de mirarlas.
+    - La fila existe **y `telegram_message_id` es `NULL`**: alguien llegó a escribir la fila y
+      el Telegram no salió --un 5xx, un límite de tasa, un HTML que Telegram rechazó--. Ahí
+      no hay ningún aviso que duplicar: hay un aviso que falta.
+
+    Sin esta consulta, la clave se quemaba al INTENTAR y no al CONSEGUIR: cualquier fallo de
+    Telegram dejaba la fila escrita, el doctor sin enterarse, y ningún reintento posible.
+    Un paciente con dolor quedaba «escalado» en una tabla que nadie mira.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT id FROM escalamientos "
+            "WHERE clave_idempotencia = %s AND telegram_message_id IS NULL",
+            (clave_idempotencia,),
+        )
+        fila = cur.fetchone()
+    return fila[0] if fila else None
+
+
 def anotar_telegram_en_escalamiento(conn, escalamiento_id: int, message_id: int) -> None:
-    """Guarda el mensaje de Telegram para poder editarle el botón cuando alguien lo toque."""
+    """Guarda el mensaje de Telegram para poder editarle el botón cuando alguien lo toque.
+
+    Y, desde la 6A, algo más: es lo que distingue un escalamiento avisado de uno que se
+    quedó a medias. Ver `escalamiento_pendiente_de_aviso`.
+    """
     with conn.cursor() as cur:
         cur.execute(
             "UPDATE escalamientos SET telegram_message_id = %s WHERE id = %s",

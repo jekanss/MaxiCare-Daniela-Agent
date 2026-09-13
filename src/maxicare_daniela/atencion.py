@@ -69,7 +69,7 @@ from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 
 from . import conversacion, guardrails, ingesta, persistencia
-from .calendario import CalendarioCaido, calendario_desde_config
+from .calendario import CalendarioCaido, CalendarioDoble, calendario_desde_config
 from .canales import Telegram, WhatsApp
 from .config import RETARDO_RESPUESTA_SEGUNDOS, Config
 from .contratos import ContextoDaniela, DatosDelTurno
@@ -325,7 +325,7 @@ def _calendario_por_defecto(config: Config) -> Any:
     todos los pacientes por una dependencia que falta.
     """
     try:
-        return calendario_desde_config(config)
+        calendario = calendario_desde_config(config)
     except Exception as e:  # noqa: BLE001 -- ver docstring
         log.error(
             "EL CALENDARIO NO ARRANCÓ (%s): Daniela puede conversar, pero NO puede agendar, "
@@ -335,6 +335,31 @@ def _calendario_por_defecto(config: Config) -> Any:
             e,
         )
         return CalendarioCaido(motivo=str(e))
+
+    # El camino que NO lanza, y es el que de verdad ocurre: `calendario_desde_config`
+    # devuelve un `CalendarioDoble()` cuando faltan las credenciales, con un `warning` y
+    # nada más. En una máquina de desarrollo es lo correcto; en WhatsApp es el fallo que
+    # este proyecto existe para evitar, porque **una variable presente y vacía no es una
+    # variable ausente** --el `.env` trae casi todas las claves así-- y un
+    # `MAXICARE_GOOGLE_SA_B64=` vacío no da error de arranque: da un doble en producción,
+    # que toma el cupo, «crea» el evento en un diccionario, le confirma la cita al paciente
+    # y lo manda a una clínica donde nadie lo espera.
+    #
+    # Este es el único sitio de `atencion.py` por el que entra el calendario de WhatsApp; el
+    # doble solo es legítimo cuando alguien lo pasa a mano (`atender(calendario=...)`, el
+    # chat de pruebas web), que es justo lo que este camino no es.
+    if isinstance(calendario, CalendarioDoble):
+        log.error(
+            "EL CALENDARIO NO ESTÁ CONFIGURADO (falta MAXICARE_GOOGLE_SA_B64 o "
+            "MAXICARE_GOOGLE_CALENDAR_ID, o están presentes y VACÍAS). Daniela puede "
+            "conversar, pero NO puede agendar: cada intento escala a los doctores. Se usa "
+            "un calendario CAÍDO y nunca uno de mentira."
+        )
+        return CalendarioCaido(
+            motivo="faltan MAXICARE_GOOGLE_SA_B64 o MAXICARE_GOOGLE_CALENDAR_ID"
+        )
+
+    return calendario
 
 
 def _entrada_para_el_modelo(mensaje: MensajeEntrante) -> str:

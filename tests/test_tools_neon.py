@@ -250,6 +250,57 @@ def test_el_mismo_intento_repetido_no_consume_un_segundo_cupo(esquema, contexto_
     assert primero == segundo, "el reintento se llevó un cupo nuevo"
 
 
+def test_un_escalamiento_sin_telegram_se_distingue_de_uno_ya_avisado(esquema, contexto_de):
+    """La diferencia entre «ya se avisó» y «se intentó avisar», contra el SQL de verdad.
+
+    `insertar_escalamiento` devuelve `None` en los dos casos, porque solo mira si la clave
+    existe. Con eso, cualquier fallo de Telegram --un 5xx, un límite de tasa, un HTML que
+    Telegram rechaza porque el paciente se llama «Ana <3 Gómez»-- dejaba la fila escrita, el
+    doctor sin enterarse y ningún reintento posible: el escalamiento quedaba vivo en una
+    tabla que nadie mira.
+
+    Se prueba aquí y no solo con dobles porque lo que puede estar mal es el `WHERE`: un
+    `telegram_message_id IS NULL` escrito como `= NULL` no devuelve nada nunca y la consulta
+    pasaría en verde contra un doble mientras en Neon no encuentra un solo escalamiento.
+    """
+    ctx = contexto_de("573001110009", "Ana Pendiente")
+    clave = ctx.clave("escalamiento", 4)
+
+    with persistencia.conectar(esquema) as conn:
+        id_escalamiento = persistencia.insertar_escalamiento(
+            conn,
+            id_conversacion=ctx.id_conversacion,
+            motivo="clinico",
+            resumen="Dice que le duele desde hace tres días.",
+            pregunta="¿Lo citamos hoy mismo?",
+            clave_idempotencia=clave,
+        )
+        assert id_escalamiento is not None
+
+        # Recién escrito, el Telegram todavía no salió: hay un aviso PENDIENTE.
+        assert persistencia.escalamiento_pendiente_de_aviso(conn, clave) == id_escalamiento
+
+        # Y el segundo intento de insertar sigue diciendo «esta clave ya existe».
+        assert (
+            persistencia.insertar_escalamiento(
+                conn,
+                id_conversacion=ctx.id_conversacion,
+                motivo="clinico",
+                resumen="lo mismo",
+                pregunta="lo mismo",
+                clave_idempotencia=clave,
+            )
+            is None
+        )
+
+        # Una vez que el Telegram salió y quedó anotado, ya no hay nada pendiente.
+        persistencia.anotar_telegram_en_escalamiento(conn, id_escalamiento, 987654)
+        assert persistencia.escalamiento_pendiente_de_aviso(conn, clave) is None
+
+        # Y una clave que no existe tampoco es un pendiente.
+        assert persistencia.escalamiento_pendiente_de_aviso(conn, f"{clave}-inexistente") is None
+
+
 def test_un_seguimiento_no_se_programa_dos_veces(esquema, contexto_de):
     ctx = contexto_de("573001110002")
     objetivo = _hora_libre(48)

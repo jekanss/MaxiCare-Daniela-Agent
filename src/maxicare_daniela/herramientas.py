@@ -46,6 +46,7 @@ levantar un agente.
 from __future__ import annotations
 
 import asyncio
+import html
 import logging
 from datetime import datetime, timedelta
 from typing import Any, Callable
@@ -436,12 +437,35 @@ async def _crear_cita(ctx: ContextoDaniela, solicitud: SolicitudCita) -> str:
         else solicitud.inicio.replace(tzinfo=ZONA_BOGOTA)
     )
 
+    # La clave la arma el orquestador, igual que en `reprogramar` y en `seguimiento`, y se
+    # ancla al HORARIO pedido -- no al «intento», que es lo que el modelo cree que significa.
+    #
+    # Con `solicitud.clave_idempotencia`, que rellena el modelo, `tomar_cupo` --que busca por
+    # clave SIN filtrar por `inicio` ni por conversación-- hacía tres cosas distintas, todas
+    # malas:
+    #
+    # 1. *Misma clave, otro horario.* El paciente pide las 10:00 y luego «mejor a las 15:00»;
+    #    el modelo repite la clave porque para él es el mismo intento. Se devuelve la reserva
+    #    de las 10:00 tal cual: las 15:00 NO consumen cupo (con capacidad 2 se venden 3), las
+    #    10:00 quedan bloqueadas para nadie, y dos citas cuelgan de una sola reserva.
+    # 2. *Claves distintas para el mismo intento.* Un reintento consume un segundo cupo y crea
+    #    un segundo evento en Google: un solo paciente agota la hora.
+    # 3. *Colisión entre pacientes.* La columna es UNIQUE global y al modelo se le OCULTA el
+    #    teléfono a propósito, así que lo natural que puede inventar es algo como
+    #    `cita-2026-09-15T10:00-limpieza`. Dos pacientes que piden el mismo bloque generan la
+    #    misma cadena, el segundo recibe la reserva del primero, y los dos salen confirmados
+    #    sobre un solo cupo.
+    #
+    # `ctx.clave` lleva el `id_conversacion` delante, que es lo que hace imposible el caso 3,
+    # y el `inicio` detrás, que es lo que hace imposible el 1 sin romper el 2.
+    clave = ctx.clave("cita", inicio.isoformat())
+
     def tomar(conn) -> tuple[tuple[int, int] | None, list[datetime]]:
         cupo = persistencia.tomar_cupo(
             conn,
             inicio=inicio,
             capacidad=ctx.capacidad_por_hora,
-            clave_idempotencia=solicitud.clave_idempotencia,
+            clave_idempotencia=clave,
             conversacion_id=ctx.id_conversacion,
         )
         if cupo is not None:
@@ -825,13 +849,36 @@ def _teclado_relevo(id_conversacion: str) -> dict:
     }
 
 
+def _escapar_html(texto: str) -> str:
+    """Telegram va en `parse_mode=HTML` y RECHAZA el mensaje entero si el HTML no cierra.
+
+    `quote=False` deja las comillas en paz: dentro de un texto no son HTML, y escaparlas solo
+    llenaría el aviso de `&#x27;` donde el doctor espera leer una frase.
+    """
+    return html.escape(texto, quote=False)
+
+
 def _aviso_para_doctores(ctx: ContextoDaniela, solicitud: SolicitudEscalamiento) -> str:
-    nombre = ctx.nombre_paciente or "paciente sin identificar"
+    """El texto del escalamiento, con TODO lo ajeno escapado.
+
+    No es cosmético, y el coste no es un aviso feo: es un aviso que no existe. Telegram va en
+    `parse_mode=HTML` y RECHAZA el mensaje entero si el HTML no cierra --un paciente llamado
+    «Ana <3 Gómez» basta--. `canales.enviar_mensaje` lanza `ErrorDeCanal`,
+    `failure_error_function` se lo traga para que el modelo siga conversando, y la fila del
+    escalamiento ya quedó escrita en Neon: el aviso de cierre de turno ve la clave quemada y
+    se calla. Resultado: dos filas de escalamiento y CERO Telegram. Un paciente con dolor
+    «escalado» en una tabla que nadie mira.
+
+    Se escapan el nombre (lo dicta el paciente), el resumen y la pregunta (los escribe el
+    modelo a partir de lo que dijo el paciente) y el motivo. Lo único que queda como HTML de
+    verdad son las etiquetas que pone esta función.
+    """
+    nombre = _escapar_html(ctx.nombre_paciente or "paciente sin identificar")
     return (
-        f"<b>Escalamiento · {solicitud.motivo}</b>\n"
+        f"<b>Escalamiento · {_escapar_html(solicitud.motivo)}</b>\n"
         f"{nombre} · +{ctx.telefono_completo}\n\n"
-        f"{solicitud.resumen_para_doctor}\n\n"
-        f"<b>Pregunta:</b> {solicitud.pregunta_concreta}"
+        f"{_escapar_html(solicitud.resumen_para_doctor)}\n\n"
+        f"<b>Pregunta:</b> {_escapar_html(solicitud.pregunta_concreta)}"
     )
 
 

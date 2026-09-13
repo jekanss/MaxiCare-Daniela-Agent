@@ -345,8 +345,10 @@ class SolicitudCita(BaseModel):
         min_length=8,
         max_length=200,
         description=(
-            "telefono + inicio. La construye el código orquestador ANTES de llamar a la tool "
-            "y la guarda en Neon; el modelo no la inventa. Es lo que hace seguro el reintento."
+            "Un identificador corto de este intento. NO decide nada: la clave real con la que "
+            "se reserva el cupo la arma el orquestador a partir de la conversación y del "
+            "horario pedido, porque una clave que el modelo pudiera inventar no protegería "
+            "nada -- dos pacientes pidiendo el mismo bloque generarían la misma cadena."
         ),
     )
 
@@ -393,7 +395,8 @@ class SolicitudCancelacion(BaseModel):
         min_length=1,
         max_length=200,
         description=(
-            "id_cita. Cancelar dos veces deja la cita cancelada, igual que cancelarla una vez."
+            "id_cita. No decide nada: cancelar es idempotente por sí solo, porque cancelar "
+            "dos veces deja la cita cancelada igual que cancelarla una vez."
         ),
     )
 
@@ -424,7 +427,8 @@ class SolicitudEscalamiento(BaseModel):
         min_length=1,
         max_length=200,
         description=(
-            "id_conversacion + turno_actual, desde el contexto local. El mismo turno solo "
+            "Un identificador corto de este escalamiento. NO decide nada: la clave real la "
+            "arma el orquestador con id_conversacion + turno_actual. El mismo turno solo "
             "puede escalar una vez, para que el doctor no reciba la misma alerta tres veces "
             "tras un reintento de red."
         ),
