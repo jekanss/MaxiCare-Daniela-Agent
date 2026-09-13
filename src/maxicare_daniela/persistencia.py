@@ -167,7 +167,9 @@ def url_asincrona(url: str) -> str:
         )
     esquema, separador, resto = url.partition("://")
     if not separador:
-        raise ValueError(f"no parece una URL de base de datos: {url[:20]}...")
+        raise ValueError(
+            "MAXICARE_DATABASE_URL no parece una URL de base de datos: le falta el «://»"
+        )
     if "+" in esquema:
         return url
     return f"{DIALECTO_ASINCRONO}{separador}{resto}"

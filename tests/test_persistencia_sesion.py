@@ -49,5 +49,20 @@ def test_otro_dialecto_asincrono_se_respeta():
 
 
 def test_una_url_vacia_se_rechaza_con_un_mensaje_util():
-    with pytest.raises(ValueError, match="MAXICARE_DATABASE_URL"):
+    with pytest.raises(ValueError, match="vacía"):
         persistencia.url_asincrona("")
+
+
+def test_url_malformada_no_filtra_credenciales():
+    """Si la URL llega malformada (sin ://), el mensaje de error NO debe echar el valor
+    crudamente. Si `MAXICARE_DATABASE_URL` se copió mal pero aun así trae credenciales,
+    el error no debe filtrarlas en los logs."""
+    url_con_clave = "usuario:clave-secreta@host/db"
+
+    with pytest.raises(ValueError) as exc_info:
+        persistencia.url_asincrona(url_con_clave)
+
+    # El mensaje de error NO debe contener la cadena que se le pasó
+    assert "clave-secreta" not in str(exc_info.value)
+    # Sí debe mencionar el problema real
+    assert "://" in str(exc_info.value)
