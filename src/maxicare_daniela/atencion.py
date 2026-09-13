@@ -230,6 +230,11 @@ class _Estado:
     intentos_identificacion: int
     id_paciente: int | None
     nombre_paciente: str | None
+    #: La clínica NO tiene ficha de este teléfono. Sale del mismo
+    #: `buscar_paciente_por_telefono` que ya decide `identidad_verificada`, así que no cuesta
+    #: una consulta más. Es lo que le permite a un paciente nuevo pedir su primera cita sin
+    #: que `identidad_antes_de_datos` lo frene -- ver `guardrails.revisar_identidad`.
+    telefono_sin_paciente: bool
     tomada_por: str | None
     #: `None` si la tabla `configuracion` no respondió. No es lo mismo que un diccionario
     #: vacío: quien lo recibe tiene que poder distinguir «no se pudo leer» de «está vacía».
@@ -303,6 +308,7 @@ def _leer_estado(database_url: str, telefono: str, wamids: list[str]) -> _Estado
         # El nombre del perfil de WhatsApp NO entra aquí: lo escribe el propio desconocido y
         # tratarlo como identidad sería regalarle el nombre de un paciente a cualquiera.
         nombre_paciente=paciente[1] if paciente else None,
+        telefono_sin_paciente=paciente is None,
         tomada_por=tomada_por,
         operativa=operativa,
     )
@@ -873,6 +879,7 @@ async def atender(
             nombre_paciente=estado.nombre_paciente,
             identidad_verificada=estado.identidad_verificada,
             intentos_identificacion=estado.intentos_identificacion,
+            telefono_sin_paciente=estado.telefono_sin_paciente,
             turno_actual=estado.turno_actual,
             tomada_por=estado.tomada_por,
             # El tema propio de la conversación llega con el relevo (6C). Hasta entonces todo

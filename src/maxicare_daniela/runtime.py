@@ -973,6 +973,12 @@ def _contexto_de_prueba(quien: dict, id_conversacion: str | None) -> tuple[Conte
     telefono = f"web-{quien['usuario']}"
     with persistencia.conectar(url) as conn:
         nuevo = persistencia.asegurar_conversacion(conn, telefono=telefono, canal="web")
+        # El mismo hecho que `atencion._leer_estado` saca para WhatsApp. Sin esta lectura, el
+        # chat del panel NO reproduciría el carril real: `telefono_sin_paciente` se quedaría
+        # en su default `False` y `identidad_antes_de_datos` frenaría una primera cita que en
+        # WhatsApp sí pasa. El comentario de abajo dice «igual que un paciente nuevo en
+        # WhatsApp», y esto es lo que lo hace cierto.
+        sin_ficha = persistencia.buscar_paciente_por_telefono(conn, telefono) is None
 
     ctx = ContextoDaniela(
         id_conversacion=nuevo,
@@ -984,6 +990,7 @@ def _contexto_de_prueba(quien: dict, id_conversacion: str | None) -> tuple[Conte
         # Sin identificar, igual que un paciente nuevo en WhatsApp. Es lo que permite probar
         # el flujo de identificación, que es donde más se equivoca un prompt.
         identidad_verificada=False,
+        telefono_sin_paciente=sin_ficha,
         tema_general=_tema_general or 0,
         # El chat de pruebas del panel, no WhatsApp: separa en el dashboard de trazas las
         # conversaciones reales de las pruebas de la clínica.

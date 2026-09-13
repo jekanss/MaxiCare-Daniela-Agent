@@ -463,6 +463,7 @@ def test_un_numero_conocido_entra_identificado(monkeypatch):
     assert turnos.ctx.identidad_verificada is True
     assert turnos.ctx.id_paciente == 7
     assert turnos.ctx.nombre_paciente == "Ana Restrepo"
+    assert turnos.ctx.telefono_sin_paciente is False
 
 
 def test_un_numero_desconocido_no_entra_identificado(monkeypatch):
@@ -483,6 +484,12 @@ def test_un_numero_desconocido_no_entra_identificado(monkeypatch):
     assert turnos.ctx.identidad_verificada is False
     assert turnos.ctx.id_paciente is None
     assert turnos.ctx.nombre_paciente is None
+    # El cable que permite su PRIMERA cita. Sin esta línea, `_leer_estado` podría dejar de
+    # calcularlo --se quedaría en el default `False` del dataclass-- y volvería el fallo del
+    # 13/09/2026: un paciente nuevo bloqueado por `identidad_antes_de_datos`, con la suite
+    # entera en verde. No es lo mismo que `identidad_verificada`: ese dice «no sabemos quién
+    # es», este dice «la clínica no lo conoce».
+    assert turnos.ctx.telefono_sin_paciente is True
 
 
 # ==========================================================================================
