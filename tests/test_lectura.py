@@ -10,6 +10,7 @@ import pytest
 from pydantic import ValidationError
 
 from maxicare_daniela import lectura
+from maxicare_daniela.canales import ArchivoDescargado
 from maxicare_daniela.contratos import LecturaArchivo, LecturaNoClinica
 
 CENTINELA = "reabsorcion radicular en el 46, con lesion periapical de 4 mm"
@@ -307,3 +308,61 @@ def test_un_fallo_de_transporte_al_crear_tambien_cae_al_general(monkeypatch):
     )
 
     assert tema is None
+
+
+# ==========================================================================================
+# El lector
+# ==========================================================================================
+
+
+def _archivo(contenido=b"\x89PNG bytes", mime="image/png", nombre="radio.png"):
+    return ArchivoDescargado(contenido=contenido, mime=mime, nombre=nombre)
+
+
+@pytest.mark.parametrize("tipo", ["image", "document"])
+def test_imagen_y_documento_si_se_leen(tipo):
+    assert lectura.vale_la_pena_leer(tipo, 1000) is True
+
+
+@pytest.mark.parametrize("tipo", ["audio", "voice", "video", "sticker", "text"])
+def test_lo_demas_no_paga_el_modelo_caro(tipo):
+    """`sol` es el modelo caro. Correrlo sobre un sticker es dinero tirado, y sobre una nota
+    de voz no funcionaria sin una API de transcripcion que esta fase no incorpora."""
+    assert lectura.vale_la_pena_leer(tipo, 1000) is False
+
+
+def test_un_archivo_enorme_no_va_al_lector():
+    assert lectura.vale_la_pena_leer("image", lectura.TOPE_BYTES_LECTOR + 1) is False
+    assert lectura.vale_la_pena_leer("image", lectura.TOPE_BYTES_LECTOR) is True
+
+
+def test_una_imagen_viaja_como_input_image():
+    entrada = lectura.entrada_para_el_lector(_archivo(), "image")
+    contenido = entrada[0]["content"][0]
+
+    assert contenido["type"] == "input_image"
+    assert contenido["image_url"].startswith("data:image/png;base64,")
+
+
+def test_un_documento_viaja_como_input_file_con_su_nombre():
+    entrada = lectura.entrada_para_el_lector(
+        _archivo(contenido=b"%PDF-1.4", mime="application/pdf", nombre="remision.pdf"),
+        "document",
+    )
+    contenido = entrada[0]["content"][0]
+
+    assert contenido["type"] == "input_file"
+    assert contenido["filename"] == "remision.pdf"
+
+
+def test_si_el_lector_revienta_devuelve_none_y_no_propaga():
+    """El doctor YA tiene el archivo. Un lector caido no puede tumbar nada mas."""
+    import asyncio
+
+    async def correr_que_revienta(*a, **kw):
+        raise RuntimeError("el modelo no contesto")
+
+    salida = asyncio.run(
+        lectura.leer_archivo(_archivo(), tipo="image", correr=correr_que_revienta)
+    )
+    assert salida is None

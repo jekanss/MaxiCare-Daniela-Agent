@@ -253,10 +253,18 @@ no de memoria):
 `ArchivoDescargado` ya trae `contenido: bytes`, `mime` y `nombre`, así que no hay que volver
 a descargar nada.
 
-**PENDIENTE de confirmar contra una llamada real en la primera tarea del plan:** si
-`file_data` espera el data URL completo (`data:application/pdf;base64,...`) o el base64 a
-secas. Los nombres de los campos están verificados; este detalle de formato no, y una
-suposición razonable aquí no se distinguiría de un hecho comprobado.
+**Confirmado el 12/09/2026 contra una llamada real** (tarea 4 de este plan, `lector_archivos`
+con `Runner.run`, un PDF mínimo válido de una página generado para la sonda —tabla `xref`
+calculada de verdad, `%PDF-` al inicio y `%%EOF` al final— con el texto «Remision para
+ortodoncia»): `file_data` espera el **data URL completo**
+(`data:application/pdf;base64,<...>`), igual que `image_url`.
+
+Con los mismos 597 bytes en las dos variantes: `data-url` devolvió `200 OK` y el modelo
+leyó de verdad el texto del PDF (`tratamiento='ortodoncia'`, `confianza='alta'`);
+`base64-pelado` devolvió `400 Bad Request` —
+`Invalid 'input[0].content[0].file_data'` / `code: invalid_value` — sobre el mismo campo.
+Las dos hipótesis quedaron distinguidas por la misma entrada: no es un PDF sospechoso, es
+el formato del campo.
 
 **Tope de tamaño:** los archivos por encima de 20 MB no van al lector. Llegan al doctor igual
 —eso no cambia— y Daniela usa la entrada de hoy.

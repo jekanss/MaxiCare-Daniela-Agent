@@ -17,9 +17,14 @@ ningún framework web.
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
 
+from agents import Runner
+
 from . import persistencia
+from .agentes import lector_archivos
+from .canales import ArchivoDescargado
 from .contratos import LecturaArchivo, LecturaNoClinica
 
 log = logging.getLogger("maxicare.lectura")
@@ -141,3 +146,66 @@ def _guardar_tema(
         persistencia.guardar_tema(
             conn, id_paciente=id_paciente, topic_id=tema, abierto=abierto
         )
+
+
+# ==========================================================================================
+# El lector
+# ==========================================================================================
+
+#: Los dos tipos que el lector puede leer de verdad. `audio`, `voice`, `video` y `sticker`
+#: siguen con el aviso factual de la fase 2: no se pagan, y no se fingen.
+TIPOS_QUE_SE_LEEN = frozenset({"image", "document"})
+
+#: Por encima de esto no se manda al modelo. El doctor recibe el archivo igual --eso no
+#: cambia nunca-- y Daniela usa la entrada de siempre.
+TOPE_BYTES_LECTOR = 20 * 1024 * 1024
+
+
+def vale_la_pena_leer(tipo: str, tamano: int) -> bool:
+    """Si el archivo es de un tipo legible y no pasa el tope de tamaño."""
+    return tipo in TIPOS_QUE_SE_LEEN and tamano <= TOPE_BYTES_LECTOR
+
+
+def entrada_para_el_lector(archivo: ArchivoDescargado, tipo: str) -> list[dict]:
+    """El archivo, con la forma que pide la Responses API.
+
+    Los nombres de campo están verificados por introspección de la 0.22.2 instalada, no de
+    memoria: `input_image` lleva `image_url`; `input_file` lleva `filename` y `file_data`.
+
+    `file_data` lleva el data URL completo (`data:<mime>;base64,<...>`), no el base64 a
+    secas: confirmado con una llamada real a la API el 12/09/2026 (spec §4.8) -- el base64
+    pelado devuelve `400 invalid_value` sobre ese mismo campo.
+    """
+    datos = base64.b64encode(archivo.contenido).decode("ascii")
+    if tipo == "image":
+        contenido = {
+            "type": "input_image",
+            "image_url": f"data:{archivo.mime};base64,{datos}",
+            "detail": "auto",
+        }
+    else:
+        contenido = {
+            "type": "input_file",
+            "filename": archivo.nombre,
+            "file_data": f"data:{archivo.mime};base64,{datos}",
+        }
+    return [{"role": "user", "content": [contenido]}]
+
+
+async def leer_archivo(
+    archivo: ArchivoDescargado, *, tipo: str, correr=None
+) -> LecturaArchivo | None:
+    """Corre `lector_archivos`. Devuelve `None` si falla, y NUNCA propaga.
+
+    `correr` existe solo para poder probar esto sin red.
+
+    Que devuelva `None` en vez de lanzar no es pereza: quien llama es una tarea de fondo que
+    ya entregó el archivo al doctor. Una excepción ahí solo llegaría a un log.
+    """
+    ejecutar = correr or (lambda entrada: Runner.run(lector_archivos, entrada))
+    try:
+        corrida = await ejecutar(entrada_para_el_lector(archivo, tipo))
+    except Exception:  # noqa: BLE001 -- ver el docstring
+        log.exception("el lector no pudo con %s", archivo.nombre)
+        return None
+    return corrida.final_output
