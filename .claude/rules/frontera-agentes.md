@@ -176,8 +176,8 @@ Las pruebas offline comprueban que la instrucción sigue escrita. No pueden ver 
   «me sangran bastante las encías», Daniela activó el protocolo en el turno 1 y siguió en él
   los cinco siguientes: cinco escalamientos, cinco «lo estoy revisando con prioridad», cero
   horarios ofrecidos, incluso después de que el paciente dijera «no, nada de eso». Y encima
-  contradecía el protocolo aprobado, que dice **buscar el cupo más cercano** — agendar es
-  parte de la respuesta a una urgencia, no lo que se suspende.
+  contradecía el protocolo aprobado, que para esas señales dice **buscar el cupo más
+  cercano** — ahí agendar es parte de la respuesta, no lo que se suspende.
 - **Un límite clínico no es un escalamiento.** Daniela escalaba cada vez que topaba con el
   límite, y en una conversación así el límite aparece en casi todos los turnos. Tres alertas
   de Telegram por un solo paciente es como se pierde la que sí importaba. La respuesta a un
@@ -185,16 +185,33 @@ Las pruebas offline comprueban que la instrucción sigue escrita. No pueden ver 
 
 Los dos se arreglaron en el prompt y los dos tienen prueba. Ninguno era visible en verde.
 
-## PENDIENTE de validación por MaxiCare
+## Las señales de alarma NO comparten una sola conducta
 
-La fila `_general` / `urgencias` está aprobada y cubre **dolor severo y sangrado activo**. La
-conversación de referencia del cliente también tamiza por **fiebre, inflamación facial y
-dificultad para respirar o tragar**, que esa fila no menciona.
+MaxiCare amplió la fila el 13/09/2026 y la respuesta no fue una lista más larga: fue **dos
+conductas distintas**, y la diferencia importa.
 
-No se añadieron al prompt ni a la base: serían criterio clínico que el documento maestro no
-contiene, y `.claude/rules/base-conocimiento.md` lo prohíbe expresamente. Si MaxiCare las
-confirma, el cambio es de **una fila**, desde la pantalla de la clínica o ampliando esa fila —
-ni una línea de código, porque el prompt ya delega en lo que la fila devuelva.
+| Señal | Qué hace Daniela |
+|---|---|
+| dolor severo · sangrado activo · fiebre · inflamación en la cara | cupo más cercano + avisar al equipo |
+| **dificultad para respirar o para tragar** | **NO ofrecer cita** · urgencias médicas + avisar al equipo |
+
+Por eso el prompt dice «qué pasa con la cita **lo decide el protocolo y no tú**» y no «agendar
+no se suspende», que fue la primera redacción. Esa frase, dicha a secas, manda a la clínica a
+alguien que tiene que ir a un hospital: es el único punto de todo este ajuste donde una
+palabra de más tiene consecuencia clínica directa.
+`test_la_senal_de_alarma_se_comprueba_una_vez_y_tiene_salida` lo fija.
+
+Y es la demostración de por qué el reparto de arriba es el correcto: MaxiCare cambió el
+criterio clínico **sin que cambiara una línea del prompt sobre qué señales existen**. Solo
+hubo que quitarle al prompt una afirmación que se había adelantado al protocolo.
+
+## La valoración ya tiene tarifa
+
+Estuvo `aprobado: false` hasta el 13/09/2026 —el documento maestro no traía tarifa universal,
+y la fila mezclaba eso con «en periodoncia se reporta entre $80.000 y $150.000»—, así que
+Daniela no podía cerrar ninguna conversación con el precio de la cita que estaba ofreciendo.
+MaxiCare fijó **$50.000, abonables a cualquier tratamiento posterior**, lo que además responde
+la segunda mitad de la nota vieja: quien solo asiste a consulta paga esos $50.000.
 
 # Convenciones del paquete
 

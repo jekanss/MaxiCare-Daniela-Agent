@@ -172,6 +172,13 @@ def test_el_limite_clinico_siempre_deja_un_siguiente_paso():
     assert "lo que sí podemos es" in texto
     assert "deja al paciente sin siguiente paso" in texto
 
+    # Y no solo ante una decisión clínica. Corrida del 13/09/2026: Daniela dio el precio de
+    # la valoración -- correcto, documentado, la respuesta que el paciente pedía -- y cerró
+    # ahí, sin ofrecerle mirar horarios. La conversación de referencia del cliente termina
+    # justo al revés, proponiendo dos opciones de hora.
+    assert "Cierras proponiendo el siguiente paso" in texto
+    assert "salvo que" in texto, "la regla sin excepción convierte un escalamiento en acoso"
+
 
 def test_el_protocolo_de_alarma_sale_de_LA_BASE_y_no_del_prompt():
     """La prueba más importante de este bloque, y la que hay que entender antes de tocarla.
@@ -221,6 +228,13 @@ def test_la_senal_de_alarma_se_comprueba_una_vez_y_tiene_salida():
     assert "NO la repitas en el mensaje siguiente" in texto
     assert "vuelves al hilo normal" in texto
     assert "Escalas una vez por asunto, no una vez por mensaje" in texto
+
+    # Y qué hacer con la cita tampoco lo decide ella. El 13/09/2026 MaxiCare separó las
+    # señales en dos conductas: dolor severo, sangrado activo, fiebre e inflamación facial
+    # van al cupo más cercano; dificultad para respirar o tragar NO se resuelve con una cita
+    # y va a urgencias médicas. Un prompt que afirme «agendar no se suspende» a secas manda
+    # a la clínica a alguien que tiene que ir a un hospital.
+    assert "lo decide el protocolo y no tú" in texto
 
 
 def test_un_limite_clinico_no_es_un_escalamiento():
