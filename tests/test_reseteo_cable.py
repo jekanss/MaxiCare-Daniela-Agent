@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import os
 from dataclasses import replace
+from types import SimpleNamespace
 
 import pytest
 
@@ -146,6 +147,113 @@ def test_si_el_reseteo_aborta_se_avisa_y_no_se_llama_a_daniela(cable, monkeypatc
     _, texto = cable["whatsapp"].enviados[0]
     assert "No reseteé nada" in texto
     assert cable["atendidos"] == []
+
+
+# ==========================================================================================
+# El mismo comando en el carril web de pruebas
+# ==========================================================================================
+
+
+@pytest.fixture
+def carril_web(monkeypatch):
+    """El chat del panel, sin base y sin modelo."""
+    registro: dict = {"reseteados": [], "respondidos": []}
+
+    async def resetear_falso(telefono, **kwargs):
+        registro["reseteados"].append(telefono)
+        registro["kwargs"] = kwargs
+        return reseteo.Borrado(filas={"pacientes": 1})
+
+    async def responder_falso(mensaje, **kwargs):
+        registro["respondidos"].append(mensaje)
+        raise AssertionError("el modelo no debería correr para un /clearstate")
+
+    monkeypatch.setattr(reseteo, "resetear", resetear_falso)
+    monkeypatch.setattr(runtime, "_preparar_esquema_de_pruebas", lambda: "postgres://pruebas_web")
+    monkeypatch.setattr(runtime.conversacion, "responder", responder_falso)
+    # Para que quitar la interceptación haga caer la prueba por la aserción que la explica
+    # --«el modelo no debería correr»-- y no por un error de conexión a Neon, que no le dice
+    # nada a quien la lea dentro de seis meses.
+    monkeypatch.setattr(
+        runtime,
+        "_contexto_de_prueba",
+        lambda quien, id_conv: (SimpleNamespace(telefono_completo="web-jean"), None),
+    )
+    return registro
+
+
+def test_en_el_chat_web_el_comando_borra_el_carril_de_ese_usuario(carril_web):
+    """El «teléfono» del carril web lleva el usuario dentro, así que cada persona de la
+    clínica borra el suyo y solo el suyo."""
+    respuesta = asyncio.run(runtime._resetear_chat_de_prueba({"usuario": "jean"}))
+
+    assert carril_web["reseteados"] == ["web-jean"]
+    assert carril_web["kwargs"]["database_url"] == "postgres://pruebas_web"
+    # Ni Telegram ni Calendar: en este carril no hay ninguno de los dos.
+    assert carril_web["kwargs"]["telegram"] is None
+    assert carril_web["kwargs"]["calendario"] is None
+
+
+def test_el_chat_web_devuelve_conversacion_nula_para_que_nazca_una_nueva(carril_web):
+    """Si devolviera el id viejo, el frontend lo mandaría en la siguiente petición y el
+    servidor buscaría una conversación que acaba de borrar."""
+    respuesta = asyncio.run(runtime._resetear_chat_de_prueba({"usuario": "jean"}))
+
+    assert respuesta["conversacion"] is None
+    assert "como si no me conocieras" in respuesta["mensaje"]
+    # La forma tiene que ser la de un turno normal o el frontend revienta al pintarla.
+    for campo in ("turno", "estado_oportunidad", "tripwires", "requiere_escalamiento"):
+        assert campo in respuesta
+
+
+def test_el_chat_web_no_le_corta_el_hilo_a_otra_persona(carril_web):
+    """Dos personas de la clínica pueden estar probando a la vez."""
+    mia = SimpleNamespace(telefono_completo="web-jean")
+    suya = SimpleNamespace(telefono_completo="web-ana")
+    runtime._conversaciones_de_prueba["conv-mia"] = (mia, None)
+    runtime._conversaciones_de_prueba["conv-suya"] = (suya, None)
+
+    asyncio.run(runtime._resetear_chat_de_prueba({"usuario": "jean"}))
+
+    assert "conv-mia" not in runtime._conversaciones_de_prueba
+    assert "conv-suya" in runtime._conversaciones_de_prueba
+    del runtime._conversaciones_de_prueba["conv-suya"]
+
+
+def test_el_comando_en_el_chat_web_no_llega_al_modelo(carril_web):
+    """`responder_falso` revienta si lo llaman: esta prueba pasa solo si no se llamó."""
+    entrada = runtime.MensajeDePrueba(mensaje="/clearstate")
+
+    respuesta = asyncio.run(runtime.chat_de_prueba(entrada, {"usuario": "jean"}))
+
+    assert carril_web["respondidos"] == []
+    assert respuesta["conversacion"] is None
+
+
+def test_un_mensaje_normal_del_chat_web_si_llega_al_modelo(carril_web, monkeypatch):
+    """La otra mitad: estar en el carril web no intercepta nada más que esa palabra."""
+    llamadas = []
+
+    async def responder_ok(mensaje, **kwargs):
+        llamadas.append(mensaje)
+        raise RuntimeError("corta aqui: lo que importa es que SI se llamo")
+
+    monkeypatch.setattr(runtime.conversacion, "responder", responder_ok)
+    monkeypatch.setattr(
+        runtime,
+        "_contexto_de_prueba",
+        lambda quien, id_conv: (object(), object()),
+    )
+
+    with pytest.raises(RuntimeError):
+        asyncio.run(
+            runtime.chat_de_prueba(
+                runtime.MensajeDePrueba(mensaje="hola"), {"usuario": "jean"}
+            )
+        )
+
+    assert llamadas == ["hola"]
+    assert carril_web["reseteados"] == []
 
 
 def test_si_el_reseteo_revienta_quien_lo_pidio_igual_recibe_algo(cable, monkeypatch):

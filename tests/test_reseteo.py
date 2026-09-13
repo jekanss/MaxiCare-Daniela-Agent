@@ -13,7 +13,7 @@ import time
 
 import pytest
 
-from maxicare_daniela import atencion, lectura, reseteo
+from maxicare_daniela import atencion, config, lectura, reseteo
 from maxicare_daniela.canales import ErrorDeCanal
 
 TEL = "573001234567"
@@ -70,6 +70,36 @@ def test_autoriza_solo_al_numero_listado():
 
     assert reseteo.autorizado("573001234567", permitidos) is True
     assert reseteo.autorizado("573009999999", permitidos) is False
+
+
+def test_autoriza_a_varios_numeros():
+    """Varios telefonos separados por coma: el caso normal, porque quien prueba suele tener
+    mas de una linea --la suya y la de alguien de la clinica-- y estrenar una para cada
+    prueba es justo lo que este comando existe para evitar."""
+    permitidos = ("573001110001", "573001110002", "573001110003")
+
+    assert reseteo.autorizado("573001110001", permitidos) is True
+    assert reseteo.autorizado("573001110002", permitidos) is True
+    assert reseteo.autorizado("573001110003", permitidos) is True
+    assert reseteo.autorizado("573009999999", permitidos) is False
+
+
+def test_la_variable_de_entorno_parte_por_comas(monkeypatch):
+    """Con espacios alrededor y una coma de mas, que es como queda un `.env` editado a mano.
+
+    `monkeypatch.setenv` y no `os.environ[...]`: pytest lo deshace al terminar la prueba. Una
+    asignacion directa se quedaria fijada para toda la sesion y rompería a quien corra
+    despues.
+    """
+    monkeypatch.setenv("MAXICARE_TELEFONOS_PRUEBA", " +57 300 111 0001 , 573001110002 ,")
+
+    assert config._lista("MAXICARE_TELEFONOS_PRUEBA") == ("+57 300 111 0001", "573001110002")
+
+
+def test_sin_la_variable_la_lista_queda_vacia(monkeypatch):
+    monkeypatch.delenv("MAXICARE_TELEFONOS_PRUEBA", raising=False)
+
+    assert config._lista("MAXICARE_TELEFONOS_PRUEBA") == ()
 
 
 def test_la_lista_se_compara_por_digitos():

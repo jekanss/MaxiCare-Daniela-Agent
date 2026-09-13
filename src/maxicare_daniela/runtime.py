@@ -945,6 +945,49 @@ def _contexto_de_prueba(
     return par
 
 
+async def _resetear_chat_de_prueba(quien: dict) -> dict:
+    """`/clearstate` en el carril web. Devuelve la misma forma que un turno normal.
+
+    NO exige `MAXICARE_TELEFONOS_PRUEBA`, y la diferencia con WhatsApp es deliberada: aquí no
+    hay ningún número de teléfono que proteger. El «teléfono» es `web-<usuario>`, una cadena
+    que no existe ni puede existir en `public`; la conexión apunta con `search_path` al
+    esquema `pruebas_web`, que es un carril de pruebas de punta a punta; y para llegar hasta
+    aquí hay que tener sesión abierta en el panel. Lo único que alguien puede borrar es su
+    propio carril, que es exactamente para lo que existe el botón de al lado.
+
+    Tampoco se le pasan Telegram ni Calendar, porque en este carril no hay ninguno de los
+    dos: el contexto de prueba se construye con `CalendarioDoble` y sin credenciales de
+    Telegram, así que no hay eventos reales que eliminar ni temas que borrar.
+    """
+    telefono = f"web-{quien['usuario']}"
+    url = await asyncio.to_thread(_preparar_esquema_de_pruebas)
+    borrado = await reseteo.resetear(
+        telefono, database_url=url, telegram=None, calendario=None
+    )
+
+    # Las conversaciones vivas de ESTE usuario, no todas: dos personas de la clínica pueden
+    # estar probando a la vez, y reiniciar la tuya no puede cortarle el hilo a la otra.
+    for id_conversacion, (ctx, _sesion) in list(_conversaciones_de_prueba.items()):
+        if ctx.telefono_completo == telefono:
+            del _conversaciones_de_prueba[id_conversacion]
+
+    log.info("RESETEO del carril web de %s: %s", quien["usuario"], borrado)
+    return {
+        # `None` es lo que hace que el turno siguiente abra una conversación nueva: el
+        # frontend guarda lo que venga aquí y lo manda en la próxima petición.
+        "conversacion": None,
+        "mensaje": reseteo.confirmacion(borrado),
+        "turno": 0,
+        "estado_oportunidad": "explorando",
+        "barrera": "ninguna",
+        "requiere_escalamiento": False,
+        "motivo_escalamiento": "",
+        "fuera_de_alcance": False,
+        "tripwires": [],
+        "regenerado": False,
+    }
+
+
 @app.post("/api/pruebas/chat")
 async def chat_de_prueba(entrada: MensajeDePrueba, quien: dict = Depends(usuario_actual)) -> dict:
     """Un turno contra la Daniela de producción.
@@ -953,6 +996,12 @@ async def chat_de_prueba(entrada: MensajeDePrueba, quien: dict = Depends(usuario
     nueve tools, las mismas instrucciones, los mismos seis guardrails. Lo único distinto es
     dónde aterriza lo que escribe.
     """
+    # `/clearstate` también aquí, y por la misma razón que en WhatsApp: el botón «reiniciar»
+    # olvida la conversación pero DEJA las filas, así que el paciente que te inventaste sigue
+    # en `pruebas_web` y el turno siguiente te reconoce. Esto sí borra.
+    if reseteo.es_comando(entrada.mensaje):
+        return await _resetear_chat_de_prueba(quien)
+
     ctx, sesion_chat = _contexto_de_prueba(quien, entrada.conversacion)
 
     resultado = await conversacion.responder(

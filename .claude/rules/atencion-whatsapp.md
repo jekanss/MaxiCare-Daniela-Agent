@@ -218,6 +218,17 @@ estrenar una línea de teléfono. Vive en `reseteo.py`, y `runtime._entregar` lo
 - **Telegram necesita `can_delete_messages`**, que `obtener_chat_telegram.py` no comprueba
   hoy — solo mira `can_manage_topics`. Si falta, el tema no se borra, se informa en la
   confirmación y el resto del reseteo sigue.
+- **El mismo comando funciona en el chat web del panel, y ahí NO exige la lista blanca.** La
+  diferencia es deliberada: el «teléfono» de ese carril es `web-<usuario>`, una cadena que no
+  existe ni puede existir en `public`; la conexión apunta con `search_path` a `pruebas_web`; y
+  para llegar hace falta sesión abierta en el panel. Cada persona de la clínica borra su
+  propio carril y solo el suyo (`test_el_chat_web_no_le_corta_el_hilo_a_otra_persona`). El
+  endpoint devuelve `conversacion: null`, que es lo que hace que el turno siguiente abra una
+  conversación nueva en vez de pedir un id que acaba de borrarse.
+- **`/api/pruebas/reiniciar` no es esto y sigue como estaba:** olvida la conversación en
+  memoria y DEJA las filas en `pruebas_web` — a propósito, para que quede rastro de qué se
+  probó. Por eso el botón «reiniciar» no te devuelve a primer contacto: el paciente que te
+  inventaste sigue en la tabla y el turno siguiente te reconoce. Para eso está `/clearstate`.
 
 ## Lo que la suite offline NO caza
 

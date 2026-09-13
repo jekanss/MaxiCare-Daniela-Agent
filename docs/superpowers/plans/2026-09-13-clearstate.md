@@ -70,6 +70,24 @@ Las FK obligan ese orden: `citas`, `reservas` y `mensajes_entrantes` apuntan a
 `conversaciones` SIN cascade, y `conversaciones.paciente_id` apunta a `pacientes` SIN
 cascade. Borrar en otro orden no es peor estilo: la base lo rechaza.
 
+## El mismo comando en el chat web del panel
+
+`runtime.chat_de_prueba` lo intercepta igual, y ahí **no se exige la lista blanca**. La
+diferencia es deliberada: el «teléfono» de ese carril es `web-<usuario>`, una cadena que no
+existe ni puede existir en `public`; la conexión apunta con `search_path` a `pruebas_web`; y
+para llegar hace falta sesión abierta en el panel. Cada persona borra su propio carril.
+
+Tampoco se le pasan Telegram ni Calendar, porque el contexto de prueba se construye con
+`CalendarioDoble` y sin credenciales de Telegram: no hay eventos reales ni temas que borrar.
+
+El endpoint devuelve `conversacion: null`, que es lo que hace que el turno siguiente abra una
+conversación nueva en vez de pedir un id recién borrado. `web/src/api.ts` pasa a declarar ese
+campo como `string | null`.
+
+**`/api/pruebas/reiniciar` no cambia.** Olvida la conversación en memoria y deja las filas, a
+propósito, para que quede rastro de qué se probó. Por eso el botón «reiniciar» no devuelve a
+primer contacto: el paciente inventado sigue en la tabla y el turno siguiente lo reconoce.
+
 ## Dos detalles que cambian el resultado
 
 1. **Se conserva la fila de `mensajes_entrantes` del propio `/clearstate`**, con
@@ -101,3 +119,4 @@ cayeron donde debían:
 | `DELETE FROM pacientes` sin `WHERE` | `test_el_vecino_no_se_toca` |
 | Que Calendar no aborte el borrado | `test_si_calendar_falla_no_se_borra_ni_una_fila` |
 | Quitar la comprobación de autorización | las 2 pruebas de la lista blanca |
+| Quitar la interceptación del chat web | `test_el_comando_en_el_chat_web_no_llega_al_modelo` |
