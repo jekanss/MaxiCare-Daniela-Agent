@@ -225,7 +225,28 @@ entorno, los invariantes y el porqué de cada uno.
 
 ## Estado
 
-Las fases 1 a 8 están cerradas. Queda la observabilidad y la persistencia del historial
-entre reinicios (fase 7), el relevo —que un doctor tome la conversación y hable él con el
-paciente— (fase 6C), y la suite de evaluaciones contra casos reales antes del piloto
-(fase 9).
+El proyecto se construye en diez fases, cada una cerrada por algo que una persona puede
+correr y mirar. Seis están cerradas, una a medias, y tres sin empezar:
+
+| | Fase | |
+|---|---|---|
+| ✅ | 1 · Contratos y base de conocimiento | |
+| ✅ | 2 · WhatsApp y el viaje del archivo | |
+| ✅ | 3 · Las nueve tools | tres citas simultáneas sobre un cupo → dos |
+| ✅ | 4 · Los dos agentes y sus guardrails | |
+| ✅ | 5 · Cascarón web y chat de pruebas | |
+| 🟡 | 6 · Ingesta, **el muro** y **el relevo** | el muro sí; el relevo no |
+| ⬜ | 7 · Persistencia y observabilidad | ver abajo |
+| ✅ | 8 · Pantallas de operación | |
+| ⬜ | 9 · Evals y piloto real | 22 evals antes de atender pacientes |
+| ⬜ | 10 · Documento de caso de éxito | depende del piloto |
+
+**El relevo** es la mitad que le falta a la fase 6: que un doctor tome la conversación desde
+Telegram y hable él con el paciente, con cierre automático por tiempo. El andamiaje ya está
+—la columna `tomada_por`, el tema del paciente naciendo cerrado— pero nada lo escribe aún.
+
+**La fase 7** son dos cosas. La observabilidad tiene media hecha: desde el 13/09/2026 ninguna
+llamada al modelo sube el contenido de la conversación a las trazas de OpenAI, y las tres
+puertas pasan por `config.config_de_corrida`. Falta agruparlas por `group_id`. La otra mitad
+es la persistencia: hoy el historial del diálogo vive en memoria del proceso y un reinicio lo
+borra —los datos no: paciente, citas y estado de oportunidad están en Neon.
