@@ -339,12 +339,11 @@ class Turnos:
 
 
 def limpiar_estado() -> None:
-    """`_candados` y `_sesiones` son estado de módulo: sobreviven entre pruebas.
+    """`_candados` es estado de módulo: sobrevive entre pruebas.
 
     Sin esto, una prueba pasa sola y falla dentro de la suite -- o al revés, que es peor.
     """
     atencion._candados.clear()
-    atencion._sesiones.clear()
     atencion._buferes.clear()
 
 
@@ -379,6 +378,9 @@ async def _atender(mensaje, **cambios):
         # toda esta suite es el turno, no el bufer; las pruebas del bufer pasan su ventana.
         ventana=0,
         tope=0,
+        # La suite offline no toca Neon: `sesion_de` es lo único que decide quién construye
+        # el historial, y aquí siempre es el doble en memoria.
+        sesion_de=lambda id_: conversacion.SesionEnMemoria(id_),
     )
     argumentos.update(cambios)
     return await atencion.atender(mensaje, **argumentos)
@@ -986,33 +988,41 @@ def test_el_contexto_lleva_el_calendario_que_se_le_pasa(monkeypatch):
 
 
 # ==========================================================================================
-# 16 · La poda
+# 16 · La sesión persistida
 # ==========================================================================================
 
 
-def test_las_sesiones_viejas_se_podan(monkeypatch):
-    """El historial vive en memoria y nadie lo borra: sin poda, `_sesiones` crece con cada
-    número que escriba a la clínica y no baja nunca.
+def test_el_turno_usa_la_sesion_persistida_y_no_la_de_memoria(monkeypatch):
+    """La promesa de la fase 7, comprobada por donde se cumple: `atender` tiene que pedirle
+    la sesión a `persistencia`, con el id de la conversación y la base de producción.
 
-    La ventana es la misma de `conversacion_viva`: pasadas 24 horas la conversación ya está
-    muerta para la base, así que su historial tampoco sirve para nada.
+    Con `SesionEnMemoria` --lo que había-- esta prueba pasa igual si el historial muere al
+    reiniciar, porque en un solo proceso no se nota. Por eso lo que se comprueba aquí es la
+    FÁBRICA y no el comportamiento: quién construye la sesión es lo que decide si sobrevive.
     """
-    preparar(monkeypatch, base=BaseFalsa(viva=("conv-viva", 1, True, 0)))
-    vieja = conversacion.SesionEnMemoria("conv-antigua")
-    ahora = time.monotonic()
-    atencion._sesiones["conv-antigua"] = (
-        vieja,
-        ahora - (atencion.VENTANA_CONVERSACION_HORAS + 1) * 3600,
-    )
-    reciente = conversacion.SesionEnMemoria("conv-viva")
-    atencion._sesiones["conv-viva"] = (reciente, ahora)
+    pedidas: list[tuple[str, str]] = []
 
-    atender(mensaje_texto())
+    def fabrica(id_conversacion, *, database_url, esquema=None, limite=None):
+        pedidas.append((id_conversacion, database_url))
+        return conversacion.SesionEnMemoria(id_conversacion)
 
-    assert "conv-antigua" not in atencion._sesiones
-    assert atencion._sesiones["conv-viva"][0] is reciente, (
-        "una conversación viva no puede perder su historial a mitad de la charla"
-    )
+    monkeypatch.setattr(atencion.persistencia, "sesion_de_agente", fabrica)
+
+    sesion = atencion._sesion_de("conv-7", "postgresql://u:c@host/db")
+
+    assert pedidas == [("conv-7", "postgresql://u:c@host/db")]
+    assert sesion.session_id == "conv-7"
+
+
+def test_una_sesion_inyectada_gana_a_la_de_produccion():
+    """`sesion_de` existe SOLO para que la suite offline pueda correr sin Neon, igual que
+    `calendario` y `dormir`. En producción vale `None` y manda la persistida."""
+    import inspect
+
+    firma = inspect.signature(atencion.atender)
+
+    assert "sesion_de" in firma.parameters
+    assert firma.parameters["sesion_de"].default is None
 
 
 def test_una_conversacion_sin_configuracion_operativa_usa_los_defaults(monkeypatch):

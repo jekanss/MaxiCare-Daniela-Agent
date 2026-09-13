@@ -254,6 +254,7 @@ async def _el_camino_completo(whatsapp, telegram) -> tuple[atencion.Atendido, as
         ventana=0,
         tope=0,
         lectura=resultado.lectura,
+        sesion_de=lambda id_: conversacion.SesionEnMemoria(id_),
     )
     return atendido, resultado.lectura
 

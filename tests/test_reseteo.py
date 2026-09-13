@@ -9,11 +9,10 @@ porque esa solo la puede contestar la base.
 from __future__ import annotations
 
 import asyncio
-import time
 
 import pytest
 
-from maxicare_daniela import atencion, config, lectura, reseteo
+from maxicare_daniela import atencion, config, conversacion, lectura, reseteo
 from maxicare_daniela.canales import ErrorDeCanal
 
 TEL = "573001234567"
@@ -121,18 +120,30 @@ def test_la_lista_se_compara_por_digitos():
 # ==========================================================================================
 
 
-def test_una_conversacion_nueva_nace_con_la_sesion_vacia():
-    """Por esto el reseteo no tiene que limpiar el historial del dialogo.
+def test_una_conversacion_nueva_nace_con_la_sesion_vacia(monkeypatch):
+    """Por esto el reseteo no tiene que limpiar el historial del dialogo a mano en memoria.
 
-    `_sesiones` se indexa por `id_conversacion`. Borrada la conversacion, la siguiente nace
-    con un UUID nuevo, y `_sesion_de` de un id que nunca se ha visto construye una sesion
-    vacia. La vieja queda inalcanzable y se poda sola a las 24 h.
+    Desde la fase 7 ya no hay `_sesiones` de la que colgarse: `_sesion_de` construye, para
+    CADA id, la sesion persistida de ese id. Un UUID que nunca se ha visto no tiene filas que
+    leer en Neon, así que borrada la conversacion, la siguiente -- con su UUID nuevo -- nace
+    vacia por construcción, no porque nada la limpie.
+
+    (Que el historial YA escrito en Neon para el número reseteado se borre de la base es
+    tarea de `persistencia.borrar_rastro`, no de este módulo -- ver
+    `.claude/rules/atencion-whatsapp.md`.)
     """
-    de_antes = atencion._sesion_de("conversacion-vieja", time.monotonic())
+    construidas: dict[str, conversacion.SesionEnMemoria] = {}
+
+    def fabrica(id_conversacion, *, database_url, esquema=None, limite=None):
+        return construidas.setdefault(id_conversacion, conversacion.SesionEnMemoria(id_conversacion))
+
+    monkeypatch.setattr(atencion.persistencia, "sesion_de_agente", fabrica)
+
+    de_antes = atencion._sesion_de("conversacion-vieja", "postgresql://prueba:prueba@localhost/nada")
     asyncio.run(de_antes.add_items([{"role": "user", "content": "me llamo Ana"}]))
     assert asyncio.run(de_antes.get_items()) != []
 
-    nueva = atencion._sesion_de("conversacion-nueva", time.monotonic())
+    nueva = atencion._sesion_de("conversacion-nueva", "postgresql://prueba:prueba@localhost/nada")
 
     assert asyncio.run(nueva.get_items()) == []
 

@@ -281,10 +281,11 @@ class EspiaResponder:
 
 
 def usar(espia: EspiaResponder) -> EspiaResponder:
-    """Igual que en `probar_atencion.py`: `_candados` y `_sesiones` son estado de modulo y
-    sobreviven entre comprobaciones."""
+    """Igual que en `probar_atencion.py`: `_candados` es estado de modulo y sobrevive entre
+    comprobaciones. El historial ya no vive en memoria (desde la fase 7): este script corre
+    contra Neon, en su propio esquema (`pruebas_lectura`), y usa la sesion persistida de
+    verdad."""
     atencion._candados.clear()
-    atencion._sesiones.clear()
     conversacion.responder = espia
     return espia
 

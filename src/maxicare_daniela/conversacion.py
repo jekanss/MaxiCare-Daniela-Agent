@@ -111,14 +111,13 @@ class SesionEnMemoria:
     `clear_session` -- sin heredar de `SessionABC`, que la documentación del propio SDK
     reserva para sus implementaciones internas.
 
-    **No es la sesión del plan.** `persistencia.tipo_sesion` dice `SQLAlchemySession`, y esa
-    llega en la fase 7 junto con la promesa de que una conversación sobreviva a reiniciar el
-    proceso. Esta existe para el carril de pruebas de la interfaz web, donde perder el
-    historial al reiniciar es intrascendente y montar tablas de sesión en un esquema de
-    pruebas sería trabajo que hay que deshacer.
+    **Es el doble de las pruebas offline, y solo eso.** Lo que corre en producción --y en el
+    chat web del panel-- es `persistencia.sesion_de_agente`, sobre Neon, desde la fase 7.
+    Esta existe para que `uv run pytest -q` siga corriendo en dos segundos y sin señal: una
+    suite que exige internet es una suite que alguien acaba saltándose.
 
-    Un chat de pruebas SIN historial no serviría: Daniela no recordaría el mensaje anterior y
-    cada turno empezaría de cero, que es justo lo que no se quiere probar.
+    Un doble SIN historial no serviría: Daniela no recordaría el mensaje anterior y cada
+    turno empezaría de cero, que es justo lo que no se quiere probar.
     """
 
     def __init__(self, session_id: str) -> None:

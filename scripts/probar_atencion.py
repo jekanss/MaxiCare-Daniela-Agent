@@ -325,10 +325,13 @@ class Turnos:
 
 
 def usar(espia: Turnos) -> Turnos:
-    """`_candados` y `_sesiones` son estado de MODULO y sobreviven entre comprobaciones. Sin
-    limpiarlos, una comprobacion pasa sola y falla dentro del script, o al reves."""
+    """`_candados` es estado de MODULO y sobrevive entre comprobaciones. Sin limpiarlo, una
+    comprobacion pasa sola y falla dentro del script, o al reves.
+
+    El historial ya no vive en memoria (desde la fase 7): este script corre contra Neon, en
+    su propio esquema (`pruebas_atencion`), y usa la sesion persistida de verdad -- que es lo
+    que se quiere probar."""
     atencion._candados.clear()
-    atencion._sesiones.clear()
     conversacion.responder = espia
     return espia
 

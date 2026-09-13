@@ -45,18 +45,17 @@ tripwire que nadie sabría explicar.
 Cuatro límites conocidos, y ninguno es un descuido
 ------------------------------------------------------------------------------------------
 
-1. **El historial vive en memoria.** Un reinicio del proceso borra el hilo del diálogo -- no
-   los datos: paciente, citas y estado de la oportunidad están en Neon. Lo arregla la fase 7
-   cambiando `SesionEnMemoria` por `SQLAlchemySession`.
+1. **El historial ya NO vive en memoria.** Desde la fase 7 lo guarda `persistencia
+   .sesion_de_agente` en Neon (`SQLAlchemySession`), así que un reinicio del proceso ya no
+   le borra el hilo del diálogo a nadie -- ni los datos (paciente, citas, estado de la
+   oportunidad) ni la conversación misma.
 2. **El candado es de proceso.** Con varios workers de uvicorn o varias réplicas deja de
    proteger, porque cada proceso tiene su propio `_candados`. La versión que sí escalaría es
    un `pg_advisory_lock` sobre el uuid de la conversación. Hoy corre un solo worker.
-3. **`_sesiones` y `_candados` se podan por antigüedad**, con la misma ventana de 24 h de
+3. **`_candados` se poda por antigüedad**, con la misma ventana de 24 h de
    `conversacion_viva`: pasada esa ventana la conversación ya está muerta para la base, así
-   que su historial tampoco sirve. Sin la poda, los diccionarios crecen con cada número que
-   escriba a la clínica y no bajan nunca. Se podan por separado porque tienen claves
-   distintas --`_sesiones` por conversación, `_candados` por teléfono-- y un candado cogido
-   no se tira nunca.
+   que serializarla ya no tiene sentido. Sin la poda, el diccionario crece con cada número
+   que escriba a la clínica y no baja nunca.
 4. **`tomada_por` siempre será `None` hasta la entrega 6C**, que es la que trae el relevo a
    los doctores. Se lee desde ya porque no cuesta una consulta aparte y evita volver aquí.
 """
@@ -123,11 +122,10 @@ VENTANA_CONVERSACION_HORAS = 24
 #: un teléfono no tiene dos conversaciones vivas a la vez: todo lo que serializaba el candado
 #: por conversación lo serializa este, y además las dos carreras de arriba.
 #:
-#: Guarda `(candado, último uso)` porque la poda ya no puede colgarse de `_sesiones`: las dos
-#: tablas tienen claves distintas --teléfono aquí, id de conversación allá-- y un candado sin
-#: marca de tiempo propia no se podría tirar nunca.
+#: Guarda `(candado, último uso)` porque la poda necesita su propia marca de tiempo: desde
+#: que el historial vive en Neon (fase 7) ya no hay `_sesiones` de la que colgarse, y un
+#: candado sin marca propia no se podría tirar nunca.
 _candados: dict[str, tuple[asyncio.Lock, float]] = {}
-_sesiones: dict[str, tuple[conversacion.SesionEnMemoria, float]] = {}
 
 
 @dataclass
@@ -365,19 +363,6 @@ def _anotar_resultado(
 # ==========================================================================================
 
 
-def _podar_sesiones(ahora: float) -> None:
-    """Tira las sesiones que ya pasaron la ventana.
-
-    Ya no tira candados: desde que el candado va por teléfono, las dos tablas tienen claves
-    distintas y borrar `_candados[id_conversacion]` no habría borrado nunca nada. De los
-    candados se encarga `_podar_candados`.
-    """
-    limite = VENTANA_CONVERSACION_HORAS * 3600
-    viejas = [id_ for id_, (_, ultimo) in _sesiones.items() if ahora - ultimo > limite]
-    for id_ in viejas:
-        del _sesiones[id_]
-
-
 def _podar_candados(ahora: float) -> None:
     """Tira los candados que nadie ha usado en la ventana. Sin esto, el diccionario crece
     con cada número que le escriba a la clínica y no baja nunca.
@@ -431,9 +416,10 @@ def olvidar(telefono: str) -> None:
     siguiente --el primero de la conversación «nueva»-- los mensajes de la anterior, y la
     prueba de que Daniela no recuerda nada fallaría por el único sitio que no es la base.
 
-    Las sesiones NO hace falta borrarlas y por eso no se tocan: `_sesiones` se indexa por
-    `id_conversacion`, y como la conversación se borró, la siguiente nace con un id nuevo y
-    una sesión vacía. La vieja queda inalcanzable y se poda sola a las 24 h.
+    El historial del diálogo ya NO está aquí: desde la fase 7 vive en `agent_messages`, y lo
+    borra `persistencia.borrar_rastro` dentro de la misma transacción que el resto del
+    rastro. Esta función no lo toca, y no es un olvido: borrar por dos caminos distintos es
+    cómo se acaba con uno de los dos desactualizado.
 
     Se llama con el candado del teléfono cogido; el candado en sí se deja donde está, porque
     quien llama lo tiene tomado en ese momento.
@@ -445,12 +431,14 @@ def olvidar(telefono: str) -> None:
     lectura_mod._candados_de_tema.pop(telefono, None)
 
 
-def _sesion_de(id_conversacion: str, ahora: float) -> conversacion.SesionEnMemoria:
-    _podar_sesiones(ahora)
-    guardada = _sesiones.get(id_conversacion)
-    sesion = guardada[0] if guardada else conversacion.SesionEnMemoria(id_conversacion)
-    _sesiones[id_conversacion] = (sesion, ahora)
-    return sesion
+def _sesion_de(id_conversacion: str, database_url: str):
+    """El historial de esta conversación, que ahora vive en Neon y no en este proceso.
+
+    Ya no hay diccionario que podar: el estado se fue a la base. Lo que se construye aquí es
+    barato --dos definiciones de tabla y un factory-- porque el pool de conexiones lo tiene
+    el engine, que `persistencia` comparte entre todas las conversaciones.
+    """
+    return persistencia.sesion_de_agente(id_conversacion, database_url=database_url)
 
 
 # ==========================================================================================
@@ -690,6 +678,7 @@ async def atender(
     ventana: float | None = None,
     tope: float | None = None,
     lectura: asyncio.Task | None = None,
+    sesion_de: Callable[[str], Any] | None = None,
 ) -> Atendido:
     """Atiende un mensaje de WhatsApp de principio a fin y deja constancia de qué pasó.
 
@@ -701,6 +690,10 @@ async def atender(
     `calendario_desde_config(config)` y `asyncio.sleep`, que es lo que corre en producción;
     una prueba que esperase 55 segundos de verdad es una prueba que alguien acaba saltándose,
     y un `CalendarioGoogle` construido por mensaje pagaría una lectura contra Google cada vez.
+
+    `sesion_de` existe **solo para que esto se pueda probar** sin Neon. Por omisión es
+    `_sesion_de`, la persistida, que es lo que corre en producción: la suite offline le pasa
+    una `SesionEnMemoria` y así sigue corriendo en dos segundos y sin señal.
 
     `telegram` no se usa en el camino normal: los avisos a los doctores salen de
     `escalar_a_doctores` --que arma su propio cliente con las credenciales del contexto-- y
@@ -900,7 +893,8 @@ async def atender(
             ),
         )
 
-        sesion = _sesion_de(estado.id_conversacion, momento_inicio)
+        fabricar = sesion_de or (lambda id_: _sesion_de(id_, config.database_url))
+        sesion = fabricar(estado.id_conversacion)
 
         try:
             resultado = await conversacion.responder(
