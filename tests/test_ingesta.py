@@ -312,3 +312,99 @@ def test_una_radiografia_va_como_documento_y_no_como_foto():
     assert _ENVIO_POR_TIPO["image"][0] == "sendDocument"
     assert _ENVIO_POR_TIPO["document"][0] == "sendDocument"
     assert _ENVIO_POR_TIPO["voice"][0] == "sendVoice"
+
+
+# ==========================================================================================
+# Crear y cerrar temas en Telegram
+# ==========================================================================================
+
+
+def test_crear_tema_pide_el_nombre_y_devuelve_el_id():
+    import asyncio
+    import httpx
+
+    from maxicare_daniela.canales import Telegram
+
+    llamadas: list[tuple[str, dict]] = []
+
+    def capturar(request: httpx.Request) -> httpx.Response:
+        llamadas.append((request.url.path, json.loads(request.content)))
+        return httpx.Response(
+            200, json={"ok": True, "result": {"message_thread_id": 91, "name": "x"}}
+        )
+
+    transporte = httpx.MockTransport(capturar)
+    original = httpx.AsyncClient
+
+    class ClienteFalso(original):
+        def __init__(self, *a, **kw):
+            kw["transport"] = transporte
+            super().__init__(*a, **kw)
+
+    httpx.AsyncClient = ClienteFalso
+    try:
+        tema = asyncio.run(Telegram("t", "-100123").crear_tema("Ana Perez · +573001112233"))
+    finally:
+        httpx.AsyncClient = original
+
+    assert tema == 91
+    assert llamadas[0][0].endswith("/createForumTopic")
+    assert llamadas[0][1]["name"] == "Ana Perez · +573001112233"
+
+
+def test_cerrar_tema_manda_el_thread_id():
+    import asyncio
+    import httpx
+
+    from maxicare_daniela.canales import Telegram
+
+    llamadas: list[tuple[str, dict]] = []
+
+    def capturar(request: httpx.Request) -> httpx.Response:
+        llamadas.append((request.url.path, json.loads(request.content)))
+        return httpx.Response(200, json={"ok": True, "result": True})
+
+    transporte = httpx.MockTransport(capturar)
+    original = httpx.AsyncClient
+
+    class ClienteFalso(original):
+        def __init__(self, *a, **kw):
+            kw["transport"] = transporte
+            super().__init__(*a, **kw)
+
+    httpx.AsyncClient = ClienteFalso
+    try:
+        asyncio.run(Telegram("t", "-100123").cerrar_tema(91))
+    finally:
+        httpx.AsyncClient = original
+
+    assert llamadas[0][0].endswith("/closeForumTopic")
+    assert llamadas[0][1]["message_thread_id"] == 91
+
+
+def test_un_tema_que_telegram_rechaza_no_pasa_por_bueno():
+    """Sin esto, un `ok: false` devolveria un KeyError sin nombre y el archivo se perderia
+    buscando un tema que no existe."""
+    import asyncio
+    import httpx
+
+    from maxicare_daniela.canales import ErrorDeCanal, Telegram
+
+    transporte = httpx.MockTransport(
+        lambda r: httpx.Response(
+            200, json={"ok": False, "description": "not enough rights to manage topics"}
+        )
+    )
+    original = httpx.AsyncClient
+
+    class ClienteFalso(original):
+        def __init__(self, *a, **kw):
+            kw["transport"] = transporte
+            super().__init__(*a, **kw)
+
+    httpx.AsyncClient = ClienteFalso
+    try:
+        with pytest.raises(ErrorDeCanal, match="not enough rights"):
+            asyncio.run(Telegram("t", "-100123").crear_tema("Ana"))
+    finally:
+        httpx.AsyncClient = original

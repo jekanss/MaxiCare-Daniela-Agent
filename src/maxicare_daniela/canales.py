@@ -243,3 +243,31 @@ class Telegram:
                 f"Telegram rechazó el archivo ({metodo}): {datos.get('description')}"
             )
         return datos["result"]["message_id"]
+
+    async def crear_tema(self, nombre: str) -> int:
+        """Abre un tema en el supergrupo y devuelve su `message_thread_id`.
+
+        Telegram corta el nombre en 128 caracteres y rechaza la llamada entera si se pasa,
+        así que se recorta aquí: un tema con el nombre corto es mejor que ningún tema.
+        """
+        cuerpo = {"chat_id": self._chat_id, "name": nombre[:128]}
+        async with httpx.AsyncClient(timeout=TIMEOUT_NORMAL) as cliente:
+            r = await cliente.post(self._url("createForumTopic"), json=cuerpo)
+        datos = r.json()
+        if not datos.get("ok"):
+            raise ErrorDeCanal(f"Telegram no creó el tema: {datos.get('description')}")
+        return datos["result"]["message_thread_id"]
+
+    async def cerrar_tema(self, tema_id: int) -> None:
+        """Cierra un tema. Un tema cerrado impide FÍSICAMENTE escribir a quien no es
+        administrador del grupo, mientras el bot, que sí lo es, sigue pudiendo depositar.
+
+        Esa asimetría es la garantía dura del diseño: el doctor no tiene que acordarse de
+        nada, porque cuando no debe escribirle al paciente, sencillamente no puede.
+        """
+        cuerpo = {"chat_id": self._chat_id, "message_thread_id": tema_id}
+        async with httpx.AsyncClient(timeout=TIMEOUT_NORMAL) as cliente:
+            r = await cliente.post(self._url("closeForumTopic"), json=cuerpo)
+        datos = r.json()
+        if not datos.get("ok"):
+            raise ErrorDeCanal(f"Telegram no cerró el tema: {datos.get('description')}")
