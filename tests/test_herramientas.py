@@ -16,6 +16,7 @@ existen para no necesitar.
 from __future__ import annotations
 
 import asyncio
+import re
 from datetime import datetime, timedelta
 from typing import get_args
 
@@ -172,7 +173,8 @@ def test_horario_lleno_es_un_resultado_y_no_una_excepcion(monkeypatch):
     ctx = contexto()
 
     async def base_falsa(_ctx, trabajo):
-        return (None, [INICIO + timedelta(hours=2)])
+        # `(cupo, cita_ya_existente, alternativas)`: sin cupo no hay nada que duplicar.
+        return (None, None, [INICIO + timedelta(hours=2)])
 
     monkeypatch.setattr(h, "_con_base", base_falsa)
 
@@ -193,6 +195,114 @@ def test_horario_lleno_es_un_resultado_y_no_una_excepcion(monkeypatch):
     assert "Bloques libres" in texto
 
 
+def test_la_clave_del_cupo_la_arma_el_orquestador_y_va_anclada_al_HORARIO(monkeypatch):
+    """`crear_cita` era el último sitio del repositorio donde una clave escrita por el modelo
+    llegaba a la base, y `tomar_cupo` busca por clave SIN filtrar por `inicio` ni por
+    conversación. Eso son tres fallos distintos, todos con el mismo final:
+
+    1. *Misma clave, otro horario.* El paciente pide las 10:00 y luego «mejor a las 15:00».
+       El modelo repite la clave --para él es el mismo intento-- y se le devuelve la reserva
+       de las 10:00: las 15:00 no consumen cupo (con capacidad 2 se venden 3) y las 10:00
+       quedan bloqueadas para nadie. Por eso la clave lleva el `inicio` dentro.
+    2. *Colisión entre pacientes.* La columna es UNIQUE global y al modelo se le oculta el
+       teléfono a propósito, así que lo natural que puede inventar es
+       `cita-2026-09-15T09:00-limpieza`: dos pacientes pidiendo el mismo bloque generan la
+       misma cadena y el segundo recibe la reserva del primero. Por eso la clave lleva el
+       `id_conversacion` delante.
+    3. Y el reintento legítimo del MISMO horario sigue siendo idempotente, que es para lo
+       que la clave existía.
+    """
+    claves: list[str] = []
+
+    def tomar_cupo_falso(_conn, *, inicio, capacidad, clave_idempotencia, conversacion_id=None):
+        claves.append(clave_idempotencia)
+        return None  # «lleno»: corta el camino antes del calendario y de la base
+
+    async def base_falsa(_ctx, trabajo):
+        return trabajo(BaseFalsa())
+
+    monkeypatch.setattr(h, "_con_base", base_falsa)
+    monkeypatch.setattr(h.persistencia, "tomar_cupo", tomar_cupo_falso)
+    monkeypatch.setattr(h, "_huecos_libres", lambda *a, **k: [])
+
+    def pedir(ctx, inicio):
+        asyncio.run(
+            h._crear_cita(
+                ctx,
+                SolicitudCita(
+                    nombre_completo="Ana Gómez",
+                    inicio=inicio,
+                    tratamiento="limpieza",
+                    # El modelo repite LA MISMA cadena en los tres casos. Antes eso bastaba
+                    # para que las tres reservas se confundieran entre sí.
+                    clave_idempotencia="cita-2026-09-15T09:00-limpieza",
+                ),
+            )
+        )
+
+    ana = contexto(id_conversacion="conv-ana")
+    beto = contexto(id_conversacion="conv-beto")
+    mas_tarde = INICIO + timedelta(hours=6)
+
+    pedir(ana, INICIO)        # el primer intento
+    pedir(ana, INICIO)        # el reintento del mismo horario
+    pedir(ana, mas_tarde)     # «mejor a las 15:00»
+    pedir(beto, INICIO)       # otro paciente, el mismo bloque
+
+    assert "cita-2026-09-15T09:00-limpieza" not in claves, "la clave del modelo llegó a la base"
+    assert claves[0] == f"conv-ana:cita:{INICIO.isoformat()}"
+    assert claves[0] == claves[1], "el reintento del mismo horario dejó de ser idempotente"
+    assert claves[2] != claves[0], "cambiar de hora reusaba la reserva de la hora anterior"
+    assert claves[3] != claves[0], "dos pacientes distintos compartían la misma reserva"
+
+
+def test_el_mismo_intento_no_crea_un_SEGUNDO_evento_en_el_calendario(monkeypatch):
+    """`tomar_cupo` era idempotente y la tool no.
+
+    Un acierto de clave devuelve la reserva que YA existía, y el código seguía derecho a
+    `crear_evento` + `registrar_cita`. Medido antes del arreglo, llamando dos veces con la
+    misma conversación y el mismo horario: una reserva, **dos eventos en el calendario del
+    doctor** y dos filas en `citas`, las dos confirmadas al paciente con ids distintos.
+
+    Con la clave anclada al horario esto es mucho menos probable, pero no imposible: el
+    modelo puede reintentar la tool dentro del mismo turno.
+    """
+    calendario = CalendarioDoble()
+    ctx = contexto(calendario=calendario)
+    liberados: list[int] = []
+
+    # La reserva 77 ya tiene su cita: es lo que devolvería `cita_viva_de_reserva`.
+    ya_creada = {
+        "id": "cita-original",
+        "nombre_completo": "Ana Gómez",
+        "tratamiento": "limpieza",
+        "evento_calendar_id": "evt-original",
+    }
+
+    async def base_falsa(_ctx, trabajo):
+        return ((77, 1), ya_creada, [])
+
+    monkeypatch.setattr(h, "_con_base", base_falsa)
+    monkeypatch.setattr(h, "_liberar", lambda _ctx, reserva_id: liberados.append(reserva_id))
+
+    texto = asyncio.run(
+        h._crear_cita(
+            ctx,
+            SolicitudCita(
+                nombre_completo="Ana Gómez",
+                inicio=INICIO,
+                tratamiento="limpieza",
+                clave_idempotencia="da-igual-lo-que-ponga",
+            ),
+        )
+    )
+
+    assert calendario.eventos == {}, "creó un segundo evento sobre una reserva que ya tenía cita"
+    assert "cita-original" in texto, "le daría al paciente un id distinto para la misma hora"
+    assert "Cita confirmada" in texto, "el modelo tiene que poder confirmarle igual"
+    assert liberados == [], "liberó un cupo que es del paciente y tiene una cita viva"
+
+
 def test_si_calendar_falla_el_cupo_se_libera_y_la_corrida_muere(monkeypatch):
     """El escenario que justifica que el doble sea hostil.
 
@@ -208,7 +318,9 @@ def test_si_calendar_falla_el_cupo_se_libera_y_la_corrida_muere(monkeypatch):
     liberados: list[int] = []
 
     async def base_falsa(_ctx, trabajo):
-        return ((77, 1), [])
+        # Cupo tomado y NINGUNA cita previa en esa reserva: el camino que crea el evento,
+        # que es el que esta prueba necesita ver fallar.
+        return ((77, 1), None, [])
 
     monkeypatch.setattr(h, "_con_base", base_falsa)
     monkeypatch.setattr(h, "_liberar", lambda _ctx, reserva_id: liberados.append(reserva_id))
@@ -421,20 +533,126 @@ def test_el_mismo_turno_no_escala_dos_veces(monkeypatch):
     assert "ya estaba escalado" in texto
 
 
+def test_un_escalamiento_registrado_sin_avisar_se_reintenta_desde_la_TOOL(monkeypatch):
+    """El aviso de cierre de turno no basta, y el caso es concreto.
+
+    La tool escribe su fila, Telegram devuelve 502, `failure_error_function` se traga el
+    `ErrorDeCanal` para que el modelo siga conversando, y el modelo cierra con
+    `requiere_escalamiento=False` --porque cree que ya avisó--. Entonces `responder` no llama
+    a `al_escalar`, el reintento de `runtime._avisar_a_doctores` no se alcanza nunca, y
+    queda: cero telegrams al doctor, una fila pendiente que nadie va a mirar, y un paciente
+    al que se le dijo «ya le estoy avisando al doctor».
+
+    Por eso el reintento tiene que vivir también aquí, que es donde nace el problema.
+    """
+    ctx = contexto()
+    telegram = TelegramFalso()
+    anotados: list[tuple[int, int]] = []
+
+    async def base_falsa(_ctx, trabajo):
+        return trabajo(BaseFalsa())
+
+    # La clave ya existe: `insertar_escalamiento` no escribe...
+    monkeypatch.setattr(h, "_con_base", base_falsa)
+    monkeypatch.setattr(h.persistencia, "insertar_escalamiento", lambda _c, **kw: None)
+    # ...pero esa fila se quedó sin Telegram.
+    monkeypatch.setattr(
+        h.persistencia, "escalamiento_pendiente_de_aviso", lambda _c, clave: 19
+    )
+    monkeypatch.setattr(
+        h.persistencia,
+        "anotar_telegram_en_escalamiento",
+        lambda _c, eid, mid: anotados.append((eid, mid)),
+    )
+
+    texto = asyncio.run(
+        h._escalar_a_doctores(
+            ctx,
+            SolicitudEscalamiento(
+                motivo="clinico",
+                resumen_para_doctor="Dice que le duele desde hace tres días.",
+                pregunta_concreta="¿Lo citamos hoy mismo?",
+                clave_idempotencia="da-igual",
+            ),
+            telegram=telegram,
+        )
+    )
+
+    assert len(telegram.enviados) == 1, "el doctor se quedó sin enterarse del escalamiento"
+    assert anotados == [(19, 4242)], "el reintento no quedó anotado; se repetiría siempre"
+    assert "ya estaba escalado" not in texto
+
+
+def test_un_escalamiento_YA_avisado_no_se_reintenta_desde_la_tool(monkeypatch):
+    """La otra mitad. Sin ella, el arreglo de arriba habría cambiado un aviso perdido por
+    un aviso repetido, que es la otra forma de que el doctor deje de mirarlos."""
+    ctx = contexto()
+    telegram = TelegramFalso()
+
+    async def base_falsa(_ctx, trabajo):
+        return trabajo(BaseFalsa())
+
+    monkeypatch.setattr(h, "_con_base", base_falsa)
+    monkeypatch.setattr(h.persistencia, "insertar_escalamiento", lambda _c, **kw: None)
+    monkeypatch.setattr(
+        h.persistencia, "escalamiento_pendiente_de_aviso", lambda _c, clave: None
+    )
+
+    texto = asyncio.run(
+        h._escalar_a_doctores(
+            ctx,
+            SolicitudEscalamiento(
+                motivo="clinico",
+                resumen_para_doctor="Lo mismo de antes.",
+                pregunta_concreta="¿Y ahora?",
+                clave_idempotencia="da-igual",
+            ),
+            telegram=telegram,
+        )
+    )
+
+    assert telegram.enviados == []
+    assert "ya estaba escalado" in texto
+
+
 def test_el_aviso_al_doctor_no_rompe_el_html_de_telegram():
-    """El resumen lo escribe un modelo a partir de lo que dijo un desconocido."""
+    """El resumen lo escribe un modelo a partir de lo que dijo un desconocido.
+
+    Esta prueba estaba VACUNADA: tenía el nombre bueno, usaba «Ana <3 Gómez» como cebo, y
+    luego solo comprobaba `assert "<b>" in aviso`, que es cierto pase lo que pase porque esa
+    etiqueta la escribe la propia función. Parecía cobertura y no lo era: el `<3` viajaba sin
+    escapar y la prueba seguía en verde.
+
+    Y lo que se pagaba no era un aviso feo. Telegram va en `parse_mode=HTML` y RECHAZA el
+    mensaje entero si el HTML no cierra: `canales.enviar_mensaje` lanza `ErrorDeCanal`,
+    `failure_error_function` se lo traga, la fila del escalamiento ya está escrita, y el
+    aviso de cierre de turno ve la clave quemada y se calla. Dos filas en Neon, CERO Telegram
+    al doctor, y un paciente con dolor esperando.
+    """
     ctx = contexto(nombre_paciente="Ana <3 Gómez")
     solicitud = SolicitudEscalamiento(
         motivo="dato_faltante",
-        resumen_para_doctor="Preguntó por el precio de algo que no está documentado.",
+        resumen_para_doctor="Preguntó por «implante & corona» y por el <precio> de eso.",
         pregunta_concreta="¿Cuánto cobramos?",
         clave_idempotencia="conv-1:1",
     )
 
     aviso = h._aviso_para_doctores(ctx, solicitud)
 
-    assert "<b>" in aviso  # el formato propio sí se conserva
+    # Lo ajeno va escapado: ni un `<` ni un `&` sueltos del paciente ni del modelo.
+    assert "Ana &lt;3 Gómez" in aviso
+    assert "&lt;precio&gt;" in aviso
+    assert "implante &amp; corona" in aviso
+    assert "<3" not in aviso, "el nombre del paciente rompe el HTML del aviso"
+    assert "<precio>" not in aviso
+
+    # Y el formato propio sí se conserva: escapar no puede dejar el aviso en texto plano.
+    assert aviso.startswith("<b>Escalamiento")
+    assert "<b>Pregunta:</b>" in aviso
     assert "+573001112233" in aviso
+
+    # El cinturón: las únicas etiquetas que quedan son las que pone la función.
+    assert set(re.findall(r"</?([a-z]+)>", aviso)) == {"b"}
 
 
 # ==========================================================================================

@@ -20,13 +20,28 @@ Lo que sí hay:
     GET  /salud              para el VPS y para saber si la configuración quedó completa
 
 Arrancar:  uv run uvicorn maxicare_daniela.runtime:app --host 0.0.0.0 --port 8080
+
+------------------------------------------------------------------------------------------
+FASE 6A — y ahora Daniela contesta
+------------------------------------------------------------------------------------------
+
+Lo de arriba sigue siendo cierto palabra por palabra: el viaje del archivo no cambió. Lo que
+se añade es UNA llamada, `atencion.atender(...)`, DESPUÉS de `ingesta.procesar_mensaje` y en
+su propio `try` --ver `_entregar`, donde está explicado por qué ese orden es una garantía y
+no una preferencia--. El turno entero vive en `atencion.py`; de este archivo sale la llamada
+y las tres cosas que solo el transporte puede aportar: el calendario de producción
+(construido una vez al arrancar), el aviso a los doctores (`_avisar_a_doctores`) y el
+interruptor `MAXICARE_DANIELA_RESPONDE`, que lo lee `atender`.
 """
 
 from __future__ import annotations
 
+import asyncio
+import html
 import logging
 
 from pathlib import Path
+from typing import Any
 
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request, Response
 from fastapi.exceptions import RequestValidationError
@@ -35,8 +50,8 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from starlette.exceptions import HTTPException as HTTPExceptionStarlette
 
-from . import autenticacion, contratos, conversacion, ingesta, panel, persistencia
-from .calendario import CalendarioDoble
+from . import atencion, autenticacion, contratos, conversacion, ingesta, panel, persistencia
+from .calendario import CalendarioCaido, CalendarioDoble, calendario_desde_config
 from .canales import Telegram, WhatsApp
 from .config import Config, cargar_dotenv
 from .contratos import ContextoDaniela
@@ -164,6 +179,79 @@ def _cargar_configuracion_operativa() -> None:
         log.error("no se pudo leer la configuración operativa (%s); se usa el General", e)
 
 
+#: El calendario de la clínica, construido UNA vez al arrancar.
+#:
+#: `CalendarioGoogle.__init__` hace una lectura real contra Google --es su comprobación de
+#: acceso-- así que construirlo por mensaje pagaría esa lectura en cada WhatsApp que entre.
+#:
+#: `None` hasta que corra el startup. Ese `None` no es un agujero: `atencion.atender` lo
+#: interpreta como «no me dieron calendario» y construye el suyo con la misma regla de
+#: seguridad (`_calendario_por_defecto`), así que lo peor que puede pasar es pagar la lectura
+#: contra Google, nunca agendar contra un doble.
+_calendario: Any | None = None
+
+
+@app.on_event("startup")
+def _construir_el_calendario() -> None:
+    """Lo mismo que `_cargar_configuracion_operativa`: si falla, se arranca igual.
+
+    Que el webhook no arranque deja a los doctores sin recibir las radiografías de sus
+    pacientes, y eso es peor que una Daniela que no puede agendar.
+
+    Lo que NO se hace al fallar es caer a `CalendarioDoble`, aunque sea el objeto que ya
+    está importado en este archivo para el chat de pruebas. El doble guarda los eventos en
+    un diccionario en memoria y dice que sí a todo: con uno aquí, `crear_cita` tomaría el
+    cupo en Neon, «crearía» el evento en el vacío y Daniela le confirmaría la cita al
+    paciente. **El paciente llegaría a una clínica donde nadie lo espera**, y sin una sola
+    línea roja en el log. `CalendarioCaido` lanza `ErrorDeCalendario` en los cuatro métodos,
+    que es exactamente lo que las tools de la fase 3 saben manejar: `crear_cita` libera el
+    cupo, no confirma nada y la corrida muere para que el orquestador escale a los doctores.
+    """
+    global _calendario
+    try:
+        _calendario = calendario_desde_config(config)
+    except Exception as e:  # noqa: BLE001 -- ver docstring
+        _calendario = CalendarioCaido(motivo=str(e))
+        log.error(
+            "EL CALENDARIO NO ARRANCÓ (%s): Daniela puede conversar, cotizar y responder, "
+            "pero NO va a poder agendar, mover ni cancelar citas. Cada intento va a escalar "
+            "a los doctores. Revisa MAXICARE_GOOGLE_SA_B64 y que el calendario esté "
+            "compartido con la cuenta de servicio.",
+            e,
+        )
+        return
+
+    # La OTRA mitad de la puerta, y es la que de verdad podía pasar.
+    #
+    # `calendario_desde_config` NO LANZA cuando faltan las credenciales: devuelve un
+    # `CalendarioDoble()` y lo deja en un `warning`. Eso está bien en una máquina de
+    # desarrollo y es letal aquí, porque en este proyecto **una variable presente y vacía no
+    # es una variable ausente**: el `.env` trae casi todas las claves escritas y sin valor,
+    # así que un `MAXICARE_GOOGLE_SA_B64=` en el VPS --un despliegue a medias, un copiado
+    # incompleto-- no da error de arranque: da un doble en producción.
+    #
+    # Con ese doble, `crear_cita` toma el cupo en Neon, «crea» el evento en un diccionario en
+    # memoria, `registrar_cita` guarda un `evento_calendar_id` que no existe en ningún
+    # calendario, y Daniela le confirma la cita al paciente. **El paciente llega a una
+    # clínica donde nadie lo espera**, y el único rastro es un INFO diciendo que el
+    # calendario está listo. Por eso aquí el doble se degrada a caído: lanzar es seguro,
+    # fingir no lo es.
+    if isinstance(_calendario, CalendarioDoble):
+        _calendario = CalendarioCaido(
+            motivo="faltan MAXICARE_GOOGLE_SA_B64 o MAXICARE_GOOGLE_CALENDAR_ID"
+        )
+        log.error(
+            "EL CALENDARIO NO ESTÁ CONFIGURADO (falta MAXICARE_GOOGLE_SA_B64 o "
+            "MAXICARE_GOOGLE_CALENDAR_ID, o están presentes y VACÍAS). Daniela puede "
+            "conversar, cotizar y responder, pero NO va a poder agendar: cada intento "
+            "escala a los doctores. Se usa un calendario CAÍDO y nunca uno de mentira, "
+            "porque el de mentira le confirmaría al paciente una cita que no existe."
+        )
+        return
+
+    log.info("calendario listo · %s", type(_calendario).__name__)
+
+
 # ==========================================================================================
 # Verificación del webhook — Meta la hace una sola vez, al conectar
 # ==========================================================================================
@@ -251,12 +339,160 @@ async def recibir(request: Request, tareas: BackgroundTasks) -> Response:
     return Response(status_code=200, content="ok", media_type="text/plain")
 
 
+def _escapar(texto: str) -> str:
+    """Telegram va en `parse_mode=HTML`, y estos textos los escribe un modelo a partir de lo
+    que dijo un desconocido: un `<` suelto rompe el mensaje entero, que es justo el que el
+    doctor necesita leer. `quote=False` deja las comillas en paz -- dentro de un texto no son
+    HTML, y escaparlas solo llenaría el aviso de `&#x27;`."""
+    return html.escape(texto, quote=False)
+
+
+def _registrar_escalamiento(
+    ctx: ContextoDaniela, motivo: str, resumen: str, pregunta: str
+) -> int | None:
+    """El id del escalamiento que hay que avisar, o `None` si el doctor YA fue avisado.
+
+    Sincrónico a propósito: `persistencia` es psycopg. Siempre dentro de `to_thread`.
+
+    Las dos consultas van en la misma conexión, y la segunda es la que convierte la
+    deduplicación en algo honesto: `insertar_escalamiento` devuelve `None` tanto si el aviso
+    salió como si solo se intentó. Cuando la fila existe pero se quedó sin
+    `telegram_message_id`, no hay nada que duplicar --hay un aviso que falta-- y se devuelve
+    su id para mandarlo ahora. **Un aviso que no salió no es un aviso duplicado.**
+    """
+    # La clave la arma el orquestador, nunca el modelo. Y es LA MISMA que construye
+    # `herramientas._escalar_a_doctores`, que es lo único que hace que este aviso y el de la
+    # tool se reconozcan como el mismo escalamiento.
+    clave = ctx.clave("escalamiento", ctx.turno_actual)
+    with persistencia.conectar(ctx.database_url) as conn:
+        nuevo = persistencia.insertar_escalamiento(
+            conn,
+            id_conversacion=ctx.id_conversacion,
+            motivo=motivo,
+            resumen=resumen,
+            pregunta=pregunta,
+            clave_idempotencia=clave,
+        )
+        if nuevo is not None:
+            return nuevo
+        return persistencia.escalamiento_pendiente_de_aviso(conn, clave)
+
+
+def _anotar_telegram(ctx: ContextoDaniela, escalamiento_id: int, message_id: int) -> None:
+    with persistencia.conectar(ctx.database_url) as conn:
+        persistencia.anotar_telegram_en_escalamiento(conn, escalamiento_id, message_id)
+
+
+async def _avisar_a_doctores(
+    ctx: ContextoDaniela, motivo: str, mensaje_al_paciente: str
+) -> None:
+    """Le cuenta a los doctores, por Telegram, que este turno escaló.
+
+    Se lo pasa `conversacion.responder` como `al_escalar`, y salta en los dos casos en que
+    el turno escala: cuando el modelo lo pide en su respuesta estructurada, y cuando el turno
+    se rompió solo (dos tripwires seguidos, límite de turnos, una excepción del SDK). En el
+    segundo caso el modelo no llamó a ninguna tool, así que este aviso es lo ÚNICO que separa
+    a un paciente atascado de un doctor que no se entera.
+
+    -------------------------------------------------------------------------------------
+    Lo que no puede hacer: mandar el aviso dos veces
+    -------------------------------------------------------------------------------------
+
+    Si el modelo ya llamó a `escalar_a_doctores` en este mismo turno, el doctor ya tiene su
+    Telegram con el resumen que escribió Daniela --que es mejor que este-- y el botón de
+    relevo. Repetirlo no es ruido inocente: a la cuarta alerta repetida el doctor deja de
+    mirarlas, y ahí es donde muere un sistema de escalamiento.
+
+    La defensa es la clave de idempotencia, no un `if`. Funciona porque las dos rutas --la
+    tool y esta-- arman exactamente la misma clave, `ctx.clave("escalamiento",
+    ctx.turno_actual)`, y porque `turno_actual` se persiste en Neon
+    (`persistencia.tocar_conversacion`): con el turno congelado en 0 todos los mensajes de
+    una conversación compartirían clave y el doctor se enteraría del primer escalamiento y
+    de ninguno más.
+
+    -------------------------------------------------------------------------------------
+    Y lo que TAMPOCO puede hacer: callarse porque alguien lo intentó y falló
+    -------------------------------------------------------------------------------------
+
+    La primera versión de esto se callaba en cuanto la clave existía, y eso quemaba la clave
+    al INTENTAR en vez de al CONSEGUIR. Basta un paciente llamado «Ana <3 Gómez» para verlo:
+    la tool escribe su fila, Telegram rechaza el HTML mal cerrado, `failure_error_function`
+    se traga el `ErrorDeCanal` para que el modelo siga conversando, y al cerrar el turno esto
+    encontraba la clave quemada y no decía nada. Dos filas de escalamiento en Neon y CERO
+    Telegram: un paciente con dolor «escalado» en una tabla que nadie mira.
+
+    Por eso `_registrar_escalamiento` distingue los dos casos con
+    `persistencia.escalamiento_pendiente_de_aviso`: si la fila existe pero se quedó sin
+    `telegram_message_id`, el aviso se manda ahora. Un aviso que no salió no es un aviso
+    duplicado.
+
+    No propaga. `conversacion.responder` ya se traga lo que salga de aquí para que un fallo
+    avisando al doctor no deje al paciente sin respuesta, pero un error tragado en silencio
+    no se puede depurar: por eso queda en el log con el id de la conversación.
+    """
+    try:
+        nombre = ctx.nombre_paciente or "paciente sin identificar"
+        # Sin afirmar que el modelo no llamó a la tool: puede haberla llamado y haber fallado
+        # antes de escribir su fila, y entonces esta sería la primera. Lo único que se sabe
+        # con certeza es que el turno cerró escalado y qué se le dijo al paciente.
+        resumen = (
+            f"El turno cerró escalado (motivo: {motivo}). Esto fue lo que se le respondió "
+            f"al paciente: {mensaje_al_paciente}"
+        )
+        pregunta = "¿Alguien puede revisar esta conversación y retomarla si hace falta?"
+
+        escalamiento_id = await asyncio.to_thread(
+            _registrar_escalamiento, ctx, motivo, resumen, pregunta
+        )
+        if escalamiento_id is None:
+            log.info(
+                "el turno %s de %s ya estaba escalado Y avisado; no se repite el aviso",
+                ctx.turno_actual,
+                ctx.id_conversacion,
+            )
+            return
+
+        # El texto lo escribe un modelo a partir de lo que dijo un desconocido, y Telegram
+        # va en `parse_mode=HTML`: un `<` sin escapar rompe el mensaje entero, que es el que
+        # el doctor necesita leer.
+        texto = (
+            f"<b>Escalamiento · {_escapar(str(motivo))}</b>\n"
+            f"{_escapar(nombre)} · +{ctx.telefono_completo}\n\n"
+            "Daniela no pudo resolverlo sola.\n\n"
+            f"<b>Lo que se le respondió al paciente:</b>\n"
+            f"{_escapar(mensaje_al_paciente)}"
+        )
+        # SIEMPRE al General: es donde los doctores pueden hablar de un caso sin que el
+        # paciente lea una palabra.
+        #
+        # `ctx.tema_general` a secas, igual que hace la tool, y NUNCA
+        # `ctx.tema_general or _tema_general`: en el General ese valor es `0`, el `or` lo
+        # cambiaría por el `_tema_general` del proceso --normalmente `1`-- y Telegram
+        # respondería `Bad Request: message thread not found`. El aviso no llegaría. Que `0`
+        # signifique «el General» es justo lo que `canales.enviar_mensaje` resuelve con su
+        # `if tema_id:`.
+        message_id = await _telegram.enviar_mensaje(texto, tema_id=ctx.tema_general)
+
+        await asyncio.to_thread(_anotar_telegram, ctx, escalamiento_id, message_id)
+    except Exception:  # noqa: BLE001 -- ver docstring
+        log.exception("no se pudo avisar a los doctores del escalamiento de %s", ctx.id_conversacion)
+
+
 async def _entregar(m: ingesta.MensajeEntrante) -> None:
     """Se ejecuta después de haber respondido. Nunca lanza: si lanzara, el error se perdería
     en el log del servidor sin dejar rastro consultable. `procesar_mensaje` ya registra el
-    fallo en la fila del mensaje."""
+    fallo en la fila del mensaje.
+
+    Los dos pasos van en `try` SEPARADOS, y el orden no es una preferencia de estilo: es la
+    garantía de la fase 2. `procesar_mensaje` es lo que le hace llegar al doctor la
+    radiografía que acaba de mandar el paciente; `atender` es la respuesta de Daniela, que
+    llama a un modelo, a Neon y a Google. Con los dos en el mismo `try` --o con Daniela
+    primero-- cualquier fallo del turno se llevaría por delante la entrega del archivo, y
+    nadie se enteraría hasta que un paciente mandara una radiografía urgente.
+    """
+    entrega = None
     try:
-        await ingesta.procesar_mensaje(
+        entrega = await ingesta.procesar_mensaje(
             m,
             whatsapp=_whatsapp,
             telegram=_telegram,
@@ -265,6 +501,57 @@ async def _entregar(m: ingesta.MensajeEntrante) -> None:
         )
     except Exception:  # noqa: BLE001
         log.exception("fallo inesperado entregando %s", m.wamid)
+
+    # Meta reintenta el mismo webhook, y el proyecto ya lo tenía asumido: `procesar_mensaje`
+    # deduplica por `wamid` con un `ON CONFLICT DO NOTHING` y devuelve `nuevo=False` cuando
+    # reconoce un reintento. Ese dato se estaba tirando, así que el archivo llegaba al doctor
+    # una sola vez --bien-- pero Daniela corría el turno entero otra vez: el mismo POST tres
+    # veces eran tres respuestas al paciente y tres corridas del modelo pagadas.
+    #
+    # `entrega is None` significa que `procesar_mensaje` reventó antes de decidir nada, y ahí
+    # se sigue: un fallo suyo --Telegram caído, la descarga del archivo-- no puede dejar al
+    # paciente sin respuesta. Solo se corta cuando dijo explícitamente que esto es un
+    # reintento.
+    if entrega is not None and not entrega.nuevo:
+        log.info("%s ya estaba atendido: reintento de Meta, Daniela no vuelve a contestar", m.wamid)
+        return
+
+    try:
+        atendido = await atencion.atender(
+            m,
+            whatsapp=_whatsapp,
+            telegram=_telegram,
+            config=config,
+            calendario=_calendario,
+            al_escalar=_avisar_a_doctores,
+        )
+    except Exception:  # noqa: BLE001 -- `atender` promete no propagar; esto lo hace cierto
+        # Aquí ya no hay nada que salvar para el paciente, pero el archivo YA llegó al
+        # doctor: eso es lo que protege el `try` de arriba.
+        log.exception("el turno de Daniela reventó para %s", m.wamid)
+        return
+
+    # El `Atendido` traía el motivo, el turno y el escalamiento, y se descartaba entero. Un
+    # turno que respondió con el mensaje de emergencia se veía en el log igual que uno que
+    # fue bien, y el único sitio donde quedaba rastro era `mensajes_entrantes` -- que hay que
+    # ir a consultar sabiendo ya que pasó algo. Esta línea es la que hace que se vea sin
+    # buscarla.
+    if atendido.motivo:
+        log.warning(
+            "turno %s de %s con incidencia (%s): respondido=%s · escalado_por=%s",
+            atendido.turno,
+            atendido.id_conversacion or m.telefono,
+            atendido.motivo,
+            atendido.respondido,
+            atendido.escalado_por,
+        )
+    elif atendido.escalado_por:
+        log.info(
+            "turno %s de %s escalado por %s",
+            atendido.turno,
+            atendido.id_conversacion or m.telefono,
+            atendido.escalado_por,
+        )
 
 
 # ==========================================================================================
@@ -279,7 +566,7 @@ async def salud() -> dict:
     Un `{"ok": true}` que no comprueba nada es peor que no tener endpoint: da confianza sin
     respaldo. Este mira de verdad las tres piezas de las que depende la fase.
     """
-    estado: dict = {"servicio": "maxicare-daniela", "fase": 5}
+    estado: dict = {"servicio": "maxicare-daniela", "fase": "6A"}
 
     try:
         with persistencia.conectar(config.database_url) as conn, conn.cursor() as cur:
@@ -308,6 +595,20 @@ async def salud() -> dict:
     ]
     estado["configuracion"] = "ok" if not faltantes else {"faltan": faltantes}
     estado["tema_general"] = _tema_general
+
+    # QUÉ calendario acabó en `_calendario`, no si la variable está puesta. Sin esta línea, el
+    # único rastro de un calendario que no arrancó es un `log.error` del arranque que nadie
+    # vuelve a mirar, mientras `/salud` sigue diciendo `configuracion: ok` y Daniela escala a
+    # los doctores cada vez que alguien intenta agendar. `CalendarioGoogle` es el bueno;
+    # `CalendarioCaido` es «no puede agendar»; un `CalendarioDoble` aquí sería el peor caso de
+    # todos --confirmarle al paciente una cita que no existe en ningún calendario-- y por eso
+    # `_construir_el_calendario` no deja que ocurra: lo degrada a caído. Que se pueda LEER
+    # desde fuera es lo que convierte esa decisión en algo comprobable.
+    estado["calendario"] = type(_calendario).__name__
+
+    # Sin esto no hay forma de saber desde fuera si Daniela está callada. Un `0` en el `.env`
+    # del VPS y un reinicio la apagan sin dejar rastro en ninguna respuesta de este endpoint.
+    estado["daniela_responde"] = config.daniela_responde
     return estado
 
 

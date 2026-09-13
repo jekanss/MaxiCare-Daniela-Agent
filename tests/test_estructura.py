@@ -49,6 +49,13 @@ MODULOS_SIN_TRANSPORTE = (
     # en una cookie. Esa ignorancia es lo que permite probar que un token vencido se rechaza
     # sin levantar un servidor ni esperar ocho horas.
     "autenticacion.py",
+    # `atencion.py` (fase 6A) es el turno completo de WhatsApp -- conversación, contexto,
+    # retardo y envío-- y aun así no sabe que el mensaje llegó por un POST de Meta. Es lo que
+    # permite probar el turno entero sin levantar un servidor, y es la razón de que exista
+    # como módulo aparte: `runtime.py` solo pone la línea que lo llama. Con el turno dentro
+    # del handler, probar «el retardo descuenta lo que tardó el modelo» exigiría un servidor,
+    # una firma de Meta y un minuto de espera por caso.
+    "atencion.py",
     # `panel.py` (fase 8) recibe una conexión y devuelve diccionarios. No sabe que alguien
     # los va a serializar como JSON detrás de una cookie, y por eso sus pruebas pueden
     # comprobar que la bitácora es atómica sin levantar un servidor.

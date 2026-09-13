@@ -39,7 +39,20 @@ rm -f "$TAR"
 
 # El .env viaja aparte y con permisos restringidos: lleva las credenciales de Neon, OpenAI,
 # WhatsApp y Telegram.
-scp -q .env "$VPS:$DESTINO/.env"
+#
+# MAXICARE_COOKIE_INSEGURA es la unica variable del proyecto que significa cosas distintas
+# en los dos sitios, asi que NO viaja: se neutraliza aqui. En local vale 1 porque
+# http://localhost rechaza una cookie marcada `Secure`; en el VPS --detras de Traefik, que
+# sirve HTTPS-- ese mismo 1 publicaria la cookie de sesion del panel sin esa marca. Copiar
+# el .env tal cual llevaria el valor de desarrollo a produccion, y nadie lo notaria: el
+# panel entra igual de bien con la cookie insegura. Poniendola en 0 aqui, el desarrollador
+# no tiene que acordarse de nada antes de desplegar.
+ENV_REMOTO="$(mktemp -t daniela-env-XXXXXX)"
+chmod 600 "$ENV_REMOTO"
+grep -v '^[[:space:]]*MAXICARE_COOKIE_INSEGURA=' .env > "$ENV_REMOTO"
+echo 'MAXICARE_COOKIE_INSEGURA=0' >> "$ENV_REMOTO"
+scp -q "$ENV_REMOTO" "$VPS:$DESTINO/.env"
+rm -f "$ENV_REMOTO"
 ssh "$VPS" "chmod 600 '$DESTINO/.env'"
 
 echo "==> Desempaquetando y construyendo"

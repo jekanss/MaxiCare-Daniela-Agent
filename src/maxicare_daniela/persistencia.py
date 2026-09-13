@@ -29,11 +29,14 @@ Daniela no los comunique como compromiso comercial.
 from __future__ import annotations
 
 import json
+import logging
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable, Sequence
+
+log = logging.getLogger("maxicare.persistencia")
 
 # ==========================================================================================
 # Los literales que el resto del sistema busca
@@ -292,6 +295,158 @@ def asegurar_conversacion(
     return id_conversacion
 
 
+def conversacion_viva(
+    conn, telefono: str, *, ventana_horas: int = 24
+) -> tuple[str, int, bool, int] | None:
+    """La conversación reciente de ese teléfono:
+    (id_conversacion, turno_actual, identidad_verificada, intentos_identificacion).
+    `None` si no hay ninguna dentro de la ventana.
+
+    `asegurar_conversacion` engaña con el nombre: SIEMPRE inserta una fila nueva, y no es un
+    get-or-create. En el chat web da igual, porque el id se guarda en un dict en memoria,
+    pero en WhatsApp -- usada tal cual -- abriría una conversación por cada mensaje: Daniela
+    no recordaría la frase anterior, `turno_actual` sería siempre 1, y las claves de
+    idempotencia (`id_conversacion + turno`) nunca colisionarían con nada, con lo que
+    dejarían de proteger. Esta función es el lookup que falta -- get-or-none, nunca
+    get-or-create: decidir si toca crear una fila nueva es trabajo de quien llama.
+
+    -----------------------------------------------------------------------------------
+    Por qué el ORDER BY lleva `id DESC` además de `actualizada_en DESC`
+    -----------------------------------------------------------------------------------
+    `now()` en Postgres es la hora de la TRANSACCIÓN, no la del statement: dos
+    conversaciones creadas dentro de la misma transacción -- dos mensajes que llegan juntos
+    -- comparten el instante exacto de `actualizada_en`. Sin un desempate estable, cuál de
+    las dos vuelve primero queda en manos del planificador, y la respuesta cambia de una
+    corrida a otra. Ya mordió así en la fase 8 de este proyecto.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT id::text, turno_actual, identidad_verificada, intentos_identificacion
+              FROM conversaciones
+             WHERE telefono = %s
+               AND actualizada_en >= now() - (%s * interval '1 hour')
+             ORDER BY actualizada_en DESC, id DESC
+             LIMIT 1
+            """,
+            (telefono, ventana_horas),
+        )
+        fila = cur.fetchone()
+    return (fila[0], fila[1], fila[2], fila[3]) if fila else None
+
+
+def tocar_conversacion(conn, id_conversacion: str, *, turno_actual: int | None = None) -> None:
+    """Pone `actualizada_en = now()` y, si se lo dan, guarda el turno en que va la charla.
+
+    Cada turno que Daniela atiende tiene que adelantar la ventana que vigila
+    `conversacion_viva`, o una conversación en curso se declararía vieja a mitad de la charla
+    y el paciente volvería a empezar de cero -- perdiendo el turno, la identidad ya
+    verificada y los intentos de identificación ya gastados.
+
+    -----------------------------------------------------------------------------------
+    Por qué `turno_actual` se escribe aquí y no en otro sitio
+    -----------------------------------------------------------------------------------
+
+    La columna existía desde la migración 001 y **ninguna sentencia del proyecto la
+    actualizaba**: `conversacion.responder` sube el contador en memoria y ahí se queda. Como
+    `atencion.py` construye un `ContextoDaniela` nuevo por mensaje --leyendo el turno de
+    Neon, que es lo correcto: un reinicio no puede hacer que la conversación empiece de
+    cero--, todos los mensajes de una conversación leían `0` y todos eran el turno 1.
+
+    Lo que costaba: las claves de idempotencia se arman con `id_conversacion + turno_actual`.
+    Con el turno congelado, el segundo escalamiento de una conversación comparte clave con el
+    primero, `insertar_escalamiento` lo descarta como duplicado y **el doctor no se entera**.
+    Un paciente que escala por dolor en el mensaje 3 y otra vez, peor, en el mensaje 9, llega
+    una sola vez.
+
+    Es opcional --`None` no toca la columna-- porque hay un sitio que solo quiere adelantar
+    la ventana sin saber nada del turno, y porque así ninguna llamada existente cambia de
+    comportamiento por haber añadido un parámetro.
+    """
+    with conn.cursor() as cur:
+        if turno_actual is None:
+            cur.execute(
+                "UPDATE conversaciones SET actualizada_en = now() WHERE id = %s",
+                (id_conversacion,),
+            )
+        else:
+            cur.execute(
+                "UPDATE conversaciones SET actualizada_en = now(), turno_actual = %s "
+                "WHERE id = %s",
+                (turno_actual, id_conversacion),
+            )
+    conn.commit()
+
+
+# ------------------------------------------------------------------------------------------
+# `mensajes_entrantes` -- por qué estas tres funciones viven aquí y no en `ingesta.py`
+# ------------------------------------------------------------------------------------------
+# `ingesta.py` sigue siendo el dueño de `_registrar`, `_marcar_reenviado` y `_marcar_fallo`:
+# esas escrituras pasan por el webhook antes de que exista ninguna conversación. Las tres de
+# aquí las llama `atencion.py`, después de que Daniela ya respondió -- o falló al intentarlo
+# -- y a esa altura ya hay una conversación de por medio. Por eso viven junto al resto del
+# acceso a conversaciones, y no junto a la ingesta cruda del webhook.
+
+
+def ligar_mensaje_a_conversacion(conn, wamid: str, id_conversacion: str) -> None:
+    """Apunta el mensaje entrante a la conversación que lo atendió."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE mensajes_entrantes SET conversacion_id = %s WHERE wamid = %s",
+            (id_conversacion, wamid),
+        )
+        if cur.rowcount == 0:
+            log.warning("ligar_mensaje_a_conversacion: %s no existe en mensajes_entrantes", wamid)
+    conn.commit()
+
+
+def marcar_respondido(conn, wamid: str, *, wamid_respuesta: str) -> None:
+    """Deja constancia de que a este mensaje sí se le contestó, y con qué mensaje de salida.
+
+    Sin esto, `mensajes_entrantes` solo cuenta el viaje hacia Telegram: no hay forma de saber
+    si al paciente, del otro lado, alguien le respondió alguna vez.
+
+    Limpia `fallo_respuesta` a propósito, igual que `_marcar_reenviado` limpia `fallo` en
+    `ingesta.py`: si el primer intento falló por timeout y el reintento sí llegó, el motivo
+    viejo no puede quedar pegado para siempre -- o un informe que cuente
+    `fallo_respuesta IS NOT NULL` contaría como fallida una respuesta que sí salió.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE mensajes_entrantes
+               SET respondido_en   = now(),
+                   wamid_respuesta = %s,
+                   fallo_respuesta = NULL
+             WHERE wamid = %s
+            """,
+            (wamid_respuesta, wamid),
+        )
+        if cur.rowcount == 0:
+            log.warning("marcar_respondido: %s no existe en mensajes_entrantes", wamid)
+    conn.commit()
+
+
+def marcar_fallo_respuesta(conn, wamid: str, *, motivo: str) -> None:
+    """Deja el motivo del fallo al responder.
+
+    NO toca `respondido_en` -- se queda en NULL a propósito. Si un fallo marcara respondido,
+    la consulta que justifica esta migración entera -- ¿a quién no le contestamos? --
+    devolvería vacío justo cuando más importa.
+
+    El motivo se trunca a 2000 caracteres, igual que `_marcar_fallo` en `ingesta.py`: un
+    traceback completo de OpenAI no tiene por qué entrar íntegro en la base de la clínica.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE mensajes_entrantes SET fallo_respuesta = %s WHERE wamid = %s",
+            (motivo[:2000], wamid),
+        )
+        if cur.rowcount == 0:
+            log.warning("marcar_fallo_respuesta: %s no existe en mensajes_entrantes", wamid)
+    conn.commit()
+
+
 def conversacion_tomada(conn, id_conversacion: str) -> str | None:
     """El doctor que tiene el relevo de esa conversación, o `None` si la tiene Daniela.
 
@@ -467,6 +622,41 @@ def registrar_cita(
     return id_cita
 
 
+def cita_viva_de_reserva(conn, reserva_id: int) -> dict[str, Any] | None:
+    """La cita NO cancelada que cuelga de esa reserva, o `None` si la reserva no tiene.
+
+    Es lo que hace idempotente a `crear_cita` de verdad. `tomar_cupo` ya lo era en el cupo
+    --un acierto de clave devuelve la reserva que ya existía-- pero la tool seguía adelante
+    y creaba OTRO evento en Google y OTRA fila en `citas`. Resultado medido llamando dos
+    veces con la misma conversación y el mismo horario: una reserva, **dos eventos en el
+    calendario del doctor** y dos citas, las dos confirmadas al paciente con ids distintos.
+
+    Se filtra por `estado <> 'cancelada'` porque una cita cancelada no debe impedir volver a
+    agendar: `liberar_cupo` borra la reserva al cancelar, así que en la práctica la siguiente
+    reserva es otra -- pero apoyarse en eso sería apoyarse en un detalle de otra función.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT id, reserva_id, conversacion_id, paciente_id, nombre_completo, telefono,
+                   tratamiento, inicio, duracion_minutos, evento_calendar_id, estado
+              FROM citas
+             WHERE reserva_id = %s AND estado <> 'cancelada'
+             ORDER BY creada_en
+             LIMIT 1
+            """,
+            (reserva_id,),
+        )
+        fila = cur.fetchone()
+    if not fila:
+        return None
+    columnas = (
+        "id", "reserva_id", "conversacion_id", "paciente_id", "nombre_completo", "telefono",
+        "tratamiento", "inicio", "duracion_minutos", "evento_calendar_id", "estado",
+    )
+    return dict(zip(columnas, fila))
+
+
 def leer_cita(conn, id_cita: str) -> dict[str, Any] | None:
     """La cita completa, o `None`. Incluye `paciente_id` para comprobar la pertenencia."""
     with conn.cursor() as cur:
@@ -607,8 +797,42 @@ def insertar_escalamiento(
     return fila[0] if fila else None
 
 
+def escalamiento_pendiente_de_aviso(conn, clave_idempotencia: str) -> int | None:
+    """El id del escalamiento con esa clave si se escribió pero NUNCA se avisó; si no, `None`.
+
+    ------------------------------------------------------------------------------------
+    La diferencia entre «ya se avisó» y «se intentó avisar»
+    ------------------------------------------------------------------------------------
+
+    `insertar_escalamiento` devuelve `None` en los dos casos, porque lo único que mira es si
+    la clave ya existe. Y no son lo mismo:
+
+    - La fila existe **y tiene `telegram_message_id`**: el doctor ya recibió su alerta.
+      Volver a mandarla es el ruido que hace que a la cuarta deje de mirarlas.
+    - La fila existe **y `telegram_message_id` es `NULL`**: alguien llegó a escribir la fila y
+      el Telegram no salió --un 5xx, un límite de tasa, un HTML que Telegram rechazó--. Ahí
+      no hay ningún aviso que duplicar: hay un aviso que falta.
+
+    Sin esta consulta, la clave se quemaba al INTENTAR y no al CONSEGUIR: cualquier fallo de
+    Telegram dejaba la fila escrita, el doctor sin enterarse, y ningún reintento posible.
+    Un paciente con dolor quedaba «escalado» en una tabla que nadie mira.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT id FROM escalamientos "
+            "WHERE clave_idempotencia = %s AND telegram_message_id IS NULL",
+            (clave_idempotencia,),
+        )
+        fila = cur.fetchone()
+    return fila[0] if fila else None
+
+
 def anotar_telegram_en_escalamiento(conn, escalamiento_id: int, message_id: int) -> None:
-    """Guarda el mensaje de Telegram para poder editarle el botón cuando alguien lo toque."""
+    """Guarda el mensaje de Telegram para poder editarle el botón cuando alguien lo toque.
+
+    Y, desde la 6A, algo más: es lo que distingue un escalamiento avisado de uno que se
+    quedó a medias. Ver `escalamiento_pendiente_de_aviso`.
+    """
     with conn.cursor() as cur:
         cur.execute(
             "UPDATE escalamientos SET telegram_message_id = %s WHERE id = %s",

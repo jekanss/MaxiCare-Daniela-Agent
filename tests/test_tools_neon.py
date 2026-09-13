@@ -33,6 +33,7 @@ from __future__ import annotations
 import asyncio
 import os
 import threading
+import uuid
 from datetime import datetime, timedelta
 
 import pytest
@@ -249,6 +250,105 @@ def test_el_mismo_intento_repetido_no_consume_un_segundo_cupo(esquema, contexto_
     assert primero == segundo, "el reintento se llevó un cupo nuevo"
 
 
+def test_crear_la_misma_cita_dos_veces_no_duplica_el_evento_ni_la_fila(esquema, contexto_de):
+    """La idempotencia completa, contra la base y el calendario de verdad.
+
+    `tomar_cupo` ya era idempotente; la tool no. Un acierto de clave devolvía la reserva que
+    ya existía y el código seguía derecho a `crear_evento` + `registrar_cita`. Medido antes
+    del arreglo, con la misma conversación y el mismo horario: **1 reserva, 2 eventos en el
+    calendario del doctor y 2 filas en `citas`**, las dos confirmadas al paciente con ids
+    distintos.
+
+    Se prueba contra Neon porque lo que decide es una consulta: `cita_viva_de_reserva`
+    filtra por `reserva_id` y por `estado <> 'cancelada'`, y eso no lo demuestra un doble.
+    """
+    inicio = _hora_libre(7)
+    ctx = contexto_de("573001110010", "Elena Doble")
+
+    def pedir() -> str:
+        return asyncio.run(
+            h._crear_cita(
+                ctx,
+                SolicitudCita(
+                    nombre_completo="Elena Doble",
+                    inicio=inicio,
+                    tratamiento="limpieza",
+                    clave_idempotencia="lo-que-el-modelo-quiera-poner",
+                ),
+            )
+        )
+
+    primero = pedir()
+    segundo = pedir()
+
+    assert "Cita confirmada" in primero and "Cita confirmada" in segundo
+    id_primero = primero.rsplit("Id de la cita: ", 1)[1].rstrip(".")
+    id_segundo = segundo.rsplit("Id de la cita: ", 1)[1].rstrip(".")
+    assert id_primero == id_segundo, "se le dieron al paciente dos ids para la misma hora"
+
+    # Un solo evento en el calendario del doctor.
+    assert len(ctx.calendario.eventos) == 1, (
+        f"hay {len(ctx.calendario.eventos)} eventos en el calendario para una sola cita"
+    )
+
+    with persistencia.conectar(esquema) as conn, conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM reservas WHERE inicio = %s", (inicio,))
+        assert cur.fetchone()[0] == 1
+        cur.execute("SELECT count(*) FROM citas WHERE inicio = %s", (inicio,))
+        assert cur.fetchone()[0] == 1, "dos citas colgando de una sola reserva"
+
+
+def test_un_escalamiento_sin_telegram_se_distingue_de_uno_ya_avisado(esquema, contexto_de):
+    """La diferencia entre «ya se avisó» y «se intentó avisar», contra el SQL de verdad.
+
+    `insertar_escalamiento` devuelve `None` en los dos casos, porque solo mira si la clave
+    existe. Con eso, cualquier fallo de Telegram --un 5xx, un límite de tasa, un HTML que
+    Telegram rechaza porque el paciente se llama «Ana <3 Gómez»-- dejaba la fila escrita, el
+    doctor sin enterarse y ningún reintento posible: el escalamiento quedaba vivo en una
+    tabla que nadie mira.
+
+    Se prueba aquí y no solo con dobles porque lo que puede estar mal es el `WHERE`: un
+    `telegram_message_id IS NULL` escrito como `= NULL` no devuelve nada nunca y la consulta
+    pasaría en verde contra un doble mientras en Neon no encuentra un solo escalamiento.
+    """
+    ctx = contexto_de("573001110009", "Ana Pendiente")
+    clave = ctx.clave("escalamiento", 4)
+
+    with persistencia.conectar(esquema) as conn:
+        id_escalamiento = persistencia.insertar_escalamiento(
+            conn,
+            id_conversacion=ctx.id_conversacion,
+            motivo="clinico",
+            resumen="Dice que le duele desde hace tres días.",
+            pregunta="¿Lo citamos hoy mismo?",
+            clave_idempotencia=clave,
+        )
+        assert id_escalamiento is not None
+
+        # Recién escrito, el Telegram todavía no salió: hay un aviso PENDIENTE.
+        assert persistencia.escalamiento_pendiente_de_aviso(conn, clave) == id_escalamiento
+
+        # Y el segundo intento de insertar sigue diciendo «esta clave ya existe».
+        assert (
+            persistencia.insertar_escalamiento(
+                conn,
+                id_conversacion=ctx.id_conversacion,
+                motivo="clinico",
+                resumen="lo mismo",
+                pregunta="lo mismo",
+                clave_idempotencia=clave,
+            )
+            is None
+        )
+
+        # Una vez que el Telegram salió y quedó anotado, ya no hay nada pendiente.
+        persistencia.anotar_telegram_en_escalamiento(conn, id_escalamiento, 987654)
+        assert persistencia.escalamiento_pendiente_de_aviso(conn, clave) is None
+
+        # Y una clave que no existe tampoco es un pendiente.
+        assert persistencia.escalamiento_pendiente_de_aviso(conn, f"{clave}-inexistente") is None
+
+
 def test_un_seguimiento_no_se_programa_dos_veces(esquema, contexto_de):
     ctx = contexto_de("573001110002")
     objetivo = _hora_libre(48)
@@ -449,3 +549,200 @@ def test_tras_dos_nombres_equivocados_se_escala_y_no_se_pide_documento(esquema, 
     assert "escala" in (segundo + tercero).lower()
     assert "cédula" not in (segundo + tercero).lower()
     assert "documento" not in tercero.lower() or "NO pidas" in tercero
+
+
+# ==========================================================================================
+# `conversacion_viva` -- el get-or-none que le falta a `asegurar_conversacion`
+# ==========================================================================================
+
+
+def test_una_conversacion_reciente_del_mismo_telefono_se_reutiliza(esquema):
+    telefono = "573002220001"
+    with persistencia.conectar(esquema) as conn:
+        id_conversacion = persistencia.asegurar_conversacion(conn, telefono=telefono)
+        viva = persistencia.conversacion_viva(conn, telefono)
+
+    assert viva is not None
+    assert viva[0] == id_conversacion
+
+
+def test_una_conversacion_vieja_no_se_reutiliza(esquema):
+    telefono = "573002220002"
+    with persistencia.conectar(esquema) as conn:
+        id_conversacion = persistencia.asegurar_conversacion(conn, telefono=telefono)
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE conversaciones SET actualizada_en = now() - interval '30 hours' "
+                "WHERE id = %s",
+                (id_conversacion,),
+            )
+        conn.commit()
+
+        assert persistencia.conversacion_viva(conn, telefono) is None
+
+
+def test_conversacion_viva_devuelve_la_mas_reciente(esquema):
+    """CRÍTICO: la consulta ordena por `actualizada_en DESC, id DESC`.
+
+    `now()` es la hora de la TRANSACCIÓN: las dos filas se crean dentro de la misma
+    transacción para que `actualizada_en` quede exactamente igual en las dos, y así la
+    prueba ejercita de verdad el desempate por `id DESC` -- no por casualidad de reloj.
+
+    El UUID **menor** se inserta PRIMERO, y ese orden es la mitad que hace que la prueba
+    sirva de algo. Sin un `ORDER BY` determinista, Postgres devuelve las filas en su orden
+    físico, que en una tabla recién escrita es el de inserción: devolvería el menor, que NO
+    es lo que esta prueba espera, y fallaría. Al revés --el mayor primero-- sin el desempate
+    devolvería igualmente el mayor y la prueba pasaría siempre, tapando exactamente el bug
+    que existe para cazar.
+
+    Verificado mutando el código: quitando `id DESC` del ORDER BY, esta prueba falla.
+    """
+    telefono = "573002220003"
+    with persistencia.conectar(esquema) as conn:
+        id_menor, id_mayor = sorted([str(uuid.uuid4()), str(uuid.uuid4())])
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO conversaciones (id, telefono, canal) VALUES (%s, %s, 'whatsapp')",
+                (id_menor, telefono),
+            )
+            cur.execute(
+                "INSERT INTO conversaciones (id, telefono, canal) VALUES (%s, %s, 'whatsapp')",
+                (id_mayor, telefono),
+            )
+        conn.commit()
+
+        viva = persistencia.conversacion_viva(conn, telefono)
+
+    assert viva is not None
+    assert viva[0] == id_mayor, "no desempató por id DESC cuando actualizada_en empata"
+
+
+def test_conversacion_viva_no_cruza_telefonos(esquema):
+    telefono_a = "573002220004"
+    telefono_b = "573002220005"
+    with persistencia.conectar(esquema) as conn:
+        persistencia.asegurar_conversacion(conn, telefono=telefono_a)
+
+        assert persistencia.conversacion_viva(conn, telefono_b) is None
+
+
+def test_tocar_conversacion_adelanta_la_ventana(esquema):
+    telefono = "573002220006"
+    with persistencia.conectar(esquema) as conn:
+        id_conversacion = persistencia.asegurar_conversacion(conn, telefono=telefono)
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE conversaciones SET actualizada_en = now() - interval '30 hours' "
+                "WHERE id = %s",
+                (id_conversacion,),
+            )
+        conn.commit()
+        assert persistencia.conversacion_viva(conn, telefono) is None
+
+        persistencia.tocar_conversacion(conn, id_conversacion)
+        viva = persistencia.conversacion_viva(conn, telefono)
+
+    assert viva is not None
+    assert viva[0] == id_conversacion
+
+
+def test_el_turno_de_la_conversacion_se_guarda_y_se_vuelve_a_leer(esquema):
+    """La columna `turno_actual` existía desde la migración 001 y NADIE la escribía.
+
+    Lo que costaba: `atencion.py` construye un `ContextoDaniela` nuevo por mensaje y lee el
+    turno de aquí --que es lo correcto, un reinicio no puede hacer que la conversación
+    empiece de cero--. Con la columna congelada en 0, todos los mensajes de una conversación
+    eran el turno 1, y las claves de idempotencia, que se arman con
+    `id_conversacion + turno_actual`, dejaban de distinguir un escalamiento nuevo de un
+    reintento del anterior: el doctor se enteraba del primero y de ninguno más.
+
+    Esta prueba recorre el viaje entero --escribir el turno y volver a leerlo por donde de
+    verdad se lee, `conversacion_viva`-- porque un `UPDATE` que no se refleje ahí no arregla
+    nada.
+    """
+    telefono = "573002220008"
+    with persistencia.conectar(esquema) as conn:
+        id_conversacion = persistencia.asegurar_conversacion(conn, telefono=telefono)
+
+        viva = persistencia.conversacion_viva(conn, telefono)
+        assert viva is not None and viva[1] == 0, "una conversación nueva empieza en el turno 0"
+
+        persistencia.tocar_conversacion(conn, id_conversacion, turno_actual=1)
+        assert persistencia.conversacion_viva(conn, telefono)[1] == 1
+
+        # El segundo mensaje de la misma conversación: sin esto, seguía siendo el turno 1.
+        persistencia.tocar_conversacion(conn, id_conversacion, turno_actual=2)
+        assert persistencia.conversacion_viva(conn, telefono)[1] == 2
+
+        # Y sin turno no lo toca: la llamada que solo quiere adelantar la ventana no puede
+        # devolver el contador a cero.
+        persistencia.tocar_conversacion(conn, id_conversacion)
+        assert persistencia.conversacion_viva(conn, telefono)[1] == 2
+
+
+# ==========================================================================================
+# Si al paciente se le respondió (migración 009)
+# ==========================================================================================
+
+
+def test_la_respuesta_al_paciente_queda_registrada(esquema):
+    """También cubre el reintento que sí funciona: un fallo previo no puede quedar pegado
+    para siempre una vez que la respuesta sí sale -- el precedente es `_marcar_reenviado`
+    en `ingesta.py`, que limpia `fallo` cuando el envío por fin llega."""
+    telefono = "573002220007"
+    wamid = f"wamid-prueba-{uuid.uuid4()}"
+    with persistencia.conectar(esquema) as conn:
+        id_conversacion = persistencia.asegurar_conversacion(conn, telefono=telefono)
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO mensajes_entrantes (wamid, telefono, tipo) VALUES (%s, %s, 'text')",
+                (wamid, telefono),
+            )
+        conn.commit()
+
+        persistencia.ligar_mensaje_a_conversacion(conn, wamid, id_conversacion)
+        persistencia.marcar_fallo_respuesta(conn, wamid, motivo="el primer intento se cayó")
+        persistencia.marcar_respondido(conn, wamid, wamid_respuesta="wamid-respuesta-1")
+
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT conversacion_id::text, respondido_en, wamid_respuesta, fallo_respuesta
+                  FROM mensajes_entrantes WHERE wamid = %s
+                """,
+                (wamid,),
+            )
+            fila = cur.fetchone()
+
+    assert fila is not None
+    assert fila[0] == id_conversacion
+    assert fila[1] is not None
+    assert fila[2] == "wamid-respuesta-1"
+    assert fila[3] is None, "el motivo del fallo viejo se quedó pegado tras responder bien"
+
+
+def test_un_fallo_al_responder_queda_registrado(esquema):
+    """Si un fallo marcara `respondido_en`, la pregunta «¿a quién no le contestamos?»
+    devolvería vacío justo cuando importa."""
+    telefono = "573002220008"
+    wamid = f"wamid-prueba-{uuid.uuid4()}"
+    with persistencia.conectar(esquema) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO mensajes_entrantes (wamid, telefono, tipo) VALUES (%s, %s, 'text')",
+                (wamid, telefono),
+            )
+        conn.commit()
+
+        persistencia.marcar_fallo_respuesta(conn, wamid, motivo="OpenAI no respondió a tiempo")
+
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT fallo_respuesta, respondido_en FROM mensajes_entrantes WHERE wamid = %s",
+                (wamid,),
+            )
+            fila = cur.fetchone()
+
+    assert fila is not None
+    assert fila[0] == "OpenAI no respondió a tiempo"
+    assert fila[1] is None

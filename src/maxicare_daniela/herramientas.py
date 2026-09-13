@@ -46,6 +46,7 @@ levantar un agente.
 from __future__ import annotations
 
 import asyncio
+import html
 import logging
 from datetime import datetime, timedelta
 from typing import Any, Callable
@@ -436,22 +437,51 @@ async def _crear_cita(ctx: ContextoDaniela, solicitud: SolicitudCita) -> str:
         else solicitud.inicio.replace(tzinfo=ZONA_BOGOTA)
     )
 
-    def tomar(conn) -> tuple[tuple[int, int] | None, list[datetime]]:
+    # La clave la arma el orquestador, igual que en `reprogramar` y en `seguimiento`, y se
+    # ancla al HORARIO pedido -- no al «intento», que es lo que el modelo cree que significa.
+    #
+    # Con `solicitud.clave_idempotencia`, que rellena el modelo, `tomar_cupo` --que busca por
+    # clave SIN filtrar por `inicio` ni por conversación-- hacía tres cosas distintas, todas
+    # malas:
+    #
+    # 1. *Misma clave, otro horario.* El paciente pide las 10:00 y luego «mejor a las 15:00»;
+    #    el modelo repite la clave porque para él es el mismo intento. Se devuelve la reserva
+    #    de las 10:00 tal cual: las 15:00 NO consumen cupo (con capacidad 2 se venden 3), las
+    #    10:00 quedan bloqueadas para nadie, y dos citas cuelgan de una sola reserva.
+    # 2. *Claves distintas para el mismo intento.* Un reintento consume un segundo cupo y crea
+    #    un segundo evento en Google: un solo paciente agota la hora.
+    # 3. *Colisión entre pacientes.* La columna es UNIQUE global y al modelo se le OCULTA el
+    #    teléfono a propósito, así que lo natural que puede inventar es algo como
+    #    `cita-2026-09-15T10:00-limpieza`. Dos pacientes que piden el mismo bloque generan la
+    #    misma cadena, el segundo recibe la reserva del primero, y los dos salen confirmados
+    #    sobre un solo cupo.
+    #
+    # `ctx.clave` lleva el `id_conversacion` delante, que es lo que hace imposible el caso 3,
+    # y el `inicio` detrás, que es lo que hace imposible el 1 sin romper el 2.
+    clave = ctx.clave("cita", inicio.isoformat())
+
+    def tomar(conn) -> tuple[tuple[int, int] | None, dict[str, Any] | None, list[datetime]]:
         cupo = persistencia.tomar_cupo(
             conn,
             inicio=inicio,
             capacidad=ctx.capacidad_por_hora,
-            clave_idempotencia=solicitud.clave_idempotencia,
+            clave_idempotencia=clave,
             conversacion_id=ctx.id_conversacion,
         )
         if cupo is not None:
-            return (cupo, [])
+            # `tomar_cupo` era idempotente y esta tool no: un acierto de clave devuelve la
+            # reserva que ya existía, y el código seguía derecho a `crear_evento` +
+            # `registrar_cita`. Dos llamadas con la misma conversación y el mismo horario
+            # dejaban UNA reserva, DOS eventos en el calendario del doctor y DOS citas, las
+            # dos confirmadas al paciente con ids distintos. Esta consulta es lo que
+            # convierte «el cupo ya era tuyo» en «la cita ya era tuya».
+            return (cupo, persistencia.cita_viva_de_reserva(conn, cupo[0]), [])
         # Solo se buscan alternativas si hizo falta: una consulta de más en el camino feliz
         # es latencia que paga cada paciente.
         ventana_fin = inicio + timedelta(hours=8)
-        return (None, _huecos_libres(conn, ctx, inicio, ventana_fin))
+        return (None, None, _huecos_libres(conn, ctx, inicio, ventana_fin))
 
-    cupo, alternativas = await _con_base(ctx, tomar)
+    cupo, ya_existente, alternativas = await _con_base(ctx, tomar)
 
     if cupo is None:
         # RESULTADO, no error. El modelo tiene que poder seguir conversando con esto.
@@ -466,6 +496,27 @@ async def _crear_cita(ctx: ContextoDaniela, solicitud: SolicitudCita) -> str:
         return texto
 
     reserva_id, _cupo_num = cupo
+
+    if ya_existente is not None:
+        # Esta reserva ya tiene su cita: este intento es un duplicado, no una cita nueva. Se
+        # devuelve LA MISMA confirmación, con el id que ya existe, y no se toca el
+        # calendario. Decirle al modelo que se creó otra le haría confirmarle al paciente un
+        # id distinto para la misma hora, y dejaría un segundo evento en la agenda del
+        # doctor sobre un solo cupo.
+        #
+        # No se libera el cupo: es del paciente, y la cita que cuelga de él es válida.
+        texto = (
+            f"Cita confirmada para {ya_existente['nombre_completo']}, "
+            f"{_formatear_hora(inicio)}, {ya_existente['tratamiento']}. "
+            f"Id de la cita: {ya_existente['id']}."
+        )
+        log.info(
+            "crear_cita repetida sobre la reserva %s: se devuelve la cita %s sin crear otra",
+            reserva_id,
+            ya_existente["id"],
+        )
+        ctx.turno.horas_autorizadas |= horas_de(texto)
+        return texto
 
     # El cupo ya está apartado. A partir de aquí, cualquier salida que no sea una cita
     # completa tiene que devolverlo.
@@ -825,19 +876,55 @@ def _teclado_relevo(id_conversacion: str) -> dict:
     }
 
 
+def _escapar_html(texto: str) -> str:
+    """Telegram va en `parse_mode=HTML` y RECHAZA el mensaje entero si el HTML no cierra.
+
+    `quote=False` deja las comillas en paz: dentro de un texto no son HTML, y escaparlas solo
+    llenaría el aviso de `&#x27;` donde el doctor espera leer una frase.
+    """
+    return html.escape(texto, quote=False)
+
+
 def _aviso_para_doctores(ctx: ContextoDaniela, solicitud: SolicitudEscalamiento) -> str:
-    nombre = ctx.nombre_paciente or "paciente sin identificar"
+    """El texto del escalamiento, con TODO lo ajeno escapado.
+
+    No es cosmético, y el coste no es un aviso feo: es un aviso que no existe. Telegram va en
+    `parse_mode=HTML` y RECHAZA el mensaje entero si el HTML no cierra --un paciente llamado
+    «Ana <3 Gómez» basta--. `canales.enviar_mensaje` lanza `ErrorDeCanal`,
+    `failure_error_function` se lo traga para que el modelo siga conversando, y la fila del
+    escalamiento ya quedó escrita en Neon: el aviso de cierre de turno ve la clave quemada y
+    se calla. Resultado: dos filas de escalamiento y CERO Telegram. Un paciente con dolor
+    «escalado» en una tabla que nadie mira.
+
+    Se escapan el nombre (lo dicta el paciente), el resumen y la pregunta (los escribe el
+    modelo a partir de lo que dijo el paciente) y el motivo. Lo único que queda como HTML de
+    verdad son las etiquetas que pone esta función.
+    """
+    nombre = _escapar_html(ctx.nombre_paciente or "paciente sin identificar")
     return (
-        f"<b>Escalamiento · {solicitud.motivo}</b>\n"
+        f"<b>Escalamiento · {_escapar_html(solicitud.motivo)}</b>\n"
         f"{nombre} · +{ctx.telefono_completo}\n\n"
-        f"{solicitud.resumen_para_doctor}\n\n"
-        f"<b>Pregunta:</b> {solicitud.pregunta_concreta}"
+        f"{_escapar_html(solicitud.resumen_para_doctor)}\n\n"
+        f"<b>Pregunta:</b> {_escapar_html(solicitud.pregunta_concreta)}"
     )
 
 
 async def _escalar_a_doctores(
     ctx: ContextoDaniela, solicitud: SolicitudEscalamiento, *, telegram: Any | None = None
 ) -> str:
+    # La clave la arma el orquestador, no el modelo, y aquí no es una regla de estilo.
+    #
+    # Hasta ahora esta tool usaba `solicitud.clave_idempotencia`, que es un campo que RELLENA
+    # EL MODELO: si escribía cualquier otra cosa --y es libre de hacerlo-- esta clave y la
+    # que arma `runtime._avisar_a_doctores` para el mismo turno no coincidían, la
+    # deduplicación no deduplicaba nada, y el doctor recibía dos Telegram del mismo
+    # escalamiento. A la cuarta alerta repetida deja de mirarlas.
+    #
+    # `ctx.clave(...)` no se puede inventar: sale del id de la conversación y del turno que
+    # lleva `ContextoDaniela`. El campo de la solicitud se conserva porque le hace pensar al
+    # modelo en la unicidad de lo que pide, pero ya no decide nada.
+    clave = ctx.clave("escalamiento", ctx.turno_actual)
+
     def registrar(conn) -> int | None:
         return persistencia.insertar_escalamiento(
             conn,
@@ -845,17 +932,41 @@ async def _escalar_a_doctores(
             motivo=solicitud.motivo,
             resumen=solicitud.resumen_para_doctor,
             pregunta=solicitud.pregunta_concreta,
-            clave_idempotencia=solicitud.clave_idempotencia,
+            clave_idempotencia=clave,
         )
 
     escalamiento_id = await _con_base(ctx, registrar)
 
     if escalamiento_id is None:
-        # Ya se escaló este turno. No es un fallo: es lo que impide que un reintento de red
-        # le mande al doctor la misma alerta tres veces.
-        return (
-            "Este turno ya estaba escalado; no se volvió a avisar. Dile al paciente que lo "
-            "estás revisando con los doctores."
+        # La clave ya existía. Antes se salía aquí, y eso quemaba la clave al INTENTAR en
+        # vez de al CONSEGUIR: si el primer intento escribió la fila y el Telegram NO salió
+        # --un 502, un límite de tasa, un HTML que Telegram rechaza-- el doctor se quedaba
+        # sin enterarse para siempre, porque nadie volvía a mirar esa fila.
+        #
+        # Y no bastaba con arreglarlo en `runtime._avisar_a_doctores`: ese solo corre cuando
+        # el turno CIERRA escalado. Si el modelo llama a esta tool, el envío falla,
+        # `failure_error_function` se traga el error y el modelo termina con
+        # `requiere_escalamiento=False` --porque cree que ya avisó-- el aviso de cierre no se
+        # llama nunca. Medido: cero telegrams, una fila pendiente, y al paciente se le dijo
+        # «ya le estoy avisando al doctor». Por eso el reintento vive también aquí, que es
+        # donde nace el problema.
+        def pendiente(conn) -> int | None:
+            return persistencia.escalamiento_pendiente_de_aviso(conn, clave)
+
+        escalamiento_id = await _con_base(ctx, pendiente)
+
+        if escalamiento_id is None:
+            # La fila existe Y tiene su `telegram_message_id`: el doctor ya recibió la
+            # alerta. Esto sí es un duplicado, y repetirlo es lo que hace que a la cuarta
+            # deje de mirarlas.
+            return (
+                "Este turno ya estaba escalado; no se volvió a avisar. Dile al paciente que "
+                "lo estás revisando con los doctores."
+            )
+
+        log.warning(
+            "el escalamiento %s se había registrado sin llegar a avisar; se reintenta",
+            escalamiento_id,
         )
 
     canal = telegram or Telegram(ctx.telegram_bot_token, ctx.telegram_chat_doctores)

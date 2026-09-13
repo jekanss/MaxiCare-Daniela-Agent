@@ -26,6 +26,7 @@ from maxicare_daniela.calendario import (
     VALOR_ORIGEN,
     ZONA_BOGOTA,
     Bloqueo,
+    CalendarioCaido,
     CalendarioDoble,
     ErrorDeCalendario,
     a_bloqueo,
@@ -294,3 +295,55 @@ def test_con_las_dos_credenciales_la_fabrica_intenta_google_de_verdad():
     """
     with pytest.raises(ErrorDeCalendario):
         calendario_desde_config(ConfigFalsa(sa_b64="no-es-base64-@@@", calendar_id="x@gmail.com"))
+
+
+# ==========================================================================================
+# El calendario que no se pudo construir
+# ==========================================================================================
+
+
+def test_el_calendario_caido_lanza_en_los_cuatro_metodos():
+    """Los cuatro, sin excepciones amables.
+
+    La tentación es que `bloqueos()` devuelva `[]` y que `eliminar_evento` pase de largo --los
+    dos «no hacen daño»--, y las dos serían mentiras caras: un `[]` significa «los doctores no
+    apartaron nada» y pondría el almuerzo en oferta; un borrado fingido deja una cita viva en
+    el calendario del doctor mientras Neon la da por cancelada.
+    """
+    caido = CalendarioCaido(motivo="Google devolvió 503")
+
+    with pytest.raises(ErrorDeCalendario):
+        caido.crear_evento(inicio=LUNES_9, duracion_minutos=60, titulo="x")
+    with pytest.raises(ErrorDeCalendario):
+        caido.mover_evento("ev-1", inicio=LUNES_9)
+    with pytest.raises(ErrorDeCalendario):
+        caido.eliminar_evento("ev-1")
+    with pytest.raises(ErrorDeCalendario):
+        caido.bloqueos(LUNES_9, LUNES_9 + timedelta(hours=2))
+
+
+def test_el_calendario_caido_dice_por_que_se_cayo():
+    """El motivo viaja en la excepción. Sin él, el log del turno dice «el calendario falló» y
+    alguien tiene que ir a adivinar si es la credencial, el permiso o que Google está caído."""
+    with pytest.raises(ErrorDeCalendario) as e:
+        CalendarioCaido(motivo="falta compartir el calendario").crear_evento(
+            inicio=LUNES_9, duracion_minutos=60, titulo="x"
+        )
+
+    assert "falta compartir el calendario" in str(e.value)
+
+
+def test_el_calendario_caido_no_finge_ser_un_calendario_que_funciona():
+    """La razón de que exista, en una aserción.
+
+    Caer a `CalendarioDoble` cuando Google no arranca haría que `crear_cita` tomara el cupo,
+    «creara» el evento en un diccionario y le confirmara la cita al paciente: el paciente
+    llega a una clínica donde nadie lo espera. `CalendarioCaido` cumple el mismo Protocol
+    --las tools lo aceptan igual-- pero se comporta como lo que es.
+    """
+    from maxicare_daniela.calendario import Calendario
+
+    caido = CalendarioCaido()
+
+    assert isinstance(caido, Calendario), "tiene que cumplir el Protocol o las tools no lo aceptan"
+    assert not isinstance(caido, CalendarioDoble)
