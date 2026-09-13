@@ -384,6 +384,10 @@ async def _identificar_paciente(ctx: ContextoDaniela, nombre_completo: str) -> s
 
     coincide, nombre_registrado, id_paciente = await _con_base(ctx, trabajo)
     ctx.intentos_identificacion += 1
+    # Se refresca con lo que acaba de devolver la base, no se deja lo que trajo el turno: si
+    # alguien registró a este paciente entre `_leer_estado` y esta llamada, el dato del turno
+    # ya es viejo. Es el mismo hecho que decide si puede pedir su primera cita.
+    ctx.telefono_sin_paciente = nombre_registrado is None and not coincide
 
     if coincide:
         ctx.identidad_verificada = True

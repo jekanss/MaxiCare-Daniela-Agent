@@ -121,6 +121,12 @@ una —qué se midió, qué costó— está en la regla que cubre ese archivo.
    más escalamiento y el paciente se iba sin su cita. Los de SALIDA se conservan los tres. Y
    el `{motivo}` que viaja en la corrección es el TEXTO del guardrail, jamás su nombre: con
    el nombre, el segundo intento es tan ciego como el primero.
+12. **Un teléfono SIN ficha en `pacientes` puede crear su primera cita; mover o cancelar,
+   nunca.** `identidad_antes_de_datos` protege los datos de alguien que ya existe —«que no se
+   mezclen cuando alguien escribe por un familiar»—, y quien no tiene ficha no tiene datos
+   que proteger: bloquearlo dejaba a la clínica sin pacientes nuevos, con `citas.paciente_id`
+   NULLABLE desde la 001 justo para ese caso. El permiso lo da `ctx.telefono_sin_paciente`,
+   que sale de la base y **nunca del modelo**, y la excepción es una lista blanca de UNA tool.
 
 # Dónde está el resto
 

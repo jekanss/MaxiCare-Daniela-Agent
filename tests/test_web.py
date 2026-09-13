@@ -265,6 +265,9 @@ def test_el_chat_usa_el_agente_de_produccion_y_el_carril_de_pruebas(cliente, mon
 
     monkeypatch.setattr(runtime, "_preparar_esquema_de_pruebas", lambda: "postgresql://x/y?options=-csearch_path%3Dpruebas_web")
     monkeypatch.setattr(persistencia, "asegurar_conversacion", lambda conn, **kw: "conv-web-1")
+    # El chat web pregunta si ese "telefono" tiene ficha, igual que `_leer_estado` en
+    # WhatsApp: es lo que decide si un paciente nuevo puede pedir su primera cita.
+    monkeypatch.setattr(persistencia, "buscar_paciente_por_telefono", lambda conn, tel: None)
     monkeypatch.setattr(persistencia, "leer_configuracion", lambda conn: persistencia.CONFIGURACION_POR_DEFECTO)
     # Desde la Tarea 6, `_contexto_de_prueba` también pide una sesión persistida a
     # `persistencia.sesion_de_agente`. Sin este doble, la llamada es real: construye un
@@ -327,6 +330,9 @@ def test_el_chat_de_pruebas_persiste_en_su_propio_esquema(monkeypatch):
     monkeypatch.setattr(
         runtime.persistencia, "asegurar_conversacion", lambda *a, **k: "conv-web-1"
     )
+    monkeypatch.setattr(
+        runtime.persistencia, "buscar_paciente_por_telefono", lambda conn, tel: None
+    )
     monkeypatch.setattr(runtime.persistencia, "conectar", _conexion_de_mentira)
     monkeypatch.setattr(runtime.persistencia, "leer_configuracion", lambda conn: {
         "capacidad_por_hora": 2, "duracion_cita_minutos": 60, "cierre_relevo_minutos": 180
@@ -386,6 +392,9 @@ def test_la_llamada_a_sesion_de_agente_usa_config_database_url_no_la_url_de_prue
     )
     monkeypatch.setattr(
         runtime.persistencia, "asegurar_conversacion", lambda *a, **k: "conv-web-2"
+    )
+    monkeypatch.setattr(
+        runtime.persistencia, "buscar_paciente_por_telefono", lambda conn, tel: None
     )
     monkeypatch.setattr(runtime.persistencia, "conectar", _conexion_de_mentira)
     monkeypatch.setattr(runtime.persistencia, "leer_configuracion", lambda conn: {

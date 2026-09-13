@@ -135,7 +135,7 @@ def test_una_cifra_de_precio_no_se_confunde_con_una_hora():
 
 
 def test_sin_identidad_verificada_no_se_toca_la_agenda():
-    veredicto = g.revisar_identidad(contexto(identidad_verificada=False))
+    veredicto = g.revisar_identidad(contexto(identidad_verificada=False), tool="crear_cita")
 
     assert veredicto.dispara is True
     assert "identificar_paciente" in veredicto.motivo
@@ -143,7 +143,67 @@ def test_sin_identidad_verificada_no_se_toca_la_agenda():
 
 
 def test_con_identidad_verificada_pasa():
-    assert g.revisar_identidad(contexto(identidad_verificada=True)).dispara is False
+    assert g.revisar_identidad(
+        contexto(identidad_verificada=True), tool="crear_cita"
+    ).dispara is False
+
+
+def test_un_paciente_nuevo_SI_puede_agendar_su_primera_cita():
+    """El 13/09/2026 alguien que nunca había ido a la clínica no podía pedir cita. Nunca.
+
+    La secuencia, leída del historial del agente en Neon: Daniela consultó disponibilidad,
+    ofreció el martes a las 10:00, el paciente dio su nombre, ella llamó a
+    `identificar_paciente` y la tool le contestó --literalmente-- «Ese número no está
+    registrado como paciente. NO es un error: puede ser alguien escribiendo por primera vez.
+    **Puedes agendarle una cita nueva**». Llamó a `crear_cita` y `identidad_antes_de_datos`
+    la bloqueó. Regeneró, volvió a intentarlo, y el paciente recibió «te escribe el doctor».
+
+    El sistema se contradecía a sí mismo, y el bloqueo no protegía nada: quien no tiene ficha
+    no tiene datos que otro pueda ver ni citas que otro pueda mover. Lo que el plan pide
+    proteger es otra cosa --«que el contexto de una cuenta y el de un paciente no se mezclen
+    cuando alguien escribe por un familiar»--, y eso exige una ficha que ya exista.
+
+    Que el diseño lo contemplaba se ve en el esquema: `citas.paciente_id` es NULLABLE y la
+    tabla guarda `nombre_completo` y `telefono` por su cuenta. Había sitio para la cita de un
+    desconocido desde la migración 001.
+
+    `telefono_sin_paciente` no es lo que dice el modelo: lo pone el código tras un
+    `buscar_paciente_por_telefono` contra la base.
+    """
+    ctx = contexto(identidad_verificada=False, telefono_sin_paciente=True)
+
+    assert g.revisar_identidad(ctx, tool="crear_cita").dispara is False
+
+
+@pytest.mark.parametrize("tool", ["reprogramar_cita", "cancelar_cita"])
+def test_un_desconocido_no_puede_mover_ni_cancelar_nada(tool):
+    """La otra mitad, y es la que impide que el arreglo de arriba abra un boquete.
+
+    Crear una cita para un número sin ficha no toca los datos de nadie. Mover o cancelar SÍ:
+    esas dos operan sobre citas que ya existen, y una cita existente puede ser de la persona
+    a la que alguien está suplantando. Ahí la identidad sigue siendo obligatoria, tenga ficha
+    el número o no.
+    """
+    ctx = contexto(identidad_verificada=False, telefono_sin_paciente=True)
+
+    assert g.revisar_identidad(ctx, tool=tool).dispara is True
+
+
+def test_con_ficha_en_la_clinica_crear_cita_sigue_exigiendo_identidad():
+    """Un número CON ficha y sin verificar es justo el caso que el plan quiere frenar: alguien
+    escribiendo desde el teléfono de otra persona. `telefono_sin_paciente` es False y el
+    guardrail salta igual que siempre."""
+    ctx = contexto(identidad_verificada=False, telefono_sin_paciente=False)
+
+    assert g.revisar_identidad(ctx, tool="crear_cita").dispara is True
+
+
+def test_una_tool_desconocida_se_trata_como_la_mas_estricta():
+    """`condicion_revision` del plan: «si aparece una cuarta tool de escritura, hay que
+    agregarla». Mientras nadie la agregue, el default no puede ser dejarla pasar."""
+    ctx = contexto(identidad_verificada=False, telefono_sin_paciente=True)
+
+    assert g.revisar_identidad(ctx, tool="borrar_historia_clinica").dispara is True
 
 
 # ==========================================================================================

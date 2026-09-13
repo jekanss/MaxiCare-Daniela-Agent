@@ -542,6 +542,15 @@ class ContextoDaniela:
     identidad_verificada: bool = False
     intentos_identificacion: int = 0
 
+    #: Comprobado CONTRA LA BASE: este teléfono no tiene fila en `pacientes`. No es lo mismo
+    #: que `not identidad_verificada` --ese es «no sabemos quién es»; este es «la clínica no
+    #: lo conoce»-- y la diferencia decide si puede pedir su primera cita.
+    #:
+    #: Lo pone `atencion._leer_estado` con el `buscar_paciente_por_telefono` que ya hacía, y
+    #: lo refresca `herramientas._identificar_paciente`. Nunca lo escribe el modelo: si
+    #: pudiera, bastaría con que dijera «soy nuevo» para saltarse `identidad_antes_de_datos`.
+    telefono_sin_paciente: bool = False
+
     #: Conversación.
     turno_actual: int = 0
 

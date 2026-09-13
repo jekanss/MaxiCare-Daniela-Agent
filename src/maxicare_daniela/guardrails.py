@@ -195,10 +195,45 @@ def revisar_horas(mensaje: str, autorizadas: set[str]) -> Veredicto:
     )
 
 
-def revisar_identidad(ctx: ContextoDaniela) -> Veredicto:
-    """Sin identidad verificada no se toca la agenda de nadie."""
+#: La única tool de escritura que puede correr sin identidad verificada, y solo cuando el
+#: teléfono no tiene ficha. Es una lista blanca y no una negra a propósito: una tool nueva
+#: que nadie clasifique cae del lado estricto, que es el lado en el que hay que caer.
+_ESCRITURAS_PARA_DESCONOCIDO = frozenset({"crear_cita"})
+
+
+def revisar_identidad(ctx: ContextoDaniela, *, tool: str) -> Veredicto:
+    """Sin identidad verificada no se toca la agenda de nadie... salvo la propia primera cita.
+
+    El plan justifica este guardrail con `datos.quien_ve_que`: «que el contexto de una cuenta
+    y el de un paciente no se mezclen cuando alguien escribe por un familiar». Eso exige que
+    exista una ficha que proteger. Un número que la clínica no conoce no tiene datos que otro
+    pueda ver ni citas que otro pueda mover, y bloquearle `crear_cita` no protegía a nadie:
+    dejaba a la clínica sin pacientes nuevos.
+
+    Y el sistema se contradecía. `identificar_paciente` le responde al modelo, palabra por
+    palabra, «puedes agendarle una cita nueva», y este guardrail se lo prohibía. Medido en
+    producción el 13/09/2026: un paciente dio su nombre, Daniela intentó crear la cita, el
+    guardrail la frenó, regeneró, la frenó otra vez, y el paciente recibió «te escribe el
+    doctor». `citas.paciente_id` es NULLABLE desde la migración 001 justo para este caso.
+
+    `reprogramar_cita` y `cancelar_cita` NO entran en la excepción, tenga ficha el número o
+    no: operan sobre citas que ya existen, y una cita existente sí puede ser de la persona a
+    la que alguien está suplantando.
+    """
     if ctx.identidad_verificada:
         return Veredicto(False)
+
+    if ctx.telefono_sin_paciente and tool in _ESCRITURAS_PARA_DESCONOCIDO:
+        return Veredicto(False)
+
+    if ctx.telefono_sin_paciente:
+        return Veredicto(
+            True,
+            f"`{tool}` opera sobre citas que ya existen y ese número no tiene ninguna "
+            "registrada a su nombre. No la muevas ni la canceles. NUNCA pidas cédula ni "
+            "documento.",
+        )
+
     return Veredicto(
         True,
         "No puedes crear, mover ni cancelar una cita sin haber verificado la identidad. "
@@ -313,9 +348,16 @@ def identidad_antes_de_datos(datos) -> ToolGuardrailFunctionOutput:
     ocurrir, no ocurrir de otra forma.
     """
     ctx = datos.context.context
-    veredicto = revisar_identidad(ctx)
+    # `tool_name` y no un guardrail por tool: las tres comparten la regla, y solo `crear_cita`
+    # tiene la excepción del paciente nuevo. Si el SDK dejara de traerlo, el `or ""` cae en el
+    # lado estricto --ninguna tool sin nombre está en la lista blanca--, que es donde tiene
+    # que caer.
+    tool = getattr(datos.context, "tool_name", "") or ""
+    veredicto = revisar_identidad(ctx, tool=tool)
     if veredicto.dispara:
-        log.warning("identidad_antes_de_datos bloqueó una escritura en %s", ctx.id_conversacion)
+        log.warning(
+            "identidad_antes_de_datos bloqueó `%s` en %s", tool, ctx.id_conversacion
+        )
         return ToolGuardrailFunctionOutput.raise_exception()
     return ToolGuardrailFunctionOutput.allow()
 
