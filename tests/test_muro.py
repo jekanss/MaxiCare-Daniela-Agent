@@ -86,25 +86,35 @@ class WhatsAppConRemision(WhatsAppFalso):
 
 
 class TelegramDeDoctores:
-    """Lo que ven los doctores.
+    """Lo que ven los doctores, y EN QUÉ HILO lo ven.
 
-    `mensajes` guarda CADENAS y no tuplas porque la aserción del entregable las une con
-    `"\\n".join(...)`. El pie del archivo se guarda aparte, en `archivos`: si entrara en
-    `mensajes`, la aserción de que lo clínico SÍ llegó podría pasar por el pie en vez de por
-    el mensaje de la lectura, que es lo que se quiere comprobar.
+    `mensajes` guarda `(texto, tema_id)`. El destino no es un detalle: medido por mutación en
+    la revisión final, cambiar `tema_id=destino` por `tema_id=tema_general` en `ingesta.py`
+    dejaba las 393 pruebas en verde, porque ningún doble offline guardaba el tema. El
+    contenido clínico de un paciente se iría al hilo donde miran todos los doctores.
+
+    El pie del archivo se guarda aparte, en `archivos`: si entrara en `mensajes`, la aserción
+    de que lo clínico SÍ llegó podría pasar por el pie en vez de por el mensaje de la
+    lectura, que es lo que se quiere comprobar.
     """
 
     def __init__(self) -> None:
-        self.mensajes: list[str] = []
+        #: (texto, tema_id)
+        self.mensajes: list[tuple[str, int | None]] = []
         self.archivos: list[tuple[str, int | None, str]] = []
         self.temas: list[str] = []
+
+    @property
+    def textos(self) -> list[str]:
+        """Solo el texto, para las aserciones que no miran el destino."""
+        return [texto for texto, _ in self.mensajes]
 
     async def enviar_archivo(self, archivo, *, tipo_whatsapp, pie, tema_id=None) -> int:
         self.archivos.append((archivo.nombre, tema_id, pie))
         return 10 + len(self.archivos)
 
     async def enviar_mensaje(self, texto, *, tema_id=None, teclado=None) -> int:
-        self.mensajes.append(texto)
+        self.mensajes.append((texto, tema_id))
         return 20 + len(self.mensajes)
 
     async def crear_tema(self, nombre: str) -> int:  # pragma: no cover - no debería hacer falta
@@ -171,7 +181,9 @@ def _montar(monkeypatch, modelo: ModeloGuionizado) -> BaseFalsa:
     monkeypatch.setattr(ingesta, "_registrar", lambda url, m: True)
     monkeypatch.setattr(ingesta, "_marcar_reenviado", lambda url, w, t, s: None)
     monkeypatch.setattr(ingesta, "_marcar_fallo", lambda url, w, e: None)
-    monkeypatch.setattr(lectura_mod, "_leer_tema", lambda url, tel: TEMA_DE_ANA)
+    # `_paciente_y_tema` devuelve `(id_paciente, tema)`: Ana YA es paciente de la clínica y
+    # ya tiene su hilo. Que un número que NO lo es no abra tema lo prueba `test_lectura.py`.
+    monkeypatch.setattr(lectura_mod, "_paciente_y_tema", lambda url, tel: (5, TEMA_DE_ANA))
     monkeypatch.setattr(lectura_mod, "_guardar_tema", lambda *a, **kw: None)
     monkeypatch.setattr(conversacion, "_guardar_estado", lambda ctx, resultado: None)
 
@@ -287,7 +299,7 @@ def test_el_contenido_clinico_de_una_remision_no_entra_al_contexto_de_daniela(mo
     assert "reabsorcion" not in entrada_del_modelo.lower()
     assert "periapical" not in entrada_del_modelo.lower()
 
-    enviado_a_telegram = "\n".join(tg.mensajes)
+    enviado_a_telegram = "\n".join(tg.textos)
     assert CENTINELA in enviado_a_telegram, (
         "la otra mitad del muro: el doctor tiene que recibir la lectura completa"
     )
@@ -364,11 +376,21 @@ def test_el_archivo_y_su_lectura_van_al_tema_del_paciente(monkeypatch):
     assert [(nombre, tema) for nombre, tema, _ in tg.archivos] == [
         ("remision.pdf", TEMA_DE_ANA)
     ]
-    clinicos = [m for m in tg.mensajes if CENTINELA in m]
+    clinicos = [(texto, tema) for texto, tema in tg.mensajes if CENTINELA in texto]
     assert len(clinicos) == 1, "la lectura clínica se mandó ninguna o más de una vez"
+    # Y AL HILO DE ESA PERSONA. Esta es la aserción que faltaba: sin ella, mutar
+    # `tema_id=destino` a `tema_id=tema_general` en `ingesta.py` dejaba la suite en verde y
+    # la lectura clínica de cada paciente caía en el hilo donde miran todos los doctores.
+    assert clinicos[0][1] == TEMA_DE_ANA, (
+        f"la lectura clínica fue al tema {clinicos[0][1]} y no al de Ana ({TEMA_DE_ANA}): "
+        "el contenido clínico de un paciente quedaría mezclado con el de todos los demás"
+    )
     # El aviso al General existe --es donde miran los doctores-- pero no lleva nada clínico.
-    avisos = [m for m in tg.mensajes if "Llegó un archivo" in m]
-    assert avisos and CENTINELA not in "\n".join(avisos)
+    avisos = [(texto, tema) for texto, tema in tg.mensajes if "Llegó un archivo" in texto]
+    assert avisos and CENTINELA not in "\n".join(t for t, _ in avisos)
+    assert [tema for _, tema in avisos] == [TEMA_GENERAL], (
+        "el aviso tiene que ir al General: es el único sitio donde los doctores miran"
+    )
 
     # El pie viaja pegado al archivo y se compone ANTES de que el lector devuelva nada:
     # dice lo que el archivo es, nunca lo que muestra. Es la garantía de la fase 2 y esta

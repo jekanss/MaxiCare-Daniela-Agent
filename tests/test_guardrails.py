@@ -210,6 +210,8 @@ def test_lo_autorizado_no_sobrevive_al_turno():
     assert ctx.turno.cifras_autorizadas == set()
     assert ctx.turno.hubo_adjunto is False
     assert g.revisar_cifras("son $1.900.000", ctx.turno.cifras_autorizadas).dispara is True
+
+
 # ==========================================================================================
 # La excepción del evaluador clínico (fase 6B)
 # ==========================================================================================
