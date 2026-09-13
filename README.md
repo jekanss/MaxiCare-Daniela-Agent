@@ -152,11 +152,24 @@ para el panel · Docker + Traefik detrás de un túnel de Cloudflare.
 ```bash
 uv sync                       # dependencias
 cp .env.ejemplo .env          # y rellenarlo: Neon, OpenAI, WhatsApp, Telegram, Google
+cp datos/base_conocimiento.ejemplo.json datos/base_conocimiento.json
 uv run python scripts/inicializar_base.py    # migraciones + carga + verificación
 uv run uvicorn maxicare_daniela.runtime:app --reload
 ```
 
 `inicializar_base.py` es idempotente; con `--solo-verificar` no escribe nada.
+
+**Los datos de la clínica no están en este repositorio.** `datos/base_conocimiento.json` y
+el documento maestro del que sale llevan la dirección de la sede, los nombres de los
+odontólogos y las tarifas: son del cliente, no del código, y están en `.gitignore` por la
+misma razón que `.env`. Lo que sí se versiona son los ejemplos de al lado
+(`base_conocimiento.ejemplo.json`, `documento-maestro.ejemplo.md`), que conservan la forma
+—las 73 entradas con su tratamiento y su concepto— y sustituyen el contenido.
+
+Eso importa más de lo que parece: **el agente no puede decir una cifra que no haya salido de
+ese archivo.** El guardrail `sin_cifra_no_documentada` extrae toda cifra de dinero de la
+respuesta y exige que la tool de conocimiento la haya autorizado en ese mismo turno. Con el
+ejemplo cargado, el sistema arranca y funciona; simplemente no tiene precios que dar.
 
 ### Pruebas
 

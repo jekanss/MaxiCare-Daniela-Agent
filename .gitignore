@@ -15,3 +15,10 @@ web/dist/
 # fases ya cerradas. 1,2 MB en 47 archivos -- mas que todo `src/` -- que no aportan nada
 # a una busqueda y la ensucian entera. La propia skill que los genera los da por ignorados.
 .superpowers/
+
+# Datos reales del cliente. Misma regla que `.env`, por la misma razon: son de la clinica,
+# no del repositorio. Se versionan los ejemplos de al lado -- `base_conocimiento.ejemplo.json`
+# y `documento-maestro.ejemplo.md` -- que conservan la FORMA sin publicar direccion, nombres
+# de odontologos ni tarifas.
+datos/base_conocimiento.json
+docs/conocimiento/documento-maestro-tratamientos-y-politicas.md

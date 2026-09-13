@@ -1,0 +1,440 @@
+[
+  {
+    "tratamiento": "_general",
+    "concepto": "sede",
+    "contenido": "Calle 000 #00-00, oficina 000, Ciudad. Indicaciones para llegar y si hay parqueadero.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "_general",
+    "concepto": "horario",
+    "contenido": "Lunes a viernes de 0:00 a. m. a 0:00 p. m.; sábados de 0:00 a. m. a 0:00 p. m.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "_general",
+    "concepto": "equipo",
+    "contenido": "Nombre del profesional y su especialidad.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "_general",
+    "concepto": "equipo_por_confirmar",
+    "contenido": "Especialidad y años de experiencia; nombre por confirmar con la clínica.",
+    "aprobado": false
+  },
+  {
+    "tratamiento": "_general",
+    "concepto": "eps",
+    "contenido": "Relación con EPS y planes de salud.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "_general",
+    "concepto": "politica_precios",
+    "contenido": "Cómo se comunican los precios y en qué casos cambian.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "_general",
+    "concepto": "financiacion",
+    "contenido": "Planes de pago disponibles y sus condiciones.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "_general",
+    "concepto": "medios_pago",
+    "contenido": "Medios de pago aceptados.",
+    "aprobado": false
+  },
+  {
+    "tratamiento": "_general",
+    "concepto": "valoracion",
+    "contenido": "Costo y condiciones de la cita de valoración.",
+    "aprobado": false
+  },
+  {
+    "tratamiento": "_general",
+    "concepto": "recordatorios",
+    "contenido": "Cuándo y cómo se recuerda una cita al paciente.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "_general",
+    "concepto": "urgencias",
+    "contenido": "Cómo se atiende una urgencia y en qué horario.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "_general",
+    "concepto": "confirmacion_de_cita",
+    "contenido": "Cómo se confirma una cita y qué pasa si no se confirma.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "cordales",
+    "concepto": "precio",
+    "contenido": "$000.000 por unidad. Precio de EJEMPLO, sin relación con ninguna clínica real.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "cordales",
+    "concepto": "profesional",
+    "contenido": "Especialidad que realiza el procedimiento.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "cordales",
+    "concepto": "duracion",
+    "contenido": "00 a 00 minutos por sesión.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "cordales",
+    "concepto": "incluye",
+    "contenido": "Qué cubre el precio: valoración, procedimiento, controles.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "cordales",
+    "concepto": "no_incluye",
+    "contenido": "Qué NO cubre el precio: exámenes de imagen, medicación, sedación.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "cordales",
+    "concepto": "control",
+    "contenido": "Cuándo es el control posterior.",
+    "aprobado": false
+  },
+  {
+    "tratamiento": "cordales",
+    "concepto": "cuidados",
+    "contenido": "Indicaciones posteriores al procedimiento.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "implantes",
+    "concepto": "precio",
+    "contenido": "$000.000 por unidad. Precio de EJEMPLO, sin relación con ninguna clínica real.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "implantes",
+    "concepto": "paquetes",
+    "contenido": "Dos unidades: $000.000; tres: $000.000; cuatro: $000.000.",
+    "aprobado": false
+  },
+  {
+    "tratamiento": "implantes",
+    "concepto": "profesional",
+    "contenido": "Especialidad que realiza el procedimiento.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "implantes",
+    "concepto": "duracion",
+    "contenido": "00 a 00 minutos por sesión.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "implantes",
+    "concepto": "incluye",
+    "contenido": "Qué cubre el precio: valoración, procedimiento, controles.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "implantes",
+    "concepto": "no_incluye",
+    "contenido": "Qué NO cubre el precio: exámenes de imagen, medicación, sedación.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "implantes",
+    "concepto": "garantia",
+    "contenido": "Cobertura y plazo de la garantía, y qué la invalida.",
+    "aprobado": false
+  },
+  {
+    "tratamiento": "implantes",
+    "concepto": "cuidados",
+    "contenido": "Indicaciones posteriores al procedimiento.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "blanqueamiento",
+    "concepto": "precio",
+    "contenido": "$000.000 por unidad. Precio de EJEMPLO, sin relación con ninguna clínica real.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "blanqueamiento",
+    "concepto": "profesional",
+    "contenido": "Especialidad que realiza el procedimiento.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "blanqueamiento",
+    "concepto": "duracion",
+    "contenido": "00 a 00 minutos por sesión.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "blanqueamiento",
+    "concepto": "incluye",
+    "contenido": "Qué cubre el precio: valoración, procedimiento, controles.",
+    "aprobado": false
+  },
+  {
+    "tratamiento": "blanqueamiento",
+    "concepto": "no_incluye",
+    "contenido": "Qué NO cubre el precio: exámenes de imagen, medicación, sedación.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "blanqueamiento",
+    "concepto": "cuidados",
+    "contenido": "Indicaciones posteriores al procedimiento.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "ortodoncia",
+    "concepto": "precio",
+    "contenido": "$000.000 por unidad. Precio de EJEMPLO, sin relación con ninguna clínica real.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "ortodoncia",
+    "concepto": "profesional",
+    "contenido": "Especialidad que realiza el procedimiento.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "ortodoncia",
+    "concepto": "duracion",
+    "contenido": "00 a 00 minutos por sesión.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "ortodoncia",
+    "concepto": "incluye",
+    "contenido": "Qué cubre el precio: valoración, procedimiento, controles.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "ortodoncia",
+    "concepto": "no_incluye",
+    "contenido": "Qué NO cubre el precio: exámenes de imagen, medicación, sedación.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "ortodoncia",
+    "concepto": "financiacion",
+    "contenido": "Planes de pago disponibles y sus condiciones.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "ortodoncia",
+    "concepto": "garantia",
+    "contenido": "Cobertura y plazo de la garantía, y qué la invalida.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "ortodoncia",
+    "concepto": "retenedores",
+    "contenido": "Qué retenedores se entregan y cuánto cuestan aparte.",
+    "aprobado": false
+  },
+  {
+    "tratamiento": "diseno_sonrisa",
+    "concepto": "precio",
+    "contenido": "$000.000 por unidad. Precio de EJEMPLO, sin relación con ninguna clínica real.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "diseno_sonrisa",
+    "concepto": "profesional",
+    "contenido": "Especialidad que realiza el procedimiento.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "diseno_sonrisa",
+    "concepto": "duracion",
+    "contenido": "00 a 00 minutos por sesión.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "diseno_sonrisa",
+    "concepto": "incluye",
+    "contenido": "Qué cubre el precio: valoración, procedimiento, controles.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "diseno_sonrisa",
+    "concepto": "garantia",
+    "contenido": "Cobertura y plazo de la garantía, y qué la invalida.",
+    "aprobado": false
+  },
+  {
+    "tratamiento": "microdiseno",
+    "concepto": "precio",
+    "contenido": "$000.000 por unidad. Precio de EJEMPLO, sin relación con ninguna clínica real.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "microdiseno",
+    "concepto": "profesional",
+    "contenido": "Especialidad que realiza el procedimiento.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "microdiseno",
+    "concepto": "duracion",
+    "contenido": "00 a 00 minutos por sesión.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "microdiseno",
+    "concepto": "garantia",
+    "contenido": "Cobertura y plazo de la garantía, y qué la invalida.",
+    "aprobado": false
+  },
+  {
+    "tratamiento": "coronas",
+    "concepto": "precio",
+    "contenido": "$000.000 por unidad. Precio de EJEMPLO, sin relación con ninguna clínica real.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "coronas",
+    "concepto": "profesional",
+    "contenido": "Especialidad que realiza el procedimiento.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "coronas",
+    "concepto": "duracion",
+    "contenido": "00 a 00 minutos por sesión.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "coronas",
+    "concepto": "control",
+    "contenido": "Cuándo es el control posterior.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "coronas",
+    "concepto": "garantia",
+    "contenido": "Cobertura y plazo de la garantía, y qué la invalida.",
+    "aprobado": false
+  },
+  {
+    "tratamiento": "periodoncia",
+    "concepto": "precio",
+    "contenido": "$000.000 por unidad. Precio de EJEMPLO, sin relación con ninguna clínica real.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "periodoncia",
+    "concepto": "profesional",
+    "contenido": "Especialidad que realiza el procedimiento.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "periodoncia",
+    "concepto": "duracion",
+    "contenido": "00 a 00 minutos por sesión.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "gingivectomia",
+    "concepto": "precio",
+    "contenido": "$000.000 por unidad. Precio de EJEMPLO, sin relación con ninguna clínica real.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "gingivectomia",
+    "concepto": "profesional",
+    "contenido": "Especialidad que realiza el procedimiento.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "gingivectomia",
+    "concepto": "duracion",
+    "contenido": "00 a 00 minutos por sesión.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "gingivectomia",
+    "concepto": "garantia",
+    "contenido": "Cobertura y plazo de la garantía, y qué la invalida.",
+    "aprobado": false
+  },
+  {
+    "tratamiento": "bichectomia",
+    "concepto": "precio",
+    "contenido": "$000.000 por unidad. Precio de EJEMPLO, sin relación con ninguna clínica real.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "bichectomia",
+    "concepto": "profesional",
+    "contenido": "Especialidad que realiza el procedimiento.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "bichectomia",
+    "concepto": "duracion",
+    "contenido": "00 a 00 minutos por sesión.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "bichectomia",
+    "concepto": "incluye",
+    "contenido": "Qué cubre el precio: valoración, procedimiento, controles.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "bichectomia",
+    "concepto": "recuperacion",
+    "contenido": "Cuánto tarda la recuperación y qué se siente en ese periodo.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "bichectomia",
+    "concepto": "indicacion",
+    "contenido": "Para qué casos está indicado el tratamiento.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "bichectomia",
+    "concepto": "garantia",
+    "contenido": "Cobertura y plazo de la garantía, y qué la invalida.",
+    "aprobado": false
+  },
+  {
+    "tratamiento": "limpieza",
+    "concepto": "precio",
+    "contenido": "$000.000 por unidad. Precio de EJEMPLO, sin relación con ninguna clínica real.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "limpieza",
+    "concepto": "profesional",
+    "contenido": "Especialidad que realiza el procedimiento.",
+    "aprobado": false
+  },
+  {
+    "tratamiento": "limpieza",
+    "concepto": "duracion",
+    "contenido": "00 a 00 minutos por sesión.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "limpieza",
+    "concepto": "frecuencia",
+    "contenido": "Cada cuánto se recomienda repetir el tratamiento.",
+    "aprobado": true
+  }
+]

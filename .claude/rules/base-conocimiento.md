@@ -1,6 +1,7 @@
 ---
 paths:
   - "datos/base_conocimiento.json"
+  - "datos/base_conocimiento.ejemplo.json"
 ---
 
 # La base de conocimiento
@@ -43,3 +44,19 @@ resolver, porque nadie sabe qué preguntarle a MaxiCare. El test lo impide.
 
 Tras editar: `uv run pytest -q tests/test_base_conocimiento.py` y luego
 `uv run python scripts/inicializar_base.py` para recargar.
+
+# El archivo real no se versiona
+
+`datos/base_conocimiento.json` y el documento maestro del que sale llevan la direccion de
+la sede, los nombres de los odontologos y las tarifas: son datos del cliente, y estan en
+`.gitignore` por la misma razon que `.env`. Lo versionado son los ejemplos de al lado, que
+conservan las 73 entradas con su `tratamiento` y su `concepto` --el esquema-- y sustituyen
+el `contenido`.
+
+En un clon nuevo, antes de `inicializar_base.py`:
+
+```bash
+cp datos/base_conocimiento.ejemplo.json datos/base_conocimiento.json
+```
+
+y despues se sustituye por el real de la clinica.
