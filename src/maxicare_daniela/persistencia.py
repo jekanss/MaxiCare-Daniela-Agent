@@ -274,6 +274,35 @@ def asegurar_paciente(conn, *, nombre_completo: str, telefono: str) -> int:
     return fila[0]
 
 
+def tema_del_paciente(conn, telefono: str) -> int | None:
+    """El tema de Telegram de ese número, o `None` si todavía no tiene.
+
+    El tema se ata al PACIENTE, no a la conversación: una persona puede tener varios
+    episodios a lo largo del tiempo y todos comparten hilo. Lo dice la migración 002.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT telegram_topic_id FROM pacientes WHERE telefono = %s",
+            (telefono,),
+        )
+        fila = cur.fetchone()
+    return fila[0] if fila else None
+
+
+def guardar_tema(conn, *, id_paciente: int, topic_id: int) -> None:
+    """Ata el tema al paciente. `telegram_topic_abierto` queda en FALSE a propósito: el
+    tema nace cerrado y solo el relevo (6C) lo abre."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE pacientes
+               SET telegram_topic_id = %s, telegram_topic_abierto = FALSE
+             WHERE id = %s
+            """,
+            (topic_id, id_paciente),
+        )
+
+
 def asegurar_conversacion(
     conn, *, telefono: str, paciente_id: int | None = None, canal: str = "whatsapp"
 ) -> str:
