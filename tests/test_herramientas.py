@@ -120,6 +120,94 @@ def test_sin_alternativas_el_texto_no_deja_al_paciente_en_el_aire():
     assert "escala" in texto.lower()
 
 
+def test_la_rejilla_no_ofrece_bloques_que_ya_pasaron():
+    """Una hora que ya pasó no es un hueco libre: es una cita imposible.
+
+    Sin este filtro, un modelo que resuelva mal el año --y hasta hoy no sabía en qué año
+    vive-- ofrece el 16 de septiembre del año pasado y nadie lo detiene.
+    """
+    bloques = bloques_del_dia(
+        datetime(2026, 9, 15, 8, 0, tzinfo=h.ZONA_BOGOTA),
+        datetime(2026, 9, 15, 14, 0, tzinfo=h.ZONA_BOGOTA),
+        duracion_minutos=60,
+        no_antes_de=datetime(2026, 9, 15, 10, 30, tzinfo=h.ZONA_BOGOTA),
+    )
+
+    # Las 10:00 ya empezaron; 8 y 9 quedaron atrás.
+    assert [b.hour for b in bloques] == [11, 12, 13]
+
+
+def test_una_ventana_mas_corta_que_un_bloque_no_se_confunde_con_agenda_llena(monkeypatch):
+    """«No cabe una cita en tu franja» y «no hay cupo» son cosas distintas.
+
+    Con la rejilla vacía por ventana corta, la tool decía lo mismo que con la agenda
+    saturada. El paciente pedía «el 16 tipo 10 am» con la agenda ENTERAMENTE libre y se iba
+    creyendo que no había nada.
+    """
+    ctx = contexto(ahora=datetime(2026, 9, 16, 7, 0, tzinfo=h.ZONA_BOGOTA))
+
+    async def base_falsa(_ctx, trabajo):
+        return trabajo(BaseFalsa())
+
+    monkeypatch.setattr(h, "_con_base", base_falsa)
+    monkeypatch.setattr(persistencia, "bloques_ocupados", lambda conn, desde, hasta: {})
+
+    texto = asyncio.run(h._consultar_disponibilidad(ctx, "2026-09-16T10:00", "2026-09-16T10:30"))
+
+    assert "No quedan bloques libres" not in texto
+    assert "Bloques libres" in texto
+    assert "10:00" in texto
+
+
+def test_la_disponibilidad_no_ofrece_horas_de_hoy_que_ya_pasaron(monkeypatch):
+    """Que la rejilla SEPA filtrar el pasado no sirve si la consulta no le pasa la hora.
+
+    Esta prueba existe porque la de la rejilla pasaba con `_huecos_libres` sin cablear: son
+    dos cosas distintas y hacían falta las dos.
+    """
+    ctx = contexto(ahora=datetime(2026, 9, 16, 11, 30, tzinfo=h.ZONA_BOGOTA))
+
+    async def base_falsa(_ctx, trabajo):
+        return trabajo(BaseFalsa())
+
+    monkeypatch.setattr(h, "_con_base", base_falsa)
+    monkeypatch.setattr(persistencia, "bloques_ocupados", lambda conn, desde, hasta: {})
+
+    texto = asyncio.run(h._consultar_disponibilidad(ctx, "2026-09-16T08:00", "2026-09-16T14:00"))
+
+    assert "08:00" not in texto
+    assert "09:00" not in texto
+    assert "11:00" not in texto  # empezó hace media hora
+    assert "12:00" in texto
+
+
+def test_no_se_agenda_una_cita_en_una_hora_que_ya_paso(monkeypatch):
+    """Y se rechaza ANTES de tocar la base: un cupo consumido en el pasado no lo libera nadie."""
+    ctx = contexto(ahora=datetime(2026, 9, 15, 12, 0, tzinfo=h.ZONA_BOGOTA))
+    toques = []
+
+    async def base_falsa(_ctx, trabajo):
+        toques.append("tocó la base")
+        return (None, None, [])
+
+    monkeypatch.setattr(h, "_con_base", base_falsa)
+
+    texto = asyncio.run(
+        h._crear_cita(
+            ctx,
+            SolicitudCita(
+                nombre_completo="Ana Gómez",
+                inicio=datetime(2026, 9, 15, 9, 0, tzinfo=h.ZONA_BOGOTA),
+                tratamiento="limpieza",
+                clave_idempotencia="conv-1:2026-09-15T09:00",
+            ),
+        )
+    )
+
+    assert "ya pasó" in texto
+    assert toques == []
+
+
 # ==========================================================================================
 # identificar_paciente
 # ==========================================================================================
