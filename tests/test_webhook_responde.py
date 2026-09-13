@@ -1,0 +1,506 @@
+"""El cable: que un mensaje de WhatsApp llegue a Daniela, y que el archivo llegue igual.
+
+Offline. `TestClient` habla con la aplicación en el mismo proceso; `ingesta.procesar_mensaje`
+y `atencion.atender` se sustituyen por espías, así que aquí no hay red, ni Neon, ni modelo.
+Lo que se prueba es el CABLEADO de `runtime._entregar`, que es lo único que esta tarea añade
+al camino de producción.
+
+------------------------------------------------------------------------------------------
+La prueba que justifica el archivo entero
+------------------------------------------------------------------------------------------
+
+`test_el_archivo_sigue_llegando_al_doctor_pase_lo_que_pase`. La garantía de la fase 2 es que
+un archivo de un paciente llega a los doctores aunque todo lo demás falle, y esta tarea es
+exactamente donde se podía romper sin que nadie lo notara: basta con meter el turno de
+Daniela en el mismo `try` que la entrega, o antes de ella, para que un fallo del modelo se
+lleve por delante una radiografía urgente. Nada en producción lo avisaría -- el webhook
+seguiría devolviendo 200.
+
+`test_el_orden_es_primero_el_doctor_y_luego_daniela` es su otra mitad: con Daniela primero,
+un turno lento no pierde el archivo, pero lo retrasa los diez segundos que tarde el modelo.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import hmac
+import json
+import os
+from datetime import datetime
+
+import pytest
+
+# Mismo preámbulo que `test_web.py`, y por el mismo motivo: `runtime.py` construye su
+# `Config` al importarse y `MAXICARE_DATABASE_URL` es obligatoria. Se carga el `.env` real
+# primero y solo se inventa una URL si de verdad no hay ninguna.
+#
+# `setdefault` y NUNCA `os.environ[...] = ...`: pytest importa todos los módulos de prueba
+# antes de ejecutar ninguno, así que una asignación aquí se queda fijada para toda la sesión
+# y deja a `test_tools_neon.py` conectándose a `localhost/nada`. Ya pasó una vez.
+from maxicare_daniela.config import cargar_dotenv  # noqa: E402
+
+cargar_dotenv()
+os.environ.setdefault("MAXICARE_DATABASE_URL", "postgresql://prueba:prueba@localhost/nada")
+
+from dataclasses import replace  # noqa: E402
+
+from agents import Agent, RunConfig  # noqa: E402
+from fastapi.testclient import TestClient  # noqa: E402
+
+from maxicare_daniela import (  # noqa: E402
+    atencion,
+    conversacion,
+    herramientas,
+    ingesta,
+    persistencia,
+    runtime,
+)
+from maxicare_daniela.calendario import (  # noqa: E402
+    CalendarioCaido,
+    CalendarioDoble,
+    ErrorDeCalendario,
+)
+from maxicare_daniela.contratos import (  # noqa: E402
+    ContextoDaniela,
+    RespuestaDaniela,
+    SolicitudEscalamiento,
+)
+
+from .dobles import ModeloGuionizado, responde, respuesta_daniela, usa_tool  # noqa: E402
+
+APP_SECRET = "un-app-secret-de-prueba"
+
+
+# ==========================================================================================
+# El sobre de Meta y su firma
+# ==========================================================================================
+
+
+def _sobre(*mensajes, statuses=None) -> dict:
+    """La envoltura de cuatro niveles que manda Meta. La forma real, no una simplificada."""
+    valor = {"messaging_product": "whatsapp", "metadata": {"phone_number_id": "123"}}
+    if mensajes:
+        valor["messages"] = list(mensajes)
+    if statuses is not None:
+        valor["statuses"] = statuses
+    return {
+        "object": "whatsapp_business_account",
+        "entry": [{"id": "WABA", "changes": [{"field": "messages", "value": valor}]}],
+    }
+
+
+def _mensaje_de_texto(wamid: str = "wamid.de.prueba.1") -> dict:
+    return _sobre(
+        {
+            "from": "573001234567",
+            "id": wamid,
+            "timestamp": "1757700000",
+            "type": "text",
+            "text": {"body": "buenas, cuánto vale una limpieza?"},
+        }
+    )
+
+
+def _firmar(cuerpo: bytes) -> str:
+    return "sha256=" + hmac.new(APP_SECRET.encode(), cuerpo, hashlib.sha256).hexdigest()
+
+
+def _enviar(cliente: TestClient, payload: dict, *, firma: str | None = None):
+    """El POST tal como lo hace Meta: bytes crudos y la firma sobre esos mismos bytes.
+
+    Se manda `content=` y no `json=` porque la firma cubre los bytes exactos: dejar que el
+    cliente reserialice el diccionario daría otra cadena y otra firma.
+    """
+    crudo = json.dumps(payload).encode()
+    return cliente.post(
+        "/webhook/whatsapp",
+        content=crudo,
+        headers={
+            "x-hub-signature-256": firma if firma is not None else _firmar(crudo),
+            "content-type": "application/json",
+        },
+    )
+
+
+# ==========================================================================================
+# Espías
+# ==========================================================================================
+
+
+class Espias:
+    """Qué se llamó, con qué, y en qué orden."""
+
+    def __init__(self) -> None:
+        self.orden: list[str] = []
+        self.procesados: list[ingesta.MensajeEntrante] = []
+        self.atendidos: list[ingesta.MensajeEntrante] = []
+        #: Lo pone la prueba que quiere ver reventar el turno de Daniela.
+        self.daniela_revienta = False
+
+
+@pytest.fixture
+def espias(monkeypatch) -> Espias:
+    registro = Espias()
+
+    async def procesar_falso(m, **_kwargs):
+        registro.orden.append("doctor")
+        registro.procesados.append(m)
+        return ingesta.Resultado(m.wamid, nuevo=True, reenviado=True)
+
+    async def atender_falso(m, **_kwargs):
+        registro.orden.append("daniela")
+        registro.atendidos.append(m)
+        if registro.daniela_revienta:
+            raise RuntimeError("el modelo se cayó a mitad del turno")
+        return atencion.Atendido(wamid=m.wamid, id_conversacion="conv-1", respondido=True)
+
+    # Se sustituye el atributo del módulo, no un nombre importado: `runtime.py` llama
+    # `ingesta.procesar_mensaje(...)` y `atencion.atender(...)`, así que esto es lo que ve.
+    monkeypatch.setattr(ingesta, "procesar_mensaje", procesar_falso)
+    monkeypatch.setattr(atencion, "atender", atender_falso)
+    return registro
+
+
+@pytest.fixture
+def cliente(monkeypatch) -> TestClient:
+    # `Config` es `frozen`, así que se sustituye el objeto entero y no uno de sus campos.
+    monkeypatch.setattr(
+        runtime, "config", replace(runtime.config, whatsapp_app_secret=APP_SECRET)
+    )
+    return TestClient(runtime.app)
+
+
+# ==========================================================================================
+# El cable
+# ==========================================================================================
+
+
+def test_un_mensaje_de_texto_llega_a_daniela(cliente, espias):
+    """Lo que esta tarea existe para conseguir: que el paciente reciba respuesta.
+
+    El webhook lleva meses registrando mensajes y reenviándolos a Telegram sin contestarle
+    a nadie. Esta es la línea que lo cambia.
+    """
+    r = _enviar(cliente, _mensaje_de_texto("wamid.hola"))
+
+    assert r.status_code == 200
+    assert [m.wamid for m in espias.atendidos] == ["wamid.hola"]
+
+
+def test_el_archivo_sigue_llegando_al_doctor_pase_lo_que_pase(cliente, espias):
+    """LA prueba de esta tarea.
+
+    La garantía de la fase 2 no admite excepciones: la radiografía que manda un paciente
+    llega a los doctores aunque todo lo demás falle. Daniela es «todo lo demás».
+
+    Si alguien mete `atender` dentro del mismo `try` que `procesar_mensaje` --o antes-- esta
+    prueba es lo único que lo caza. En producción no se vería: el webhook seguiría
+    devolviendo 200, el log tendría una excepción de Daniela, y el archivo simplemente no
+    estaría en Telegram.
+    """
+    espias.daniela_revienta = True
+
+    r = _enviar(cliente, _mensaje_de_texto("wamid.radiografia"))
+
+    assert r.status_code == 200
+    assert [m.wamid for m in espias.procesados] == ["wamid.radiografia"], (
+        "el turno de Daniela se llevó por delante la entrega del archivo al doctor"
+    )
+
+
+def test_el_orden_es_primero_el_doctor_y_luego_daniela(cliente, espias):
+    """Con Daniela primero el archivo no se pierde, pero llega tarde: los segundos que tarde
+    el modelo en contestar son segundos que el doctor no tiene la radiografía."""
+    _enviar(cliente, _mensaje_de_texto("wamid.orden"))
+
+    assert espias.orden == ["doctor", "daniela"]
+
+
+def test_un_webhook_sin_mensajes_no_llama_a_daniela(cliente, espias):
+    """Meta manda un webhook por cada cambio de estado de lo que NOSOTROS enviamos: enviado,
+    entregado, leído. Llegan constantemente, y cada uno que llegara a Daniela sería una
+    corrida del modelo pagada para contestarle a nadie."""
+    payload = _sobre(
+        statuses=[
+            {
+                "id": "wamid.enviado.por.nosotros",
+                "status": "delivered",
+                "timestamp": "1757700000",
+                "recipient_id": "573001234567",
+            }
+        ]
+    )
+
+    r = _enviar(cliente, payload)
+
+    assert r.status_code == 200
+    assert espias.atendidos == []
+    assert espias.procesados == []
+
+
+def test_una_firma_invalida_no_llega_a_daniela(cliente, espias):
+    """La URL del webhook es pública. Sin esta puerta, cualquiera que la adivine pone a
+    Daniela a conversar --y a gastar tokens-- con un mensaje que ningún paciente mandó."""
+    r = _enviar(cliente, _mensaje_de_texto("wamid.falso"), firma="sha256=deadbeef")
+
+    assert r.status_code == 403
+    assert espias.atendidos == []
+    assert espias.procesados == []
+
+
+def test_el_webhook_responde_200_aunque_daniela_reviente(cliente, espias):
+    """Un 500 le dice a Meta que reintente, y cada reintento es otra copia del archivo para
+    el doctor. El 200 no dice «lo entregué»: dice «lo recibí»."""
+    espias.daniela_revienta = True
+
+    r = _enviar(cliente, _mensaje_de_texto("wamid.revienta"))
+
+    assert r.status_code == 200
+
+
+# ==========================================================================================
+# El calendario
+# ==========================================================================================
+
+
+def test_el_calendario_se_construye_una_sola_vez_al_arrancar():
+    """`CalendarioGoogle.__init__` hace una lectura real contra Google --es su comprobación
+    de acceso--, así que construirlo dentro de `_entregar` la pagaría en cada WhatsApp que
+    entre. Que esté colgado del startup es lo que lo impide."""
+    assert runtime._construir_el_calendario in runtime.app.router.on_startup
+
+
+def test_un_calendario_que_no_arranca_queda_CAIDO_y_jamas_un_doble(monkeypatch):
+    """La diferencia entre los dos objetos es la razón de ser del proyecto.
+
+    `CalendarioDoble` guarda los eventos en un diccionario en memoria y dice que sí a todo:
+    con uno aquí, `crear_cita` tomaría el cupo en Neon, «crearía» el evento en el vacío y
+    Daniela le confirmaría la cita al paciente --que llegaría a una clínica donde nadie lo
+    espera, y sin una línea roja en el log--. `CalendarioCaido` lanza, que es lo que las
+    tools de la fase 3 saben manejar: liberan el cupo y escalan.
+
+    Y el servidor tiene que arrancar igual: dejarlo caído deja a los doctores sin recibir
+    las radiografías de sus pacientes, que es peor que una Daniela que no agenda.
+    """
+
+    def no_arranca(_config):
+        raise RuntimeError("Google devolvió 403: el calendario no está compartido")
+
+    monkeypatch.setattr(runtime, "calendario_desde_config", no_arranca)
+    monkeypatch.setattr(runtime, "_calendario", "sin tocar")
+
+    runtime._construir_el_calendario()  # no propaga: el webhook arranca igual
+
+    assert isinstance(runtime._calendario, CalendarioCaido)
+    assert not isinstance(runtime._calendario, CalendarioDoble)
+    with pytest.raises(ErrorDeCalendario):
+        runtime._calendario.bloqueos(datetime.now(), datetime.now())
+
+
+# ==========================================================================================
+# El aviso a los doctores -- y el aviso que NO se manda dos veces
+# ==========================================================================================
+
+
+class TelegramFalso:
+    def __init__(self) -> None:
+        self.enviados: list[dict] = []
+
+    async def enviar_mensaje(self, texto, *, tema_id=None, teclado=None) -> int:
+        self.enviados.append({"texto": texto, "tema_id": tema_id, "teclado": teclado})
+        return 4242
+
+
+class ConexionFalsa:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+
+def _contexto(**cambios) -> ContextoDaniela:
+    base = dict(
+        id_conversacion="conv-441",
+        telefono_completo="573001112233",
+        database_url="postgresql://no-se-usa",
+        calendario=CalendarioDoble(),
+        turno_actual=3,
+        nombre_paciente="Ana Gómez",
+    )
+    base.update(cambios)
+    return ContextoDaniela(**base)
+
+
+@pytest.fixture
+def base_falsa(monkeypatch) -> list[dict]:
+    """Captura lo que se le pasa a `insertar_escalamiento` sin abrir una conexión."""
+    registradas: list[dict] = []
+
+    def insertar_falso(_conn, **kwargs):
+        registradas.append(kwargs)
+        return 7
+
+    monkeypatch.setattr(persistencia, "conectar", lambda url: ConexionFalsa())
+    monkeypatch.setattr(persistencia, "insertar_escalamiento", insertar_falso)
+    monkeypatch.setattr(
+        persistencia, "anotar_telegram_en_escalamiento", lambda conn, eid, mid: None
+    )
+    return registradas
+
+
+def test_el_aviso_al_doctor_sale_por_telegram_con_lo_que_se_le_dijo_al_paciente(
+    monkeypatch, base_falsa
+):
+    ctx = _contexto()
+    telegram = TelegramFalso()
+    monkeypatch.setattr(runtime, "_telegram", telegram)
+
+    asyncio.run(runtime._avisar_a_doctores(ctx, "clinico", "Déjame confirmarlo y te escribo."))
+
+    assert len(telegram.enviados) == 1
+    texto = telegram.enviados[0]["texto"]
+    assert "clinico" in texto
+    assert "+573001112233" in texto
+    assert "Déjame confirmarlo" in texto
+
+
+def test_el_aviso_del_orquestador_usa_la_clave_del_turno_y_no_una_inventada(
+    monkeypatch, base_falsa
+):
+    """`plan.contexto`: las claves de idempotencia las arma el orquestador. Una clave que
+    dependiera de otra cosa --la hora, un uuid, lo que escriba el modelo-- no deduplicaría
+    nada, y el doctor recibiría dos Telegram del mismo escalamiento."""
+    ctx = _contexto(turno_actual=3)
+    monkeypatch.setattr(runtime, "_telegram", TelegramFalso())
+
+    asyncio.run(runtime._avisar_a_doctores(ctx, "dato_faltante", "Ya te confirmo."))
+
+    assert base_falsa[0]["clave_idempotencia"] == "conv-441:escalamiento:3"
+
+
+def test_un_turno_que_ya_escalo_no_manda_un_segundo_telegram(monkeypatch):
+    """`insertar_escalamiento` devuelve `None` cuando esa clave ya existe, y ese `None` es
+    toda la defensa: significa que la tool `escalar_a_doctores` ya avisó en este mismo turno.
+    A la cuarta alerta repetida el doctor deja de mirarlas."""
+    ctx = _contexto()
+    telegram = TelegramFalso()
+    monkeypatch.setattr(runtime, "_telegram", telegram)
+    monkeypatch.setattr(persistencia, "conectar", lambda url: ConexionFalsa())
+    monkeypatch.setattr(persistencia, "insertar_escalamiento", lambda _conn, **kw: None)
+
+    asyncio.run(runtime._avisar_a_doctores(ctx, "clinico", "Ya te confirmo."))
+
+    assert telegram.enviados == [], "se le avisó dos veces al doctor del mismo turno"
+
+
+def test_la_tool_y_el_orquestador_arman_exactamente_la_misma_clave(monkeypatch, base_falsa):
+    """Si no coinciden, la deduplicación no deduplica nada.
+
+    Y no coincidían: `_escalar_a_doctores` usaba `solicitud.clave_idempotencia`, un campo que
+    rellena EL MODELO. Escribiera lo que escribiera, el `INSERT` de la tool y el del
+    orquestador eran dos filas distintas y el doctor recibía los dos Telegram.
+    """
+    ctx = _contexto(turno_actual=5)
+    telegram = TelegramFalso()
+    monkeypatch.setattr(runtime, "_telegram", telegram)
+
+    asyncio.run(
+        herramientas._escalar_a_doctores(
+            ctx,
+            SolicitudEscalamiento(
+                motivo="clinico",
+                resumen_para_doctor="Pregunta por una lesión que ve en su radiografía.",
+                pregunta_concreta="¿Se puede responder algo de esto por WhatsApp?",
+                clave_idempotencia="lo-que-al-modelo-se-le-ocurrio",
+            ),
+            telegram=telegram,
+        )
+    )
+    asyncio.run(runtime._avisar_a_doctores(ctx, "clinico", "Ya te confirmo."))
+
+    claves = [k["clave_idempotencia"] for k in base_falsa]
+    assert len(claves) == 2
+    assert claves[0] == claves[1] == "conv-441:escalamiento:5"
+    assert "lo-que-al-modelo-se-le-ocurrio" not in claves
+
+
+def test_en_un_turno_de_verdad_el_doctor_recibe_UN_telegram_y_no_dos(monkeypatch):
+    """La comprobación que de verdad importa, y por el camino completo.
+
+    Las de arriba comparan claves; esta corre un turno entero a través del SDK --con el
+    `escalar_a_doctores` de producción entre las tools-- en el peor caso posible: el modelo
+    llama a la tool Y ADEMÁS marca `requiere_escalamiento`, así que las dos rutas de aviso se
+    disparan sobre el mismo turno. El doctor tiene que recibir un solo Telegram.
+
+    Lo que se comprueba no es un `if`: es que la clave que arma la tool durante la corrida y
+    la que arma `_avisar_a_doctores` después coinciden de verdad cuando nadie las puso una al
+    lado de la otra a mano.
+    """
+    ctx = _contexto(turno_actual=7)
+    telegram = TelegramFalso()
+    claves: list[str] = []
+    vistas: set[str] = set()
+
+    def insertar_con_deduplicacion(_conn, **kwargs):
+        """El `ON CONFLICT (clave_idempotencia) DO NOTHING` de Neon, en diez líneas."""
+        clave = kwargs["clave_idempotencia"]
+        claves.append(clave)
+        if clave in vistas:
+            return None
+        vistas.add(clave)
+        return len(vistas)
+
+    monkeypatch.setattr(persistencia, "conectar", lambda url: ConexionFalsa())
+    monkeypatch.setattr(persistencia, "insertar_escalamiento", insertar_con_deduplicacion)
+    monkeypatch.setattr(
+        persistencia, "anotar_telegram_en_escalamiento", lambda conn, eid, mid: None
+    )
+    # La tool arma su propio cliente con las credenciales del contexto; sin esto le sonaría
+    # el teléfono a un doctor de verdad.
+    monkeypatch.setattr(herramientas, "Telegram", lambda *a, **k: telegram)
+    monkeypatch.setattr(runtime, "_telegram", telegram)
+    monkeypatch.setattr(conversacion, "_guardar_estado", lambda ctx, resultado: None)
+
+    agente = Agent(
+        name="daniela_de_prueba",
+        model=ModeloGuionizado(
+            usa_tool(
+                "escalar_a_doctores",
+                solicitud={
+                    "motivo": "clinico",
+                    "resumen_para_doctor": "Dice que le duele desde hace tres días.",
+                    "pregunta_concreta": "¿Lo citamos hoy mismo?",
+                    "clave_idempotencia": "la-que-al-modelo-se-le-ocurrio",
+                },
+            ),
+            responde(
+                respuesta_daniela(
+                    "Ya le estoy avisando al doctor.",
+                    requiere_escalamiento=True,
+                    motivo_escalamiento="clinico",
+                )
+            ),
+        ),
+        instructions="Responde.",
+        output_type=RespuestaDaniela,
+        tools=[herramientas.escalar_a_doctores],
+    )
+
+    asyncio.run(
+        conversacion.responder(
+            "me duele mucho",
+            ctx=ctx,
+            agente=agente,
+            run_config=RunConfig(tracing_disabled=True),
+            al_escalar=runtime._avisar_a_doctores,
+        )
+    )
+
+    assert claves == ["conv-441:escalamiento:8", "conv-441:escalamiento:8"], (
+        "la tool y el orquestador escribieron dos filas distintas para el mismo turno"
+    )
+    assert len(telegram.enviados) == 1, (
+        "el doctor recibió el mismo escalamiento dos veces; a la cuarta deja de mirarlas"
+    )

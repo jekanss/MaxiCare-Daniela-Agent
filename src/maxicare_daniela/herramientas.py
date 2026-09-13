@@ -838,6 +838,19 @@ def _aviso_para_doctores(ctx: ContextoDaniela, solicitud: SolicitudEscalamiento)
 async def _escalar_a_doctores(
     ctx: ContextoDaniela, solicitud: SolicitudEscalamiento, *, telegram: Any | None = None
 ) -> str:
+    # La clave la arma el orquestador, no el modelo, y aquí no es una regla de estilo.
+    #
+    # Hasta ahora esta tool usaba `solicitud.clave_idempotencia`, que es un campo que RELLENA
+    # EL MODELO: si escribía cualquier otra cosa --y es libre de hacerlo-- esta clave y la
+    # que arma `runtime._avisar_a_doctores` para el mismo turno no coincidían, la
+    # deduplicación no deduplicaba nada, y el doctor recibía dos Telegram del mismo
+    # escalamiento. A la cuarta alerta repetida deja de mirarlas.
+    #
+    # `ctx.clave(...)` no se puede inventar: sale del id de la conversación y del turno que
+    # lleva `ContextoDaniela`. El campo de la solicitud se conserva porque le hace pensar al
+    # modelo en la unicidad de lo que pide, pero ya no decide nada.
+    clave = ctx.clave("escalamiento", ctx.turno_actual)
+
     def registrar(conn) -> int | None:
         return persistencia.insertar_escalamiento(
             conn,
@@ -845,7 +858,7 @@ async def _escalar_a_doctores(
             motivo=solicitud.motivo,
             resumen=solicitud.resumen_para_doctor,
             pregunta=solicitud.pregunta_concreta,
-            clave_idempotencia=solicitud.clave_idempotencia,
+            clave_idempotencia=clave,
         )
 
     escalamiento_id = await _con_base(ctx, registrar)
