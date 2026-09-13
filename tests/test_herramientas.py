@@ -26,7 +26,12 @@ from maxicare_daniela import contratos
 from maxicare_daniela import herramientas as h
 from maxicare_daniela import persistencia
 from maxicare_daniela.calendario import Bloqueo, CalendarioDoble, bloques_del_dia
-from maxicare_daniela.contratos import ContextoDaniela, SolicitudCita, SolicitudEscalamiento
+from maxicare_daniela.contratos import (
+    ContextoDaniela,
+    SolicitudCancelacion,
+    SolicitudCita,
+    SolicitudEscalamiento,
+)
 
 INICIO = datetime(2026, 9, 15, 9, 0, tzinfo=h.ZONA_BOGOTA)
 
@@ -427,6 +432,233 @@ def test_si_calendar_falla_el_cupo_se_libera_y_la_corrida_muere(monkeypatch):
         )
 
     assert liberados == [77], "el cupo quedó bloqueado para un paciente que nunca tuvo cita"
+
+
+def test_agendar_registra_al_paciente_y_lo_deja_verificado(monkeypatch):
+    """Quien saca su primera cita deja de ser un desconocido. En ese mismo instante.
+
+    Sin esto, el arreglo del 13/09/2026 dejaba a medio camino a la persona que acababa de
+    agendar: `crear_cita` se le permitía --no tiene ficha, no hay datos que proteger-- pero
+    `reprogramar_cita` y `cancelar_cita` seguían exigiendo identidad, y esa identidad no
+    podía llegar nunca, porque `identificar_paciente` solo verifica contra filas de
+    `pacientes` y nadie creaba la suya. Medido en vivo: pedía moverla y recibía «te escribe
+    el doctor»; pedía cancelarla, lo mismo. El mismo callejón sin salida, movido de sitio.
+
+    `asegurar_paciente` llevaba escrito desde la fase 1 --con su docstring sobre no pisar el
+    nombre de quien ya existe-- y ninguna tool lo llamaba. Esto es ese cable.
+
+    El efecto secundario importa tanto como el principal: la cita deja de guardarse con
+    `paciente_id = NULL`, que era la fila que la comprobación de pertenencia de
+    `reprogramar`/`cancelar` trataba como de cualquiera.
+    """
+    ctx = contexto(identidad_verificada=False, telefono_sin_paciente=True, id_paciente=None)
+    registrados: list[tuple[str, str]] = []
+    guardadas: list[dict] = []
+    pasos: list[int] = []
+
+    async def base_falsa(_ctx, trabajo):
+        pasos.append(1)
+        if len(pasos) == 1:
+            return ((77, 1), None, [])  # `tomar`: cupo libre y ninguna cita previa
+        return trabajo(BaseFalsa())  # `guardar`: corre de verdad contra los dobles
+
+    def asegurar(conn, *, nombre_completo, telefono):
+        registrados.append((nombre_completo, telefono))
+        return 42
+
+    monkeypatch.setattr(h, "_con_base", base_falsa)
+    monkeypatch.setattr(h.persistencia, "asegurar_paciente", asegurar)
+    monkeypatch.setattr(
+        h.persistencia,
+        "registrar_cita",
+        lambda conn, **kw: (guardadas.append(kw), "cita-nueva")[1],
+    )
+
+    texto = asyncio.run(
+        h._crear_cita(
+            ctx,
+            SolicitudCita(
+                nombre_completo="Ana Gómez",
+                inicio=INICIO,
+                tratamiento="limpieza",
+                clave_idempotencia="clave-suficientemente-larga",
+            ),
+        )
+    )
+
+    assert "cita-nueva" in texto
+    assert registrados == [("Ana Gómez", "573001112233")], "no registró al paciente"
+    assert guardadas[0]["paciente_id"] == 42, "la cita quedaría con paciente_id NULL"
+    # Y el contexto deja de mentir en el mismo turno: la ficha ya existe en la base, así que
+    # `_leer_estado` lo daría por verificado en el siguiente. Dejarlo en False aquí haría que
+    # el turno en curso siguiera creyendo que es un desconocido.
+    assert ctx.id_paciente == 42
+    assert ctx.nombre_paciente == "Ana Gómez"
+    assert ctx.telefono_sin_paciente is False
+    assert ctx.identidad_verificada is True
+
+
+def test_una_cita_de_otro_telefono_no_se_puede_cancelar(monkeypatch):
+    """La pertenencia se comprueba por TELÉFONO, no solo por `paciente_id`.
+
+    La comprobación era `if ctx.id_paciente is not None and cita["paciente_id"] not in
+    (None, ctx.id_paciente)`, y tenía dos huecos que hasta el 13/09/2026 no se podían
+    alcanzar porque el guardrail frenaba antes a todo el que no tuviera ficha:
+
+    1. Con `ctx.id_paciente is None` no se comprobaba NADA.
+    2. Una cita con `paciente_id = NULL` se daba por buena para cualquiera.
+
+    El arreglo de los pacientes nuevos volvía el hueco 2 alcanzable --esas citas pasaban a
+    ser las normales-- así que el candado se ata a lo que de verdad identifica al dueño: el
+    número desde el que se escribe. El id de una cita es un UUID que solo conoce quien lo
+    recibió, pero «difícil de adivinar» no es un control de acceso.
+    """
+    ctx = contexto(identidad_verificada=True, id_paciente=None)
+    ajena = {
+        "id": "cita-de-otro",
+        "reserva_id": 9,
+        "paciente_id": None,
+        "telefono": "573009998877",  # NO es el de `contexto()`
+        "estado": "confirmada",
+        "evento_calendar_id": "evt-1",
+        "inicio": INICIO,
+    }
+    eliminados: list[str] = []
+
+    async def base_falsa(_ctx, trabajo):
+        return ajena
+
+    monkeypatch.setattr(h, "_con_base", base_falsa)
+    monkeypatch.setattr(
+        ctx.calendario, "eliminar_evento", lambda evento_id: eliminados.append(evento_id)
+    )
+
+    texto = asyncio.run(
+        h._cancelar_cita(ctx, SolicitudCancelacion(
+            id_cita="cita-de-otro", motivo="porque sí", clave_idempotencia="cita-de-otro"
+        ))
+    )
+
+    assert "no pertenece" in texto
+    assert "NO la canceles" in texto
+    assert eliminados == [], "borró del calendario la cita de otra persona"
+
+
+def test_la_cita_del_propio_telefono_si_se_puede_cancelar(monkeypatch):
+    """El falso positivo de la anterior: sin esta, una comprobación que devolviera «ajena»
+    siempre pasaría aquella y dejaría a todo el mundo sin poder cancelar."""
+    ctx = contexto(identidad_verificada=True, id_paciente=None)
+    propia = {
+        "id": "cita-propia",
+        "reserva_id": 9,
+        "paciente_id": None,
+        "telefono": "573001112233",  # el mismo de `contexto()`
+        "estado": "confirmada",
+        "evento_calendar_id": "evt-1",
+        "inicio": INICIO,
+    }
+    eliminados: list[str] = []
+    aplicados: list[str] = []
+
+    async def base_falsa(_ctx, trabajo):
+        if not aplicados:
+            aplicados.append("leida")
+            return propia
+        return None
+
+    monkeypatch.setattr(h, "_con_base", base_falsa)
+    monkeypatch.setattr(
+        ctx.calendario, "eliminar_evento", lambda evento_id: eliminados.append(evento_id)
+    )
+
+    texto = asyncio.run(
+        h._cancelar_cita(ctx, SolicitudCancelacion(
+            id_cita="cita-propia", motivo="porque sí", clave_idempotencia="cita-propia"
+        ))
+    )
+
+    assert "cancelada" in texto
+    assert eliminados == ["evt-1"]
+
+
+def test_reprogramar_autoriza_LAS_DOS_horas_la_vieja_y_la_nueva(monkeypatch):
+    """Confirmar un cambio de hora exige decir las dos, y decir la vieja hacía saltar el freno.
+
+    Medido en vivo el 13/09/2026: la cita se movió de las 10:00 a las 14:00 --la base lo
+    confirma-- y el paciente recibió «te escribe el doctor», porque Daniela escribió «antes
+    tenías a las 10, ahora a las 2» y solo las 14:00 estaban autorizadas. `ctx.turno` se vacía
+    en cada turno, así que las 10:00 que autorizó `crear_cita` ayer ya no valen hoy, y hacen
+    bien en no valer.
+
+    El resultado es el peor de los posibles: la cita SE MOVIÓ y al paciente le dijimos que no
+    pasó nada. Se presenta a las 10:00 a un cupo que acabamos de liberar.
+
+    La hora vieja no es un recuerdo del modelo: sale de `leer_cita`, de la base, en este mismo
+    turno. Autorizarla no debilita nada -- es exactamente el mismo criterio que autoriza la
+    nueva.
+    """
+    ctx = contexto(identidad_verificada=True, id_paciente=None)
+    cita = {
+        "id": "cita-1",
+        "reserva_id": 5,
+        "paciente_id": None,
+        "telefono": "573001112233",
+        "estado": "confirmada",
+        "evento_calendar_id": None,
+        "inicio": INICIO,  # 15/09 09:00
+    }
+    destino = INICIO + timedelta(hours=5)  # 14:00
+    pasos: list[int] = []
+
+    async def base_falsa(_ctx, trabajo):
+        pasos.append(1)
+        if len(pasos) == 1:
+            return ("ok", cita, (6, 1), [])
+        return None  # `aplicar`
+
+    monkeypatch.setattr(h, "_con_base", base_falsa)
+
+    texto = asyncio.run(h._reprogramar_cita(ctx, "cita-1", destino.isoformat()))
+
+    assert "14:00" in texto
+    assert "09:00" in texto, "sin la hora vieja en el texto, el modelo no puede citarla"
+    assert {"09:00", "14:00"} <= ctx.turno.horas_autorizadas
+
+
+def test_cancelar_autoriza_la_hora_que_acaba_de_cancelar(monkeypatch):
+    """El mismo fallo y peor consecuencia: la cita queda cancelada y el paciente no se entera.
+
+    «Tu cita del martes a las 2 quedó cancelada» es la frase natural, y esa hora no estaba
+    autorizada por nada -- el texto de la tool no la nombraba--, así que el guardrail bloqueaba
+    la confirmación de algo que YA había ocurrido. El paciente se presenta a una cita que no
+    existe y el cupo ya está libre para otro.
+    """
+    ctx = contexto(identidad_verificada=True, id_paciente=None)
+    cita = {
+        "id": "cita-1",
+        "reserva_id": 5,
+        "paciente_id": None,
+        "telefono": "573001112233",
+        "estado": "confirmada",
+        "evento_calendar_id": None,
+        "inicio": INICIO,
+    }
+    pasos: list[int] = []
+
+    async def base_falsa(_ctx, trabajo):
+        pasos.append(1)
+        return cita if len(pasos) == 1 else None
+
+    monkeypatch.setattr(h, "_con_base", base_falsa)
+
+    texto = asyncio.run(
+        h._cancelar_cita(
+            ctx, SolicitudCancelacion(id_cita="cita-1", motivo=None, clave_idempotencia="cita-1")
+        )
+    )
+
+    assert "09:00" in texto
+    assert "09:00" in ctx.turno.horas_autorizadas
 
 
 def test_crear_cita_no_le_da_al_modelo_un_texto_cuando_falla():

@@ -67,6 +67,51 @@ Cuatro cosas sostienen que esto no se convierta en una puerta:
 - **Un número CON ficha y sin verificar sigue bloqueado**, que es exactamente el caso que el
   plan quiere frenar.
 
+Y lo que impide que esa excepción deje a nadie encerrado: **`crear_cita` registra al
+paciente** (`asegurar_paciente`, que llevaba escrito desde la fase 1 sin que ninguna tool lo
+llamara). Sin eso, quien acababa de agendar no podía mover ni cancelar su propia cita
+**jamás**: `identificar_paciente` solo verifica contra filas de `pacientes`, nadie creaba la
+suya, y pedía cambiar la hora recibiendo «te escribe el doctor». El mismo callejón sin
+salida, movido un paso más allá. Efecto secundario que importa igual: las citas dejan de
+guardarse con `paciente_id = NULL`.
+
+# La pertenencia de una cita se ancla al TELÉFONO
+
+`reprogramar_cita` y `cancelar_cita` comprueban de quién es la cita con `_es_ajena`. Lo que
+había era `if ctx.id_paciente is not None and cita["paciente_id"] not in (None,
+ctx.id_paciente)`, con dos huecos: sin `id_paciente` no comprobaba **nada**, y una cita con
+`paciente_id = NULL` valía para cualquiera. Ninguno se podía alcanzar mientras el guardrail
+frenara a todo el que no tuviera ficha; permitir la primera cita de un desconocido volvía el
+segundo alcanzable, porque esas citas pasaban a ser las normales.
+
+Ahora manda el número desde el que se escribe, que es el que quedó guardado en la cita. **Que
+el id de una cita sea un UUID no es un control de acceso:** es una cadena que el propio
+sistema le mandó al paciente por WhatsApp. Se conserva la pertenencia por `paciente_id` para
+quien cambia de número o tiene una cita que le abrió la clínica.
+
+# Toda hora que la tool confirma tiene que quedar AUTORIZADA, incluida la vieja
+
+`sin_hora_no_verificada` compara contra lo que las tools devolvieron **en este turno**, y
+`ctx.turno` se vacía en cada turno. Dos consecuencias que costaron reprogramaciones reales:
+
+- **`reprogramar_cita` devuelve las DOS horas**, la anterior y la nueva. Confirmar un cambio
+  exige decir de dónde a dónde, y la hora vieja ya no está autorizada por el turno en que se
+  agendó. La hora vieja sale de `leer_cita` —de la base, en este turno—, así que autorizarla
+  es el mismo criterio de siempre, no una excepción.
+- **`cancelar_cita` devuelve la hora que cancela**, por lo mismo: «tu cita del martes a las 2
+  quedó cancelada» es la frase natural.
+
+En los dos casos el fallo era el peor posible, porque **la escritura ya había ocurrido**: la
+cita movida o cancelada en Neon y en Calendar, y el paciente recibiendo el mensaje seguro.
+Se presentaba a la hora vieja, a un cupo que el sistema acababa de liberar.
+
+**Y el guardrail tenía su propio bug de lectura: «2:00 pm» valía 02:00.** La primera
+alternativa de `_HORA` casaba `2:00` y dejaba el `pm` fuera del match, así que la rama de 12
+horas no lo veía nunca. Solo fallaba con minutos —«2 pm» siempre estuvo bien— y bastaba para
+bloquear cualquier confirmación de una cita de tarde escrita como habla la gente. Es
+literalmente la `condicion_revision` que el plan le puso a ese guardrail: «si bloquea
+mensajes legítimos hay que afinar la extracción, no quitar el guardrail».
+
 # Convenciones del paquete
 
 - `SolicitudCita` **no tiene campo de teléfono**: la tool lo lee del contexto local.

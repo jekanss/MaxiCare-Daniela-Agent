@@ -72,11 +72,32 @@ _CIFRA = re.compile(
 
 #: Una hora concreta: 14:00, 2 pm, 2:30 p.m. Se exige que sea una hora *dicha*, no un número
 #: cualquiera, porque el mensaje al paciente está lleno de números que no son horas.
+#: El `suf24` NO es un adorno: sin él, «2:00 pm» casaba por la primera alternativa --que se
+#: queda con «2:00»-- y el «pm» quedaba fuera del match, así que la rama de 12 horas no lo
+#: veía nunca y la hora salía como 02:00. Solo fallaba CON minutos; «2 pm» siempre estuvo
+#: bien. Costó una reprogramación real: la cita se movió a las 14:00, Daniela lo confirmó
+#: escribiendo «2:00 pm», el guardrail leyó 02:00 y bloqueó el mensaje dos veces. El paciente
+#: recibió «te escribe el doctor» con su cita ya movida.
+#: El `(?![0-9])` hace el trabajo que hacía el `\b` final, que no se puede conservar: un
+#: sufijo como «p.m.» termina en punto y ahí `\b` deja de casar.
 _HORA = re.compile(
-    r"\b([01]?\d|2[0-3])\s*[:h]\s*([0-5]\d)\b"            # 14:00, 9h30
-    r"|\b(1[0-2]|0?[1-9])\s*(?:a\.?\s*m\.?|p\.?\s*m\.?)"  # 2 pm, 9 a.m.
+    r"\b(?P<h24>[01]?\d|2[0-3])\s*[:h]\s*(?P<minuto>[0-5]\d)(?![0-9])"
+    r"(?:\s*(?P<suf24>a\.?\s*m\.?|p\.?\s*m\.?))?"          # 14:00, 9h30, 2:00 pm
+    r"|\b(?P<h12>1[0-2]|0?[1-9])\s*(?P<suf12>a\.?\s*m\.?|p\.?\s*m\.?)"  # 2 pm, 9 a.m.
     , re.IGNORECASE,
 )
+
+
+def _a_24_horas(valor: int, sufijo: str | None) -> int:
+    """Aplica el am/pm a una hora ya leída. Sin sufijo, el número se queda como está."""
+    if not sufijo:
+        return valor
+    marca = sufijo.lower().replace(".", "").replace(" ", "")
+    if marca.startswith("p") and valor != 12:
+        return valor + 12
+    if marca.startswith("a") and valor == 12:
+        return 0
+    return valor
 
 #: Una fecha concreta en número: 15/09, 15-09-2026.
 _FECHA = re.compile(r"\b([0-3]?\d)\s*[/-]\s*([01]?\d)(?:\s*[/-]\s*\d{2,4})?\b")
@@ -116,16 +137,14 @@ def horas_de(texto: str) -> set[str]:
     encontradas: set[str] = set()
 
     for coincidencia in _HORA.finditer(texto):
-        hora24, minuto, hora12 = coincidencia.group(1), coincidencia.group(2), coincidencia.group(3)
+        hora24 = coincidencia.group("h24")
         if hora24 is not None:
-            encontradas.add(f"{int(hora24):02d}:{minuto}")
-        elif hora12 is not None:
-            texto_coincidente = coincidencia.group(0).lower()
-            valor = int(hora12)
-            if "p" in texto_coincidente and valor != 12:
-                valor += 12
-            if "a" in texto_coincidente and valor == 12:
-                valor = 0
+            valor = _a_24_horas(int(hora24), coincidencia.group("suf24"))
+            encontradas.add(f"{valor:02d}:{coincidencia.group('minuto')}")
+            continue
+        hora12 = coincidencia.group("h12")
+        if hora12 is not None:
+            valor = _a_24_horas(int(hora12), coincidencia.group("suf12"))
             encontradas.add(f"{valor:02d}:00")
 
     for dia, mes in _FECHA.findall(texto):

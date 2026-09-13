@@ -129,6 +129,43 @@ def test_una_cifra_de_precio_no_se_confunde_con_una_hora():
     assert g.revisar_horas("cuesta $1.900.000", autorizadas=set()).dispara is False
 
 
+@pytest.mark.parametrize(
+    "texto, esperado",
+    [
+        ("te espero a las 2:00 pm", {"14:00"}),
+        ("a las 2:30 p.m.", {"14:30"}),
+        ("a las 2:00 am", {"02:00"}),
+        ("a las 12:30 pm", {"12:30"}),
+        ("a las 12:30 am", {"00:30"}),
+        ("a las 14:00", {"14:00"}),  # el formato de 24 h no cambia
+        ("a las 2 pm", {"14:00"}),  # sin minutos, como ya funcionaba
+    ],
+)
+def test_una_hora_con_minutos_Y_con_pm_se_lee_como_de_la_tarde(texto, esperado):
+    """«2:00 pm» valía 02:00, y eso bloqueaba confirmaciones legítimas.
+
+    La primera alternativa de `_HORA` --la de `HH:MM`-- casaba «2:00» y dejaba el «pm» fuera
+    del match, así que la rama de 12 horas no llegaba a mirarlo nunca. Solo se notaba con
+    minutos: «2 pm» siempre estuvo bien.
+
+    Medido en vivo el 13/09/2026 reprogramando una cita a las 2 de la tarde:
+    `reprogramar_cita` autorizaba 14:00, Daniela escribía «2:00 pm», el guardrail leía 02:00
+    y saltaba. Dos veces. **La cita YA se había movido** --lo confirma la base-- y el paciente
+    recibía «te escribe el doctor»: se presentaría a la hora vieja, a un cupo ya liberado.
+
+    Es exactamente la `condicion_revision` que el plan le puso a este guardrail: «si bloquea
+    mensajes legítimos hay que afinar la extracción, no quitar el guardrail».
+    """
+    assert g.horas_de(texto) == esperado
+
+
+def test_el_guardrail_no_salta_por_escribir_la_hora_autorizada_en_formato_de_12h():
+    """El caso de arriba visto desde donde se sufría."""
+    autorizadas = {"14:00"}
+
+    assert g.revisar_horas("Te espero el martes a las 2:00 pm.", autorizadas).dispara is False
+
+
 # ==========================================================================================
 # identidad_antes_de_datos
 # ==========================================================================================
@@ -181,8 +218,12 @@ def test_un_desconocido_no_puede_mover_ni_cancelar_nada(tool):
 
     Crear una cita para un número sin ficha no toca los datos de nadie. Mover o cancelar SÍ:
     esas dos operan sobre citas que ya existen, y una cita existente puede ser de la persona
-    a la que alguien está suplantando. Ahí la identidad sigue siendo obligatoria, tenga ficha
-    el número o no.
+    a la que alguien está suplantando. Ahí la identidad sigue siendo obligatoria.
+
+    Que esto NO deje encerrado a quien acaba de agendar lo resuelve `crear_cita`, que
+    registra al paciente: desde el turno siguiente ese número tiene ficha, `_leer_estado` lo
+    da por verificado y estas dos tools se le abren. Lo sostiene
+    `test_herramientas.py::test_agendar_registra_al_paciente_y_lo_deja_verificado`.
     """
     ctx = contexto(identidad_verificada=False, telefono_sin_paciente=True)
 
