@@ -97,8 +97,9 @@ VENTANA_ALTERNATIVAS = timedelta(hours=8)
 # ==========================================================================================
 
 
-def _ahora() -> datetime:
-    return datetime.now(ZONA_BOGOTA)
+# Aquí vivía `_ahora()`, que leía el reloj de la máquina. No queda ninguna: el instante lo
+# pone `ctx.ahora`, una sola vez por turno. Dos relojes en un módulo son dos relojes que un
+# día discrepan, y el que no viaja en el contexto no se puede fijar desde una prueba.
 
 
 def _a_fecha(valor: str, campo: str) -> datetime:
@@ -753,6 +754,21 @@ def _es_ajena(ctx: ContextoDaniela, cita: dict[str, Any]) -> bool:
 async def _reprogramar_cita(ctx: ContextoDaniela, id_cita: str, nuevo_inicio: str) -> str:
     destino = _a_fecha(nuevo_inicio, "nuevo_inicio")
 
+    # El mismo guardia que `crear_cita`, y aquí duele más: crear en el pasado deja una cita
+    # fantasma, pero MOVER al pasado además DESTRUYE una cita buena. `mover_cita` la lleva al
+    # día que ya pasó, `liberar_cupo` suelta el cupo que el paciente sí tenía y `mover_evento`
+    # arrastra el evento del doctor detrás. El paciente se queda sin la cita que tenía y se lo
+    # confirmamos como un cambio normal.
+    #
+    # Va ANTES del bloqueo del doctor a propósito: es una comparación local y `bloqueos()` es
+    # una llamada a Google. Una hora del pasado no merece esa llamada.
+    if destino < ctx.ahora:
+        return (
+            f"Esa hora ({_formatear_hora(destino)}) ya pasó: hoy es "
+            f"{_formatear_hora(ctx.ahora)}. NO muevas la cita ahí; sigue donde estaba. "
+            "Confirma con el paciente qué fecha futura quiere y consulta la disponibilidad."
+        )
+
     # Mover una cita a una hora que el doctor apartó es el mismo defecto que crearla ahí, y
     # se comprueba en el mismo sitio: antes de tocar la base. Ver `_bloqueo_que_tapa`.
     bloqueo = await _bloqueo_que_tapa(ctx, destino)
@@ -1004,7 +1020,11 @@ async def _programar_seguimiento(
     ctx: ContextoDaniela, tipo: str, fecha_objetivo: str
 ) -> str:
     objetivo = _a_fecha(fecha_objetivo, "fecha_objetivo")
-    if objetivo <= _ahora():
+    # `ctx.ahora` y no `_ahora()`: el instante del turno, que una prueba puede fijar. Es la
+    # regla que el propio docstring de `ContextoDaniela.ahora` declara, y esta tool era la
+    # única que se salía. En producción los dos valores coinciden; lo que cambia es que el
+    # comportamiento deja de depender del reloj de la máquina, y por tanto se puede probar.
+    if objetivo <= ctx.ahora:
         return "Esa fecha ya pasó. Programa el seguimiento para un momento futuro."
 
     clave = ctx.clave("seguimiento", tipo, objetivo.isoformat())

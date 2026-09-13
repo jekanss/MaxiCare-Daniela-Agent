@@ -340,6 +340,69 @@ def test_no_se_mueve_una_cita_a_una_hora_bloqueada_por_el_doctor(monkeypatch):
     assert tocada == [], "tocó la base por una hora que nunca se pudo usar"
 
 
+def test_no_se_mueve_una_cita_a_una_hora_que_ya_paso(monkeypatch):
+    """`crear_cita` lo comprobaba desde el 13/09 y `reprogramar_cita` no, y aquí duele más.
+
+    Crear una cita en el pasado deja una cita fantasma sobre un cupo que nadie libera.
+    MOVER una al pasado hace eso **y además destruye una cita buena**: `mover_cita` la lleva
+    al día que ya pasó, `liberar_cupo` suelta el cupo bueno que el paciente tenía, y
+    `mover_evento` arrastra el evento del calendario del doctor detrás. El paciente se queda
+    sin la cita que sí tenía, y Daniela se lo confirma como si fuera un cambio normal.
+
+    Los dos caminos que llegan aquí son los de siempre: el paciente que dice «muévela para
+    ayer» y el modelo resolviendo mal una fecha relativa.
+
+    Se comprueba ANTES que el bloqueo del doctor, no después: es una comparación local y el
+    bloqueo cuesta una llamada a Google. Una hora del pasado no merece esa llamada.
+    """
+    calendario = CalendarioDoble()
+    ctx = contexto(
+        calendario=calendario, ahora=datetime(2026, 9, 15, 12, 0, tzinfo=h.ZONA_BOGOTA)
+    )
+    tocada = []
+
+    async def base_falsa(_ctx, trabajo):
+        tocada.append("la base")
+        return trabajo(BaseFalsa())
+
+    monkeypatch.setattr(h, "_con_base", base_falsa)
+
+    texto = asyncio.run(h._reprogramar_cita(ctx, "cita-1", "2026-09-15T09:00"))
+
+    assert "ya pasó" in texto
+    assert tocada == [], "tocó la base por una hora que nunca se pudo usar"
+    assert calendario.eventos == {}, "arrastró el evento del doctor al pasado"
+
+
+def test_el_seguimiento_mira_el_reloj_DEL_TURNO_y_no_el_de_la_maquina(monkeypatch):
+    """`ctx.ahora` existe para que ninguna tool llame a `datetime.now()` por su cuenta.
+
+    Lo dice su propio docstring en `contratos.py`: viaja en el contexto «por la misma razón
+    que `calendario`: una prueba lo fija y el comportamiento deja de depender del reloj de la
+    máquina». `programar_seguimiento` usaba `_ahora()` y era la única que se salía.
+
+    En producción los dos valen casi lo mismo, así que esto no es un fallo que se vea: es la
+    grieta por la que la política declarada deja de ser verdad. Con el reloj de la máquina
+    esta prueba no se puede escribir, y lo que no se puede probar acaba divergiendo.
+    """
+    ctx = contexto(ahora=datetime(2027, 1, 1, 8, 0, tzinfo=h.ZONA_BOGOTA))
+    tocada = []
+
+    async def base_falsa(_ctx, trabajo):
+        tocada.append("la base")
+        return trabajo(BaseFalsa())
+
+    monkeypatch.setattr(h, "_con_base", base_falsa)
+
+    # Futuro para el reloj de la máquina, pasado para el turno.
+    texto = asyncio.run(
+        h._programar_seguimiento(ctx, "recordatorio_cita", "2026-12-01T09:00")
+    )
+
+    assert "ya pasó" in texto
+    assert tocada == [], "programó un recordatorio para antes del turno que lo pide"
+
+
 def test_no_se_agenda_una_cita_en_una_hora_que_ya_paso(monkeypatch):
     """Y se rechaza ANTES de tocar la base: un cupo consumido en el pasado no lo libera nadie."""
     ctx = contexto(ahora=datetime(2026, 9, 15, 12, 0, tzinfo=h.ZONA_BOGOTA))
@@ -984,7 +1047,7 @@ def test_no_se_programa_nada_sobre_una_conversacion_que_tiene_un_doctor(monkeypa
 
     monkeypatch.setattr(h, "_con_base", base_falsa)
 
-    futuro = (h._ahora() + timedelta(days=2)).isoformat()
+    futuro = (ctx.ahora + timedelta(days=2)).isoformat()
     texto = asyncio.run(h._programar_seguimiento(ctx, "recordatorio_cita", futuro))
 
     assert "No se programó nada" in texto
@@ -993,7 +1056,7 @@ def test_no_se_programa_nada_sobre_una_conversacion_que_tiene_un_doctor(monkeypa
 
 def test_no_se_programa_un_seguimiento_hacia_atras():
     ctx = contexto()
-    pasado = (h._ahora() - timedelta(days=1)).isoformat()
+    pasado = (ctx.ahora - timedelta(days=1)).isoformat()
 
     texto = asyncio.run(h._programar_seguimiento(ctx, "reactivacion", pasado))
 
