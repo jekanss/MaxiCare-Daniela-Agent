@@ -489,11 +489,14 @@ def test_conversacion_viva_devuelve_la_mas_reciente(esquema):
     transacción para que `actualizada_en` quede exactamente igual en las dos, y así la
     prueba ejercita de verdad el desempate por `id DESC` -- no por casualidad de reloj.
 
-    El UUID mayor se inserta PRIMERO, a propósito: si se insertara en el orden que le toca
-    por sorteo, la mitad de las veces el mayor ya habría quedado primero por casualidad, y
-    quitar el `id DESC` del ORDER BY seguiría "pasando" la prueba la otra mitad. Insertando
-    el mayor primero, el orden de inserción queda siempre contra el orden por `id DESC`, así
-    que sin el desempate la prueba falla el 100% de las veces, no el ~50%.
+    El UUID **menor** se inserta PRIMERO, y ese orden es la mitad que hace que la prueba
+    sirva de algo. Sin un `ORDER BY` determinista, Postgres devuelve las filas en su orden
+    físico, que en una tabla recién escrita es el de inserción: devolvería el menor, que NO
+    es lo que esta prueba espera, y fallaría. Al revés --el mayor primero-- sin el desempate
+    devolvería igualmente el mayor y la prueba pasaría siempre, tapando exactamente el bug
+    que existe para cazar.
+
+    Verificado mutando el código: quitando `id DESC` del ORDER BY, esta prueba falla.
     """
     telefono = "573002220003"
     with persistencia.conectar(esquema) as conn:
@@ -501,11 +504,11 @@ def test_conversacion_viva_devuelve_la_mas_reciente(esquema):
         with conn.cursor() as cur:
             cur.execute(
                 "INSERT INTO conversaciones (id, telefono, canal) VALUES (%s, %s, 'whatsapp')",
-                (id_mayor, telefono),
+                (id_menor, telefono),
             )
             cur.execute(
                 "INSERT INTO conversaciones (id, telefono, canal) VALUES (%s, %s, 'whatsapp')",
-                (id_menor, telefono),
+                (id_mayor, telefono),
             )
         conn.commit()
 
