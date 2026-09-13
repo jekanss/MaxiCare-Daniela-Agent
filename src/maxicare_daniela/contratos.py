@@ -41,6 +41,11 @@ from typing import Any, Iterable, Literal, get_args
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+# `calendario` no importa `contratos`, así que esto no cierra ningún ciclo. Se importa en vez
+# de volver a escribir `timezone(timedelta(hours=-5))` aquí: dos definiciones de la misma
+# zona son dos sitios donde arreglar el día que Colombia adopte horario de verano.
+from .calendario import ZONA_BOGOTA
+
 # ---------------------------------------------------------------------------------------
 # Vocabularios cerrados
 # ---------------------------------------------------------------------------------------
@@ -539,6 +544,14 @@ class ContextoDaniela:
 
     #: Conversación.
     turno_actual: int = 0
+
+    #: El instante en que arranca este turno, en hora de Bogotá.
+    #:
+    #: Viaja en el contexto --y no se calcula con `datetime.now()` dentro de cada tool-- por
+    #: la misma razón que `calendario`: una prueba lo fija y el comportamiento deja de
+    #: depender del reloj de la máquina. De aquí salen las dos cosas que el 13/09/2026
+    #: estaban rotas: que Daniela sepa en qué año vive, y que no ofrezca una hora que ya pasó.
+    ahora: datetime = field(default_factory=lambda: datetime.now(ZONA_BOGOTA))
 
     #: Relevo. Con `tomada_por` distinto de None, Daniela calla y no programa nada.
     tomada_por: str | None = None
