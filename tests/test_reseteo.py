@@ -3,7 +3,9 @@
 Sin red y sin base. La prueba que demuestra la garantía --que tras el reset Daniela se
 comporta como en un primer contacto-- vive aquí abajo, con dobles; la que comprueba que el
 orden de los DELETE es el que las claves foraneas permiten vive en `test_reseteo_neon.py`,
-porque esa solo la puede contestar la base.
+porque esa solo la puede contestar la base. La posición RELATIVA de `agent_sessions` frente
+a `conversaciones` --que los `session_id` SON esos ids, y por eso tiene que borrarse antes--
+se fija aquí abajo con una conexión de mentira que solo anota el SQL, sin tocar Postgres.
 """
 
 from __future__ import annotations
@@ -12,7 +14,7 @@ import asyncio
 
 import pytest
 
-from maxicare_daniela import atencion, config, conversacion, lectura, reseteo
+from maxicare_daniela import atencion, config, lectura, persistencia, reseteo
 from maxicare_daniela.canales import ErrorDeCanal
 
 TEL = "573001234567"
@@ -111,41 +113,72 @@ def test_la_lista_se_compara_por_digitos():
 
 
 # ==========================================================================================
-# Los dos eslabones de la garantia que no necesitan base
+# El orden del borrado y el olvido de la memoria del proceso -- lo que no necesita base
 #
-# El primero --que `_leer_estado` devuelve lo mismo que para un numero virgen-- solo lo
-# puede contestar Postgres y vive en `test_reseteo_neon.py`. Estos dos cierran la cadena:
-# con el estado igual, la sesion vacia y el bufer limpio, lo que recibe el modelo en el
-# turno siguiente es lo mismo que recibiria en un primer contacto.
+# Que `_leer_estado` devuelve lo mismo que para un numero virgen, y que el historial del
+# dialogo (en `agent_messages` desde la fase 7) queda de verdad borrado, solo lo puede
+# contestar Postgres: eso vive en `test_reseteo_neon.py`. Lo que SÍ se puede fijar sin base
+# es la POSICIÓN de las sentencias -- con una conexión que solo anota lo que se ejecuta -- y
+# que el búfer en memoria se olvida. Las dos cierran la cadena junto con la prueba de Neon.
 # ==========================================================================================
 
 
-def test_una_conversacion_nueva_nace_con_la_sesion_vacia(monkeypatch):
-    """Por esto el reseteo no tiene que limpiar el historial del dialogo a mano en memoria.
+class _CursorQueRegistra:
+    """Un cursor de mentira: anota el SQL que recibe y no toca ninguna base."""
 
-    Desde la fase 7 ya no hay `_sesiones` de la que colgarse: `_sesion_de` construye, para
-    CADA id, la sesion persistida de ese id. Un UUID que nunca se ha visto no tiene filas que
-    leer en Neon, así que borrada la conversacion, la siguiente -- con su UUID nuevo -- nace
-    vacia por construcción, no porque nada la limpie.
+    def __init__(self, ejecutadas: list[str]) -> None:
+        self._ejecutadas = ejecutadas
+        self.rowcount = 0
 
-    (Que el historial YA escrito en Neon para el número reseteado se borre de la base es
-    tarea de `persistencia.borrar_rastro`, no de este módulo -- ver
-    `.claude/rules/atencion-whatsapp.md`.)
-    """
-    construidas: dict[str, conversacion.SesionEnMemoria] = {}
+    def execute(self, sql, parametros=None) -> None:
+        self._ejecutadas.append(sql)
 
-    def fabrica(id_conversacion, *, database_url, esquema=None, limite=None):
-        return construidas.setdefault(id_conversacion, conversacion.SesionEnMemoria(id_conversacion))
+    def fetchone(self):
+        return None
 
-    monkeypatch.setattr(atencion.persistencia, "sesion_de_agente", fabrica)
+    def fetchall(self):
+        return []
 
-    de_antes = atencion._sesion_de("conversacion-vieja", "postgresql://prueba:prueba@localhost/nada")
-    asyncio.run(de_antes.add_items([{"role": "user", "content": "me llamo Ana"}]))
-    assert asyncio.run(de_antes.get_items()) != []
+    def __enter__(self) -> "_CursorQueRegistra":
+        return self
 
-    nueva = atencion._sesion_de("conversacion-nueva", "postgresql://prueba:prueba@localhost/nada")
+    def __exit__(self, *exc) -> bool:
+        return False
 
-    assert asyncio.run(nueva.get_items()) == []
+
+class _ConexionQueRegistra:
+    """Una conexión de mentira que solo anota el SQL que `borrar_rastro` ejecuta, sin
+    tocar ninguna base. Sirve para fijar el ORDEN de las sentencias, no su resultado --
+    eso último solo lo puede contestar Postgres, en `test_reseteo_neon.py`."""
+
+    def __init__(self) -> None:
+        self.ejecutadas: list[str] = []
+
+    def cursor(self) -> _CursorQueRegistra:
+        return _CursorQueRegistra(self.ejecutadas)
+
+    def commit(self) -> None:
+        pass
+
+    def rollback(self) -> None:
+        pass
+
+
+def test_el_historial_se_borra_antes_que_las_conversaciones():
+    """El orden no es estilo: los `session_id` SON los ids de las conversaciones. Al revés,
+    el DELETE de `agent_sessions` no encontraría a qué apuntar y el historial se quedaría
+    vivo, invisible, ligado a un número que el sistema dice no conocer."""
+    conn = _ConexionQueRegistra()
+
+    persistencia.borrar_rastro(conn, "573001112233")
+
+    sentencias = [s.lower() for s in conn.ejecutadas]
+    posicion_historial = next(i for i, s in enumerate(sentencias) if "agent_sessions" in s)
+    posicion_conversaciones = next(
+        i for i, s in enumerate(sentencias) if "delete from conversaciones" in s
+    )
+
+    assert posicion_historial < posicion_conversaciones
 
 
 def test_olvidar_saca_el_bufer_del_numero():

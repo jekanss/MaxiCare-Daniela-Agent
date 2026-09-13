@@ -1247,6 +1247,13 @@ def borrar_rastro(conn, telefono: str, *, conservar_wamid: str | None = None) ->
     nada. De la hoja a la raíz, y las cuatro tablas con CASCADE (`estado_oportunidad`,
     `notas_archivo`, `seguimientos`, `escalamientos`) se van solas al caer la conversación.
 
+    `agent_sessions` va justo ANTES que `conversaciones`, y por una razón que no tiene
+    marcha atrás: `session_id` ES el `id` de esas conversaciones (la migración 010 lo declara
+    sin clave foránea a propósito, así que no hay CASCADE que lo salve). Borrar primero
+    `conversaciones` deja a la subconsulta sin nada que encontrar, y el historial del diálogo
+    -- `agent_sessions` y, por su `ON DELETE CASCADE`, `agent_messages` -- sobrevive huérfano
+    e inalcanzable, con la agravante de que el borrado parece haber funcionado.
+
     `conservar_wamid` deja en pie la fila de `mensajes_entrantes` del propio mensaje que pidió
     el borrado, con su `conversacion_id` en NULL. Sin eso, un reintento del webhook de Meta
     --que reintenta, y por eso existe la deduplicación por `wamid`-- ejecutaría el comando una
@@ -1301,6 +1308,24 @@ def borrar_rastro(conn, telefono: str, *, conservar_wamid: str | None = None) ->
                 parametros,
             )
             borradas["reservas"] = cur.rowcount
+
+            # El historial del diálogo, desde la fase 7. Va ANTES de borrar `conversaciones`
+            # porque los `session_id` SON los ids de esas conversaciones: después del DELETE
+            # no habría forma de saber cuáles eran, y el historial quedaría huérfano y vivo.
+            #
+            # `agent_messages` no se borra a mano: se va sola por el `ON DELETE CASCADE` de
+            # la migración 010. Un segundo DELETE aquí sería un sitio más que mantener.
+            cur.execute(
+                f"""
+                DELETE FROM agent_sessions
+                 WHERE session_id IN (
+                        SELECT id::text FROM conversaciones
+                         WHERE id IN ({_CONVERSACIONES_DEL_TELEFONO})
+                 )
+                """,
+                parametros,
+            )
+            borradas["agent_sessions"] = cur.rowcount
 
             cur.execute(
                 f"DELETE FROM conversaciones WHERE id IN ({_CONVERSACIONES_DEL_TELEFONO})",

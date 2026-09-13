@@ -420,13 +420,12 @@ def olvidar(telefono: str) -> None:
     prueba de que Daniela no recuerda nada fallaría por el único sitio que no es la base.
 
     El historial del diálogo ya NO está aquí: desde la fase 7 vive en `agent_messages`, en
-    Neon. Pero borrarlo **todavía no es cosa de nadie**: `persistencia.borrar_rastro` no
-    toca `agent_sessions` ni `agent_messages` -- eso es PENDIENTE, y lo cierra la Tarea 8.
-    Hoy `/clearstate` borra al paciente, sus citas y su conversación, pero las filas del
-    historial de ese `id_conversacion` quedan huérfanas en la base. Como el reseteo abre la
-    conversación siguiente con un `id_conversacion` nuevo, el próximo turno no las vuelve a
-    leer -- pero no están borradas, y esta función no lo toca a propósito: fingir que sí
-    sería peor que decir que falta.
+    Neon. Y desde la Tarea 8, `persistencia.borrar_rastro` también lo borra -- dentro de la
+    misma transacción que el resto del rastro, y ANTES de `DELETE FROM conversaciones`,
+    porque los `session_id` son esos ids: al revés no habría forma de encontrar cuáles borrar.
+    Esta función no lo toca porque no le hace falta: el borrado de la base ya ocurrió antes de
+    que `olvidar` se llame (ver `reseteo.resetear`), y lo único que queda vivo en el proceso
+    es el búfer, que es justo lo que esta función limpia.
 
     Se llama con el candado del teléfono cogido; el candado en sí se deja donde está, porque
     quien llama lo tiene tomado en ese momento.

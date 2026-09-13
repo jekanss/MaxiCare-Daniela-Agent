@@ -192,13 +192,16 @@ estrenar una línea de teléfono. Vive en `reseteo.py`, y `runtime._entregar` lo
   `id_conversacion`, que es un UUID nuevo por definición. Lo sostiene
   `test_reseteo_neon.py::test_tras_el_reset_daniela_ve_lo_mismo_que_en_un_primer_contacto`,
   con su control: antes del borrado, esa misma prueba comprueba que Daniela SÍ lo conocía.
-  El historial del diálogo **hoy NO se borra, y está PENDIENTE** -- lo cierra la Tarea 8.
-  Desde la fase 7 vive en `agent_messages`, en Neon, y `persistencia.borrar_rastro` no toca
-  esa tabla ni `agent_sessions`: las filas del `id_conversacion` borrado quedan huérfanas.
-  Como el reseteo abre la conversación siguiente con un `id_conversacion` nuevo, el próximo
-  turno no las vuelve a leer -- pero no están borradas, y hasta que la Tarea 8 lo haga, decir
-  que `/clearstate` deja al paciente sin historial sería falso. Lo único de memoria del
-  proceso que sí hay que sacar es el búfer, y de eso se encarga `atencion.olvidar`.
+  El historial del diálogo **también se borra, desde la Tarea 8.** Desde la fase 7 vive en
+  `agent_messages`/`agent_sessions`, en Neon, y `persistencia.borrar_rastro` lo borra dentro
+  de la MISMA transacción que el resto del rastro -- el `DELETE FROM agent_sessions` va
+  ANTES que `DELETE FROM conversaciones`, porque `session_id` ES el `id` de esas
+  conversaciones (la migración 010 lo declara sin clave foránea a propósito, así que no hay
+  CASCADE que salve el orden contrario): al revés, la subconsulta no encontraría a qué
+  apuntar y el historial quedaría huérfano e inalcanzable, con la agravante de que el
+  borrado parecería haber funcionado. `agent_messages` no se borra a mano: se va sola por su
+  propio `ON DELETE CASCADE`. Lo único de memoria del proceso que hay que sacar aparte es el
+  búfer, y de eso se encarga `atencion.olvidar`.
 - **La lista vacía apaga el comando para todo el mundo, y ese es el default.** Sin números
   listados, `/clearstate` llega a Daniela como cualquier otro texto. Dos pruebas lo vigilan
   (`test_reseteo_cable.py`), y las dos caen al mutar la condición de `_entregar`: sin ellas,

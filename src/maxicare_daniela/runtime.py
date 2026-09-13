@@ -1019,13 +1019,9 @@ async def _resetear_chat_de_prueba(quien: dict) -> dict:
 
     # Las conversaciones vivas de ESTE usuario, no todas: dos personas de la clínica pueden
     # estar probando a la vez, y reiniciar la tuya no puede cortarle el hilo a la otra. Solo
-    # se olvida el CONTEXTO -- el historial en `agent_messages`/`agent_sessions` NO lo borra
-    # `reseteo.resetear`: `persistencia.borrar_rastro` borra `mensajes_entrantes`, `citas`,
-    # `reservas`, `conversaciones` y `pacientes`, y ninguna es esa tabla; la migración 010
-    # declara `session_id` sin clave foránea, así que tampoco cascadea. Esas filas quedan
-    # huérfanas -- el `id_conversacion` que se borra aquí abajo nunca se vuelve a pedir, pero
-    # sigue en `pruebas_web`. Cerrarlo es la Tarea 8 (ver `.claude/rules/atencion-whatsapp.md`,
-    # sección `/clearstate`, donde está el mismo hueco documentado para WhatsApp).
+    # hace falta olvidar el CONTEXTO -- el historial en `agent_messages`/`agent_sessions` ya
+    # lo borró `reseteo.resetear` más arriba, dentro de `persistencia.borrar_rastro` (desde
+    # la Tarea 8), así que no queda una fila huérfana que limpiar aquí.
     for id_conversacion, ctx in list(_conversaciones_de_prueba.items()):
         if ctx.telefono_completo == telefono:
             del _conversaciones_de_prueba[id_conversacion]

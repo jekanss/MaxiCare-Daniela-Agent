@@ -14,11 +14,13 @@ contacto.
 
 Por que se puede garantizar: todo lo que Daniela sabe de alguien al empezar un turno sale de
 `_leer_estado`, que lee `pacientes`, `conversaciones` y `configuracion` --esta ultima es
-global, no del paciente--. El historial del dialogo NO esta en Postgres: vive en
-`conversacion.SesionEnMemoria`, indexada por `id_conversacion`. Borrada la conversacion, la
-siguiente nace con un id nuevo y una sesion vacia, asi que la memoria no hay que limpiarla:
-deja de ser alcanzable. Y el campo que manda, `identidad_verificada`, se calcula como
-`bool(paciente) or bool(verificada)`: sin fila en `pacientes` vuelve a `False`.
+global, no del paciente--. El historial del dialogo SI esta en Postgres desde la fase 7:
+vive en `agent_sessions` / `agent_messages`, con `session_id = id_conversacion`, y
+`persistencia.borrar_rastro` lo borra dentro de la MISMA transaccion que el resto del
+rastro. Va antes del `DELETE FROM conversaciones` porque los `session_id` son esos ids: al
+reves quedaria historial vivo de una conversacion que ya no existe. Y el campo que manda,
+`identidad_verificada`, se calcula como `bool(paciente) or bool(verificada)`: sin fila en
+`pacientes` vuelve a `False`.
 
 LO QUE NO BORRA, dicho aqui para que nadie lo descubra despues:
 
