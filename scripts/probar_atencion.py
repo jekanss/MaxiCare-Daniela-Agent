@@ -68,6 +68,7 @@ import argparse
 import asyncio
 import dataclasses
 import os
+import selectors
 import sys
 import time
 import uuid
@@ -87,6 +88,27 @@ from maxicare_daniela import atencion, conversacion, ingesta, persistencia  # no
 from maxicare_daniela.calendario import CalendarioDoble  # noqa: E402
 from maxicare_daniela.config import RETARDO_RESPUESTA_SEGUNDOS, Config  # noqa: E402
 from maxicare_daniela.contratos import RespuestaDaniela  # noqa: E402
+
+def _correr(corutina):
+    """`asyncio.run`, salvo en Windows, donde fuerza un `SelectorEventLoop`.
+
+    El mismo envoltorio que `scripts/probar_persistencia.py` y `tests/test_sesion_neon.py`.
+    Aqui llego tarde: hasta la fase 7 este script no tocaba nada async contra la base, y en
+    la fase 7 `atencion.atender` paso a pedirle la sesion del agente a `SQLAlchemySession`
+    --psycopg en modo async--, que en el `ProactorEventLoop` de Windows revienta en el propio
+    `connect()`. Solo se veia con `--chat`, que es el modo que gasta tokens y por eso nadie
+    corrio: el script moria con «a `responder` no se le llamo ni una vez», que no nombra la
+    causa por ningun lado. En Linux --donde corre el VPS-- el loop por defecto ya es el
+    selector, asi que produccion nunca estuvo afectada.
+    """
+    if sys.platform == "win32":
+        loop = asyncio.SelectorEventLoop(selectors.SelectSelector())
+        try:
+            return loop.run_until_complete(corutina)
+        finally:
+            loop.close()
+    return asyncio.run(corutina)
+
 
 #: Ni `pruebas` (lo borran probar_tools.py y probar_agentes.py) ni `pruebas_web` (el carril
 #: del chat de la pantalla). Uno propio, para que dos entregables puedan correr a la vez.
@@ -935,7 +957,7 @@ def main() -> int:
 
     empezado = time.monotonic()
     try:
-        asyncio.run(corridas(url, args.chat))
+        _correr(corridas(url, args.chat))
     finally:
         restaurar_responder()
         print("\n" + "=" * 78)

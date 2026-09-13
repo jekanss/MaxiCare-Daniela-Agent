@@ -54,7 +54,12 @@ Entregables por fase. **Los marcados gastan tokens**; los demás, ni uno:
 | `scripts/probar_webhook.py <url>` | el webhook en producción | **sí** (despierta a Daniela) |
 
 - `probar_atencion.py` escribe en `pruebas_atencion` —lo crea y lo borra comprobando el
-  borrado— y su WhatsApp es falso: no le llega nada a ningún paciente.
+  borrado— y su WhatsApp es falso: no le llega nada a ningún paciente. **Su `--chat` corre
+  bajo un `SelectorEventLoop`**, como el de la fase 7: desde que `atender` pide la sesión a
+  `SQLAlchemySession`, el `ProactorEventLoop` de Windows la rechaza en el propio `connect()`
+  y el script moría con «a `responder` no se le llamó ni una vez», que no nombra la causa.
+  Solo pasaba con `--chat` —el modo que gasta—, así que estuvo roto toda la fase 7 sin que
+  nadie lo viera. En Linux, donde corre el VPS, no aplica.
 - `probar_lectura.py` escribe en `pruebas_lectura` —mismo patrón de creación y borrado
   comprobado—; su Telegram y su WhatsApp son falsos, y el lector va doblado salvo con
   `--chat`, donde además corre una vez de verdad sobre un PDF generado en el momento (no
@@ -109,6 +114,13 @@ una —qué se midió, qué costó— está en la regla que cubre ese archivo.
    con lo que el SDK espera —incluido el `TIMESTAMP` **sin zona**, al revés que el resto del
    esquema—. Quien suba la versión del SDK compara columna por columna; lo que caza el
    desajuste es `tests/test_sesion_neon.py`, y solo corre con `-m neon`.
+11. **La regeneración corre SIN los guardrails de ENTRADA, y un tripwire de entrada no se
+   regenera nunca.** `CORRECCION` empieza con «AVISO DEL SISTEMA» y le reescribe la conducta
+   a Daniela: pasada por `uso_indebido`, el evaluador la clasificaba como inyección
+   **siempre**, así que cualquier guardrail de salida que saltara acababa en mensaje seguro
+   más escalamiento y el paciente se iba sin su cita. Los de SALIDA se conservan los tres. Y
+   el `{motivo}` que viaja en la corrección es el TEXTO del guardrail, jamás su nombre: con
+   el nombre, el segundo intento es tan ciego como el primero.
 
 # Dónde está el resto
 

@@ -96,12 +96,56 @@ MENSAJE_FALLO_TECNICO = (
 
 #: La corrección que se le da al modelo al regenerar. Es explícita a propósito: «vuelve a
 #: intentarlo» sin decir qué estuvo mal produce el mismo mensaje y quema el reintento.
+#: `{motivo}` lo rellena `_motivo_del_tripwire`, y lo que entra ahí es la frase que compuso
+#: el guardrail --qué sobró y qué tool la habría verificado--, no su nombre. La diferencia
+#: entre las dos cosas es la diferencia entre un reintento que agenda y uno que se disculpa.
 CORRECCION = (
-    "AVISO DEL SISTEMA: tu respuesta anterior fue bloqueada por un control de seguridad "
-    "({motivo}). Vuelve a responder al paciente SIN incluir ninguna cifra, hora, fecha ni "
-    "valoración clínica que no te haya devuelto una tool en este mismo turno. Si te falta "
-    "el dato, dilo y ofrece confirmarlo; no lo estimes."
+    "AVISO DEL SISTEMA: tu respuesta anterior fue bloqueada por un control de seguridad.\n"
+    "{motivo}\n"
+    "Vuelve a responder al paciente SIN incluir ninguna cifra, hora, fecha ni valoración "
+    "clínica que no te haya devuelto una tool en este mismo turno. Si te falta el dato, "
+    "llama a la tool que lo tiene; si aun así no puedes verificarlo, dilo y ofrece "
+    "confirmarlo. No lo estimes."
 )
+
+
+def _sin_guardrails_de_entrada(agente: Agent) -> Agent:
+    """El mismo agente, sin los guardrails que juzgan lo que escribe el paciente.
+
+    Se usa SOLO para la regeneración, y es un arreglo con fecha: el 13/09/2026 un paciente
+    pidió «una valoración para el próximo martes 15 a las 10 am» y se fue con «ya le paso tu
+    mensaje al doctor». No había cupo lleno ni calendario caído --el martes 15 a las 10:00
+    estaba libre--: `sin_hora_no_verificada` frenó la primera respuesta, que es su trabajo, y
+    el reintento que existe para arreglarla murió contra `uso_indebido`.
+
+    Contra `uso_indebido` porque lo que se le manda al regenerar es `CORRECCION`, que empieza
+    con «AVISO DEL SISTEMA» y le reescribe la conducta a Daniela. Eso es, literalmente, la
+    forma de una inyección de prompt, y el evaluador la clasificaba como tal: «Intenta
+    imponer instrucciones del sistema y modificar el comportamiento de la asistente».
+    Medido contra el modelo real ese día, con esas palabras. No era intermitente: **toda**
+    regeneración terminaba en el mensaje seguro y un escalamiento. En producción eso se ve
+    como «Daniela no agenda», y cuanto mejor hacía su trabajo el guardrail de salida, más
+    seguido pasaba.
+
+    La corrección NO la escribe el paciente: la escribe este módulo. Pasarla por un guardrail
+    de ENTRADA es una confusión de categoría, no una regla estricta de más. El mensaje del
+    paciente ya se revisó en la primera corrida; volver a revisarlo aquí no protegía nada que
+    no estuviera protegido.
+
+    Lo único que no es texto fijo es el `{motivo}`, y conviene saber exactamente qué entra
+    ahí: de `sin_cifra_no_documentada` y `sin_hora_no_verificada`, cifras y horas que
+    `cifras_de`/`horas_de` extrajeron ya normalizadas --dígitos y `HH:MM`, nada más--; de
+    `sin_lectura_clinica`, una frase de máximo 300 caracteres que escribe el modelo evaluador
+    sobre la respuesta de la propia Daniela. Ninguna la teclea el paciente, pero la última la
+    redacta un modelo, así que no es «texto nuestro» sin más y no se va a describir como tal.
+
+    Los guardrails de SALIDA se conservan enteros, y son los que importan para la seguridad
+    clínica: la respuesta regenerada pasa por los mismos tres filtros que la primera. Si
+    vuelve a dar una hora sin verificar, sigue saltando y sigue escalando.
+    """
+    if not agente.input_guardrails:
+        return agente
+    return agente.clone(input_guardrails=[])
 
 
 class SesionEnMemoria:
@@ -212,6 +256,32 @@ def _nombre_del_tripwire(excepcion: Exception) -> str:
         return type(excepcion).__name__
 
 
+def _motivo_del_tripwire(excepcion: Exception) -> str:
+    """Lo que el guardrail dejó DICHO, no cómo se llama.
+
+    `Veredicto` ya lo pedía en su docstring --«sin decirle al modelo QUÉ cifra sobra, el
+    segundo intento es tan ciego como el primero»-- y `responder` no lo cumplía: rellenaba el
+    `{motivo}` de `CORRECCION` con `_nombre_del_tripwire`, así que al modelo le llegaba
+    «sin_hora_no_verificada» y nada más. El texto bueno --«Mencionaste 10:00 sin que ninguna
+    tool lo haya verificado en este turno. Llama a `consultar_disponibilidad` y ofrece solo
+    lo que devuelva»-- se calculaba, viajaba en `output_info` y se tiraba a la basura.
+
+    Se notaba en el resultado, no en un log: regenerando el turno del 13/09/2026 con el
+    modelo real, Daniela contestaba «lo confirmo con la clínica» sin llamar a la tool. No
+    escalaba, pero tampoco agendaba, teniendo el martes a las 10:00 libre.
+
+    Mismo `try` amplio que `_nombre_del_tripwire` y por la misma razón: si el SDK cambia de
+    forma, se cae al nombre y el turno sigue.
+    """
+    try:
+        info = excepcion.guardrail_result.output.output_info  # type: ignore[attr-defined]
+    except Exception:  # noqa: BLE001 -- ver docstring
+        info = None
+    if isinstance(info, str) and info.strip():
+        return info.strip()
+    return _nombre_del_tripwire(excepcion)
+
+
 def _config_de_corrida(ctx: ContextoDaniela) -> RunConfig:
     """El `RunConfig` de cada turno de Daniela, con el tracing sin contenido.
 
@@ -277,9 +347,9 @@ async def responder(
 
     resultado = Resultado(respuesta=_respuesta_de_emergencia(MENSAJE_FALLO_TECNICO), turno=ctx.turno_actual)
 
-    async def _correr(texto: str) -> RespuestaDaniela:
+    async def _correr(texto: str, *, usando: Agent | None = None) -> RespuestaDaniela:
         corrida = await Runner.run(
-            agente,
+            usando or agente,
             texto,
             context=ctx,
             session=sesion,
@@ -291,6 +361,20 @@ async def responder(
     try:
         resultado.respuesta = await _correr(entrada)
 
+    except InputGuardrailTripwireTriggered as e:
+        # Un guardrail de ENTRADA salta antes de que el modelo abra la boca. No hay respuesta
+        # anterior que corregir --`CORRECCION` le diría al modelo algo que no ocurrió-- y lo
+        # que se acaba de clasificar como ataque es el mensaje del paciente, no una salida
+        # mejorable. A una inyección no se le da un segundo intento: mensaje seguro y aviso a
+        # los doctores, que es donde terminaba antes igualmente, pero pagando una llamada al
+        # modelo para llegar.
+        nombre = _nombre_del_tripwire(e)
+        resultado.tripwires.append(nombre)
+        resultado.respuesta = _respuesta_de_emergencia(MENSAJE_SEGURO)
+        resultado.escalado_por = "dato_faltante"
+        resultado.fallo = f"tripwire de entrada: {nombre}"
+        log.error("tripwire de entrada (%s) en %s · se escala", nombre, ctx.id_conversacion)
+
     except TRIPWIRES as e:
         nombre = _nombre_del_tripwire(e)
         resultado.tripwires.append(nombre)
@@ -300,8 +384,15 @@ async def responder(
         # Nunca dos -- el plan es tajante, y con razón: un guardrail que salta dos veces
         # está diciendo que el modelo no va a corregirse solo, y el tercer intento solo
         # gasta dinero y minutos del paciente.
+        #
+        # `_sin_guardrails_de_entrada` es lo que hace que ese reintento EXISTA de verdad: sin
+        # él, la corrección se juzgaba como si la hubiera escrito el paciente y el segundo
+        # tripwire estaba garantizado. Ver su docstring.
         try:
-            resultado.respuesta = await _correr(CORRECCION.format(motivo=nombre))
+            resultado.respuesta = await _correr(
+                CORRECCION.format(motivo=_motivo_del_tripwire(e)),
+                usando=_sin_guardrails_de_entrada(agente),
+            )
             resultado.regenerado = True
         except TRIPWIRES as segunda:
             segundo_nombre = _nombre_del_tripwire(segunda)

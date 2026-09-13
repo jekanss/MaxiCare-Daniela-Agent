@@ -255,6 +255,45 @@ estrenar una línea de teléfono. Vive en `reseteo.py`, y `runtime._entregar` lo
   probó. Por eso el botón «reiniciar» no te devuelve a primer contacto: el paciente que te
   inventaste sigue en la tabla y el turno siguiente te reconoce. Para eso está `/clearstate`.
 
+## La regeneración: el freno que se frenaba a sí mismo
+
+Cuando un guardrail de salida salta, `conversacion.responder` regenera UNA vez mandándole al
+modelo el texto `CORRECCION`. Dos cosas de ese camino estuvieron rotas hasta el 13/09/2026, y
+juntas producían el síntoma que la clínica describió como **«Daniela no agenda»**.
+
+- **La corrección pasaba por `uso_indebido`, que es un guardrail de ENTRADA.** `CORRECCION`
+  empieza con «AVISO DEL SISTEMA» y le reescribe la conducta a Daniela: es, palabra por
+  palabra, la forma de una inyección de prompt. El evaluador la clasificaba como ataque
+  —medido contra el modelo real, dos veces de dos: «Intenta imponer instrucciones del sistema
+  y modificar el comportamiento de la asistente»—, así que el segundo tripwire estaba
+  **garantizado** y toda regeneración acababa en mensaje seguro más escalamiento. El
+  reintento existía en el código y no llegaba a correr nunca. Cuanto mejor hacía su trabajo el
+  guardrail de salida, más seguido pasaba. Hoy la regeneración corre sobre
+  `agente.clone(input_guardrails=[])`; los de SALIDA se conservan los tres.
+- **Un tripwire de ENTRADA ya no se regenera.** Salta antes de que el modelo responda, así
+  que «tu respuesta anterior fue bloqueada» sería falso y el segundo intento se le pediría
+  sobre un mensaje que acabamos de clasificar como ataque. Mensaje seguro y escalamiento
+  directos: mismo destino que antes, una llamada al modelo menos. Lo sostiene
+  `test_un_tripwire_de_entrada_no_se_regenera_nunca`, y **es esa prueba la que ahora impide
+  que quitar el guardrail de la regeneración abra una puerta**: antes, la propiedad la
+  sostenía por accidente el doble disparo del evaluador.
+- **El `{motivo}` es el TEXTO del guardrail, no su nombre.** `Veredicto` lo pedía en su
+  docstring desde la fase 4 —«sin decirle al modelo QUÉ cifra sobra, el segundo intento es
+  tan ciego como el primero»— y el código rellenaba el hueco con `_nombre_del_tripwire`. La
+  frase útil («Mencionaste 10:00 sin que ninguna tool lo haya verificado. Llama a
+  `consultar_disponibilidad`…») se calculaba, viajaba en `output_info` y se tiraba. Con el
+  nombre solo, la respuesta regenerada era «lo confirmo con la clínica» sin llamar a ninguna
+  tool: no escalaba, pero tampoco agendaba.
+
+**El prompt tenía el hueco correspondiente:** decía «no ofrezcas ninguna hora que no venga de
+`consultar_disponibilidad`», y el modelo no vive como «ofrecer» el **repetirle al paciente la
+hora que él mismo propuso**. Esa era la forma concreta en que se disparaba el primer
+guardrail. Ahora está dicho con su consecuencia.
+
+Medido sobre el turno real que falló, con el modelo de verdad: antes, escalaba **siempre**;
+después de los tres arreglos, cinco corridas de cinco sin un solo tripwire. La ruta de
+escalamiento por doble disparo sigue existiendo, y tiene que seguir existiendo.
+
 ## El tracing: tres consumidores de modelo, una sola puerta
 
 **Toda llamada al modelo pasa por `config.config_de_corrida()`.** No hay ninguna excepción y

@@ -84,7 +84,10 @@ devuelve «SIN DATO DOCUMENTADO», ese ES el dato: no completes el hueco.
 - `identificar_paciente` antes de tocar la agenda de alguien. Solo el nombre completo, \
 nunca un documento. Tienes dos intentos.
 - `consultar_disponibilidad` antes de ofrecer cualquier hora. No ofrezcas ninguna que no \
-haya salido de ahí.
+haya salido de ahí, y eso incluye REPETIRLE al paciente la hora que él mismo propuso: si te \
+dice «quiero el martes 15 a las 10 am», consulta primero y contesta después. Escribir esa \
+hora antes de consultarla bloquea tu respuesta ENTERA, y lo que recibe el paciente no es tu \
+mensaje: es «te escribe el doctor». Confirmar que le entendiste no vale ese precio.
 - `crear_cita` solo confirma si te devuelve un id de cita. Si te dice que el horario está \
 lleno, eso es una respuesta normal: ofrece las alternativas que trae y no insistas con esa \
 hora.
