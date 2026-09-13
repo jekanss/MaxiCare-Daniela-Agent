@@ -1014,15 +1014,59 @@ def test_el_turno_usa_la_sesion_persistida_y_no_la_de_memoria(monkeypatch):
     assert sesion.session_id == "conv-7"
 
 
-def test_una_sesion_inyectada_gana_a_la_de_produccion():
+def test_atender_sin_sesion_inyectada_pide_la_persistida(monkeypatch):
+    """El cable entero de la fase 7, comprobado por donde de verdad corre: SIN pasarle
+    `sesion_de` a `atender` -- que es como lo llama `runtime.py` en producción --, el turno
+    tiene que pedirle la sesión a `persistencia.sesion_de_agente` con
+    `(id_conversacion, database_url)`.
+
+    Ninguna otra prueba de este archivo recorre este camino: `_atender` inyecta siempre el
+    doble en memoria. Por eso esta es la única que cae si alguien cambia
+    `fabricar = sesion_de or (lambda id_: _sesion_de(id_, config.database_url))` por
+    `fabricar = sesion_de or (lambda id_: conversacion.SesionEnMemoria(id_))` -- la mutación
+    que desactiva la persistencia entera y deja el resto de la suite en verde.
+    """
+    preparar(monkeypatch)
+    pedidas: list[tuple[str, str]] = []
+
+    def espia(id_conversacion, *, database_url, esquema=None, limite=None):
+        pedidas.append((id_conversacion, database_url))
+        return conversacion.SesionEnMemoria(id_conversacion)
+
+    monkeypatch.setattr(atencion.persistencia, "sesion_de_agente", espia)
+    config = config_falso()
+
+    resultado = atender(mensaje_texto(), config=config, sesion_de=None)
+
+    assert resultado.respondido is True
+    assert pedidas == [(resultado.id_conversacion, config.database_url)]
+
+
+def test_una_sesion_inyectada_gana_a_la_de_produccion(monkeypatch):
     """`sesion_de` existe SOLO para que la suite offline pueda correr sin Neon, igual que
-    `calendario` y `dormir`. En producción vale `None` y manda la persistida."""
-    import inspect
+    `calendario` y `dormir`. En producción vale `None` y manda la persistida -- pero cuando SÍ
+    se inyecta una, tiene que ser esa la que use el turno, y la fábrica de producción
+    (`persistencia.sesion_de_agente`) no debe tocarse ni una vez.
 
-    firma = inspect.signature(atencion.atender)
+    Antes, esta prueba solo miraba `inspect.signature`: pasaba igual con un cuerpo que
+    ignorase `sesion_de` por completo. Esta versión comprueba comportamiento.
+    """
+    base, turnos = preparar(monkeypatch)
 
-    assert "sesion_de" in firma.parameters
-    assert firma.parameters["sesion_de"].default is None
+    llamadas_a_produccion: list[tuple] = []
+
+    def fabrica_de_produccion(*args, **kwargs):
+        llamadas_a_produccion.append((args, kwargs))
+        return conversacion.SesionEnMemoria("no-deberia-usarse")
+
+    monkeypatch.setattr(atencion.persistencia, "sesion_de_agente", fabrica_de_produccion)
+
+    inyectada = conversacion.SesionEnMemoria("inyectada")
+    resultado = atender(mensaje_texto(), sesion_de=lambda id_conversacion: inyectada)
+
+    assert resultado.respondido is True
+    assert turnos.llamadas[-1]["sesion"] is inyectada
+    assert llamadas_a_produccion == []
 
 
 def test_una_conversacion_sin_configuracion_operativa_usa_los_defaults(monkeypatch):

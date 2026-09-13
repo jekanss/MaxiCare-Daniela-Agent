@@ -282,9 +282,13 @@ class EspiaResponder:
 
 def usar(espia: EspiaResponder) -> EspiaResponder:
     """Igual que en `probar_atencion.py`: `_candados` es estado de modulo y sobrevive entre
-    comprobaciones. El historial ya no vive en memoria (desde la fase 7): este script corre
-    contra Neon, en su propio esquema (`pruebas_lectura`), y usa la sesion persistida de
-    verdad."""
+    comprobaciones. El historial ya no vive en memoria (desde la fase 7): `atender` sigue
+    pidiendole la sesion a `persistencia.sesion_de_agente`, contra Neon, en su propio esquema
+    (`pruebas_lectura`). Pero a diferencia de `probar_atencion.py`, aqui esa sesion NUNCA se
+    ejercita: `EspiaResponder` no delega en el `responder` real ni con `--chat` (ver su
+    docstring), asi que la sesion se construye y no llega a leerse ni a escribirse -- no cae
+    una sola fila en `pruebas_lectura.agent_messages`. Este script prueba el muro, no el
+    historial de la conversacion."""
     atencion._candados.clear()
     conversacion.responder = espia
     return espia

@@ -22,7 +22,10 @@ En WhatsApp un paciente no manda un mensaje: manda tres seguidos. «hola» · «
 «cuánto vale un implante», en menos de dos segundos. Meta entrega los tres webhooks casi a la
 vez, y sin candado eso son tres `Runner.run` simultáneos sobre la MISMA conversación:
 
-1. **El historial se cruza.** Los tres comparten la `SesionEnMemoria` de la conversación.
+1. **El historial se cruza.** Los tres comparten la MISMA sesión persistida
+   (`persistencia.sesion_de_agente`, sobre `agent_messages` en Neon) de la conversación --y
+   desde la fase 7 eso ya no es un detalle de un solo proceso: es una fila compartida en la
+   base, así que el cruce sobreviviría incluso si cada turno corriera en un worker distinto.
    El segundo lee el historial antes de que el primero haya escrito su respuesta, así que
    Daniela contesta dos veces al mismo contexto y puede contradecirse; y los items se
    escriben en el orden en que terminan, no en el que ocurrieron.
@@ -416,10 +419,14 @@ def olvidar(telefono: str) -> None:
     siguiente --el primero de la conversación «nueva»-- los mensajes de la anterior, y la
     prueba de que Daniela no recuerda nada fallaría por el único sitio que no es la base.
 
-    El historial del diálogo ya NO está aquí: desde la fase 7 vive en `agent_messages`, y lo
-    borra `persistencia.borrar_rastro` dentro de la misma transacción que el resto del
-    rastro. Esta función no lo toca, y no es un olvido: borrar por dos caminos distintos es
-    cómo se acaba con uno de los dos desactualizado.
+    El historial del diálogo ya NO está aquí: desde la fase 7 vive en `agent_messages`, en
+    Neon. Pero borrarlo **todavía no es cosa de nadie**: `persistencia.borrar_rastro` no
+    toca `agent_sessions` ni `agent_messages` -- eso es PENDIENTE, y lo cierra la Tarea 8.
+    Hoy `/clearstate` borra al paciente, sus citas y su conversación, pero las filas del
+    historial de ese `id_conversacion` quedan huérfanas en la base. Como el reseteo abre la
+    conversación siguiente con un `id_conversacion` nuevo, el próximo turno no las vuelve a
+    leer -- pero no están borradas, y esta función no lo toca a propósito: fingir que sí
+    sería peor que decir que falta.
 
     Se llama con el candado del teléfono cogido; el candado en sí se deja donde está, porque
     quien llama lo tiene tomado en ese momento.

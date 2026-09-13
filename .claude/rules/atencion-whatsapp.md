@@ -28,9 +28,12 @@ en producción o por mutación, no razonado.
   recordaría ni la frase anterior, `turno_actual` sería siempre 1 y las claves de
   idempotencia (`id_conversacion + turno`) no colisionarían nunca, con lo que dejarían de
   proteger.
-- **El historial vive en memoria** (`_sesiones`). Un reinicio borra el hilo del diálogo, no
-  los datos: paciente, citas y estado de oportunidad están en Neon. Lo arregla la fase 7 con
-  `SQLAlchemySession`.
+- **El historial YA NO vive en memoria.** Desde la fase 7, `atencion.atender` le pide la
+  sesión a `persistencia.sesion_de_agente` (`SQLAlchemySession`, sobre `agent_messages` en
+  Neon) por omisión, así que un reinicio del proceso ya no borra el hilo del diálogo de un
+  paciente de WhatsApp -- igual que ya no borraba los datos: paciente, citas y estado de
+  oportunidad. El chat web del panel es la excepción: sigue en `SesionEnMemoria`
+  (`runtime.py:749` y `runtime.py:954`), pendiente de la Tarea 6.
 
 ## El candado
 
@@ -184,9 +187,13 @@ estrenar una línea de teléfono. Vive en `reseteo.py`, y `runtime._entregar` lo
   `id_conversacion`, que es un UUID nuevo por definición. Lo sostiene
   `test_reseteo_neon.py::test_tras_el_reset_daniela_ve_lo_mismo_que_en_un_primer_contacto`,
   con su control: antes del borrado, esa misma prueba comprueba que Daniela SÍ lo conocía.
-  El historial del diálogo no hay que borrarlo porque `_sesiones` se indexa por
-  `id_conversacion`: conversación borrada, id nuevo, sesión vacía. Lo único de memoria que sí
-  hay que sacar es el búfer, y de eso se encarga `atencion.olvidar`.
+  El historial del diálogo **hoy NO se borra, y está PENDIENTE** -- lo cierra la Tarea 8.
+  Desde la fase 7 vive en `agent_messages`, en Neon, y `persistencia.borrar_rastro` no toca
+  esa tabla ni `agent_sessions`: las filas del `id_conversacion` borrado quedan huérfanas.
+  Como el reseteo abre la conversación siguiente con un `id_conversacion` nuevo, el próximo
+  turno no las vuelve a leer -- pero no están borradas, y hasta que la Tarea 8 lo haga, decir
+  que `/clearstate` deja al paciente sin historial sería falso. Lo único de memoria del
+  proceso que sí hay que sacar es el búfer, y de eso se encarga `atencion.olvidar`.
 - **La lista vacía apaga el comando para todo el mundo, y ese es el default.** Sin números
   listados, `/clearstate` llega a Daniela como cualquier otro texto. Dos pruebas lo vigilan
   (`test_reseteo_cable.py`), y las dos caen al mutar la condición de `_entregar`: sin ellas,
