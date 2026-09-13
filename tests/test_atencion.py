@@ -23,11 +23,13 @@ import asyncio
 import contextlib
 import random
 import time
+from datetime import datetime
 
+import httpx
 import pytest
 
 from maxicare_daniela import atencion, conversacion, ingesta, persistencia
-from maxicare_daniela.calendario import CalendarioDoble
+from maxicare_daniela.calendario import CalendarioCaido, CalendarioDoble, ErrorDeCalendario
 from maxicare_daniela.canales import ErrorDeCanal
 from maxicare_daniela.config import Config
 from maxicare_daniela.contratos import RespuestaDaniela
@@ -118,6 +120,36 @@ class DormirFalso:
         self.dormidas.append(segundos)
 
 
+class ConexionFalsa:
+    """Imita lo único de psycopg que importa aquí: `autocommit=False`.
+
+    Cuando una sentencia falla, Postgres deja la transacción **abortada** y cualquier
+    sentencia siguiente revienta con `InFailedSqlTransaction` hasta que alguien haga
+    `rollback()`. Un doble que se limite a lanzar la excepción pedida y siga tan campante
+    deja pasar exactamente ese fallo, que es lo que le pasó a la primera versión de la
+    prueba de la configuración: pasaba en verde mientras el código real se caía entero.
+    """
+
+    def __init__(self) -> None:
+        self.abortada = False
+        self.rollbacks = 0
+        self.cerrada = False
+
+    def comprobar(self) -> None:
+        if self.abortada:
+            raise RuntimeError(
+                "InFailedSqlTransaction: current transaction is aborted, commands ignored "
+                "until end of transaction block"
+            )
+
+    def abortar(self) -> None:
+        self.abortada = True
+
+    def rollback(self) -> None:
+        self.rollbacks += 1
+        self.abortada = False
+
+
 class BaseFalsa:
     """Sustituye las funciones de `persistencia` que usa `atencion`, y anota cada llamada.
 
@@ -140,6 +172,9 @@ class BaseFalsa:
         self.configuracion = CONFIGURACION_OPERATIVA if configuracion is None else configuracion
         self.nueva = nueva
         self.llamadas: list[tuple] = []
+        #: Las conexiones que se abrieron, en orden. Sirven para comprobar el ruling 5 --que
+        #: ninguna sigue abierta mientras corre el modelo-- y los rollbacks.
+        self.conexiones: list[ConexionFalsa] = []
 
     @property
     def nombres(self) -> list[str]:
@@ -154,22 +189,32 @@ class BaseFalsa:
     def instalar(self, monkeypatch) -> BaseFalsa:
         @contextlib.contextmanager
         def conectar(url):
+            conexion = ConexionFalsa()
+            self.conexiones.append(conexion)
             self.llamadas.append(("conectar", url))
-            # Una conexión de mentira: todo lo que la usaría está sustituido más abajo.
-            yield object()
+            try:
+                yield conexion
+            finally:
+                # El cierre se anota igual que la apertura: es la mitad que permite afirmar
+                # que NINGUNA conexión sigue abierta mientras corre el modelo (ruling 5).
+                conexion.cerrada = True
+                self.llamadas.append(("cerrar", url))
 
         def anotar(nombre, *args):
             self.llamadas.append((nombre, *args))
 
         def conversacion_viva(conn, telefono, *, ventana_horas=24):
+            conn.comprobar()
             anotar("conversacion_viva", telefono, ventana_horas)
             return self.viva
 
         def buscar_paciente_por_telefono(conn, telefono):
+            conn.comprobar()
             anotar("buscar_paciente_por_telefono", telefono)
             return self.paciente
 
         def asegurar_conversacion(conn, *, telefono, paciente_id=None, canal="whatsapp"):
+            conn.comprobar()
             anotar("asegurar_conversacion", telefono, paciente_id, canal)
             # `nueva` puede ser una función del teléfono: dos números distintos NO pueden
             # recibir el mismo id de conversación, o el doble estaría fabricando justo la
@@ -177,25 +222,34 @@ class BaseFalsa:
             return self.nueva(telefono) if callable(self.nueva) else self.nueva
 
         def leer_configuracion(conn):
+            conn.comprobar()
             anotar("leer_configuracion")
             if isinstance(self.configuracion, Exception):
+                # Un error de SQL de verdad aborta la transacción. Sin esta línea, la prueba
+                # de la degradación pasaría por la razón equivocada.
+                conn.abortar()
                 raise self.configuracion
             return dict(self.configuracion)
 
         def conversacion_tomada(conn, id_conversacion):
+            conn.comprobar()
             anotar("conversacion_tomada", id_conversacion)
             return self.tomada
 
         def ligar_mensaje_a_conversacion(conn, wamid, id_conversacion):
+            conn.comprobar()
             anotar("ligar_mensaje_a_conversacion", wamid, id_conversacion)
 
-        def tocar_conversacion(conn, id_conversacion):
-            anotar("tocar_conversacion", id_conversacion)
+        def tocar_conversacion(conn, id_conversacion, *, turno_actual=None):
+            conn.comprobar()
+            anotar("tocar_conversacion", id_conversacion, turno_actual)
 
         def marcar_respondido(conn, wamid, *, wamid_respuesta):
+            conn.comprobar()
             anotar("marcar_respondido", wamid, wamid_respuesta)
 
         def marcar_fallo_respuesta(conn, wamid, *, motivo):
+            conn.comprobar()
             anotar("marcar_fallo_respuesta", wamid, motivo)
 
         monkeypatch.setattr(persistencia, "conectar", conectar)
@@ -652,18 +706,38 @@ def test_un_mensaje_con_archivo_marca_el_adjunto_y_no_interpreta(monkeypatch):
 # ==========================================================================================
 
 
-def test_si_enviar_falla_queda_registrado_y_no_revienta(monkeypatch):
-    """WhatsApp rechaza el envío --token vencido, número fuera de la ventana de 24 h-- y eso
-    no puede tumbar el proceso: quedaría un mensaje sin respuesta y sin rastro de por qué."""
+@pytest.mark.parametrize(
+    "fallo",
+    [
+        ErrorDeCanal("WhatsApp rechazó el envío: 400"),
+        httpx.ReadTimeout("la Graph API no respondió"),
+        KeyError("messages"),
+    ],
+    ids=["error_de_canal", "timeout_de_httpx", "respuesta_con_otra_forma"],
+)
+def test_si_enviar_falla_queda_registrado_y_no_revienta(monkeypatch, fallo):
+    """WhatsApp no responde --token vencido, número fuera de la ventana de 24 h, o Meta
+    tardando de más-- y eso no puede tumbar el turno.
+
+    Los tres casos son reales y solo el primero es un `ErrorDeCanal`: `canales.enviar_texto`
+    hace el POST **sin envolver los errores de httpx**, así que un `ReadTimeout` sale crudo, y
+    un 200 con otra forma revienta en `r.json()["messages"][0]["id"]` con un `KeyError`. Con
+    un `except` estrecho, esa tarde de timeouts se pierde en el BackgroundTask: el paciente
+    sin respuesta, `mensajes_entrantes` sin motivo, y la conversación sin tocar --así que a
+    las 24 horas se declara muerta a mitad de la charla.
+    """
     base, _ = preparar(monkeypatch)
-    whatsapp = WhatsAppFalso(falla_con=ErrorDeCanal("WhatsApp rechazó el envío: 400"))
+    whatsapp = WhatsAppFalso(falla_con=fallo)
 
     resultado = atender(mensaje_texto(), whatsapp=whatsapp)
 
     assert resultado.respondido is False
-    assert resultado.motivo and "WhatsApp" in resultado.motivo
+    assert resultado.motivo and type(fallo).__name__ in resultado.motivo
     assert "marcar_fallo_respuesta" in base.nombres
     assert "marcar_respondido" not in base.nombres
+    assert "tocar_conversacion" in base.nombres, (
+        "sin tocarla, la conversación se declara vieja a las 24 h por un fallo de envío"
+    )
 
 
 def test_si_el_turno_revienta_el_paciente_igual_recibe_algo(monkeypatch):
@@ -751,18 +825,33 @@ def test_las_sesiones_viejas_se_podan(monkeypatch):
 def test_una_conversacion_sin_configuracion_operativa_usa_los_defaults(monkeypatch):
     """Que la tabla `configuracion` no responda no puede dejar mudo al paciente.
 
-    Los defaults del dataclass son los mismos de `persistencia.CONFIGURACION_POR_DEFECTO`,
-    así que Daniela sigue trabajando con los números correctos mientras alguien mira el log.
+    Y la degradación tiene que degradar de verdad. `conectar` abre con `autocommit=False`:
+    el error de SQL deja la transacción ABORTADA, y las dos lecturas que vienen después
+    dentro del mismo `with` --`conversacion_tomada` y `ligar_mensaje_a_conversacion`--
+    revientan con `InFailedSqlTransaction` si nadie hace `rollback()`. Sin él, un
+    `statement_timeout` sobre `configuracion` tumba `_leer_estado` entero y TODOS los
+    mensajes de la clínica reciben el mensaje de emergencia, sin conversación y sin
+    historial, por no poder leer tres enteros que ya tienen default.
+
+    Por eso `ConexionFalsa` imita la transacción abortada: sin eso esta prueba pasaba por la
+    razón equivocada.
     """
-    _, turnos = preparar(
-        monkeypatch, base=BaseFalsa(configuracion=RuntimeError("la tabla no responde"))
+    base, turnos = preparar(
+        monkeypatch, base=BaseFalsa(configuracion=RuntimeError("statement timeout"))
     )
     whatsapp = WhatsAppFalso()
 
     resultado = atender(mensaje_texto(), whatsapp=whatsapp)
 
     assert resultado.respondido is True
+    assert whatsapp.textos and whatsapp.textos[0] != conversacion.MENSAJE_SEGURO, (
+        "cayó al camino de «sin base»: la lectura entera se fue al suelo"
+    )
+    assert base.conexiones[0].rollbacks == 1, "la transacción quedó abortada y nadie la limpió"
+    assert "conversacion_tomada" in base.nombres
+    assert "ligar_mensaje_a_conversacion" in base.nombres
     assert turnos.ctx.capacidad_por_hora == 2
+    assert turnos.ctx.duracion_cita_minutos == 60
     assert turnos.ctx.tema_general == 0
 
 
@@ -776,3 +865,206 @@ def test_ningun_tipo_de_archivo_se_queda_sin_nombre_en_castellano(monkeypatch, t
 
     assert ingesta.NOMBRE_HUMANO[tipo] in turnos.entrada
     assert turnos.llamadas[-1]["hubo_adjunto"] is True
+
+
+# ==========================================================================================
+# Lo que `_DatosDelMensaje` conserva, y lo que NO puede conservar
+# ==========================================================================================
+
+
+def test_los_hechos_del_mensaje_sobreviven_al_reinicio_del_turno():
+    """`responder` llama a `ctx.turno.reiniciar()` antes de correr, y eso borraba los dos
+    campos del prefiltro clínico. Que el paciente haya mandado una radiografía no es algo que
+    autorizara una tool: es un hecho del mensaje que ya entró."""
+    turno = atencion._DatosDelMensaje(adjunto_del_mensaje=True, sintomas_del_mensaje=True)
+
+    # Antes de reiniciar nada: el invariante ya tiene que ser cierto.
+    assert turno.hubo_adjunto is True
+    assert turno.menciona_sintomas is True
+
+    turno.reiniciar()
+
+    assert turno.hubo_adjunto is True
+    assert turno.menciona_sintomas is True
+
+
+def test_el_reinicio_sigue_borrando_las_cifras_y_las_horas_autorizadas():
+    """La mitad que protege el muro, y la que nadie vigilaba.
+
+    Mutando `reiniciar()` para que conservara también `cifras_autorizadas`, la suite entera
+    seguía verde. Eso sería una fuga entre turnos: un precio consultado hace diez mensajes
+    volvería a estar autorizado y `sin_cifra_no_documentada` lo dejaría pasar «porque ya lo
+    vio». Es exactamente el fallo contra el que existe `DatosDelTurno.reiniciar`, y este
+    subtipo es lo único que se interpone entre ese fallo y el paciente.
+    """
+    turno = atencion._DatosDelMensaje(adjunto_del_mensaje=True)
+    turno.cifras_autorizadas = {"1900000"}
+    turno.horas_autorizadas = {"09:00"}
+
+    turno.reiniciar()
+
+    assert turno.cifras_autorizadas == set(), "una cifra de otro turno sigue autorizada"
+    assert turno.horas_autorizadas == set(), "una hora de otro turno sigue autorizada"
+    assert turno.hubo_adjunto is True, "y el hecho del mensaje tiene que seguir ahí"
+
+
+def test_un_mensaje_que_habla_de_dolor_enciende_el_prefiltro_clinico(monkeypatch):
+    """La otra mitad del prefiltro de `sin_lectura_clinica`, y hoy nadie más la enciende.
+
+    El único sitio del repositorio que rellenaba `menciona_sintomas` era un script de la
+    fase 4. Sin esa línea en `atencion.py`, el guardrail que impide que Daniela le diga a un
+    paciente qué tiene no llega ni a preguntarle al evaluador cuando alguien escribe «me
+    duele mucho desde ayer».
+    """
+    _, turnos = preparar(monkeypatch)
+
+    atender(mensaje_texto("Hola, me duele mucho desde ayer"))
+
+    assert turnos.llamadas[-1]["menciona_sintomas"] is True
+
+
+def test_un_mensaje_normal_no_enciende_el_prefiltro(monkeypatch):
+    """El caso que NO debe disparar: sin él, poner el campo a `True` siempre pasaría la
+    prueba de arriba y se pagaría un evaluador por cada «¿tienen parqueadero?»."""
+    _, turnos = preparar(monkeypatch)
+
+    atender(mensaje_texto("Hola, ¿tienen parqueadero?"))
+
+    assert turnos.llamadas[-1]["menciona_sintomas"] is False
+
+
+# ==========================================================================================
+# El ruling 5: ninguna conexión abierta mientras corre el modelo
+# ==========================================================================================
+
+
+def test_la_conexion_a_neon_se_cierra_antes_de_llamar_al_modelo(monkeypatch):
+    """Una conexión sostenida a lo largo del turno deja la sesión `idle in transaction` los
+    ocho o diez segundos que tarda el modelo.
+
+    Ninguna de las lecturas hace `commit()` tras su SELECT, así que el snapshot y la conexión
+    del pooler se quedan retenidos **por cada paciente que esté escribiendo a la vez**. Hoy se
+    cumple, pero nada lo vigilaba: un refactor que moviera el `with` a envolver el turno
+    entero pasaría en verde y la factura de Neon sería el único aviso.
+    """
+    limpiar_estado()
+    base = BaseFalsa(viva=("conv-viva", 1, True, 0)).instalar(monkeypatch)
+    turnos = Turnos()
+
+    async def responder(entrada, **extra):
+        base.llamadas.append(("modelo",))
+        return await turnos(entrada, **extra)
+
+    monkeypatch.setattr(conversacion, "responder", responder)
+
+    atender(mensaje_texto())
+
+    abiertas, abiertas_en_el_modelo = 0, None
+    for llamada in base.llamadas:
+        if llamada[0] == "conectar":
+            abiertas += 1
+        elif llamada[0] == "cerrar":
+            abiertas -= 1
+        elif llamada[0] == "modelo":
+            abiertas_en_el_modelo = abiertas
+
+    assert abiertas_en_el_modelo == 0, "hay una conexión a Neon abierta mientras corre el modelo"
+    assert base.nombres.count("conectar") == 2, "las lecturas y las escrituras van en dos bloques"
+    assert base.nombres.count("cerrar") == 2
+    assert all(c.cerrada for c in base.conexiones)
+
+
+# ==========================================================================================
+# El turno se persiste
+# ==========================================================================================
+
+
+def test_el_turno_se_guarda_en_la_conversacion(monkeypatch):
+    """`conversaciones.turno_actual` no lo escribía ninguna sentencia del proyecto.
+
+    Como el contexto se construye nuevo por mensaje leyendo el turno de Neon, la columna
+    congelada en 0 hacía que todos los turnos de una conversación fueran el turno 1 -- y la
+    clave de idempotencia `id_conversacion + turno` dejaba de distinguir un escalamiento
+    nuevo de un reintento del anterior. El doctor solo se enteraba del primero.
+    """
+    base, _ = preparar(monkeypatch, base=BaseFalsa(viva=("conv-viva", 4, True, 0)))
+
+    resultado = atender(mensaje_texto())
+
+    assert resultado.turno == 5, "el turno leído de Neon tiene que avanzar"
+    assert base.argumentos("tocar_conversacion") == ("conv-viva", 5)
+
+
+def test_el_turno_se_guarda_aunque_el_envio_falle(monkeypatch):
+    """El turno se gastó igual: el modelo corrió y sus tools ya pudieron escribir. Dejar la
+    columna atrás haría que el siguiente mensaje reutilizara la clave de idempotencia de un
+    turno que sí ocurrió."""
+    base, _ = preparar(monkeypatch, base=BaseFalsa(viva=("conv-viva", 4, True, 0)))
+    whatsapp = WhatsAppFalso(falla_con=httpx.ConnectError("sin red"))
+
+    atender(mensaje_texto(), whatsapp=whatsapp)
+
+    assert base.argumentos("tocar_conversacion") == ("conv-viva", 5)
+
+
+# ==========================================================================================
+# El calendario que no arranca
+# ==========================================================================================
+
+
+def calendario_que_no_arranca(config):
+    raise ErrorDeCalendario("Google devolvió 503 al comprobar el acceso")
+
+
+def test_si_el_calendario_no_arranca_daniela_sigue_contestando(monkeypatch):
+    """`CalendarioGoogle.__init__` hace una lectura real contra Google --es su comprobación de
+    acceso-- y puede fallar al construirse. Sin el `try`, ese fallo salía de `atender` y el
+    paciente se quedaba sin respuesta por una dependencia que ni siquiera hace falta para
+    contestarle un precio."""
+    _, turnos = preparar(monkeypatch)
+    monkeypatch.setattr(atencion, "calendario_desde_config", calendario_que_no_arranca)
+    whatsapp = WhatsAppFalso()
+
+    resultado = atender(mensaje_texto(), whatsapp=whatsapp, calendario=None)
+
+    assert resultado.respondido is True
+    assert whatsapp.textos, "el paciente se quedó sin respuesta por el calendario"
+    assert isinstance(turnos.ctx.calendario, CalendarioCaido)
+
+
+def test_un_calendario_caido_nunca_es_un_calendario_doble(monkeypatch):
+    """La decisión que sostiene la prueba anterior.
+
+    Caer a `CalendarioDoble` es el arreglo obvio y es mucho peor que el problema: el doble
+    dice que sí a todo, así que `crear_cita` tomaría el cupo, «crearía» el evento en un
+    diccionario y Daniela le confirmaría al paciente una cita que no existe en ningún
+    calendario. El paciente llega a una clínica donde nadie lo espera.
+    """
+    _, turnos = preparar(monkeypatch)
+    monkeypatch.setattr(atencion, "calendario_desde_config", calendario_que_no_arranca)
+
+    atender(mensaje_texto(), calendario=None)
+
+    assert not isinstance(turnos.ctx.calendario, CalendarioDoble)
+    with pytest.raises(ErrorDeCalendario):
+        turnos.ctx.calendario.crear_evento(
+            inicio=datetime(2026, 9, 14, 9, 0), duracion_minutos=60, titulo="x"
+        )
+
+
+def test_marcar_leido_no_puede_tumbar_el_turno(monkeypatch):
+    """`canales.marcar_leido` se traga los `httpx.HTTPError` y nada más. Cualquier otra cosa
+    salía de `atender` ANTES de tocar la base: el paciente sin respuesta y sin rastro, por un
+    detalle cosmético que ni siquiera es el mensaje."""
+    preparar(monkeypatch)
+    whatsapp = WhatsAppFalso()
+
+    async def revienta(wamid):
+        raise RuntimeError("el token de WhatsApp no sirve para marcar leído")
+
+    whatsapp.marcar_leido = revienta
+
+    resultado = atender(mensaje_texto(), whatsapp=whatsapp)
+
+    assert resultado.respondido is True
+    assert whatsapp.textos

@@ -547,6 +547,40 @@ def test_tocar_conversacion_adelanta_la_ventana(esquema):
     assert viva[0] == id_conversacion
 
 
+def test_el_turno_de_la_conversacion_se_guarda_y_se_vuelve_a_leer(esquema):
+    """La columna `turno_actual` existía desde la migración 001 y NADIE la escribía.
+
+    Lo que costaba: `atencion.py` construye un `ContextoDaniela` nuevo por mensaje y lee el
+    turno de aquí --que es lo correcto, un reinicio no puede hacer que la conversación
+    empiece de cero--. Con la columna congelada en 0, todos los mensajes de una conversación
+    eran el turno 1, y las claves de idempotencia, que se arman con
+    `id_conversacion + turno_actual`, dejaban de distinguir un escalamiento nuevo de un
+    reintento del anterior: el doctor se enteraba del primero y de ninguno más.
+
+    Esta prueba recorre el viaje entero --escribir el turno y volver a leerlo por donde de
+    verdad se lee, `conversacion_viva`-- porque un `UPDATE` que no se refleje ahí no arregla
+    nada.
+    """
+    telefono = "573002220008"
+    with persistencia.conectar(esquema) as conn:
+        id_conversacion = persistencia.asegurar_conversacion(conn, telefono=telefono)
+
+        viva = persistencia.conversacion_viva(conn, telefono)
+        assert viva is not None and viva[1] == 0, "una conversación nueva empieza en el turno 0"
+
+        persistencia.tocar_conversacion(conn, id_conversacion, turno_actual=1)
+        assert persistencia.conversacion_viva(conn, telefono)[1] == 1
+
+        # El segundo mensaje de la misma conversación: sin esto, seguía siendo el turno 1.
+        persistencia.tocar_conversacion(conn, id_conversacion, turno_actual=2)
+        assert persistencia.conversacion_viva(conn, telefono)[1] == 2
+
+        # Y sin turno no lo toca: la llamada que solo quiere adelantar la ventana no puede
+        # devolver el contador a cero.
+        persistencia.tocar_conversacion(conn, id_conversacion)
+        assert persistencia.conversacion_viva(conn, telefono)[1] == 2
+
+
 # ==========================================================================================
 # Si al paciente se le respondió (migración 009)
 # ==========================================================================================

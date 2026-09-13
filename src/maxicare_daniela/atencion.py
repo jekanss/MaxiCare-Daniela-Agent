@@ -69,8 +69,8 @@ from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 
 from . import conversacion, guardrails, ingesta, persistencia
-from .calendario import calendario_desde_config
-from .canales import ErrorDeCanal, Telegram, WhatsApp
+from .calendario import CalendarioCaido, calendario_desde_config
+from .canales import Telegram, WhatsApp
 from .config import RETARDO_RESPUESTA_SEGUNDOS, Config
 from .contratos import ContextoDaniela, DatosDelTurno
 from .ingesta import MensajeEntrante
@@ -118,6 +118,15 @@ class _DatosDelMensaje(DatosDelTurno):
     #: Lo que trajo el mensaje. `reiniciar()` los vuelve a poner, no los borra.
     adjunto_del_mensaje: bool = False
     sintomas_del_mensaje: bool = False
+
+    def __post_init__(self) -> None:
+        # Para que el invariante sea cierto desde que el objeto existe y no solo a partir del
+        # primer `reiniciar()`. Hoy `responder` reinicia siempre antes de correr, así que sin
+        # esto igual funcionaría -- pero un `ContextoDaniela` recién construido que ya diga la
+        # verdad no depende de que nadie llame a nada, y cualquiera que lo inspeccione (una
+        # prueba, un hook, la tool de la 6B) ve lo que trajo el mensaje.
+        self.hubo_adjunto = self.adjunto_del_mensaje
+        self.menciona_sintomas = self.sintomas_del_mensaje
 
     def reiniciar(self) -> None:
         super().reiniciar()
@@ -196,6 +205,15 @@ def _leer_estado(database_url: str, telefono: str, wamid: str) -> _Estado:
         try:
             operativa = persistencia.leer_configuracion(conn)
         except Exception:  # noqa: BLE001 -- los defaults del dataclass son los mismos
+            # El `rollback()` es lo que hace que este `except` degrade de verdad. `conectar`
+            # abre la conexión con `autocommit=False`: un error de SQL --un
+            # `statement_timeout` leyendo `configuracion`, por ejemplo-- deja la transacción
+            # ABORTADA, y las dos llamadas que vienen después, dentro de este mismo `with`,
+            # revientan con `InFailedSqlTransaction`. Sin el rollback, `_leer_estado` se cae
+            # entero y TODOS los mensajes de la clínica reciben el mensaje de emergencia
+            # mientras dure el problema -- por no poder leer tres enteros que ya tienen
+            # default. La degradación elegante no degradaba nada.
+            conn.rollback()
             log.warning("sin configuración operativa para %s; se usan los defaults", telefono)
             operativa = None
 
@@ -227,6 +245,7 @@ def _anotar_resultado(
     *,
     wamid_respuesta: str | None,
     motivo: str | None,
+    turno: int,
 ) -> None:
     """El segundo bloque de base: qué pasó con la respuesta. Nunca propaga.
 
@@ -241,7 +260,13 @@ def _anotar_resultado(
                 persistencia.marcar_fallo_respuesta(conn, wamid, motivo=motivo)
             # Siempre, incluso si el envío falló: el turno ocurrió, y la conversación tiene
             # que seguir viva o `conversacion_viva` la declararía vieja a mitad de la charla.
-            persistencia.tocar_conversacion(conn, id_conversacion)
+            #
+            # Y con el turno, que es lo que lo devuelve al único sitio donde sobrevive a un
+            # reinicio. Sin esto la columna se quedaba en 0 para siempre, todos los turnos de
+            # una conversación eran el turno 1, y la clave de idempotencia
+            # `id_conversacion + turno` dejaba de distinguir un escalamiento nuevo de un
+            # reintento del anterior -- el doctor solo se enteraba del primero.
+            persistencia.tocar_conversacion(conn, id_conversacion, turno_actual=turno)
     except Exception:  # noqa: BLE001 -- ver docstring
         log.exception("no se pudo anotar el resultado de %s", wamid)
 
@@ -278,6 +303,38 @@ def _sesion_de(id_conversacion: str, ahora: float) -> conversacion.SesionEnMemor
 # ==========================================================================================
 # Lo que se le dice al modelo
 # ==========================================================================================
+
+
+def _calendario_por_defecto(config: Config) -> Any:
+    """El calendario de producción, o uno que se comporta como caído. Nunca uno que finge.
+
+    `CalendarioGoogle.__init__` hace una lectura real contra Google --es su comprobación de
+    acceso, y es deliberada-- así que puede fallar al construirse con las credenciales bien
+    puestas: Google caído, o el calendario sin compartir con la cuenta de servicio. Sin este
+    `try`, ese fallo salía de `atender` y el paciente se quedaba sin respuesta por una
+    dependencia que ni siquiera hacía falta para contestarle un precio.
+
+    Lo que NO se hace aquí es caer a `CalendarioDoble`, que es lo que pediría el instinto: un
+    doble en producción le confirma al paciente una cita que no existe en ningún calendario y
+    lo manda a una clínica donde nadie lo espera. `CalendarioCaido` lanza `ErrorDeCalendario`,
+    que es justo lo que las tools de la fase 3 saben manejar -- liberan el cupo y escalan.
+
+    Se atrapa `Exception` y no solo `ErrorDeCalendario` por la misma razón que abajo con el
+    envío: el constructor traduce lo que conoce (auth, HTTP, red), pero un `ImportError` de
+    las bibliotecas de Google en un despliegue a medias no está traducido, y dejaría mudos a
+    todos los pacientes por una dependencia que falta.
+    """
+    try:
+        return calendario_desde_config(config)
+    except Exception as e:  # noqa: BLE001 -- ver docstring
+        log.error(
+            "EL CALENDARIO NO ARRANCÓ (%s): Daniela puede conversar, pero NO puede agendar, "
+            "mover ni cancelar citas. Las tools van a escalar a los doctores cada vez que lo "
+            "intenten. Revisa MAXICARE_GOOGLE_SA_B64 y que el calendario esté compartido con "
+            "la cuenta de servicio.",
+            e,
+        )
+        return CalendarioCaido(motivo=str(e))
 
 
 def _entrada_para_el_modelo(mensaje: MensajeEntrante) -> str:
@@ -360,9 +417,16 @@ async def atender(
         )
 
     # El doble check azul mientras Daniela «escribe» es lo que hace creíble la espera. Después
-    # del retardo no sirve de nada: para entonces ya llegó la respuesta. Falla en silencio por
-    # diseño -- ver `canales.WhatsApp.marcar_leido`.
-    await whatsapp.marcar_leido(mensaje.wamid)
+    # del retardo no sirve de nada: para entonces ya llegó la respuesta.
+    #
+    # `canales.WhatsApp.marcar_leido` se traga los `httpx.HTTPError` y nada más. Un timeout de
+    # lectura los cubre, pero un token vencido que devuelva algo raro, o cualquier otra cosa,
+    # saldría de aquí y tumbaría el turno ANTES de tocar la base: el paciente sin respuesta y
+    # sin rastro, por un detalle cosmético.
+    try:
+        await whatsapp.marcar_leido(mensaje.wamid)
+    except Exception:  # noqa: BLE001 -- ver arriba
+        log.warning("no se pudo marcar leído %s; se sigue igual", mensaje.wamid, exc_info=True)
 
     texto = _entrada_para_el_modelo(mensaje)
 
@@ -380,7 +444,7 @@ async def atender(
         log.exception("no se pudo leer el estado de %s; se responde lo mínimo", mensaje.telefono)
         try:
             await whatsapp.enviar_texto(mensaje.telefono, conversacion.MENSAJE_SEGURO)
-        except ErrorDeCanal:
+        except Exception:  # noqa: BLE001 -- mismo motivo que en el envío de abajo
             log.exception("tampoco se pudo responder a %s", mensaje.telefono)
             return Atendido(mensaje.wamid, None, False, motivo=f"sin base y sin envío: {e}")
         return Atendido(
@@ -402,7 +466,7 @@ async def atender(
             # Nunca un `CalendarioDoble()` fijo: este es el sitio por donde el calendario de
             # verdad entra en producción, y un doble aquí dejaría a la clínica sin ver una
             # sola cita, sin un solo error en el log.
-            calendario=calendario if calendario is not None else calendario_desde_config(config),
+            calendario=calendario if calendario is not None else _calendario_por_defecto(config),
             id_paciente=estado.id_paciente,
             nombre_paciente=estado.nombre_paciente,
             identidad_verificada=estado.identidad_verificada,
@@ -452,21 +516,30 @@ async def atender(
 
         try:
             wamid_respuesta = await whatsapp.enviar_texto(mensaje.telefono, respuesta)
-        except ErrorDeCanal as e:
-            log.error("no se le pudo responder a %s: %s", mensaje.telefono, e)
+        except Exception as e:  # noqa: BLE001 -- ver abajo
+            # `ErrorDeCanal` NO basta, y esto está comprobado: `canales.enviar_texto` hace el
+            # POST sin envolver los errores de httpx, así que un `ReadTimeout` o un
+            # `ConnectError` contra la Graph API salen crudos -- y también un `KeyError` si
+            # Meta devuelve un 200 con otra forma. Con el `except` estrecho, esa tarde de
+            # timeouts se traducía en: excepción perdida en el BackgroundTask, paciente sin
+            # respuesta, `mensajes_entrantes` sin motivo, y la conversación sin tocar, así que
+            # a las 24 horas se declaraba muerta a mitad de la charla. Este módulo promete en
+            # su docstring que nunca propaga; esta línea es la que lo hace verdad.
+            log.exception("no se le pudo responder a %s", mensaje.telefono)
             await asyncio.to_thread(
                 _anotar_resultado,
                 config.database_url,
                 estado.id_conversacion,
                 mensaje.wamid,
                 wamid_respuesta=None,
-                motivo=str(e),
+                motivo=f"{type(e).__name__}: {e}",
+                turno=turno,
             )
             return Atendido(
                 wamid=mensaje.wamid,
                 id_conversacion=estado.id_conversacion,
                 respondido=False,
-                motivo=str(e),
+                motivo=f"{type(e).__name__}: {e}",
                 turno=turno,
                 escalado_por=escalado_por,
             )
@@ -478,6 +551,7 @@ async def atender(
             mensaje.wamid,
             wamid_respuesta=wamid_respuesta,
             motivo=fallo,
+            turno=turno,
         )
         return Atendido(
             wamid=mensaje.wamid,

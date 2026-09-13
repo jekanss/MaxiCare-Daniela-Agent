@@ -335,19 +335,46 @@ def conversacion_viva(
     return (fila[0], fila[1], fila[2], fila[3]) if fila else None
 
 
-def tocar_conversacion(conn, id_conversacion: str) -> None:
-    """Pone `actualizada_en = now()`.
+def tocar_conversacion(conn, id_conversacion: str, *, turno_actual: int | None = None) -> None:
+    """Pone `actualizada_en = now()` y, si se lo dan, guarda el turno en que va la charla.
 
     Cada turno que Daniela atiende tiene que adelantar la ventana que vigila
     `conversacion_viva`, o una conversación en curso se declararía vieja a mitad de la charla
     y el paciente volvería a empezar de cero -- perdiendo el turno, la identidad ya
     verificada y los intentos de identificación ya gastados.
+
+    -----------------------------------------------------------------------------------
+    Por qué `turno_actual` se escribe aquí y no en otro sitio
+    -----------------------------------------------------------------------------------
+
+    La columna existía desde la migración 001 y **ninguna sentencia del proyecto la
+    actualizaba**: `conversacion.responder` sube el contador en memoria y ahí se queda. Como
+    `atencion.py` construye un `ContextoDaniela` nuevo por mensaje --leyendo el turno de
+    Neon, que es lo correcto: un reinicio no puede hacer que la conversación empiece de
+    cero--, todos los mensajes de una conversación leían `0` y todos eran el turno 1.
+
+    Lo que costaba: las claves de idempotencia se arman con `id_conversacion + turno_actual`.
+    Con el turno congelado, el segundo escalamiento de una conversación comparte clave con el
+    primero, `insertar_escalamiento` lo descarta como duplicado y **el doctor no se entera**.
+    Un paciente que escala por dolor en el mensaje 3 y otra vez, peor, en el mensaje 9, llega
+    una sola vez.
+
+    Es opcional --`None` no toca la columna-- porque hay un sitio que solo quiere adelantar
+    la ventana sin saber nada del turno, y porque así ninguna llamada existente cambia de
+    comportamiento por haber añadido un parámetro.
     """
     with conn.cursor() as cur:
-        cur.execute(
-            "UPDATE conversaciones SET actualizada_en = now() WHERE id = %s",
-            (id_conversacion,),
-        )
+        if turno_actual is None:
+            cur.execute(
+                "UPDATE conversaciones SET actualizada_en = now() WHERE id = %s",
+                (id_conversacion,),
+            )
+        else:
+            cur.execute(
+                "UPDATE conversaciones SET actualizada_en = now(), turno_actual = %s "
+                "WHERE id = %s",
+                (turno_actual, id_conversacion),
+            )
     conn.commit()
 
 

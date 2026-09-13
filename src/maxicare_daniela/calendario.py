@@ -190,6 +190,74 @@ class CalendarioDoble:
 
 
 # ==========================================================================================
+# El calendario que no se pudo construir
+# ==========================================================================================
+
+
+@dataclass(frozen=True)
+class CalendarioCaido:
+    """Cumple el Protocol y lanza `ErrorDeCalendario` en los cuatro métodos.
+
+    Existe para un caso concreto: `CalendarioGoogle.__init__` hace una lectura real contra
+    Google --es su comprobación de acceso-- y puede fallar al construirse, con las
+    credenciales bien puestas, porque Google esté caído o porque a alguien se le olvidó
+    compartir el calendario con la cuenta de servicio.
+
+    -----------------------------------------------------------------------------------
+    Por qué NO se cae a `CalendarioDoble`, que es lo que parecería obvio
+    -----------------------------------------------------------------------------------
+
+    Porque `CalendarioDoble` dice que sí a todo. Con uno en producción, `crear_cita` toma el
+    cupo en Neon, «crea» el evento en un diccionario en memoria, devuelve un id que no existe
+    en ningún calendario, y Daniela le confirma la cita al paciente. **El paciente llega a
+    una clínica donde nadie lo espera.** Es exactamente el fallo que este proyecto entero
+    existe para evitar, y encima sin una sola línea roja en el log.
+
+    Un calendario caído que se comporta como caído, en cambio, es seguro: las tools de la
+    fase 3 ya saben qué hacer con un `ErrorDeCalendario` --`crear_cita` libera el cupo que
+    acababa de tomar, no le confirma nada al paciente, y la corrida muere para que el
+    orquestador escale-- y esa es la conducta correcta cuando no se puede agendar.
+
+    Lo que sí sigue funcionando mientras tanto: precios, horarios, la base de conocimiento y
+    la conversación entera. Solo se cae lo que de verdad depende del calendario.
+
+    No confundir con el `CalendarioDoble` que devuelve `calendario_desde_config` cuando
+    faltan las credenciales. Ahí el doble es lo correcto, porque significa «esto no está
+    configurado» --una máquina de desarrollo-- y no «está configurado y no responde».
+    """
+
+    #: Qué pasó al construirlo. Viaja en cada excepción para que el log del turno diga la
+    #: causa de verdad y no solo «el calendario falló».
+    motivo: str = "el calendario no se pudo construir"
+
+    def _caido(self, operacion: str) -> ErrorDeCalendario:
+        return ErrorDeCalendario(
+            f"El calendario no está disponible ({operacion}): {self.motivo}. No se puede "
+            "agendar, mover ni cancelar hasta que se restablezca."
+        )
+
+    def crear_evento(
+        self, *, inicio: datetime, duracion_minutos: int, titulo: str, descripcion: str = ""
+    ) -> str:
+        raise self._caido("crear_evento")
+
+    def mover_evento(self, evento_id: str, *, inicio: datetime) -> None:
+        raise self._caido("mover_evento")
+
+    def eliminar_evento(self, evento_id: str) -> None:
+        # También lanza, y no es un descuido. `eliminar_evento` perdona el «ya no existe»
+        # porque ahí el resultado deseado se cumplió igual; aquí no sabemos nada del evento,
+        # y decir que se borró dejaría una cita viva en el calendario del doctor mientras
+        # Neon la da por cancelada.
+        raise self._caido("eliminar_evento")
+
+    def bloqueos(self, desde: datetime, hasta: datetime) -> list[Bloqueo]:
+        # Devolver `[]` sería peor que lanzar: significaría «los doctores no apartaron nada»
+        # y Daniela ofrecería como libre el almuerzo o el quirófano.
+        raise self._caido("bloqueos")
+
+
+# ==========================================================================================
 # Google
 # ==========================================================================================
 
