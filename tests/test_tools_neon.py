@@ -746,3 +746,84 @@ def test_un_fallo_al_responder_queda_registrado(esquema):
     assert fila is not None
     assert fila[0] == "OpenAI no respondió a tiempo"
     assert fila[1] is None
+
+
+# ==========================================================================================
+# El tema del paciente (fase 6B) — comprobación 11 del spec
+# ==========================================================================================
+#
+# Vive en este archivo y no en uno propio porque comparte la fixture `esquema`: un segundo
+# archivo de Neon significaría un segundo DROP/CREATE SCHEMA en la misma corrida, y dos
+# ciclos de vida de esquema que nadie coordina son una carrera esperando a ocurrir.
+#
+# Lo que esto añade sobre las pruebas offline: allá `persistencia.tema_del_paciente` y
+# `persistencia.guardar_tema` están DOBLADAS, así que su SQL no lo ejecuta nadie. Una
+# columna mal escrita en el UPDATE, o un `WHERE` sobre `telefono` donde la tabla tiene `id`,
+# pasaría la suite entera en verde y fallaría en el primer archivo de producción.
+
+
+def test_el_tema_de_telegram_se_persiste_y_se_recupera_por_telefono(esquema):
+    """Comprobación 11: `telegram_topic_id` se guarda y se lee por teléfono, en `pruebas`.
+
+    Recorre el mismo SQL que `lectura.asegurar_tema` corre en producción, en el mismo orden:
+    el paciente no tiene tema → se le cuelga uno → se recupera por su número.
+    """
+    telefono = "573009911001"
+    topic_id = 990011
+
+    with persistencia.conectar(esquema) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT current_schema()")
+            assert cur.fetchone()[0] == ESQUEMA, (
+                "esta prueba estaría escribiendo fuera del esquema de pruebas"
+            )
+
+        id_paciente = persistencia.asegurar_paciente(
+            conn, nombre_completo="Ana Del Tema", telefono=telefono
+        )
+
+        # Antes del primer archivo no hay tema, y eso es lo que hace que `asegurar_tema` lo
+        # cree. Si esto devolviera cualquier cosa distinta de None, no se crearía nunca.
+        assert persistencia.tema_del_paciente(conn, telefono) is None
+
+        persistencia.guardar_tema(conn, id_paciente=id_paciente, topic_id=topic_id)
+
+        assert persistencia.tema_del_paciente(conn, telefono) == topic_id
+
+        # Y nace CERRADO: el default de `abierto` es lo que impide que cualquiera del grupo
+        # le escriba al paciente fuera de relevo.
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT telegram_topic_id, telegram_topic_abierto
+                  FROM pacientes WHERE telefono = %s
+                """,
+                (telefono,),
+            )
+            assert cur.fetchone() == (topic_id, False)
+
+        # El parámetro `abierto` existe para cuando Telegram no dejó cerrar el tema: ahí la
+        # base tiene que decir la verdad, no la intención con la que se creó. Es la columna
+        # que leerá el relevo de la fase 6C.
+        persistencia.guardar_tema(
+            conn, id_paciente=id_paciente, topic_id=topic_id, abierto=True
+        )
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT telegram_topic_abierto FROM pacientes WHERE telefono = %s",
+                (telefono,),
+            )
+            assert cur.fetchone() == (True,)
+
+
+def test_un_numero_sin_fila_no_tiene_tema_ni_lo_finge(esquema):
+    """La otra mitad del CRÍTICO: un desconocido no tiene tema porque no tiene fila.
+
+    `lectura.asegurar_tema` pregunta por el paciente ANTES de crear nada y se cae al General
+    si no existe. Esta prueba fija lo que la base le contesta en ese caso: `None` las dos
+    veces, no una fila vacía ni una excepción.
+    """
+    desconocido = "573009911999"
+    with persistencia.conectar(esquema) as conn:
+        assert persistencia.buscar_paciente_por_telefono(conn, desconocido) is None
+        assert persistencia.tema_del_paciente(conn, desconocido) is None

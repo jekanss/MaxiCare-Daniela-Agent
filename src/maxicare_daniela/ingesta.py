@@ -22,10 +22,23 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
+from . import lectura as lectura_mod
 from . import persistencia
 from .canales import ErrorDeCanal, Telegram, WhatsApp
 
 log = logging.getLogger("maxicare.ingesta")
+
+#: La única referencia FUERTE a las tareas del lector. `asyncio` solo las guarda en un
+#: `WeakSet`, así que una tarea que nadie sostiene se la puede llevar el recolector a
+#: medias: el turno de Daniela ya terminó --ese es justo el caso en que el `shield` de
+#: `atencion._recoger_lecturas` existe-- y el doctor se quedaría sin su lectura clínica en
+#: silencio. El `add_done_callback` la saca en cuanto acaba, así que el `set` no crece.
+_lectores_vivos: set[asyncio.Task] = set()
+
+#: Lo mismo, para las tareas de `asegurar_tema` que se pasaron del tope y siguen por su
+#: cuenta. Van en un `set` propio y no en `_lectores_vivos` porque no son lo mismo: una es la
+#: lectura clínica del doctor y esta es el hilo donde caerá su PRÓXIMO archivo.
+_temas_en_curso: set[asyncio.Task] = set()
 
 #: Los tipos de WhatsApp que traen un archivo adjunto. `sticker` está incluido porque técnica
 #: mente es media aunque nunca sea clínico; excluirlo haría que un sticker se procesara como
@@ -200,6 +213,64 @@ class Resultado:
     nuevo: bool
     reenviado: bool
     fallo: str | None = None
+    #: La tarea del lector, si se arrancó. `atencion.atender` la recoge cuando cierra la
+    #: ventana del búfer. Es una `Task` y no un valor a propósito: esperarla aquí pondría
+    #: una llamada al modelo delante de la entrega del archivo al doctor.
+    lectura: asyncio.Task | None = None
+
+
+def _soltar_tema(tarea: asyncio.Task) -> None:
+    """Saca la tarea del `set` y le recoge la excepción, si la hubo.
+
+    Una tarea que se pasó del tope sigue viva sin nadie esperándola: si reventara, su
+    excepción se quedaría sin recoger y `asyncio` la sacaría por el destructor, con un
+    «Task exception was never retrieved» sin contexto y a destiempo.
+    """
+    _temas_en_curso.discard(tarea)
+    if not tarea.cancelled() and tarea.exception() is not None:
+        log.error("la creación del tema falló por detrás: %s", tarea.exception())
+
+
+async def _tema_o_general(
+    m: MensajeEntrante, *, database_url: str, telegram: Telegram
+) -> int | None:
+    """`asegurar_tema` con un reloj delante. `None` significa «al General».
+
+    El `except` de `asegurar_tema` ya degradaba ante un fallo; lo que faltaba era que el
+    RELOJ degradara también. Sin esto, el primer archivo de un paciente encadena `crear_tema`
+    y `cerrar_tema` --15 s de timeout cada una-- delante de la entrega al doctor, y el
+    candado por teléfono se lo suma al segundo archivo del mismo número. Choca de frente con
+    la garantía de la fase 2: nada de lo que se escriba puede retrasar la entrega del archivo.
+
+    El `shield` no es adorno. Sin él, el tope CANCELA la corrutina a mitad de `crear_tema`, y
+    si Telegram ya había creado el tema nadie lo guarda: queda un tema huérfano en el grupo y
+    el siguiente archivo crea otro. Con él, la operación termina por su cuenta --crea, cierra
+    y guarda-- y el hilo queda listo para el próximo archivo de esa persona; lo único que se
+    pierde es que ESTE archivo cae en el General. `_temas_en_curso` la sostiene mientras
+    tanto, por la misma razón que `_lectores_vivos` sostiene al lector.
+    """
+    tarea = asyncio.ensure_future(
+        lectura_mod.asegurar_tema(
+            telefono=m.telefono,
+            nombre_perfil=m.nombre_perfil,
+            database_url=database_url,
+            telegram=telegram,
+        )
+    )
+    _temas_en_curso.add(tarea)
+    tarea.add_done_callback(_soltar_tema)
+    try:
+        return await asyncio.wait_for(
+            asyncio.shield(tarea), timeout=lectura_mod.TOPE_SEGUNDOS_TEMA
+        )
+    except asyncio.TimeoutError:
+        log.warning(
+            "el tema de %s tardó más de %.0f s: este archivo va al General y el tema se "
+            "sigue creando por detrás para el siguiente",
+            m.telefono,
+            lectura_mod.TOPE_SEGUNDOS_TEMA,
+        )
+        return None
 
 
 async def procesar_mensaje(
@@ -224,16 +295,48 @@ async def procesar_mensaje(
         log.info("wamid %s ya estaba registrado: es un reintento de Meta, se ignora", m.wamid)
         return Resultado(m.wamid, nuevo=False, reenviado=False)
 
+    tarea: asyncio.Task | None = None
     try:
         if m.trae_archivo:
             # Primero los bytes. Todo lo demás puede esperar; esto no.
             archivo = await whatsapp.descargar_media(
                 m.media_id, nombre_original=m.nombre_archivo
             )
+            tema = await _tema_o_general(m, database_url=database_url, telegram=telegram)
+            destino = tema or tema_general
             pie = componer_aviso(m, tamano=archivo.tamano)
             telegram_id = await telegram.enviar_archivo(
-                archivo, tipo_whatsapp=m.tipo, pie=pie, tema_id=tema_general
+                archivo, tipo_whatsapp=m.tipo, pie=pie, tema_id=destino
             )
+            # A partir de aquí el archivo YA está entregado. Nada de lo que sigue —el aviso
+            # al General, el arranque del lector— puede convertir esta entrega en un fallo,
+            # así que el aviso queda en su propio try/except y el lector arranca ANTES de
+            # intentarlo: un aviso que revienta no puede quitarle al doctor la lectura.
+            if lectura_mod.vale_la_pena_leer(m.tipo, archivo.tamano):
+                tarea = asyncio.create_task(
+                    lectura_mod.leer_y_repartir(
+                        archivo, tipo=m.tipo, telegram=telegram, tema_id=destino
+                    )
+                )
+                # Ver `_lectores_vivos`: sin esta referencia fuerte, la tarea puede morir a
+                # medias en cuanto el turno de Daniela suelte la suya.
+                _lectores_vivos.add(tarea)
+                tarea.add_done_callback(_lectores_vivos.discard)
+            if tema:
+                # El archivo ya no cae en el General, así que el General tiene que enterarse
+                # igual: es donde los doctores miran. Degradación, no entrega: si esto falla,
+                # el archivo sigue estando donde ya quedó.
+                try:
+                    await telegram.enviar_mensaje(
+                        f"📎 Llegó un archivo de {_escapar(m.nombre_perfil or m.telefono)}"
+                        f" — está en su tema.",
+                        tema_id=tema_general,
+                    )
+                except Exception:  # noqa: BLE001
+                    log.exception(
+                        "el archivo de %s ya está entregado; solo falló el aviso al General",
+                        m.wamid,
+                    )
             tamano = archivo.tamano
         else:
             telegram_id = await telegram.enviar_mensaje(
@@ -248,7 +351,7 @@ async def procesar_mensaje(
 
     await asyncio.to_thread(_marcar_reenviado, database_url, m.wamid, telegram_id, tamano)
     log.info("%s entregado a los doctores (telegram message_id=%s)", m.wamid, telegram_id)
-    return Resultado(m.wamid, nuevo=True, reenviado=True)
+    return Resultado(m.wamid, nuevo=True, reenviado=True, lectura=tarea)
 
 
 # ── Acceso a la base ──────────────────────────────────────────────────────────────────────

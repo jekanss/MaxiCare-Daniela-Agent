@@ -93,6 +93,82 @@ número y espera `VENTANA_SILENCIO_SEGUNDOS` (20) sin mensajes nuevos, con tope 
   como antes, y lo único que se apaga es la respuesta al paciente. Existe para poder callarla
   en diez segundos sin desplegar código.
 
+## El muro
+
+La fase 6B le añadió un archivo al turno de WhatsApp: cuando llega una radiografía o una
+remisión, un lector automático la lee y el contenido clínico va SOLO a los doctores por
+Telegram, mientras Daniela recibe únicamente lo no clínico. Seis cosas de ese camino no se
+pueden mover.
+
+- **El reparto es un TIPO sin el campo, no una instrucción que alguien podría desobedecer.**
+  `lectura.repartir` parte lo que devolvió el lector en dos: `contexto_clinico` (texto libre,
+  destino Telegram) y `LecturaNoClinica` (`tipo_documento`, `tratamiento`, `origen`,
+  `fecha_documento`, `confianza` — sin `contexto_clinico`). Esa ausencia no es que el código
+  se acuerde de no copiarlo: es que la clase no tiene dónde ponerlo, y lleva
+  `extra="forbid"` para que ni un `**lectura.model_dump()` a medio pensar lo cuele como
+  atributo extra. `atencion._entrada_para_el_modelo` solo puede leer de `LecturaNoClinica`
+  porque es literalmente lo único que le llega: `leer_y_repartir` nunca devuelve la lectura
+  entera, sea cual sea el prompt del lector ese día.
+
+- **El archivo nunca espera al modelo, y el orden dentro de `procesar_mensaje` es este:**
+  descargar → tema (con tope) → **entregar el archivo** → arrancar el lector → avisar al
+  General. El archivo va PRIMERO; el `asyncio.create_task` del lector va inmediatamente
+  después, en cuanto el archivo ya está entregado; y el aviso al General es lo ÚLTIMO y va en
+  su propio `try/except` porque es degradación, no entrega. El lector va antes que el aviso a
+  propósito: un aviso que revienta no puede quitarle al doctor su lectura clínica, y a esas
+  alturas el archivo ya está depositado, así que nada de lo que siga puede convertir esa
+  entrega en un fallo. Es la garantía de la fase 2 (nada de lo que se escriba puede retrasar
+  la entrega al doctor), y sigue vigente: si el lector se cayera, se colgara o tardara un
+  minuto, el doctor ya tiene el archivo en su tema desde antes de que la tarea existiera.
+  (Una versión anterior de esta regla decía que el aviso iba antes del lector y que el
+  `create_task` era lo último de la función. Las dos afirmaciones eran falsas y el código
+  nunca fue así; lo sostienen
+  `test_ingesta.py::test_el_aviso_al_general_no_invalida_una_entrega_que_ya_ocurrio` y
+  `::test_el_lector_no_retrasa_la_entrega_del_archivo`.)
+
+- **Buscar o crear el tema también tiene reloj: `lectura.TOPE_SEGUNDOS_TEMA` (5 s).**
+  `asegurar_tema` encadena `crear_tema` y `cerrar_tema` en el primer archivo de un paciente,
+  cada una con `TIMEOUT_NORMAL` (15 s): sin tope, con Telegram lento la radiografía esperaba
+  medio minuto delante del doctor, y el candado por teléfono se lo sumaba al segundo archivo
+  del mismo número. Vencido el tope, el archivo va al General. La espera va con
+  `wait_for(shield(tarea))` y no con un `wait_for` pelado: **cancelar la operación a mitad de
+  `crear_tema` dejaría un tema huérfano en el grupo** —Telegram ya lo creó y nadie lo
+  guardó—, así que la tarea sigue por detrás (`ingesta._temas_en_curso` la sostiene) y el
+  hilo queda listo para el próximo archivo de esa persona.
+
+- **La ingesta NO crea filas en `pacientes`. Un desconocido no abre tema.** `asegurar_tema`
+  comprueba con `buscar_paciente_por_telefono` que el paciente ya existe ANTES de crear nada
+  —antes, no después, o quedaría el tema huérfano— y si no existe devuelve `None`: su archivo
+  va al General, exactamente como antes de 6B. La razón es de seguridad clínica, no de orden:
+  `atencion._leer_estado` deriva `identidad_verificada` de la EXISTENCIA de esa fila, y
+  `runtime._entregar` corre `procesar_mensaje` antes que `atender`. Con la ingesta creando la
+  fila —con el `nombre_perfil` que el propio desconocido escribió—, mandar una foto
+  **verificaba a un desconocido en ese mismo turno**: `revisar_identidad` y el
+  `tool_input_guardrail` `identidad_antes_de_datos` quedaban desactivados para él, y
+  `_mismo_nombre` comparaba después el nombre que él decía contra el nombre que él mismo
+  había puesto. Lo que se pierde es poco: el hilo vale por lo que CONSERVA —el historial de
+  esa persona— y un desconocido no tiene historial. En cuanto se identifique o le abran una
+  cita, su siguiente archivo le abrirá el hilo.
+
+- **El lector corre con `run_config`, y `trace_include_sensitive_data` va en `False`.** Es la
+  CUARTA salida del muro y la única que no se ve: `RunConfig()` nace con ese campo en `True`
+  en la 0.22.2, así que sin pasarlo el data URL entero de la radiografía y el
+  `LecturaArchivo` completo —`contexto_clinico` incluido— subían a los traces de OpenAI, que
+  se exportan fuera de la clínica. `config.TRACE_INCLUDE_SENSITIVE_DATA` existía desde la
+  fase 1 y no la cableaba nadie. Con `False` los spans se siguen creando (latencia, coste,
+  errores) y solo se omiten entradas y salidas. **`conversacion.py` tiene el mismo hueco y
+  está aplazado a la fase 7 por decisión expresa**: si lo cierras, cierra también su prueba.
+
+- **El lector corre en PARALELO con la ventana del búfer, nunca delante.** La tarea nace en
+  `procesar_mensaje` y viaja como `Resultado.lectura`; `atencion.atender` no la espera al
+  recibirla, la guarda en `bufer.lecturas[wamid]` y solo la recoge (`_recoger_lecturas`,
+  `asyncio.shield` con un margen corto) DESPUÉS de que la ventana de silencio cierra.
+  Encadenarla delante sumaría los 4-8 s que tarda el lector a los 20 s de la ventana, y
+  contra `limites.latencia_maxima` (un minuto) no cabe: medido el 12/09, un documento recibido
+  a las 19:03:28 se entregó después de un texto recibido a las 19:03:29 — si el lector hubiera
+  ido delante, Daniela habría contestado el texto sin saber todavía que había una foto. Lo que
+  no llegue a tiempo se descarta con un `log.info`, nunca con una excepción que tumbe el turno.
+
 ## Lo que la suite offline NO caza
 
 **`uv run pytest -q` a secas no caza una regresión en el SQL de `tocar_conversacion`.** Está
@@ -103,3 +179,22 @@ en verde y solo falla la de Neon. Quien toque esa función tiene que correr las 
 MAXICARE_PRUEBAS_NEON=1 uv run pytest -q -m neon
 uv run python scripts/probar_atencion.py
 ```
+
+**Tampoco caza a qué TEMA va cada cosa si el doble tira el `tema_id`.** Medido en la revisión
+final de 6B: cambiando `tema_id=destino` por `tema_id=tema_general` en `ingesta.py`, las 393
+pruebas quedaban en verde —el contenido clínico de cada paciente se iría al hilo donde miran
+todos los doctores— porque ningún doble offline guardaba el destino. Todo doble de Telegram
+guarda hoy `(texto, tema_id)`, y quien escriba uno nuevo tiene que hacer lo mismo.
+
+### Antes de desplegar esta fase, a mano
+
+- **Corre `uv run python scripts/obtener_chat_telegram.py`.** Es el único sitio donde se
+  comprueban `is_forum` y `can_manage_topics` del supergrupo. Sin los dos, `createForumTopic`
+  falla siempre y el **100 % de los archivos degrada al tema General desde el primer minuto**
+  — degradación correcta y silenciosa, que es justo la que nadie nota.
+- **Nada automatizado llama a `createForumTopic` contra el Telegram real.** En
+  `scripts/probar_lectura.py` `crear_tema` y `cerrar_tema` están doblados **incluso con
+  `--chat`**, así que ningún script ha comprobado nunca que un tema aparezca de verdad en el
+  grupo. Eso lo mira una persona con un Telegram delante: el tema del paciente existe, está
+  cerrado, tiene el archivo dentro y la lectura debajo. Decir que lo cubre un script sería
+  mentir sobre lo que está verificado.

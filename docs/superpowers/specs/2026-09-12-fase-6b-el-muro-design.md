@@ -201,8 +201,26 @@ archivo.
 
 **El nombre del tema** sale de `m.nombre_perfil` más el teléfono —`Ana Pérez · +573...`—. Si
 WhatsApp no manda nombre de perfil, el tema se llama solo con el teléfono: un tema sin
-nombre es peor que uno feo. `persistencia.asegurar_paciente` recibe ese mismo valor, y ya
-resuelve el caso del número desconocido que manda un archivo como primer mensaje.
+nombre es peor que uno feo.
+
+**Un número desconocido NO abre tema** (corregido en la revisión final de la fase; esta
+sección decía antes que `persistencia.asegurar_paciente` recibía el nombre de perfil y «ya
+resolvía» ese caso). `asegurar_tema` comprueba con `buscar_paciente_por_telefono` que el
+paciente ya existe **antes** de llamar a `createForumTopic` —antes, o quedaría un tema
+huérfano en el grupo— y si no existe devuelve `None`: el archivo va al tema General,
+exactamente como antes de 6B. La ingesta no crea filas en `pacientes`.
+
+**Por qué se corrigió:** `atencion._leer_estado` deriva `identidad_verificada` de la
+existencia de esa fila, y `runtime._entregar` corre `procesar_mensaje` antes que `atender`.
+Creando la fila desde la ingesta —con el nombre que el propio desconocido escribió en su
+perfil de WhatsApp—, **mandar una foto verificaba a un desconocido en ese mismo turno**:
+`revisar_identidad` («sin identidad verificada no se toca la agenda de nadie») y el
+`tool_input_guardrail` `identidad_antes_de_datos` quedaban desactivados para él, y
+`_mismo_nombre` acababa comparando el nombre que él decía contra el que él mismo había
+puesto. El principio que decide los empates —la seguridad clínica prevalece— gana aquí sobre
+la comodidad de darle hilo a todo el mundo: el hilo por paciente vale por lo que **conserva**
+—el historial de esa persona— y un desconocido no tiene historial que conservar. En cuanto se
+identifique o le abran una cita, su siguiente archivo le abrirá el hilo.
 
 **Hueco conocido que esto NO cierra:** Telegram no permite quitarle privilegios al creador
 del grupo, así que esa persona puede escribir en un tema cerrado y su mensaje llegaría al
@@ -253,10 +271,18 @@ no de memoria):
 `ArchivoDescargado` ya trae `contenido: bytes`, `mime` y `nombre`, así que no hay que volver
 a descargar nada.
 
-**PENDIENTE de confirmar contra una llamada real en la primera tarea del plan:** si
-`file_data` espera el data URL completo (`data:application/pdf;base64,...`) o el base64 a
-secas. Los nombres de los campos están verificados; este detalle de formato no, y una
-suposición razonable aquí no se distinguiría de un hecho comprobado.
+**Confirmado el 12/09/2026 contra una llamada real** (tarea 4 de este plan, `lector_archivos`
+con `Runner.run`, un PDF mínimo válido de una página generado para la sonda —tabla `xref`
+calculada de verdad, `%PDF-` al inicio y `%%EOF` al final— con el texto «Remision para
+ortodoncia»): `file_data` espera el **data URL completo**
+(`data:application/pdf;base64,<...>`), igual que `image_url`.
+
+Con los mismos 597 bytes en las dos variantes: `data-url` devolvió `200 OK` y el modelo
+leyó de verdad el texto del PDF (`tratamiento='ortodoncia'`, `confianza='alta'`);
+`base64-pelado` devolvió `400 Bad Request` —
+`Invalid 'input[0].content[0].file_data'` / `code: invalid_value` — sobre el mismo campo.
+Las dos hipótesis quedaron distinguidas por la misma entrada: no es un PDF sospechoso, es
+el formato del campo.
 
 **Tope de tamaño:** los archivos por encima de 20 MB no van al lector. Llegan al doctor igual
 —eso no cambia— y Daniela usa la entrada de hoy.
@@ -305,9 +331,25 @@ Ninguna de estas rutas puede dejar al doctor sin el archivo.
 9. `sticker`, `voice`, `audio` y `video` no llaman al lector.
 10. Un archivo de más de 20 MB no llama al lector y sí llega a Telegram.
 
+Las cinco que añadió la revisión final:
+
+10b. El lector corre con un `run_config` cuyo `trace_include_sensitive_data` es `False` — la
+   cuarta salida del muro, la única que sale de la clínica sin que nadie la vea.
+10c. Un número sin fila en `pacientes` no abre tema, y `crear_tema` no se llama ni una vez.
+10d. Ni `lectura.py` ni `ingesta.py` nombran `asegurar_paciente` — la aserción que impide que
+   la fuga de identidad vuelva por otro sitio.
+10e. Un `asegurar_tema` que tarda más que `TOPE_SEGUNDOS_TEMA` no retrasa la entrega: el
+   archivo va al General y la creación del tema sigue por detrás, sin cancelarse.
+10f. La lectura clínica va al tema DEL PACIENTE. Sin esta, mutar `tema_id=destino` a
+   `tema_id=tema_general` dejaba la suite entera en verde.
+
 ### Contra Neon (`MAXICARE_PRUEBAS_NEON=1 uv run pytest -q -m neon`)
 
 11. `telegram_topic_id` se persiste y se recupera por teléfono, en el esquema de pruebas.
+   Implementada en la revisión final, al final de `tests/test_tools_neon.py` (comparte la
+   fixture `esquema`: un segundo archivo de Neon serían dos ciclos de vida de esquema sin
+   coordinar). Ejercita el SQL real de `persistencia.tema_del_paciente` y
+   `persistencia.guardar_tema`, incluido el parámetro `abierto`, que offline va doblado.
 
 ### Entregable ejecutable
 
@@ -318,8 +360,14 @@ no gasta ni uno.
 ### Lo que ningún script comprueba
 
 Que el doctor vea el tema del paciente en su Telegram con el archivo dentro y la lectura
-debajo. Eso lo mira una persona, y decir que lo cubre un script sería mentir sobre lo que
-está verificado.
+debajo. **En `probar_lectura.py`, `crear_tema` y `cerrar_tema` están doblados incluso con
+`--chat`**: nada automatizado llama a `createForumTopic` contra el Telegram real. Eso lo mira
+una persona, y decir que lo cubre un script sería mentir sobre lo que está verificado.
+
+Y antes de desplegar la fase hay que correr `uv run python scripts/obtener_chat_telegram.py`:
+es el único sitio donde se comprueban `is_forum` y `can_manage_topics` del supergrupo. Sin
+los dos, el 100 % de los archivos degrada al tema General desde el primer minuto — en
+silencio, porque la degradación es correcta.
 
 ---
 

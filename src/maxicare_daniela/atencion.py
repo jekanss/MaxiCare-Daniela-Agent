@@ -74,12 +74,13 @@ from . import conversacion, guardrails, ingesta, persistencia
 from .calendario import CalendarioCaido, CalendarioDoble, calendario_desde_config
 from .canales import Telegram, WhatsApp
 from .config import (
+    MARGEN_LECTURA_SEGUNDOS,
     RETARDO_RESPUESTA_SEGUNDOS,
     TOPE_BUFER_SEGUNDOS,
     VENTANA_SILENCIO_SEGUNDOS,
     Config,
 )
-from .contratos import ContextoDaniela, DatosDelTurno
+from .contratos import ContextoDaniela, DatosDelTurno, LecturaNoClinica
 from .ingesta import MensajeEntrante
 
 log = logging.getLogger("maxicare.atencion")
@@ -139,6 +140,9 @@ class _Bufer:
     #: Despierta al que espera cuando llega un mensaje nuevo, para que la cuenta vuelva a
     #: empezar sin tener que sondear.
     despierta: asyncio.Event
+    #: La tarea del lector de cada mensaje que traía archivo, por `wamid`. No todas las
+    #: entradas del grupo tienen una: un texto suelto no tiene nada que leer.
+    lecturas: dict[str, asyncio.Task]
 
 
 #: El búfer por teléfono. A diferencia de los otros dos diccionarios, este NO necesita poda:
@@ -476,19 +480,93 @@ def _calendario_por_defecto(config: Config) -> Any:
     return calendario
 
 
-def _entrada_para_el_modelo(mensaje: MensajeEntrante) -> str:
+async def _recoger_lecturas(
+    tareas: dict[str, asyncio.Task], margen: float | None = None
+) -> dict[str, LecturaNoClinica]:
+    """Lo que el lector alcanzó a producir. Lo que no, no llegó.
+
+    `margen` es corto a propósito: la ventana ya le dio al lector sus 20 segundos. Esto es
+    la cola, no la espera.
+
+    Y es un plazo COMPARTIDO, no uno por archivo. Los lectores corrieron todos a la vez
+    durante la ventana, así que a todos les queda lo mismo por terminar; dárselo a cada uno
+    por separado convertiría las tres páginas de una remisión --el caso que el búfer existe
+    para agrupar-- en 3 × 3 s de cola. Contra el presupuesto de `limites.latencia_maxima`
+    eso no cabe: 45 de tope + 9 de cola + 6 del turno se pasan del minuto. Con el plazo
+    compartido el techo es uno y no depende de cuántos archivos mandara el paciente.
+
+    El default se resuelve AQUÍ y no en la firma porque un valor por defecto se evalúa al
+    definir la función: con `margen: float = MARGEN_LECTURA_SEGUNDOS`, un `monkeypatch` del
+    módulo no cambiaría nada y la prueba del lector lento mediría la constante de verdad.
+    """
+    margen = MARGEN_LECTURA_SEGUNDOS if margen is None else margen
+    fin = time.monotonic() + margen
+    recogidas: dict[str, LecturaNoClinica] = {}
+    for wamid, tarea in tareas.items():
+        try:
+            # `shield` para que el timeout NO cancele la tarea: el lector sigue corriendo y
+            # su mensaje a Telegram llega igual, tarde pero llega. Cancelarla dejaría al
+            # doctor sin la lectura solo porque Daniela ya no la necesitaba.
+            valor = await asyncio.wait_for(
+                asyncio.shield(tarea), timeout=max(0.0, fin - time.monotonic())
+            )
+        except TimeoutError:
+            log.info("la lectura de %s no llegó a tiempo; el turno sale sin ella", wamid)
+            continue
+        except Exception:  # noqa: BLE001 -- ninguna puede tumbar el turno
+            # Hoy no debería verse: `leer_y_repartir` se traga lo suyo y devuelve `None`. Si
+            # aparece es que algo cambió, y un `log.info` sin traza diciendo «no llegó a
+            # tiempo» sería la pista equivocada.
+            log.exception("la lectura de %s falló de una forma inesperada", wamid)
+            continue
+        if valor is not None:
+            recogidas[wamid] = valor
+    return recogidas
+
+
+def _entrada_para_el_modelo(
+    mensaje: MensajeEntrante, lectura: LecturaNoClinica | None = None
+) -> str:
     """El texto del paciente, o --si vino un archivo-- QUÉ llegó. Nunca qué muestra.
 
-    El lector de archivos llega en la entrega 6B; hoy nadie ha visto el contenido, y el
-    prompt tiene que decirlo con todas las letras. Si aquí se colara una interpretación
-    --«parece una radiografía con una caries»--, `sin_lectura_clinica` no tendría nada que
-    bloquear: la invención vendría de dentro del sistema, ya con aspecto de dato.
+    Sin `lectura` --un audio, un sticker, o un lector que no llegó a tiempo-- nadie ha visto
+    el contenido, y el prompt tiene que decirlo con todas las letras. Si aquí se colara una
+    interpretación --«parece una radiografía con una caries»--, `sin_lectura_clinica` no
+    tendría nada que bloquear: la invención vendría de dentro del sistema, ya con aspecto de
+    dato.
+
+    Con `lectura` cambia QUÉ se sabe, no el muro: `LecturaNoClinica` no tiene
+    `contexto_clinico` --no es que no se copie, es que no hay dónde ponerlo--, así que lo
+    más que puede decir esta rama es de qué tratamiento es el documento y de dónde viene.
+    Qué muestra sigue siendo cosa del doctor, y el aviso lo repite para que el modelo no
+    complete el hueco por su cuenta.
 
     Es la misma regla que `ingesta.componer_aviso` respeta con los doctores, y se escribe
-    igual a propósito: cuando llegue 6B no habrá que revisar este camino para entenderlo.
+    igual a propósito.
     """
     if mensaje.trae_archivo:
         que = ingesta.NOMBRE_HUMANO.get(mensaje.tipo, f"algo de tipo «{mensaje.tipo}»")
+        if lectura is not None:
+            aviso = f"[El paciente acaba de enviar {que}"
+            if mensaje.nombre_archivo:
+                # Igual que la rama sin lectura. Que el lector acierte no es razón para que
+                # Daniela deje de saber cómo se llamaba el archivo.
+                aviso += f", con el nombre «{mensaje.nombre_archivo}»"
+            aviso += ". Un lector automático lo revisó y el doctor ya lo tiene. "
+            if lectura.tratamiento != "no_identificado":
+                aviso += f"Es sobre {lectura.tratamiento.replace('_', ' ')}. "
+            else:
+                aviso += "No se pudo identificar para qué tratamiento es: pregúntaselo. "
+            if lectura.origen:
+                aviso += f"Viene de «{lectura.origen}». "
+            aviso += (
+                "NO sabes qué muestra el archivo y no debes suponerlo: eso lo ve el "
+                "doctor.]"
+            )
+            if mensaje.texto:
+                aviso += f"\nEl paciente escribió junto al archivo: {mensaje.texto}"
+            return aviso
+
         aviso = f"[El paciente acaba de enviar {que}"
         if mensaje.nombre_archivo:
             aviso += f", con el nombre «{mensaje.nombre_archivo}»"
@@ -510,17 +588,24 @@ def _entrada_para_el_modelo(mensaje: MensajeEntrante) -> str:
     return f"[El paciente envió {que}. No trae texto.]"
 
 
-def _entrada_del_grupo(mensajes: list[MensajeEntrante]) -> str:
+def _entrada_del_grupo(
+    mensajes: list[MensajeEntrante], leidas: dict[str, LecturaNoClinica] | None = None
+) -> str:
     """Los mensajes del grupo como UNA sola entrada para el modelo.
 
     El aviso de la cabecera no es decorativo. Sin él, el modelo recibe tres frases sueltas y
     las contesta una por una dentro del mismo globo --«1) ¡Hola! 2) Ofrecemos... 3) Sí,
     hacemos...»--, que es exactamente la sensación que el búfer existe para quitar, solo que
     concentrada en un mensaje en vez de repartida en tres.
+
+    Cada lectura se busca por `wamid`, no por posición: la foto y el «¿esto qué es?» que
+    viene detrás son dos mensajes del mismo grupo, y atar la lectura al segundo haría que la
+    entrada dijera que el mensaje de TEXTO trae una remisión, que es falso.
     """
+    leidas = leidas or {}
     if len(mensajes) == 1:
-        return _entrada_para_el_modelo(mensajes[0])
-    partes = [_entrada_para_el_modelo(m) for m in mensajes]
+        return _entrada_para_el_modelo(mensajes[0], leidas.get(mensajes[0].wamid))
+    partes = [_entrada_para_el_modelo(m, leidas.get(m.wamid)) for m in mensajes]
     return (
         "[El paciente escribió esto en varios mensajes seguidos, como se escribe en "
         "WhatsApp. Es una sola idea partida en trozos: léela entera y contéstale UNA vez, "
@@ -569,6 +654,7 @@ async def atender(
     dormir: Callable[[float], Awaitable[None]] | None = None,
     ventana: float | None = None,
     tope: float | None = None,
+    lectura: asyncio.Task | None = None,
 ) -> Atendido:
     """Atiende un mensaje de WhatsApp de principio a fin y deja constancia de qué pasó.
 
@@ -587,6 +673,11 @@ async def atender(
     a necesitar aquí y porque es el mismo juego de dependencias que recibe
     `ingesta.procesar_mensaje`: dos funciones del mismo webhook que se piden lo mismo se leen
     mucho mejor que dos que no.
+
+    `lectura` es la `asyncio.Task` del lector de archivos que arrancó `procesar_mensaje`, y
+    llega YA CORRIENDO: no se espera aquí antes de la ventana, se recoge después de que
+    cierre y solo si ya terminó. Lo que no llegue, se descarta -- el doctor lo recibe igual
+    por su lado, que es el camino que no se puede retrasar.
 
     Nunca propaga. Quien llama es un BackgroundTask de FastAPI, donde una excepción se pierde
     en el log del servidor sin dejar rastro consultable.
@@ -638,6 +729,8 @@ async def atender(
     if esperando is not None:
         esperando.mensajes.append(mensaje)
         esperando.ultimo = ahora
+        if lectura is not None:
+            esperando.lecturas[mensaje.wamid] = lectura
         esperando.despierta.set()
         log.info(
             "%s se suma al grupo de %s (van %d); no abre turno propio",
@@ -649,7 +742,13 @@ async def atender(
             wamid=mensaje.wamid, id_conversacion=None, respondido=False, agrupado=True
         )
 
-    bufer = _Bufer([mensaje], primero=ahora, ultimo=ahora, despierta=asyncio.Event())
+    bufer = _Bufer(
+        [mensaje],
+        primero=ahora,
+        ultimo=ahora,
+        despierta=asyncio.Event(),
+        lecturas={mensaje.wamid: lectura} if lectura is not None else {},
+    )
     _buferes[mensaje.telefono] = bufer
     try:
         await _esperar_el_silencio(
@@ -663,11 +762,20 @@ async def atender(
         # grupo que ya no espera a nadie, y ese teléfono no volvería a recibir respuesta.
         _buferes.pop(mensaje.telefono, None)
 
+    # El lector corrió EN PARALELO con la ventana, no delante. Aquí solo se recoge lo que ya
+    # esté listo: lo que quede se descarta.
+    #
+    # Encadenarlo delante sumaría sus 4-8 s a los 20 de la ventana y, en el peor caso,
+    # Daniela habría contestado ya el texto que vino junto a la foto sin saber que había una
+    # foto. Eso está medido: el 12/09, un documento recibido a las 19:03:28 se entregó
+    # después de un texto recibido a las 19:03:29.
+    leidas = await _recoger_lecturas(bufer.lecturas)
+
     mensajes = bufer.mensajes
     wamids = [m.wamid for m in mensajes]
     if len(mensajes) > 1:
         log.info("%s: %d mensajes en un solo turno", mensaje.telefono, len(mensajes))
-    texto = _entrada_del_grupo(mensajes)
+    texto = _entrada_del_grupo(mensajes, leidas)
 
     # El candado se coge ANTES de leer la base, y ese orden es el arreglo entero.
     #
