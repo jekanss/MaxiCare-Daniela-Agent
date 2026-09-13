@@ -127,6 +127,13 @@ una —qué se midió, qué costó— está en la regla que cubre ese archivo.
    que proteger: bloquearlo dejaba a la clínica sin pacientes nuevos, con `citas.paciente_id`
    NULLABLE desde la 001 justo para ese caso. El permiso lo da `ctx.telefono_sin_paciente`,
    que sale de la base y **nunca del modelo**, y la excepción es una lista blanca de UNA tool.
+   Lo que impide que eso lo deje encerrado: **`crear_cita` registra al paciente**, así que
+   desde el turno siguiente sí puede mover y cancelar lo suyo.
+13. **La pertenencia de una cita va por TELÉFONO, y toda hora que una tool confirma queda
+   autorizada — incluida la vieja al reprogramar y la cancelada al cancelar.** El id de una
+   cita es un UUID que el sistema le mandó al paciente: no es un control de acceso. Y si la
+   hora no queda autorizada, `sin_hora_no_verificada` bloquea la confirmación de una escritura
+   **que ya ocurrió**: la cita movida y el paciente yendo a la hora vieja.
 
 # Dónde está el resto
 

@@ -582,21 +582,46 @@ async def _crear_cita(ctx: ContextoDaniela, solicitud: SolicitudCita) -> str:
             "liberó y la cita NO existe. No se le puede confirmar nada al paciente."
         ) from e
 
-    def guardar(conn) -> str:
-        return persistencia.registrar_cita(
+    def guardar(conn) -> tuple[str, int]:
+        # Quien saca su primera cita deja de ser un desconocido, y aquí es donde deja de
+        # serlo. Sin esta fila, `identificar_paciente` no tendría nunca contra qué
+        # verificarlo --solo mira `pacientes`-- y `reprogramar_cita` y `cancelar_cita`, que
+        # sí exigen identidad, se le quedaban cerradas PARA SIEMPRE: pedía mover su propia
+        # cita y recibía «te escribe el doctor». `asegurar_paciente` estaba escrito desde la
+        # fase 1 y ninguna tool lo llamaba.
+        #
+        # No pisa el nombre de una ficha que ya exista -- eso lo decide `asegurar_paciente`,
+        # y su docstring explica por qué: dos personas en el teléfono de la casa.
+        paciente_id = ctx.id_paciente or persistencia.asegurar_paciente(
             conn,
-            reserva_id=reserva_id,
-            conversacion_id=ctx.id_conversacion,
-            paciente_id=ctx.id_paciente,
             nombre_completo=solicitud.nombre_completo,
             telefono=ctx.telefono_completo,
-            tratamiento=solicitud.tratamiento,
-            inicio=inicio,
-            duracion_minutos=ctx.duracion_cita_minutos,
-            evento_calendar_id=evento_id,
+        )
+        return (
+            persistencia.registrar_cita(
+                conn,
+                reserva_id=reserva_id,
+                conversacion_id=ctx.id_conversacion,
+                paciente_id=paciente_id,
+                nombre_completo=solicitud.nombre_completo,
+                telefono=ctx.telefono_completo,
+                tratamiento=solicitud.tratamiento,
+                inicio=inicio,
+                duracion_minutos=ctx.duracion_cita_minutos,
+                evento_calendar_id=evento_id,
+            ),
+            paciente_id,
         )
 
-    id_cita = await _con_base(ctx, guardar)
+    id_cita, paciente_id = await _con_base(ctx, guardar)
+    # El contexto deja de mentir en el mismo turno. La ficha ya está en la base, así que el
+    # `bool(paciente)` de `atencion._leer_estado` lo daría por verificado en el siguiente:
+    # dejarlo en False aquí solo haría que el turno en curso creyera otra cosa que la base.
+    ctx.id_paciente = paciente_id
+    if ctx.nombre_paciente is None:
+        ctx.nombre_paciente = solicitud.nombre_completo
+    ctx.telefono_sin_paciente = False
+    ctx.identidad_verificada = True
     texto = (
         f"Cita confirmada para {solicitud.nombre_completo}, {_formatear_hora(inicio)}, "
         f"{solicitud.tratamiento}. Id de la cita: {id_cita}."
@@ -633,6 +658,33 @@ async def crear_cita(
 # ==========================================================================================
 
 
+def _es_ajena(ctx: ContextoDaniela, cita: dict[str, Any]) -> bool:
+    """¿Esta cita es de otra persona? La pertenencia se ancla al TELÉFONO.
+
+    Lo que había era:
+
+        if ctx.id_paciente is not None and cita["paciente_id"] not in (None, ctx.id_paciente)
+
+    y tenía dos huecos que nadie podía alcanzar mientras `identidad_antes_de_datos` frenara
+    a todo el que no tuviera ficha: con `ctx.id_paciente is None` no comprobaba NADA, y una
+    cita con `paciente_id = NULL` la daba por buena para cualquiera. El arreglo que permite
+    agendar a un paciente nuevo volvía el segundo hueco alcanzable --esas citas pasaban a ser
+    las normales--, así que el candado se ata a lo que de verdad identifica al dueño: el
+    número desde el que se escribe, que es el que quedó guardado en la propia cita.
+
+    Que el id de una cita sea un UUID que solo conoce quien lo recibió no es un control de
+    acceso; es una contraseña que el propio sistema le enseñó al paciente por WhatsApp.
+
+    Se conserva la pertenencia por `paciente_id`: una persona puede cambiar de número, o
+    tener una cita que le abrió la clínica desde otro teléfono, y seguir siendo la dueña.
+    """
+    if cita.get("telefono") == ctx.telefono_completo:
+        return False
+    if ctx.id_paciente is not None and cita.get("paciente_id") == ctx.id_paciente:
+        return False
+    return True
+
+
 async def _reprogramar_cita(ctx: ContextoDaniela, id_cita: str, nuevo_inicio: str) -> str:
     destino = _a_fecha(nuevo_inicio, "nuevo_inicio")
 
@@ -645,7 +697,7 @@ async def _reprogramar_cita(ctx: ContextoDaniela, id_cita: str, nuevo_inicio: st
         cita = persistencia.leer_cita(conn, id_cita)
         if cita is None:
             return ("no_existe", None, None, [])
-        if ctx.id_paciente is not None and cita["paciente_id"] not in (None, ctx.id_paciente):
+        if _es_ajena(ctx, cita):
             return ("ajena", None, None, [])
         if cita["estado"] == "cancelada":
             return ("cancelada", cita, None, [])
@@ -701,7 +753,16 @@ async def _reprogramar_cita(ctx: ContextoDaniela, id_cita: str, nuevo_inicio: st
             persistencia.liberar_cupo(conn, reserva_vieja)
 
     await _con_base(ctx, aplicar)
-    texto = f"Cita {id_cita} reprogramada para {_formatear_hora(destino)}."
+    # Las DOS horas, y la vieja no es un adorno: confirmar un cambio exige decir de dónde a
+    # dónde, y `ctx.turno` se vacía en cada turno, así que la hora anterior --autorizada
+    # cuando se agendó-- ya no lo está. Sin nombrarla aquí, `sin_hora_no_verificada` bloqueaba
+    # la confirmación de un cambio QUE YA HABÍA OCURRIDO: la cita movida y el paciente
+    # recibiendo el mensaje seguro, camino de presentarse a la hora vieja. Sale de `leer_cita`
+    # --de la base, en este turno-- así que autorizarla es el mismo criterio de siempre.
+    texto = (
+        f"Cita {id_cita} reprogramada: estaba en {_formatear_hora(cita['inicio'])} y ahora "
+        f"queda en {_formatear_hora(destino)}."
+    )
     ctx.turno.horas_autorizadas |= horas_de(texto)
     return texto
 
@@ -738,7 +799,7 @@ async def _cancelar_cita(ctx: ContextoDaniela, solicitud: SolicitudCancelacion) 
 
     if cita is None:
         return f"No existe ninguna cita con id {solicitud.id_cita}."
-    if ctx.id_paciente is not None and cita["paciente_id"] not in (None, ctx.id_paciente):
+    if _es_ajena(ctx, cita):
         return (
             "Esa cita no pertenece al paciente identificado en esta conversación. NO la "
             "canceles. Escala a los doctores."
@@ -767,12 +828,22 @@ async def _cancelar_cita(ctx: ContextoDaniela, solicitud: SolicitudCancelacion) 
 
     await _con_base(ctx, aplicar)
 
+    # La hora cancelada va en el texto y queda autorizada, por lo mismo que en `reprogramar`:
+    # «tu cita del martes a las 9 quedó cancelada» es la frase natural, y sin autorizarla
+    # `sin_hora_no_verificada` bloqueaba la confirmación de una cancelación YA APLICADA. El
+    # paciente se quedaba creyendo que su cita sigue en pie y el cupo ya estaba libre para
+    # otro. Sale de `leer_cita`, no de la memoria del modelo.
+    cuando = _formatear_hora(cita["inicio"])
     if calendario_ok:
-        return f"Cita {solicitud.id_cita} cancelada y el horario quedó libre."
-    return (
-        f"Cita {solicitud.id_cita} cancelada y el horario quedó libre, pero el evento sigue "
-        "en el calendario de los doctores. Escala para que alguien lo borre a mano."
-    )
+        texto = f"Cita {solicitud.id_cita} ({cuando}) cancelada y ese horario quedó libre."
+    else:
+        texto = (
+            f"Cita {solicitud.id_cita} ({cuando}) cancelada y ese horario quedó libre, pero "
+            "el evento sigue en el calendario de los doctores. Escala para que alguien lo "
+            "borre a mano."
+        )
+    ctx.turno.horas_autorizadas |= horas_de(texto)
+    return texto
 
 
 @function_tool(
