@@ -33,6 +33,7 @@ from __future__ import annotations
 import asyncio
 import os
 import threading
+import uuid
 from datetime import datetime, timedelta
 
 import pytest
@@ -449,3 +450,154 @@ def test_tras_dos_nombres_equivocados_se_escala_y_no_se_pide_documento(esquema, 
     assert "escala" in (segundo + tercero).lower()
     assert "cédula" not in (segundo + tercero).lower()
     assert "documento" not in tercero.lower() or "NO pidas" in tercero
+
+
+# ==========================================================================================
+# `conversacion_viva` -- el get-or-none que le falta a `asegurar_conversacion`
+# ==========================================================================================
+
+
+def test_una_conversacion_reciente_del_mismo_telefono_se_reutiliza(esquema):
+    telefono = "573002220001"
+    with persistencia.conectar(esquema) as conn:
+        id_conversacion = persistencia.asegurar_conversacion(conn, telefono=telefono)
+        viva = persistencia.conversacion_viva(conn, telefono)
+
+    assert viva is not None
+    assert viva[0] == id_conversacion
+
+
+def test_una_conversacion_vieja_no_se_reutiliza(esquema):
+    telefono = "573002220002"
+    with persistencia.conectar(esquema) as conn:
+        id_conversacion = persistencia.asegurar_conversacion(conn, telefono=telefono)
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE conversaciones SET actualizada_en = now() - interval '30 hours' "
+                "WHERE id = %s",
+                (id_conversacion,),
+            )
+        conn.commit()
+
+        assert persistencia.conversacion_viva(conn, telefono) is None
+
+
+def test_conversacion_viva_devuelve_la_mas_reciente(esquema):
+    """CRÍTICO: la consulta ordena por `actualizada_en DESC, id DESC`.
+
+    `now()` es la hora de la TRANSACCIÓN: las dos filas se crean dentro de la misma
+    transacción para que `actualizada_en` quede exactamente igual en las dos, y así la
+    prueba ejercita de verdad el desempate por `id DESC` -- no por casualidad de reloj.
+    """
+    telefono = "573002220003"
+    with persistencia.conectar(esquema) as conn:
+        id_primera = str(uuid.uuid4())
+        id_segunda = str(uuid.uuid4())
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO conversaciones (id, telefono, canal) VALUES (%s, %s, 'whatsapp')",
+                (id_primera, telefono),
+            )
+            cur.execute(
+                "INSERT INTO conversaciones (id, telefono, canal) VALUES (%s, %s, 'whatsapp')",
+                (id_segunda, telefono),
+            )
+        conn.commit()
+
+        esperado = max(id_primera, id_segunda)
+        viva = persistencia.conversacion_viva(conn, telefono)
+
+    assert viva is not None
+    assert viva[0] == esperado, "no desempató por id DESC cuando actualizada_en empata"
+
+
+def test_conversacion_viva_no_cruza_telefonos(esquema):
+    telefono_a = "573002220004"
+    telefono_b = "573002220005"
+    with persistencia.conectar(esquema) as conn:
+        persistencia.asegurar_conversacion(conn, telefono=telefono_a)
+
+        assert persistencia.conversacion_viva(conn, telefono_b) is None
+
+
+def test_tocar_conversacion_adelanta_la_ventana(esquema):
+    telefono = "573002220006"
+    with persistencia.conectar(esquema) as conn:
+        id_conversacion = persistencia.asegurar_conversacion(conn, telefono=telefono)
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE conversaciones SET actualizada_en = now() - interval '30 hours' "
+                "WHERE id = %s",
+                (id_conversacion,),
+            )
+        conn.commit()
+        assert persistencia.conversacion_viva(conn, telefono) is None
+
+        persistencia.tocar_conversacion(conn, id_conversacion)
+        viva = persistencia.conversacion_viva(conn, telefono)
+
+    assert viva is not None
+    assert viva[0] == id_conversacion
+
+
+# ==========================================================================================
+# Si al paciente se le respondió (migración 009)
+# ==========================================================================================
+
+
+def test_la_respuesta_al_paciente_queda_registrada(esquema):
+    telefono = "573002220007"
+    wamid = f"wamid-prueba-{uuid.uuid4()}"
+    with persistencia.conectar(esquema) as conn:
+        id_conversacion = persistencia.asegurar_conversacion(conn, telefono=telefono)
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO mensajes_entrantes (wamid, telefono, tipo) VALUES (%s, %s, 'text')",
+                (wamid, telefono),
+            )
+        conn.commit()
+
+        persistencia.ligar_mensaje_a_conversacion(conn, wamid, id_conversacion)
+        persistencia.marcar_respondido(conn, wamid, wamid_respuesta="wamid-respuesta-1")
+
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT conversacion_id::text, respondido_en, wamid_respuesta
+                  FROM mensajes_entrantes WHERE wamid = %s
+                """,
+                (wamid,),
+            )
+            fila = cur.fetchone()
+
+    assert fila is not None
+    assert fila[0] == id_conversacion
+    assert fila[1] is not None
+    assert fila[2] == "wamid-respuesta-1"
+
+
+def test_un_fallo_al_responder_queda_registrado(esquema):
+    """Si un fallo marcara `respondido_en`, la pregunta «¿a quién no le contestamos?»
+    devolvería vacío justo cuando importa."""
+    telefono = "573002220008"
+    wamid = f"wamid-prueba-{uuid.uuid4()}"
+    with persistencia.conectar(esquema) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO mensajes_entrantes (wamid, telefono, tipo) VALUES (%s, %s, 'text')",
+                (wamid, telefono),
+            )
+        conn.commit()
+
+        persistencia.marcar_fallo_respuesta(conn, wamid, motivo="OpenAI no respondió a tiempo")
+
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT fallo_respuesta, respondido_en FROM mensajes_entrantes WHERE wamid = %s",
+                (wamid,),
+            )
+            fila = cur.fetchone()
+
+    assert fila is not None
+    assert fila[0] == "OpenAI no respondió a tiempo"
+    assert fila[1] is None

@@ -292,6 +292,116 @@ def asegurar_conversacion(
     return id_conversacion
 
 
+def conversacion_viva(
+    conn, telefono: str, *, ventana_horas: int = 24
+) -> tuple[str, int, bool, int] | None:
+    """La conversación reciente de ese teléfono:
+    (id_conversacion, turno_actual, identidad_verificada, intentos_identificacion).
+    `None` si no hay ninguna dentro de la ventana.
+
+    `asegurar_conversacion` engaña con el nombre: SIEMPRE inserta una fila nueva, y no es un
+    get-or-create. En el chat web da igual, porque el id se guarda en un dict en memoria,
+    pero en WhatsApp -- usada tal cual -- abriría una conversación por cada mensaje: Daniela
+    no recordaría la frase anterior, `turno_actual` sería siempre 1, y las claves de
+    idempotencia (`id_conversacion + turno`) nunca colisionarían con nada, con lo que
+    dejarían de proteger. Esta función es el lookup que falta -- get-or-none, nunca
+    get-or-create: decidir si toca crear una fila nueva es trabajo de quien llama.
+
+    -----------------------------------------------------------------------------------
+    Por qué el ORDER BY lleva `id DESC` además de `actualizada_en DESC`
+    -----------------------------------------------------------------------------------
+    `now()` en Postgres es la hora de la TRANSACCIÓN, no la del statement: dos
+    conversaciones creadas dentro de la misma transacción -- dos mensajes que llegan juntos
+    -- comparten el instante exacto de `actualizada_en`. Sin un desempate estable, cuál de
+    las dos vuelve primero queda en manos del planificador, y la respuesta cambia de una
+    corrida a otra. Ya mordió así en la fase 8 de este proyecto.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT id::text, turno_actual, identidad_verificada, intentos_identificacion
+              FROM conversaciones
+             WHERE telefono = %s
+               AND actualizada_en >= now() - (%s * interval '1 hour')
+             ORDER BY actualizada_en DESC, id DESC
+             LIMIT 1
+            """,
+            (telefono, ventana_horas),
+        )
+        fila = cur.fetchone()
+    return (fila[0], fila[1], fila[2], fila[3]) if fila else None
+
+
+def tocar_conversacion(conn, id_conversacion: str) -> None:
+    """Pone `actualizada_en = now()`.
+
+    Cada turno que Daniela atiende tiene que adelantar la ventana que vigila
+    `conversacion_viva`, o una conversación en curso se declararía vieja a mitad de la charla
+    y el paciente volvería a empezar de cero -- perdiendo el turno, la identidad ya
+    verificada y los intentos de identificación ya gastados.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE conversaciones SET actualizada_en = now() WHERE id = %s",
+            (id_conversacion,),
+        )
+    conn.commit()
+
+
+# ------------------------------------------------------------------------------------------
+# `mensajes_entrantes` -- por qué estas tres funciones viven aquí y no en `ingesta.py`
+# ------------------------------------------------------------------------------------------
+# `ingesta.py` sigue siendo el dueño de `_registrar`, `_marcar_reenviado` y `_marcar_fallo`:
+# esas escrituras pasan por el webhook antes de que exista ninguna conversación. Las tres de
+# aquí las llama `atencion.py`, después de que Daniela ya respondió -- o falló al intentarlo
+# -- y a esa altura ya hay una conversación de por medio. Por eso viven junto al resto del
+# acceso a conversaciones, y no junto a la ingesta cruda del webhook.
+
+
+def ligar_mensaje_a_conversacion(conn, wamid: str, id_conversacion: str) -> None:
+    """Apunta el mensaje entrante a la conversación que lo atendió."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE mensajes_entrantes SET conversacion_id = %s WHERE wamid = %s",
+            (id_conversacion, wamid),
+        )
+    conn.commit()
+
+
+def marcar_respondido(conn, wamid: str, *, wamid_respuesta: str) -> None:
+    """Deja constancia de que a este mensaje sí se le contestó, y con qué mensaje de salida.
+
+    Sin esto, `mensajes_entrantes` solo cuenta el viaje hacia Telegram: no hay forma de saber
+    si al paciente, del otro lado, alguien le respondió alguna vez.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE mensajes_entrantes
+               SET respondido_en   = now(),
+                   wamid_respuesta = %s
+             WHERE wamid = %s
+            """,
+            (wamid_respuesta, wamid),
+        )
+    conn.commit()
+
+
+def marcar_fallo_respuesta(conn, wamid: str, *, motivo: str) -> None:
+    """Deja el motivo del fallo al responder.
+
+    NO toca `respondido_en` -- se queda en NULL a propósito. Si un fallo marcara respondido,
+    la consulta que justifica esta migración entera -- ¿a quién no le contestamos? --
+    devolvería vacío justo cuando más importa.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE mensajes_entrantes SET fallo_respuesta = %s WHERE wamid = %s",
+            (motivo, wamid),
+        )
+    conn.commit()
+
+
 def conversacion_tomada(conn, id_conversacion: str) -> str | None:
     """El doctor que tiene el relevo de esa conversación, o `None` si la tiene Daniela.
 
