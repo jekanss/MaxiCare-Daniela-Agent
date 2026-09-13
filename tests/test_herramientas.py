@@ -186,6 +186,160 @@ def test_la_disponibilidad_no_ofrece_horas_de_hoy_que_ya_pasaron(monkeypatch):
     assert "12:00" in texto
 
 
+# ==========================================================================================
+# Google Calendar es la fuente de la disponibilidad
+# ==========================================================================================
+#
+# Lo que pidió la clínica, en sus palabras: el doctor bloquea de 2 a 5 en SU calendario y
+# Daniela deja de ofrecer esas horas; borra el bloqueo y vuelven a estar libres, sin que
+# nadie toque nada en el sistema. Las tres pruebas de abajo son esa frase, partida.
+
+
+def test_un_bloqueo_del_doctor_tapa_esas_horas_en_la_disponibilidad(monkeypatch):
+    """El caso literal: 2 p. m. a 5 p. m. apartadas a mano en Google Calendar."""
+    calendario = CalendarioDoble()
+    calendario.agregar_bloqueo(
+        datetime(2026, 9, 16, 14, 0, tzinfo=h.ZONA_BOGOTA),
+        datetime(2026, 9, 16, 17, 0, tzinfo=h.ZONA_BOGOTA),
+        "Cirugía",
+    )
+    ctx = contexto(
+        calendario=calendario, ahora=datetime(2026, 9, 16, 7, 0, tzinfo=h.ZONA_BOGOTA)
+    )
+
+    async def base_falsa(_ctx, trabajo):
+        return trabajo(BaseFalsa())
+
+    monkeypatch.setattr(h, "_con_base", base_falsa)
+    monkeypatch.setattr(persistencia, "bloques_ocupados", lambda conn, desde, hasta: {})
+
+    texto = asyncio.run(h._consultar_disponibilidad(ctx, "2026-09-16T13:00", "2026-09-16T18:00"))
+
+    assert "13:00" in texto, "la hora anterior al bloqueo sigue libre"
+    assert "17:00" in texto, "el bloqueo termina a las 17:00 y esa hora vuelve a ser suya"
+    for tapada in ("14:00", "15:00", "16:00"):
+        assert tapada not in texto, f"ofreció {tapada}, que el doctor apartó"
+
+
+def test_quitar_el_bloqueo_devuelve_esas_horas_sin_tocar_nada_mas(monkeypatch):
+    """La otra mitad: el doctor borra el evento y el horario se libera solo.
+
+    No hay caché que invalidar ni estado que sincronizar --`_huecos_libres` le pregunta a
+    Calendar en cada consulta--, y esta prueba es lo que impide que alguien meta uno «para
+    ahorrar latencia» sin darse cuenta de lo que rompe.
+    """
+    calendario = CalendarioDoble()
+    ctx = contexto(
+        calendario=calendario, ahora=datetime(2026, 9, 16, 7, 0, tzinfo=h.ZONA_BOGOTA)
+    )
+
+    async def base_falsa(_ctx, trabajo):
+        return trabajo(BaseFalsa())
+
+    monkeypatch.setattr(h, "_con_base", base_falsa)
+    monkeypatch.setattr(persistencia, "bloques_ocupados", lambda conn, desde, hasta: {})
+
+    consulta = lambda: asyncio.run(
+        h._consultar_disponibilidad(ctx, "2026-09-16T13:00", "2026-09-16T18:00")
+    )
+
+    calendario.agregar_bloqueo(
+        datetime(2026, 9, 16, 14, 0, tzinfo=h.ZONA_BOGOTA),
+        datetime(2026, 9, 16, 17, 0, tzinfo=h.ZONA_BOGOTA),
+        "Cirugía",
+    )
+    assert "15:00" not in consulta()
+
+    calendario._bloqueos.clear()  # el doctor borra el evento
+    assert "15:00" in consulta(), "el horario no volvió a estar disponible"
+
+
+def test_no_se_agenda_dentro_de_un_bloqueo_del_doctor(monkeypatch):
+    """Ofrecer bien no basta: hay que RECHAZAR bien.
+
+    `consultar_disponibilidad` ya respetaba los bloqueos, pero `crear_cita` no los miraba:
+    comprobaba la hora pasada y el cupo de Neon, y se iba derecha a `crear_evento`. Dos
+    caminos llegaban ahí con una hora bloqueada:
+
+      1. El paciente pide una hora concreta --«las 3»-- y el modelo agenda sin consultar
+         antes. Nada se lo impedía: `sin_hora_no_verificada` da por buena toda hora que una
+         tool confirma, y la confirmación de `crear_cita` se autoriza a sí misma.
+      2. El doctor bloquea DESPUÉS de que Daniela ofreció esa hora y antes de que el
+         paciente diga que sí. Es la ventana normal de una conversación por WhatsApp:
+         minutos.
+
+    En los dos casos el resultado era una cita encima de la cirugía del doctor, confirmada
+    al paciente, y un evento en el calendario donde él ya había dicho que no podía.
+    """
+    calendario = CalendarioDoble()
+    calendario.agregar_bloqueo(
+        datetime(2026, 9, 15, 14, 0, tzinfo=h.ZONA_BOGOTA),
+        datetime(2026, 9, 15, 17, 0, tzinfo=h.ZONA_BOGOTA),
+        "Cirugía",
+    )
+    ctx = contexto(
+        calendario=calendario, ahora=datetime(2026, 9, 15, 8, 0, tzinfo=h.ZONA_BOGOTA)
+    )
+    tocada = []
+
+    async def base_falsa(_ctx, trabajo):
+        tocada.append("la base")
+        return trabajo(BaseFalsa())
+
+    monkeypatch.setattr(h, "_con_base", base_falsa)
+    monkeypatch.setattr(persistencia, "bloques_ocupados", lambda conn, desde, hasta: {})
+    monkeypatch.setattr(
+        persistencia, "tomar_cupo", lambda conn, **kw: (55, 1)
+    )
+    monkeypatch.setattr(persistencia, "cita_viva_de_reserva", lambda conn, reserva_id: None)
+
+    texto = asyncio.run(
+        h._crear_cita(
+            ctx,
+            SolicitudCita(
+                nombre_completo="Ana Gómez",
+                inicio=datetime(2026, 9, 15, 15, 0, tzinfo=h.ZONA_BOGOTA),
+                tratamiento="limpieza",
+                clave_idempotencia="da-igual",
+            ),
+        )
+    )
+
+    assert calendario.eventos == {}, "creó la cita encima del bloqueo del doctor"
+    assert "Cita confirmada" not in texto, "se la confirmó al paciente"
+    assert tocada == [], "consumió un cupo por una hora que nunca se pudo agendar"
+
+
+def test_no_se_mueve_una_cita_a_una_hora_bloqueada_por_el_doctor(monkeypatch):
+    """Mover una cita encima de la cirugía del doctor es el mismo defecto que crearla ahí.
+
+    Y aquí el camino 2 de `_bloqueo_que_tapa` es todavía más probable: entre que el paciente
+    pide cambiar y acepta la hora nueva pasa una conversación entera.
+    """
+    calendario = CalendarioDoble()
+    calendario.agregar_bloqueo(
+        datetime(2026, 9, 15, 14, 0, tzinfo=h.ZONA_BOGOTA),
+        datetime(2026, 9, 15, 17, 0, tzinfo=h.ZONA_BOGOTA),
+        "Cirugía",
+    )
+    ctx = contexto(
+        calendario=calendario, ahora=datetime(2026, 9, 15, 8, 0, tzinfo=h.ZONA_BOGOTA)
+    )
+    tocada = []
+
+    async def base_falsa(_ctx, trabajo):
+        tocada.append("la base")
+        return trabajo(BaseFalsa())
+
+    monkeypatch.setattr(h, "_con_base", base_falsa)
+
+    texto = asyncio.run(h._reprogramar_cita(ctx, "cita-1", "2026-09-15T15:00"))
+
+    assert "no está disponible" in texto
+    assert calendario.eventos == {}, "movió el evento encima del bloqueo"
+    assert tocada == [], "tocó la base por una hora que nunca se pudo usar"
+
+
 def test_no_se_agenda_una_cita_en_una_hora_que_ya_paso(monkeypatch):
     """Y se rechaza ANTES de tocar la base: un cupo consumido en el pasado no lo libera nadie."""
     ctx = contexto(ahora=datetime(2026, 9, 15, 12, 0, tzinfo=h.ZONA_BOGOTA))

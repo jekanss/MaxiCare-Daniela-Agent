@@ -16,6 +16,18 @@ El `CLAUDE.md` raíz lleva la regla en una línea. Aquí está el porqué.
   de una hora taparía el bloque y la clínica atendería **uno** por hora en vez de dos. Cada
   evento que crea Daniela lleva `extendedProperties.private.origen = "daniela"` y
   `bloqueos()` lo descarta. Un evento sin marca es de los doctores y sí tapa.
+- **Google Calendar manda también al ESCRIBIR, no solo al ofrecer.**
+  `consultar_disponibilidad` respeta los bloqueos desde la fase 3, pero hasta el 13/09/2026
+  `crear_cita` y `reprogramar_cita` no los miraban: comprobaban la hora pasada y el cupo de
+  Neon, y se iban derechas a `crear_evento`. Dos caminos llegaban ahí con una hora que el
+  doctor había apartado —el paciente que pide «las 3» y el modelo que agenda sin consultar
+  antes, y el doctor que bloquea DESPUÉS de que Daniela ofreció esa hora, que en WhatsApp
+  son minutos—. El guardia es `_bloqueo_que_tapa`, y va **antes de tocar la base**: un cupo
+  consumido por una cita que nunca se pudo crear hay que ir a devolverlo. El mensaje no
+  nombra el título del evento: es la agenda privada del doctor.
+- **No hay caché de bloqueos, y es deliberado.** Cada consulta le pregunta a Google, que es
+  lo que hace que borrar el evento libere la hora sin sincronizar nada. Los pasos 6b y 6c de
+  `probar_calendario.py` existen para cazar a quien meta uno «para bajar la latencia».
 - **La credencial es `MAXICARE_GOOGLE_SA_B64`, no una ruta a un archivo.** `config.py`
   decía `MAXICARE_GOOGLE_CREDENTIALS_PATH`, que no existía en ningún `.env`; nadie lo notó
   porque ningún módulo leía ese campo. El nombre correcto es el que documenta `.env.ejemplo`.

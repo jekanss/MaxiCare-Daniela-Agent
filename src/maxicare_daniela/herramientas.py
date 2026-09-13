@@ -58,7 +58,7 @@ from typing import Any, Callable
 from agents import RunContextWrapper, function_tool
 
 from . import contratos, persistencia
-from .calendario import ZONA_BOGOTA, ErrorDeCalendario, bloques_del_dia
+from .calendario import ZONA_BOGOTA, Bloqueo, ErrorDeCalendario, bloques_del_dia
 from .canales import Telegram
 from .guardrails import cifras_de, horas_de, identidad_antes_de_datos
 from .contratos import (
@@ -133,6 +133,51 @@ def _formatear_hora(momento: datetime) -> str:
     dias = ("lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo")
     local = momento.astimezone(ZONA_BOGOTA)
     return f"{dias[local.weekday()]} {local.day}/{local.month} a las {local:%H:%M}"
+
+
+async def _bloqueo_que_tapa(ctx: ContextoDaniela, inicio: datetime) -> Bloqueo | None:
+    """El bloqueo del doctor que cubre ese bloque, si lo hay. Google manda.
+
+    `consultar_disponibilidad` ya respetaba los bloqueos desde la fase 3, pero las dos tools
+    que ESCRIBEN no los miraban: comprobaban la hora pasada y el cupo de Neon, y se iban
+    derechas a `crear_evento`. Dos caminos llegaban ahí con una hora que el doctor había
+    apartado:
+
+      1. **El modelo agenda sin consultar antes.** El paciente dice «las 3» y Daniela lo
+         toma. Nada se lo impedía: `sin_hora_no_verificada` da por buena toda hora que una
+         tool confirma, y la confirmación de `crear_cita` se autoriza a sí misma.
+      2. **El doctor bloquea DESPUÉS de que Daniela ofreció esa hora.** Entre el «tengo las
+         3 libres» y el «sí, esa» del paciente pasan minutos: es una conversación de
+         WhatsApp, no una transacción.
+
+    Va ANTES de tocar la base, junto a la comprobación de hora pasada y por el mismo motivo:
+    un cupo consumido por una cita que nunca se pudo crear hay que ir a devolverlo.
+
+    Límite conocido: si el doctor bloquea entre dos intentos de la MISMA `crear_cita` (un
+    reintento del modelo, segundos), el segundo intento responde «bloqueado» en vez de
+    devolver la confirmación que ya existía. La cita, que sí se creó, sigue en pie. Se
+    prefiere ese mensaje raro en un caso de segundos a consumir un cupo en todos los demás.
+    """
+    paso = timedelta(minutes=ctx.duracion_cita_minutos)
+    fin = inicio + paso
+    bloqueos = await asyncio.to_thread(ctx.calendario.bloqueos, inicio, fin)
+    for bloqueo in bloqueos:
+        if bloqueo.solapa(inicio, fin):
+            return bloqueo
+    return None
+
+
+def _texto_bloqueado(inicio: datetime, bloqueo: Bloqueo) -> str:
+    """Lo que el modelo lee cuando el doctor apartó esa hora. RESULTADO, no excepción.
+
+    No se le dice el título del evento: es la agenda privada del doctor y puede decir
+    «cirugía de X» o algo personal. Al paciente le basta con que no está disponible.
+    """
+    return (
+        f"Esa hora ({_formatear_hora(inicio)}) no está disponible: el doctor la tiene "
+        "apartada en su calendario. NO la agendes y no insistas con ella. Consulta la "
+        "disponibilidad y ofrécele al paciente lo que salga de ahí."
+    )
 
 
 def _huecos_libres(
@@ -497,6 +542,13 @@ async def _crear_cita(ctx: ContextoDaniela, solicitud: SolicitudCita) -> str:
             "fecha futura quiere y consulta la disponibilidad de nuevo."
         )
 
+    # Google Calendar es la fuente de la disponibilidad, y eso vale también en el momento de
+    # escribir. Ver `_bloqueo_que_tapa`: sin esto, una hora que el doctor apartó se podía
+    # agendar igual y el evento acababa encima de su cirugía.
+    bloqueo = await _bloqueo_que_tapa(ctx, inicio)
+    if bloqueo is not None:
+        return _texto_bloqueado(inicio, bloqueo)
+
     # La clave la arma el orquestador, igual que en `reprogramar` y en `seguimiento`, y se
     # ancla al HORARIO pedido -- no al «intento», que es lo que el modelo cree que significa.
     #
@@ -700,6 +752,12 @@ def _es_ajena(ctx: ContextoDaniela, cita: dict[str, Any]) -> bool:
 
 async def _reprogramar_cita(ctx: ContextoDaniela, id_cita: str, nuevo_inicio: str) -> str:
     destino = _a_fecha(nuevo_inicio, "nuevo_inicio")
+
+    # Mover una cita a una hora que el doctor apartó es el mismo defecto que crearla ahí, y
+    # se comprueba en el mismo sitio: antes de tocar la base. Ver `_bloqueo_que_tapa`.
+    bloqueo = await _bloqueo_que_tapa(ctx, destino)
+    if bloqueo is not None:
+        return _texto_bloqueado(destino, bloqueo)
 
     # La clave se ancla al VALOR DESTINO y no a un delta. Con «mover dos horas», un reintento
     # movería la cita otras dos horas: el mismo intento produciría un resultado distinto cada
