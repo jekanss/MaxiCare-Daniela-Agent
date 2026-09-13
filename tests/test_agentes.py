@@ -275,6 +275,27 @@ def test_cancelar_se_intenta_recuperar_UNA_vez_y_despues_se_cancela():
     assert "no llega, que para la clínica es peor" in texto
 
 
+def test_el_intento_de_recuperar_la_cita_se_ofrece_sin_condicionar_la_cancelacion():
+    """El intento existía y salió agresivo. Lo que produjo el modelo:
+
+        «¿Qué pasó? Si prefieres, también puedo revisar otro horario antes de cancelarla.»
+
+    «Antes de cancelarla» convierte el ofrecimiento en un trámite previo: el paciente lee
+    que para cancelar tiene que pasar por ahí. Es la misma conducta --preguntar y ofrecer--
+    con la temperatura equivocada, y el resultado es el que el límite de «una sola vez»
+    quería evitar.
+    """
+    texto = agentes.INSTRUCCIONES_DANIELA
+
+    assert "no tiene que dar explicaciones" in texto
+    assert "SI ÉL QUIERE" in texto, "el horario alternativo se ofrece, no se interpone"
+    assert "antes de cancelarla" in texto, (
+        "la frase tiene que estar NOMBRADA como lo que no se dice; si alguien la borra del "
+        "prompt, el modelo vuelve a producirla"
+    )
+    assert "suenan a obstáculo" in texto
+
+
 def test_daniela_atiende_el_motivo_nuevo_sin_perder_el_viejo():
     """La muela partida pasa a ser la prioridad; el sangrado de encías no se borra, porque
     el profesional necesita ver los dos."""
