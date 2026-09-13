@@ -26,7 +26,7 @@ from agents import RunConfig, Runner
 from . import persistencia
 from .agentes import lector_archivos
 from .canales import ArchivoDescargado
-from .config import TRACE_INCLUDE_SENSITIVE_DATA, WORKFLOW_NAME
+from .config import TRACE_INCLUDE_SENSITIVE_DATA, WORKFLOW_NAME, config_de_corrida
 from .contratos import LecturaArchivo, LecturaNoClinica
 
 log = logging.getLogger("maxicare.lectura")
@@ -245,14 +245,12 @@ def _config_de_corrida() -> RunConfig:
     False porque `datos.datos_sensibles` tiene contenido y `LecturaArchivo.contexto_clinico`
     es la excepción declarada en `contratos[]`». Lo que faltaba era cablearla.
 
-    Con `False` los spans se siguen creando --latencia, coste, errores-- y lo único que se
-    omite son las entradas y las salidas. Se construye una por corrida y no una constante de
-    módulo: un `RunConfig` compartido entre corridas concurrentes es estado compartido.
+    La construcción vive en `config.config_de_corrida`, por donde pasan los TRES consumidores
+    de modelo del proyecto. Estaba duplicada aquí, y esa duplicación es cómo la misma fuga
+    siguió abierta en `conversacion.py` y en los evaluadores de guardrail mientras este lado
+    ya estaba cerrado.
     """
-    return RunConfig(
-        workflow_name=WORKFLOW_NAME,
-        trace_include_sensitive_data=TRACE_INCLUDE_SENSITIVE_DATA,
-    )
+    return config_de_corrida()
 
 
 async def leer_archivo(

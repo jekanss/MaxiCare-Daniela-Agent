@@ -50,7 +50,7 @@ from agents import (
 )
 from pydantic import BaseModel, Field
 
-from .config import MODELO_EVALUADOR
+from .config import MODELO_EVALUADOR, config_de_corrida
 from .contratos import ContextoDaniela, RespuestaDaniela
 
 log = logging.getLogger("maxicare.guardrails")
@@ -272,7 +272,14 @@ async def _preguntar(evaluador: Agent, texto: str) -> Veredicto:
     trace.
     """
     try:
-        resultado = await Runner.run(evaluador, texto, max_turns=1)
+        # `run_config` y no los defaults del SDK: lo que recibe un evaluador es el mensaje
+        # del paciente (`uso_indebido`) o la respuesta de Daniela antes de enviarla
+        # (`sin_lectura_clinica`). Es la TERCERA puerta del tracing, y la más fácil de
+        # olvidar: nadie piensa en un freno como en algo que habla con OpenAI. Estuvo abierta
+        # mientras `lectura.py` ya tenía la suya cerrada. Ver `config.config_de_corrida`.
+        resultado = await Runner.run(
+            evaluador, texto, max_turns=1, run_config=config_de_corrida()
+        )
         veredicto: VeredictoEvaluador = resultado.final_output
         return Veredicto(veredicto.dispara, veredicto.razon)
     except Exception as e:  # noqa: BLE001

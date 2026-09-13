@@ -52,6 +52,37 @@ LIMITE_TURNOS = 15
 #: En True, el contenido clínico quedaría en los traces, que se exportan fuera.
 TRACE_INCLUDE_SENSITIVE_DATA = False
 
+def config_de_corrida():
+    """El `RunConfig` que lleva TODA llamada al modelo de este proyecto.
+
+    Hay tres consumidores de modelo --Daniela en `conversacion.py`, el lector en `lectura.py`
+    y los evaluadores de guardrail en `guardrails.py`-- y los tres tienen que pasar por aquí.
+    Cada uno construía (o no construía) el suyo, y así fue como el proyecto acabó con la
+    misma fuga abierta en dos sitios distintos durante meses: `RunConfig()` nace en la 0.22.2
+    con `trace_include_sensitive_data=True`, de modo que omitirlo sube al dashboard de OpenAI
+    --que se exporta fuera de la clínica-- lo que escribe el paciente, lo que responde
+    Daniela, las entradas y salidas de las nueve tools, y el data URL de cada radiografía.
+
+    Va en código y no en `OPENAI_AGENTS_TRACE_INCLUDE_SENSITIVE_DATA` a propósito: una
+    variable de entorno se olvida en el siguiente servidor y el fallo vuelve sin avisar.
+
+    Con `False` los spans se siguen creando --latencia, coste, errores, turnos-- y lo único
+    que se omite son las entradas y las salidas. Se construye uno POR CORRIDA y no una
+    constante de módulo: un `RunConfig` compartido entre corridas concurrentes es estado
+    compartido.
+
+    El import va dentro y no arriba por la trampa de las variables vacías: `runtime.py` llama
+    a `descartar_vacias_de_terceros()` ANTES de construir nada que hable con OpenAI, y este
+    módulo se importa mucho antes que eso.
+    """
+    from agents import RunConfig
+
+    return RunConfig(
+        workflow_name=WORKFLOW_NAME,
+        trace_include_sensitive_data=TRACE_INCLUDE_SENSITIVE_DATA,
+    )
+
+
 #: `persistencia.compactacion`: recorte del historial por cantidad, cero llamadas de modelo.
 #: La memoria larga no vive aquí: vive en el estado estructurado de Neon, que no se degrada.
 LIMITE_HISTORIAL_SESION = 40

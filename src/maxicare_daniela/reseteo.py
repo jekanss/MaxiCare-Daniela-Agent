@@ -22,11 +22,11 @@ deja de ser alcanzable. Y el campo que manda, `identidad_verificada`, se calcula
 
 LO QUE NO BORRA, dicho aqui para que nadie lo descubra despues:
 
-1. **Las trazas de OpenAI.** `conversacion.py` arma su `RunConfig` sin
-   `trace_include_sensitive_data=False`, asi que la conversacion entera --mensajes, nombre,
-   argumentos de las tools-- esta en el dashboard de OpenAI. Daniela no la lee, de modo que
-   no afecta al comportamiento, pero el rastro existe y este comando no lo toca. Aplazado a
-   la fase 7 por decision expresa.
+1. **Las trazas de OpenAI que YA se subieron.** Desde la fase 6A hasta el 13/09/2026, cada
+   conversacion --mensajes, nombre, argumentos de las tools-- subio integra al dashboard de
+   OpenAI, porque ningun `RunConfig` pasaba `trace_include_sensitive_data=False`. La fuga ya
+   esta cerrada (`config.config_de_corrida`), pero lo que salio antes sigue alla y este
+   comando no lo toca: borra la base, no el dashboard de otra empresa.
 2. **Los logs del contenedor**, que llevan el numero en claro y rotan solos.
 """
 

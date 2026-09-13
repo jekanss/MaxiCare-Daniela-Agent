@@ -22,6 +22,7 @@ import pytest
 from agents import Agent, MaxTurnsExceeded, ModelBehaviorError, RunConfig, UserError
 
 from maxicare_daniela import conversacion
+from maxicare_daniela.config import TRACE_INCLUDE_SENSITIVE_DATA, WORKFLOW_NAME
 from maxicare_daniela.calendario import CalendarioDoble
 from maxicare_daniela.contratos import ContextoDaniela, RespuestaDaniela
 
@@ -276,3 +277,63 @@ def test_la_sesion_devuelve_los_ultimos_items_no_los_primeros():
         assert await sesion.get_items() == []
 
     asyncio.run(comprobar())
+
+
+# ==========================================================================================
+# El tracing: la cuarta salida, tambien aqui
+#
+# Ninguna prueba de arriba ejercita el `RunConfig` de PRODUCCION, porque todas pasan el suyo
+# (`SIN_RED`) para no subir trazas. Por ese hueco la conversacion entera de cada paciente
+# --lo que escribe, lo que responde Daniela, las entradas y salidas de las nueve tools--
+# estuvo subiendo integra al dashboard de OpenAI desde que se desplego la fase 6A.
+# `lectura.py` ya lo cerraba para las radiografias; esto es el mismo arreglo en el otro lado.
+# ==========================================================================================
+
+
+def test_el_run_config_de_produccion_no_sube_la_conversacion_a_los_traces():
+    config = conversacion._config_de_corrida()
+
+    assert config.trace_include_sensitive_data is False, (
+        "la conversacion del paciente se esta subiendo a los traces de OpenAI, que se "
+        "exportan fuera de la clinica"
+    )
+    assert config.trace_include_sensitive_data is TRACE_INCLUDE_SENSITIVE_DATA
+    assert config.workflow_name == WORKFLOW_NAME
+    # Los spans se siguen creando: apagar el tracing entero costaria la latencia, el coste y
+    # los errores de cada turno, que es justo lo que hay que poder mirar.
+    assert config.tracing_disabled is False
+
+
+def test_responder_usa_ese_run_config_cuando_nadie_le_pasa_uno():
+    """La prueba que cierra el agujero de verdad.
+
+    Que `_config_de_corrida` devuelva lo correcto no sirve de nada si `responder` no la
+    llama: el hueco anterior era exactamente ese, un `RunConfig(workflow_name=...)` armado
+    en linea con los defaults del SDK, que traen `trace_include_sensitive_data=True`.
+    """
+    capturado = {}
+
+    class RunnerEspia:
+        @staticmethod
+        async def run(agente, texto, **kwargs):
+            capturado.update(kwargs)
+            raise RuntimeError("corta aqui: lo que importa ya se capturo")
+
+    import contextlib
+
+    import pytest as _pytest
+
+    # El espia corta la corrida lanzando: lo que importa ya quedo capturado, y construir un
+    # resultado del SDK completo solo para llegar al final no probaria nada mas.
+    with _pytest.MonkeyPatch.context() as mp, contextlib.suppress(RuntimeError):
+        mp.setattr(conversacion, "Runner", RunnerEspia)
+        asyncio.run(
+            conversacion.responder(
+                "hola, me llamo Ana y me duele una muela",
+                ctx=contexto(),
+                agente=agente_con(responde(respuesta_daniela("Hola."))),
+            )
+        )
+
+    assert capturado, "no se llego a llamar a Runner.run"
+    assert capturado["run_config"].trace_include_sensitive_data is False

@@ -160,8 +160,8 @@ pueden mover.
   `LecturaArchivo` completo —`contexto_clinico` incluido— subían a los traces de OpenAI, que
   se exportan fuera de la clínica. `config.TRACE_INCLUDE_SENSITIVE_DATA` existía desde la
   fase 1 y no la cableaba nadie. Con `False` los spans se siguen creando (latencia, coste,
-  errores) y solo se omiten entradas y salidas. **`conversacion.py` tiene el mismo hueco y
-  está aplazado a la fase 7 por decisión expresa**: si lo cierras, cierra también su prueba.
+  errores) y solo se omiten entradas y salidas. **CERRADO el 13/09/2026 en los tres sitios**
+  — ver «El tracing» abajo. Este fue el primero.
 
 - **El lector corre en PARALELO con la ventana del búfer, nunca delante.** La tarea nace en
   `procesar_mensaje` y viaja como `Resultado.lectura`; `atencion.atender` no la espera al
@@ -212,9 +212,10 @@ estrenar una línea de teléfono. Vive en `reseteo.py`, y `runtime._entregar` lo
   conocido a nadie: `_leer_estado` no mira esa tabla.
 - **También se limpia `pruebas_web`**, que tiene las mismas doce tablas y no se purga nunca.
   Sin eso, un número probado desde el chat del panel seguiría conocido por esa mitad.
-- **Lo que NO borra, y está dicho en el código:** las trazas de OpenAI (`conversacion.py`
-  sigue sin `trace_include_sensitive_data=False`, aplazado a la fase 7) y los logs del
-  contenedor. Ninguna de las dos afecta al comportamiento de Daniela; el rastro existe.
+- **Lo que NO borra, y está dicho en el código:** las trazas que ya se subieron a OpenAI
+  entre la fase 6A y el 13/09/2026 —la fuga está cerrada desde entonces, pero lo que salió
+  vive en el dashboard de otra empresa, no en la base— y los logs del contenedor. Ninguna de
+  las dos afecta al comportamiento de Daniela; el rastro existe.
 - **Telegram necesita `can_delete_messages`**, que `obtener_chat_telegram.py` no comprueba
   hoy — solo mira `can_manage_topics`. Si falta, el tema no se borra, se informa en la
   confirmación y el resto del reseteo sigue.
@@ -229,6 +230,41 @@ estrenar una línea de teléfono. Vive en `reseteo.py`, y `runtime._entregar` lo
   memoria y DEJA las filas en `pruebas_web` — a propósito, para que quede rastro de qué se
   probó. Por eso el botón «reiniciar» no te devuelve a primer contacto: el paciente que te
   inventaste sigue en la tabla y el turno siguiente te reconoce. Para eso está `/clearstate`.
+
+## El tracing: tres consumidores de modelo, una sola puerta
+
+**Toda llamada al modelo pasa por `config.config_de_corrida()`.** No hay ninguna excepción y
+no debe haberla: `RunConfig()` nace en la 0.22.2 con `trace_include_sensitive_data=True`, así
+que cualquier llamada que lo omita sube al dashboard de OpenAI —que se exporta fuera de la
+clínica— lo que escribe el paciente, lo que responde Daniela y las entradas y salidas de las
+tools, con su nombre, su teléfono y sus citas dentro.
+
+Los consumidores son **tres**, y esa cuenta es lo que hay que recordar:
+
+| Quién llama al modelo | Dónde |
+|---|---|
+| Daniela, cada turno | `conversacion._config_de_corrida` |
+| El lector de archivos | `lectura._config_de_corrida` |
+| **Los evaluadores de guardrail** | `guardrails._preguntar` |
+
+El tercero es el que se olvida, y de hecho se olvidó: nadie piensa en un freno como en algo
+que habla con OpenAI. `uso_indebido` recibe el mensaje del paciente y `sin_lectura_clinica`
+recibe la respuesta de Daniela antes de enviarla, así que su traza llevaba exactamente lo
+mismo que las otras dos. Estuvo abierto desde la fase 4 hasta el 13/09/2026, mientras
+`lectura.py` ya tenía el suyo cerrado desde 6B.
+
+**La construcción vive en UN sitio** (`config.config_de_corrida`) precisamente por eso:
+estaba duplicada entre dos módulos, y la duplicación es cómo la misma fuga siguió abierta en
+un tercero. Cada módulo conserva su envoltorio con el docstring de qué fuga cierra, pero
+ninguno construye su propio `RunConfig`.
+
+Va en código y no en `OPENAI_AGENTS_TRACE_INCLUDE_SENSITIVE_DATA` a propósito: una variable
+de entorno se olvida en el siguiente servidor. Tres pruebas lo sostienen —una por consumidor—
+y las tres caen al quitar el campo.
+
+**Lo que esto NO arregla:** lo ya subido sigue en el dashboard de OpenAI. Cerrar la fuga
+detiene la hemorragia; no borra lo que salió entre la fase 6A y hoy. Y falta la otra mitad
+del entregable de la fase 7: agrupar las trazas por `group_id`, que sigue sin hacerse.
 
 ## Lo que la suite offline NO caza
 

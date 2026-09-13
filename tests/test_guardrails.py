@@ -310,3 +310,41 @@ def test_interpretar_la_radiografia_sigue_disparando(monkeypatch):
         "la excepción tiene que seguir acotada a NOMBRAR UN TRATAMIENTO. Redactada como "
         "«lo que venga en un documento no es diagnosticar», ampara también el diagnóstico."
     )
+
+
+# ==========================================================================================
+# La tercera puerta del tracing
+#
+# `conversacion.py` y `lectura.py` ya pasan un `RunConfig` sin contenido. Los evaluadores de
+# guardrail son el tercer consumidor de modelo del proyecto --y el mas facil de olvidar,
+# porque nadie piensa en un freno como en algo que habla con OpenAI--. Lo que reciben es
+# literalmente el mensaje del paciente (`uso_indebido`) o la respuesta de Daniela antes de
+# enviarla (`sin_lectura_clinica`), asi que su traza lleva lo mismo que las otras dos.
+# ==========================================================================================
+
+
+def test_los_evaluadores_no_suben_lo_que_evaluan_a_los_traces(monkeypatch):
+    capturado = {}
+
+    class RunnerEspia:
+        @staticmethod
+        async def run(agente, texto, **kwargs):
+            capturado.update(kwargs)
+            capturado["texto"] = texto
+            raise RuntimeError("corta aqui: lo que importa ya se capturo")
+
+    monkeypatch.setattr(g, "Runner", RunnerEspia)
+
+    # `_preguntar` se traga cualquier fallo del evaluador y devuelve «no dispara»: eso es
+    # deliberado --un evaluador caido no puede dejar mudo al sistema-- y aqui viene bien.
+    veredicto = asyncio.run(g._preguntar(g._evaluador_uso, "me duele una muela, soy Ana"))
+
+    assert veredicto.dispara is False
+    assert capturado["texto"] == "me duele una muela, soy Ana"
+    assert capturado.get("run_config") is not None, (
+        "el evaluador corre sin RunConfig, asi que el SDK usa sus defaults y sube a los "
+        "traces de OpenAI lo que escribio el paciente"
+    )
+    assert capturado["run_config"].trace_include_sensitive_data is False
+    # Los spans siguen: un evaluador que falla mucho tiene que poder verse.
+    assert capturado["run_config"].tracing_disabled is False

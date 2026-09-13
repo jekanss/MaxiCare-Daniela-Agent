@@ -35,6 +35,9 @@ El campo que manda es `identidad_verificada = bool(paciente) or bool(verificada)
    `trace_include_sensitive_data=False`. La conversación entera está en el dashboard de
    OpenAI. Daniela no la lee, así que no afecta al comportamiento; el rastro existe. Sigue
    aplazado a la fase 7.
+   **ACTUALIZACIÓN 13/09/2026:** la fuga se cerró ese mismo día, en los tres consumidores de
+   modelo, con `config.config_de_corrida`. Lo que este comando sigue sin borrar es lo que ya
+   se subió entre la fase 6A y esa fecha: eso vive en el dashboard de OpenAI, no en la base.
 2. **Los logs de Docker del VPS**, con el número en claro, rotación ~50 MB.
 
 ## Archivos

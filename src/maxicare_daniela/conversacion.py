@@ -56,7 +56,7 @@ from agents import (
 
 from . import persistencia
 from .agentes import daniela as agente_daniela
-from .config import LIMITE_TURNOS, WORKFLOW_NAME
+from .config import LIMITE_TURNOS, WORKFLOW_NAME, config_de_corrida
 from .contratos import ContextoDaniela, MotivoEscalamiento, RespuestaDaniela
 
 log = logging.getLogger("maxicare.conversacion")
@@ -197,6 +197,33 @@ def _nombre_del_tripwire(excepcion: Exception) -> str:
         return type(excepcion).__name__
 
 
+def _config_de_corrida() -> RunConfig:
+    """El `RunConfig` de cada turno de Daniela, con el tracing sin contenido.
+
+    Lo que había aquí era `RunConfig(workflow_name=WORKFLOW_NAME)` a secas, y los defaults
+    del SDK 0.22.2 --introspeccionados-- traen `trace_include_sensitive_data=True`. La
+    consecuencia no era teórica: desde que se desplegó la fase 6A, cada conversación de
+    WhatsApp subía íntegra al dashboard de OpenAI --lo que escribe el paciente, lo que
+    responde Daniela, y las entradas y salidas de las nueve tools, que incluyen su nombre,
+    su teléfono y sus citas--. Que los traces suben de verdad ya estaba comprobado en este
+    proyecto: fue lo que desconcertaba durante el fallo de la `OPENAI_BASE_URL` vacía, cuando
+    las trazas llegaban mientras toda llamada al modelo moría.
+
+    `config.TRACE_INCLUDE_SENSITIVE_DATA` existía desde la fase 1 con su porqué escrito
+    --`datos.datos_sensibles` tiene contenido-- y no la cableaba nadie más que `lectura.py`,
+    que cerró su lado en la fase 6B. Este es el otro lado.
+
+    Va en CÓDIGO y no en una variable de entorno a propósito: `OPENAI_AGENTS_TRACE_INCLUDE_
+    SENSITIVE_DATA` apagaría lo mismo, pero una variable de entorno se olvida en el siguiente
+    servidor y el fallo vuelve sin que nada avise.
+
+    La construcción vive en `config.config_de_corrida`, que es por donde pasan los TRES
+    consumidores de modelo del proyecto. Estaba duplicada, y esa duplicación es justamente
+    cómo la misma fuga acabó abierta en dos sitios a la vez.
+    """
+    return config_de_corrida()
+
+
 async def responder(
     entrada: str,
     *,
@@ -219,7 +246,7 @@ async def responder(
     prueba no le haga sonar el teléfono a un doctor de verdad.
     """
     agente = agente or agente_daniela
-    run_config = run_config or RunConfig(workflow_name=WORKFLOW_NAME)
+    run_config = run_config or _config_de_corrida()
 
     # El contrato de `DatosDelTurno`: se vacía ANTES de correr, no después. Si se vaciara al
     # terminar, un turno que reventara a mitad dejaría autorizadas las cifras del anterior.
