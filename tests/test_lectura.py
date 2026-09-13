@@ -345,6 +345,13 @@ def test_una_imagen_viaja_como_input_image():
 
 
 def test_un_documento_viaja_como_input_file_con_su_nombre():
+    """`file_data` lleva el data URL completo, no el base64 pelado.
+
+    Es justo lo que el Paso 1 de esta tarea existía para medir: contra la API real, el
+    12/09/2026, el base64 pelado en `file_data` devolvió `400 invalid_value` y el data URL
+    completo funcionó. Esta aserción es lo único de la suite que detecta si alguien vuelve
+    a mandar el base64 pelado --sin ella, la regresión solo se vería en producción.
+    """
     entrada = lectura.entrada_para_el_lector(
         _archivo(contenido=b"%PDF-1.4", mime="application/pdf", nombre="remision.pdf"),
         "document",
@@ -353,6 +360,7 @@ def test_un_documento_viaja_como_input_file_con_su_nombre():
 
     assert contenido["type"] == "input_file"
     assert contenido["filename"] == "remision.pdf"
+    assert contenido["file_data"].startswith("data:application/pdf;base64,")
 
 
 def test_si_el_lector_revienta_devuelve_none_y_no_propaga():
