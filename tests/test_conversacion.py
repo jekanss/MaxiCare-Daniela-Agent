@@ -21,7 +21,7 @@ import asyncio
 import pytest
 from agents import Agent, MaxTurnsExceeded, ModelBehaviorError, RunConfig, UserError
 
-from maxicare_daniela import conversacion
+from maxicare_daniela import agentes, conversacion
 from maxicare_daniela.config import TRACE_INCLUDE_SENSITIVE_DATA, WORKFLOW_NAME
 from maxicare_daniela.calendario import CalendarioDoble
 from maxicare_daniela.contratos import ContextoDaniela, RespuestaDaniela
@@ -49,6 +49,18 @@ def contexto() -> ContextoDaniela:
         database_url="postgresql://no-se-usa/na",
         calendario=CalendarioDoble(),
     )
+
+
+def _contexto_minimo(**cambios) -> ContextoDaniela:
+    """Como `contexto()`, pero con los campos que cada prueba de tracing necesita variar."""
+    base = dict(
+        id_conversacion="conv-de-prueba",
+        telefono_completo="573001112233",
+        database_url="postgresql://no-se-usa/na",
+        calendario=CalendarioDoble(),
+    )
+    base.update(cambios)
+    return ContextoDaniela(**base)
 
 
 def agente_con(*turnos) -> Agent:
@@ -291,7 +303,7 @@ def test_la_sesion_devuelve_los_ultimos_items_no_los_primeros():
 
 
 def test_el_run_config_de_produccion_no_sube_la_conversacion_a_los_traces():
-    config = conversacion._config_de_corrida()
+    config = conversacion._config_de_corrida(contexto())
 
     assert config.trace_include_sensitive_data is False, (
         "la conversacion del paciente se esta subiendo a los traces de OpenAI, que se "
@@ -302,6 +314,8 @@ def test_el_run_config_de_produccion_no_sube_la_conversacion_a_los_traces():
     # Los spans se siguen creando: apagar el tracing entero costaria la latencia, el coste y
     # los errores de cada turno, que es justo lo que hay que poder mirar.
     assert config.tracing_disabled is False
+    # Desde la fase 7: el group_id agrupa las trazas de este episodio.
+    assert config.group_id == "conv-de-prueba"
 
 
 def test_responder_usa_ese_run_config_cuando_nadie_le_pasa_uno():
@@ -337,3 +351,18 @@ def test_responder_usa_ese_run_config_cuando_nadie_le_pasa_uno():
 
     assert capturado, "no se llego a llamar a Runner.run"
     assert capturado["run_config"].trace_include_sensitive_data is False
+    # Desde la fase 7: `responder` construye el run_config con el ctx que recibio, y ese
+    # group_id es lo que agrupa la traza de este turno con las demas del mismo episodio.
+    assert capturado["run_config"].group_id == "conv-de-prueba"
+
+
+def test_el_turno_de_daniela_va_bajo_el_group_id_de_su_conversacion():
+    ctx = _contexto_minimo(id_conversacion="conv-abc")
+
+    corrida = conversacion._config_de_corrida(ctx)
+
+    assert corrida.group_id == "conv-abc"
+    assert corrida.trace_metadata["version_prompt"] == agentes.VERSION_PROMPT
+    assert corrida.trace_metadata["canal"] == "whatsapp"
+    # Y lo de siempre, que ninguna de estas líneas puede reabrir:
+    assert corrida.trace_include_sensitive_data is False

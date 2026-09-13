@@ -30,6 +30,18 @@ def contexto(**cambios) -> ContextoDaniela:
     return ContextoDaniela(**base)
 
 
+def _wrapper_con_contexto(**cambios) -> RunContextWrapper:
+    return RunContextWrapper(contexto(**cambios))
+
+
+def _resultado_de_mentira(*, dispara: bool):
+    """Lo que `Runner.run` devolvería de verdad: algo con `.final_output` como el que lee
+    `_preguntar`. No toca la red -- es el mismo doble que ya usa el resto de este archivo."""
+    from types import SimpleNamespace
+
+    return SimpleNamespace(final_output=g.VeredictoEvaluador(dispara=dispara, razon=""))
+
+
 # ==========================================================================================
 # sin_cifra_no_documentada
 # ==========================================================================================
@@ -241,7 +253,7 @@ def _revisar_lo_clinico(monkeypatch, mensaje: str, *, el_evaluador_dispara: bool
     """
     visto: list[tuple[str, str]] = []
 
-    async def evaluador_doblado(evaluador, texto):
+    async def evaluador_doblado(evaluador, texto, *, ctx=None):
         visto.append((evaluador.name, texto))
         return g.Veredicto(el_evaluador_dispara, "lo dictó la prueba")
 
@@ -348,3 +360,34 @@ def test_los_evaluadores_no_suben_lo_que_evaluan_a_los_traces(monkeypatch):
     assert capturado["run_config"].trace_include_sensitive_data is False
     # Los spans siguen: un evaluador que falla mucho tiene que poder verse.
     assert capturado["run_config"].tracing_disabled is False
+    # Desde la fase 7: sin un ctx que lo diga, el evaluador no se inventa un group_id.
+    assert capturado["run_config"].group_id is None
+
+
+def test_el_evaluador_corre_bajo_el_group_id_de_la_conversacion(monkeypatch):
+    """La puerta más fácil de olvidar: nadie piensa en un freno como en algo que habla con
+    OpenAI. Si el evaluador queda fuera del grupo, el trace de un mensaje bloqueado aparece
+    suelto, sin la conversación que lo explica -- que es justo el trace que alguien va a
+    querer leer.
+
+    Se invoca `g.uso_indebido.guardrail_function` en vez de `g.uso_indebido` a secas: el
+    decorador `@input_guardrail` devuelve un `InputGuardrail` (comprobado contra la 0.22.2
+    instalada), que no es invocable -- solo trae un método `.run(agent, input, context)`, que
+    exige un `Agent` real donde aquí basta con probar el cableado del `run_config`. Llamar
+    directo a la función envuelta prueba lo mismo con menos aparato.
+    """
+    capturado = {}
+
+    class RunnerEspia:
+        @staticmethod
+        async def run(agente, texto, **kwargs):
+            capturado.update(kwargs)
+            return _resultado_de_mentira(dispara=False)
+
+    monkeypatch.setattr(g, "Runner", RunnerEspia)
+    ctx = _wrapper_con_contexto(id_conversacion="conv-xyz")
+
+    asyncio.run(g.uso_indebido.guardrail_function(ctx, None, "hola"))
+
+    assert capturado["run_config"].group_id == "conv-xyz"
+    assert capturado["run_config"].trace_include_sensitive_data is False

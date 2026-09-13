@@ -55,7 +55,7 @@ from agents import (
 )
 
 from . import persistencia
-from .agentes import daniela as agente_daniela
+from .agentes import VERSION_PROMPT, daniela as agente_daniela
 from .config import LIMITE_TURNOS, WORKFLOW_NAME, config_de_corrida
 from .contratos import ContextoDaniela, MotivoEscalamiento, RespuestaDaniela
 
@@ -212,7 +212,7 @@ def _nombre_del_tripwire(excepcion: Exception) -> str:
         return type(excepcion).__name__
 
 
-def _config_de_corrida() -> RunConfig:
+def _config_de_corrida(ctx: ContextoDaniela) -> RunConfig:
     """El `RunConfig` de cada turno de Daniela, con el tracing sin contenido.
 
     Lo que había aquí era `RunConfig(workflow_name=WORKFLOW_NAME)` a secas, y los defaults
@@ -235,8 +235,15 @@ def _config_de_corrida() -> RunConfig:
     La construcción vive en `config.config_de_corrida`, que es por donde pasan los TRES
     consumidores de modelo del proyecto. Estaba duplicada, y esa duplicación es justamente
     cómo la misma fuga acabó abierta en dos sitios a la vez.
+
+    Desde la fase 7 lleva además el `group_id` de la conversación, que es lo que agrupa las
+    trazas de un episodio -- las de Daniela, las del lector y las de los evaluadores.
     """
-    return config_de_corrida()
+    return config_de_corrida(
+        group_id=ctx.id_conversacion,
+        canal=ctx.canal,
+        version_prompt=VERSION_PROMPT,
+    )
 
 
 async def responder(
@@ -261,7 +268,7 @@ async def responder(
     prueba no le haga sonar el teléfono a un doctor de verdad.
     """
     agente = agente or agente_daniela
-    run_config = run_config or _config_de_corrida()
+    run_config = run_config or _config_de_corrida(ctx)
 
     # El contrato de `DatosDelTurno`: se vacía ANTES de correr, no después. Si se vaciara al
     # terminar, un turno que reventara a mitad dejaría autorizadas las cifras del anterior.

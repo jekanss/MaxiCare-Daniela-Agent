@@ -52,7 +52,28 @@ LIMITE_TURNOS = 15
 #: En True, el contenido clínico quedaría en los traces, que se exportan fuera.
 TRACE_INCLUDE_SENSITIVE_DATA = False
 
-def config_de_corrida():
+def version_de_prompt(texto: str) -> str:
+    """Un identificador corto y estable del texto de un prompt, para el `trace_metadata`.
+
+    Un hash y no un número que alguien suba a mano: se mueve solo cuando el prompt cambia de
+    verdad y nadie tiene que acordarse. Doce caracteres porque va en cada trace y nadie lee
+    un sha256 entero; es un identificador, no una defensa criptográfica.
+
+    `hashlib` y no el `hash()` de Python, que está aleatorizado por `PYTHONHASHSEED`: daría
+    una versión distinta en cada arranque del contenedor y el campo dejaría de servir para
+    lo único que sirve, que es agrupar trazas del mismo prompt.
+    """
+    import hashlib
+
+    return hashlib.sha256(texto.encode("utf-8")).hexdigest()[:12]
+
+
+def config_de_corrida(
+    *,
+    group_id: str | None = None,
+    canal: str = "whatsapp",
+    version_prompt: str | None = None,
+):
     """El `RunConfig` que lleva TODA llamada al modelo de este proyecto.
 
     Hay tres consumidores de modelo --Daniela en `conversacion.py`, el lector en `lectura.py`
@@ -74,12 +95,28 @@ def config_de_corrida():
     El import va dentro y no arriba por la trampa de las variables vacías: `runtime.py` llama
     a `descartar_vacias_de_terceros()` ANTES de construir nada que hable con OpenAI, y este
     módulo se importa mucho antes que eso.
+
+    `group_id` agrupa las trazas de un mismo EPISODIO. Es el UUID de la conversación, no el
+    teléfono: un teléfono agrupa a una persona para siempre; una conversación agrupa lo que
+    alguien va a querer leer entero cuando llegue un reclamo. Los TRES consumidores de modelo
+    tienen que pasar el mismo, o el trace agrupado tendrá un agujero justo en los turnos con
+    archivo, que son los más interesantes de leer.
+
+    `version_prompt` se omite a propósito cuando quien llama no es Daniela ni el lector: los
+    evaluadores de guardrail tienen su propio prompt, y poner el de Daniela ahí sería un dato
+    plausible y falso.
     """
     from agents import RunConfig
+
+    metadata: dict[str, str] = {"canal": canal}
+    if version_prompt is not None:
+        metadata["version_prompt"] = version_prompt
 
     return RunConfig(
         workflow_name=WORKFLOW_NAME,
         trace_include_sensitive_data=TRACE_INCLUDE_SENSITIVE_DATA,
+        group_id=group_id,
+        trace_metadata=metadata,
     )
 
 
