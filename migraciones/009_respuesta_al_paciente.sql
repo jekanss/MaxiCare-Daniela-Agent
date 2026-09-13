@@ -22,8 +22,19 @@ ALTER TABLE mensajes_entrantes
     ADD COLUMN IF NOT EXISTS wamid_respuesta  TEXT,
     ADD COLUMN IF NOT EXISTS fallo_respuesta  TEXT;
 
--- «¿A quién no le contestamos?» es la consulta que justifica toda esta migración, y son
--- pocas filas entre muchas: solo los mensajes que fallaron y siguen sin respuesta.
+-- «¿A quién no le contestamos?» es la consulta que justifica toda esta migración. El
+-- predicado es `respondido_en IS NULL` a secas -- no se le exige además
+-- `fallo_respuesta IS NOT NULL` -- porque el caso que más duele es el mensaje que nadie
+-- intentó contestar porque el proceso se cayó antes de registrar siquiera el fallo: las dos
+-- columnas en NULL. Un predicado más estrecho dejaría ese caso invisible. El precedente de
+-- esta misma tabla es igual de ancho: `ix_mensajes_sin_reenviar` solo pide
+-- `reenviado_en IS NULL`.
+--
+-- El `DROP INDEX IF EXISTS` de abajo es necesario porque esta migración ya se aplicó una vez
+-- en `public` con el predicado angosto (revisión de la fase 6A); sin borrarlo primero, el
+-- `CREATE INDEX IF NOT EXISTS` con el mismo nombre no haría nada y el índice viejo -- con el
+-- hueco -- se quedaría vigente.
+DROP INDEX IF EXISTS ix_mensajes_sin_responder;
 CREATE INDEX IF NOT EXISTS ix_mensajes_sin_responder
     ON mensajes_entrantes (recibido_en DESC)
-    WHERE respondido_en IS NULL AND fallo_respuesta IS NOT NULL;
+    WHERE respondido_en IS NULL;

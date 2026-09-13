@@ -29,11 +29,14 @@ Daniela no los comunique como compromiso comercial.
 from __future__ import annotations
 
 import json
+import logging
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable, Sequence
+
+log = logging.getLogger("maxicare.persistencia")
 
 # ==========================================================================================
 # Los literales que el resto del sistema busca
@@ -365,6 +368,8 @@ def ligar_mensaje_a_conversacion(conn, wamid: str, id_conversacion: str) -> None
             "UPDATE mensajes_entrantes SET conversacion_id = %s WHERE wamid = %s",
             (id_conversacion, wamid),
         )
+        if cur.rowcount == 0:
+            log.warning("ligar_mensaje_a_conversacion: %s no existe en mensajes_entrantes", wamid)
     conn.commit()
 
 
@@ -373,17 +378,25 @@ def marcar_respondido(conn, wamid: str, *, wamid_respuesta: str) -> None:
 
     Sin esto, `mensajes_entrantes` solo cuenta el viaje hacia Telegram: no hay forma de saber
     si al paciente, del otro lado, alguien le respondió alguna vez.
+
+    Limpia `fallo_respuesta` a propósito, igual que `_marcar_reenviado` limpia `fallo` en
+    `ingesta.py`: si el primer intento falló por timeout y el reintento sí llegó, el motivo
+    viejo no puede quedar pegado para siempre -- o un informe que cuente
+    `fallo_respuesta IS NOT NULL` contaría como fallida una respuesta que sí salió.
     """
     with conn.cursor() as cur:
         cur.execute(
             """
             UPDATE mensajes_entrantes
                SET respondido_en   = now(),
-                   wamid_respuesta = %s
+                   wamid_respuesta = %s,
+                   fallo_respuesta = NULL
              WHERE wamid = %s
             """,
             (wamid_respuesta, wamid),
         )
+        if cur.rowcount == 0:
+            log.warning("marcar_respondido: %s no existe en mensajes_entrantes", wamid)
     conn.commit()
 
 
@@ -393,12 +406,17 @@ def marcar_fallo_respuesta(conn, wamid: str, *, motivo: str) -> None:
     NO toca `respondido_en` -- se queda en NULL a propósito. Si un fallo marcara respondido,
     la consulta que justifica esta migración entera -- ¿a quién no le contestamos? --
     devolvería vacío justo cuando más importa.
+
+    El motivo se trunca a 2000 caracteres, igual que `_marcar_fallo` en `ingesta.py`: un
+    traceback completo de OpenAI no tiene por qué entrar íntegro en la base de la clínica.
     """
     with conn.cursor() as cur:
         cur.execute(
             "UPDATE mensajes_entrantes SET fallo_respuesta = %s WHERE wamid = %s",
-            (motivo, wamid),
+            (motivo[:2000], wamid),
         )
+        if cur.rowcount == 0:
+            log.warning("marcar_fallo_respuesta: %s no existe en mensajes_entrantes", wamid)
     conn.commit()
 
 

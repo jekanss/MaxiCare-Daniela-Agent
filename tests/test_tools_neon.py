@@ -488,27 +488,31 @@ def test_conversacion_viva_devuelve_la_mas_reciente(esquema):
     `now()` es la hora de la TRANSACCIÓN: las dos filas se crean dentro de la misma
     transacción para que `actualizada_en` quede exactamente igual en las dos, y así la
     prueba ejercita de verdad el desempate por `id DESC` -- no por casualidad de reloj.
+
+    El UUID mayor se inserta PRIMERO, a propósito: si se insertara en el orden que le toca
+    por sorteo, la mitad de las veces el mayor ya habría quedado primero por casualidad, y
+    quitar el `id DESC` del ORDER BY seguiría "pasando" la prueba la otra mitad. Insertando
+    el mayor primero, el orden de inserción queda siempre contra el orden por `id DESC`, así
+    que sin el desempate la prueba falla el 100% de las veces, no el ~50%.
     """
     telefono = "573002220003"
     with persistencia.conectar(esquema) as conn:
-        id_primera = str(uuid.uuid4())
-        id_segunda = str(uuid.uuid4())
+        id_menor, id_mayor = sorted([str(uuid.uuid4()), str(uuid.uuid4())])
         with conn.cursor() as cur:
             cur.execute(
                 "INSERT INTO conversaciones (id, telefono, canal) VALUES (%s, %s, 'whatsapp')",
-                (id_primera, telefono),
+                (id_mayor, telefono),
             )
             cur.execute(
                 "INSERT INTO conversaciones (id, telefono, canal) VALUES (%s, %s, 'whatsapp')",
-                (id_segunda, telefono),
+                (id_menor, telefono),
             )
         conn.commit()
 
-        esperado = max(id_primera, id_segunda)
         viva = persistencia.conversacion_viva(conn, telefono)
 
     assert viva is not None
-    assert viva[0] == esperado, "no desempató por id DESC cuando actualizada_en empata"
+    assert viva[0] == id_mayor, "no desempató por id DESC cuando actualizada_en empata"
 
 
 def test_conversacion_viva_no_cruza_telefonos(esquema):
@@ -546,6 +550,9 @@ def test_tocar_conversacion_adelanta_la_ventana(esquema):
 
 
 def test_la_respuesta_al_paciente_queda_registrada(esquema):
+    """También cubre el reintento que sí funciona: un fallo previo no puede quedar pegado
+    para siempre una vez que la respuesta sí sale -- el precedente es `_marcar_reenviado`
+    en `ingesta.py`, que limpia `fallo` cuando el envío por fin llega."""
     telefono = "573002220007"
     wamid = f"wamid-prueba-{uuid.uuid4()}"
     with persistencia.conectar(esquema) as conn:
@@ -558,12 +565,13 @@ def test_la_respuesta_al_paciente_queda_registrada(esquema):
         conn.commit()
 
         persistencia.ligar_mensaje_a_conversacion(conn, wamid, id_conversacion)
+        persistencia.marcar_fallo_respuesta(conn, wamid, motivo="el primer intento se cayó")
         persistencia.marcar_respondido(conn, wamid, wamid_respuesta="wamid-respuesta-1")
 
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT conversacion_id::text, respondido_en, wamid_respuesta
+                SELECT conversacion_id::text, respondido_en, wamid_respuesta, fallo_respuesta
                   FROM mensajes_entrantes WHERE wamid = %s
                 """,
                 (wamid,),
@@ -574,6 +582,7 @@ def test_la_respuesta_al_paciente_queda_registrada(esquema):
     assert fila[0] == id_conversacion
     assert fila[1] is not None
     assert fila[2] == "wamid-respuesta-1"
+    assert fila[3] is None, "el motivo del fallo viejo se quedó pegado tras responder bien"
 
 
 def test_un_fallo_al_responder_queda_registrado(esquema):
