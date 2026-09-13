@@ -173,7 +173,8 @@ def test_horario_lleno_es_un_resultado_y_no_una_excepcion(monkeypatch):
     ctx = contexto()
 
     async def base_falsa(_ctx, trabajo):
-        return (None, [INICIO + timedelta(hours=2)])
+        # `(cupo, cita_ya_existente, alternativas)`: sin cupo no hay nada que duplicar.
+        return (None, None, [INICIO + timedelta(hours=2)])
 
     monkeypatch.setattr(h, "_con_base", base_falsa)
 
@@ -255,6 +256,53 @@ def test_la_clave_del_cupo_la_arma_el_orquestador_y_va_anclada_al_HORARIO(monkey
     assert claves[3] != claves[0], "dos pacientes distintos compartían la misma reserva"
 
 
+def test_el_mismo_intento_no_crea_un_SEGUNDO_evento_en_el_calendario(monkeypatch):
+    """`tomar_cupo` era idempotente y la tool no.
+
+    Un acierto de clave devuelve la reserva que YA existía, y el código seguía derecho a
+    `crear_evento` + `registrar_cita`. Medido antes del arreglo, llamando dos veces con la
+    misma conversación y el mismo horario: una reserva, **dos eventos en el calendario del
+    doctor** y dos filas en `citas`, las dos confirmadas al paciente con ids distintos.
+
+    Con la clave anclada al horario esto es mucho menos probable, pero no imposible: el
+    modelo puede reintentar la tool dentro del mismo turno.
+    """
+    calendario = CalendarioDoble()
+    ctx = contexto(calendario=calendario)
+    liberados: list[int] = []
+
+    # La reserva 77 ya tiene su cita: es lo que devolvería `cita_viva_de_reserva`.
+    ya_creada = {
+        "id": "cita-original",
+        "nombre_completo": "Ana Gómez",
+        "tratamiento": "limpieza",
+        "evento_calendar_id": "evt-original",
+    }
+
+    async def base_falsa(_ctx, trabajo):
+        return ((77, 1), ya_creada, [])
+
+    monkeypatch.setattr(h, "_con_base", base_falsa)
+    monkeypatch.setattr(h, "_liberar", lambda _ctx, reserva_id: liberados.append(reserva_id))
+
+    texto = asyncio.run(
+        h._crear_cita(
+            ctx,
+            SolicitudCita(
+                nombre_completo="Ana Gómez",
+                inicio=INICIO,
+                tratamiento="limpieza",
+                clave_idempotencia="da-igual-lo-que-ponga",
+            ),
+        )
+    )
+
+    assert calendario.eventos == {}, "creó un segundo evento sobre una reserva que ya tenía cita"
+    assert "cita-original" in texto, "le daría al paciente un id distinto para la misma hora"
+    assert "Cita confirmada" in texto, "el modelo tiene que poder confirmarle igual"
+    assert liberados == [], "liberó un cupo que es del paciente y tiene una cita viva"
+
+
 def test_si_calendar_falla_el_cupo_se_libera_y_la_corrida_muere(monkeypatch):
     """El escenario que justifica que el doble sea hostil.
 
@@ -270,7 +318,9 @@ def test_si_calendar_falla_el_cupo_se_libera_y_la_corrida_muere(monkeypatch):
     liberados: list[int] = []
 
     async def base_falsa(_ctx, trabajo):
-        return ((77, 1), [])
+        # Cupo tomado y NINGUNA cita previa en esa reserva: el camino que crea el evento,
+        # que es el que esta prueba necesita ver fallar.
+        return ((77, 1), None, [])
 
     monkeypatch.setattr(h, "_con_base", base_falsa)
     monkeypatch.setattr(h, "_liberar", lambda _ctx, reserva_id: liberados.append(reserva_id))
@@ -480,6 +530,88 @@ def test_el_mismo_turno_no_escala_dos_veces(monkeypatch):
     )
 
     assert telegram.enviados == [], "se volvió a avisar sobre un turno ya escalado"
+    assert "ya estaba escalado" in texto
+
+
+def test_un_escalamiento_registrado_sin_avisar_se_reintenta_desde_la_TOOL(monkeypatch):
+    """El aviso de cierre de turno no basta, y el caso es concreto.
+
+    La tool escribe su fila, Telegram devuelve 502, `failure_error_function` se traga el
+    `ErrorDeCanal` para que el modelo siga conversando, y el modelo cierra con
+    `requiere_escalamiento=False` --porque cree que ya avisó--. Entonces `responder` no llama
+    a `al_escalar`, el reintento de `runtime._avisar_a_doctores` no se alcanza nunca, y
+    queda: cero telegrams al doctor, una fila pendiente que nadie va a mirar, y un paciente
+    al que se le dijo «ya le estoy avisando al doctor».
+
+    Por eso el reintento tiene que vivir también aquí, que es donde nace el problema.
+    """
+    ctx = contexto()
+    telegram = TelegramFalso()
+    anotados: list[tuple[int, int]] = []
+
+    async def base_falsa(_ctx, trabajo):
+        return trabajo(BaseFalsa())
+
+    # La clave ya existe: `insertar_escalamiento` no escribe...
+    monkeypatch.setattr(h, "_con_base", base_falsa)
+    monkeypatch.setattr(h.persistencia, "insertar_escalamiento", lambda _c, **kw: None)
+    # ...pero esa fila se quedó sin Telegram.
+    monkeypatch.setattr(
+        h.persistencia, "escalamiento_pendiente_de_aviso", lambda _c, clave: 19
+    )
+    monkeypatch.setattr(
+        h.persistencia,
+        "anotar_telegram_en_escalamiento",
+        lambda _c, eid, mid: anotados.append((eid, mid)),
+    )
+
+    texto = asyncio.run(
+        h._escalar_a_doctores(
+            ctx,
+            SolicitudEscalamiento(
+                motivo="clinico",
+                resumen_para_doctor="Dice que le duele desde hace tres días.",
+                pregunta_concreta="¿Lo citamos hoy mismo?",
+                clave_idempotencia="da-igual",
+            ),
+            telegram=telegram,
+        )
+    )
+
+    assert len(telegram.enviados) == 1, "el doctor se quedó sin enterarse del escalamiento"
+    assert anotados == [(19, 4242)], "el reintento no quedó anotado; se repetiría siempre"
+    assert "ya estaba escalado" not in texto
+
+
+def test_un_escalamiento_YA_avisado_no_se_reintenta_desde_la_tool(monkeypatch):
+    """La otra mitad. Sin ella, el arreglo de arriba habría cambiado un aviso perdido por
+    un aviso repetido, que es la otra forma de que el doctor deje de mirarlos."""
+    ctx = contexto()
+    telegram = TelegramFalso()
+
+    async def base_falsa(_ctx, trabajo):
+        return trabajo(BaseFalsa())
+
+    monkeypatch.setattr(h, "_con_base", base_falsa)
+    monkeypatch.setattr(h.persistencia, "insertar_escalamiento", lambda _c, **kw: None)
+    monkeypatch.setattr(
+        h.persistencia, "escalamiento_pendiente_de_aviso", lambda _c, clave: None
+    )
+
+    texto = asyncio.run(
+        h._escalar_a_doctores(
+            ctx,
+            SolicitudEscalamiento(
+                motivo="clinico",
+                resumen_para_doctor="Lo mismo de antes.",
+                pregunta_concreta="¿Y ahora?",
+                clave_idempotencia="da-igual",
+            ),
+            telegram=telegram,
+        )
+    )
+
+    assert telegram.enviados == []
     assert "ya estaba escalado" in texto
 
 

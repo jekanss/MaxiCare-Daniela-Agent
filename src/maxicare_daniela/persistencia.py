@@ -622,6 +622,41 @@ def registrar_cita(
     return id_cita
 
 
+def cita_viva_de_reserva(conn, reserva_id: int) -> dict[str, Any] | None:
+    """La cita NO cancelada que cuelga de esa reserva, o `None` si la reserva no tiene.
+
+    Es lo que hace idempotente a `crear_cita` de verdad. `tomar_cupo` ya lo era en el cupo
+    --un acierto de clave devuelve la reserva que ya existía-- pero la tool seguía adelante
+    y creaba OTRO evento en Google y OTRA fila en `citas`. Resultado medido llamando dos
+    veces con la misma conversación y el mismo horario: una reserva, **dos eventos en el
+    calendario del doctor** y dos citas, las dos confirmadas al paciente con ids distintos.
+
+    Se filtra por `estado <> 'cancelada'` porque una cita cancelada no debe impedir volver a
+    agendar: `liberar_cupo` borra la reserva al cancelar, así que en la práctica la siguiente
+    reserva es otra -- pero apoyarse en eso sería apoyarse en un detalle de otra función.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT id, reserva_id, conversacion_id, paciente_id, nombre_completo, telefono,
+                   tratamiento, inicio, duracion_minutos, evento_calendar_id, estado
+              FROM citas
+             WHERE reserva_id = %s AND estado <> 'cancelada'
+             ORDER BY creada_en
+             LIMIT 1
+            """,
+            (reserva_id,),
+        )
+        fila = cur.fetchone()
+    if not fila:
+        return None
+    columnas = (
+        "id", "reserva_id", "conversacion_id", "paciente_id", "nombre_completo", "telefono",
+        "tratamiento", "inicio", "duracion_minutos", "evento_calendar_id", "estado",
+    )
+    return dict(zip(columnas, fila))
+
+
 def leer_cita(conn, id_cita: str) -> dict[str, Any] | None:
     """La cita completa, o `None`. Incluye `paciente_id` para comprobar la pertenencia."""
     with conn.cursor() as cur:

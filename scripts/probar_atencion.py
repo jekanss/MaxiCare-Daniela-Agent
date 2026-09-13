@@ -512,11 +512,19 @@ async def cuatro(url: str, cfg: Config) -> None:
     print("   (siempre con respuesta fabricada: para medir el candado hay que controlar")
     print("    cuanto tarda el turno)")
 
-    # Primero uno solo, para que la conversacion exista. Sin esto los dos mensajes
-    # simultaneos leerian `conversacion_viva` -> None a la vez, abririan DOS conversaciones
-    # distintas y cada uno cogeria su propio candado: el script mediria un caso que no es el
-    # que se quiere medir. Es tambien lo que ocurre de verdad -- los tres mensajes seguidos
-    # de un paciente llegan sobre una conversacion que ya existe.
+    # Primero uno solo, para que la conversacion exista, y asi este bloque mide UNA cosa:
+    # la serializacion de dos turnos sobre una conversacion abierta.
+    #
+    # El comentario que habia aqui decia que arrancar con una conversacion ya abierta "es
+    # tambien lo que ocurre de verdad -- los tres mensajes seguidos de un paciente llegan
+    # sobre una conversacion que ya existe". ESO ERA FALSO para el primer contacto, que es
+    # justo cuando un paciente manda tres mensajes seguidos, y servia de excusa para no
+    # mirar el caso: con el candado indexado por `id_conversacion` habia que leer la base
+    # antes de poder cerrarlo, asi que dos mensajes a la vez de un numero nuevo abrian DOS
+    # conversaciones. Ya no: el candado va por TELEFONO y la lectura entra dentro. El caso
+    # del numero nuevo lo cubre `test_atencion.py`
+    # (`test_dos_mensajes_a_la_vez_de_un_numero_NUEVO_abren_UNA_sola_conversacion`), donde
+    # se puede forzar el solape sin depender de los tiempos de Neon.
     usar(Turnos())
     wa, dormir = WhatsAppFalso(), DormirFalso()
     m0 = mensaje(TEL_SERIE, texto="hola")

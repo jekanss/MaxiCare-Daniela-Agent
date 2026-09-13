@@ -490,8 +490,9 @@ async def _entregar(m: ingesta.MensajeEntrante) -> None:
     primero-- cualquier fallo del turno se llevaría por delante la entrega del archivo, y
     nadie se enteraría hasta que un paciente mandara una radiografía urgente.
     """
+    entrega = None
     try:
-        await ingesta.procesar_mensaje(
+        entrega = await ingesta.procesar_mensaje(
             m,
             whatsapp=_whatsapp,
             telegram=_telegram,
@@ -501,8 +502,22 @@ async def _entregar(m: ingesta.MensajeEntrante) -> None:
     except Exception:  # noqa: BLE001
         log.exception("fallo inesperado entregando %s", m.wamid)
 
+    # Meta reintenta el mismo webhook, y el proyecto ya lo tenía asumido: `procesar_mensaje`
+    # deduplica por `wamid` con un `ON CONFLICT DO NOTHING` y devuelve `nuevo=False` cuando
+    # reconoce un reintento. Ese dato se estaba tirando, así que el archivo llegaba al doctor
+    # una sola vez --bien-- pero Daniela corría el turno entero otra vez: el mismo POST tres
+    # veces eran tres respuestas al paciente y tres corridas del modelo pagadas.
+    #
+    # `entrega is None` significa que `procesar_mensaje` reventó antes de decidir nada, y ahí
+    # se sigue: un fallo suyo --Telegram caído, la descarga del archivo-- no puede dejar al
+    # paciente sin respuesta. Solo se corta cuando dijo explícitamente que esto es un
+    # reintento.
+    if entrega is not None and not entrega.nuevo:
+        log.info("%s ya estaba atendido: reintento de Meta, Daniela no vuelve a contestar", m.wamid)
+        return
+
     try:
-        await atencion.atender(
+        atendido = await atencion.atender(
             m,
             whatsapp=_whatsapp,
             telegram=_telegram,
@@ -514,6 +529,29 @@ async def _entregar(m: ingesta.MensajeEntrante) -> None:
         # Aquí ya no hay nada que salvar para el paciente, pero el archivo YA llegó al
         # doctor: eso es lo que protege el `try` de arriba.
         log.exception("el turno de Daniela reventó para %s", m.wamid)
+        return
+
+    # El `Atendido` traía el motivo, el turno y el escalamiento, y se descartaba entero. Un
+    # turno que respondió con el mensaje de emergencia se veía en el log igual que uno que
+    # fue bien, y el único sitio donde quedaba rastro era `mensajes_entrantes` -- que hay que
+    # ir a consultar sabiendo ya que pasó algo. Esta línea es la que hace que se vea sin
+    # buscarla.
+    if atendido.motivo:
+        log.warning(
+            "turno %s de %s con incidencia (%s): respondido=%s · escalado_por=%s",
+            atendido.turno,
+            atendido.id_conversacion or m.telefono,
+            atendido.motivo,
+            atendido.respondido,
+            atendido.escalado_por,
+        )
+    elif atendido.escalado_por:
+        log.info(
+            "turno %s de %s escalado por %s",
+            atendido.turno,
+            atendido.id_conversacion or m.telefono,
+            atendido.escalado_por,
+        )
 
 
 # ==========================================================================================

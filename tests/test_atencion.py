@@ -21,7 +21,9 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import itertools
 import random
+import threading
 import time
 from datetime import datetime
 
@@ -538,6 +540,157 @@ def test_dos_mensajes_del_mismo_telefono_se_serializan(monkeypatch):
     ), f"las dos corridas se solaparon: {orden}"
 
 
+def _respuesta_simple(ctx, texto: str = "ok") -> conversacion.Resultado:
+    return conversacion.Resultado(
+        respuesta=RespuestaDaniela(
+            mensaje_al_paciente=texto,
+            estado_oportunidad="explorando",
+            barrera_detectada="ninguna",
+            requiere_escalamiento=False,
+            motivo_escalamiento="ninguno",
+            fuera_de_alcance=False,
+        ),
+        turno=ctx.turno_actual,
+    )
+
+
+def test_dos_mensajes_a_la_vez_de_un_numero_NUEVO_abren_UNA_sola_conversacion(monkeypatch):
+    """El primer contacto es donde el candado por conversación no podía proteger nada.
+
+    El id de la conversación SALE DE LA BASE, así que con el candado indexado por ese id
+    había que leer antes de cerrarlo: dos mensajes simultáneos de un número nuevo leían los
+    dos «no hay conversación viva» y cada uno abría la suya. Daniela contestaba dos veces sin
+    saber de la otra mitad --y podía contradecirse-- y del tercer mensaje en adelante
+    `conversacion_viva` elegía una de las dos y la otra mitad del hilo se perdía.
+
+    Y es el escenario que abre el docstring del módulo («un paciente no manda un mensaje:
+    manda tres seguidos») en el momento de más valor: alguien que escribe por primera vez.
+
+    El candado por TELÉFONO lo cierra porque el teléfono viene en el mensaje: se conoce antes
+    de tocar la base, así que la lectura cabe dentro.
+    """
+    limpiar_estado()
+    contador = itertools.count(1)
+    # Un id distinto por llamada: con uno fijo, dos conversaciones se verían como una y la
+    # prueba pasaría sin comprobar nada.
+    base = BaseFalsa(viva=None, nueva=lambda tel: f"conv-{next(contador)}").instalar(monkeypatch)
+
+    # La ventana de la carrera es diminuta --lo que hay entre `conversacion_viva` y
+    # `asegurar_conversacion`, dentro del MISMO `to_thread`-- así que dejarla al azar del
+    # planificador hace una prueba que pasa por suerte: comprobado, sin el arreglo pasaba
+    # igual la mitad de las veces. Esta barrera la fuerza.
+    #
+    # Es `threading` y no `asyncio` porque `_leer_estado` corre en un hilo. Y tiene timeout:
+    # CON el candado la segunda lectura no llega nunca a la vez --ese es el arreglo-- así
+    # que la barrera se rompe sola a los 0,3 s y las dos siguen su camino. Sin el candado se
+    # cruzan, las dos leen «no hay conversación» y cada una abre la suya.
+    #
+    # La barrera va DESPUÉS de leer y no antes, y la diferencia es la prueba entera:
+    # soltando a los dos hilos ANTES de la lectura, el primero llegaba igualmente a crear la
+    # conversación antes de que el segundo leyera, y la prueba pasaba con el fallo puesto
+    # --medido--. Puesta aquí, ninguno puede crear nada hasta que los dos hayan leído, que
+    # es exactamente la carrera que se quiere reproducir.
+    barrera = threading.Barrier(2, timeout=0.3)
+    viva_original = persistencia.conversacion_viva
+
+    def viva_sincronizada(conn, telefono, *, ventana_horas=24):
+        leido = viva_original(conn, telefono, ventana_horas=ventana_horas)
+        with contextlib.suppress(threading.BrokenBarrierError):
+            barrera.wait()
+        return leido
+
+    monkeypatch.setattr(persistencia, "conversacion_viva", viva_sincronizada)
+
+    asegurar_original = persistencia.asegurar_conversacion
+
+    def asegurar_y_existir(conn, *, telefono, paciente_id=None, canal="whatsapp"):
+        id_conv = asegurar_original(conn, telefono=telefono, paciente_id=paciente_id, canal=canal)
+        # A partir de aquí la conversación EXISTE, que es lo que haría Neon. Sin esto el
+        # doble no podría distinguir el arreglo del fallo.
+        base.viva = (id_conv, 0, False, 0)
+        return id_conv
+
+    monkeypatch.setattr(persistencia, "asegurar_conversacion", asegurar_y_existir)
+
+    vistas: list[str] = []
+
+    async def responder(entrada, *, ctx, sesion=None, al_escalar=None, **extra):
+        ctx.turno.reiniciar()
+        ctx.turno_actual += 1
+        vistas.append(ctx.id_conversacion)
+        # Ceder el bucle: le da a la otra corrida la oportunidad de colarse si el candado
+        # no la está reteniendo.
+        for _ in range(5):
+            await asyncio.sleep(0)
+        return _respuesta_simple(ctx)
+
+    monkeypatch.setattr(conversacion, "responder", responder)
+
+    async def correr():
+        await asyncio.gather(
+            _atender(mensaje_texto("A", wamid="wamid-a")),
+            _atender(mensaje_texto("B", wamid="wamid-b")),
+        )
+
+    asyncio.run(asyncio.wait_for(correr(), timeout=10))
+
+    assert base.nombres.count("asegurar_conversacion") == 1, (
+        "se abrieron dos conversaciones para el mismo número: la mitad del hilo se pierde"
+    )
+    assert vistas[0] == vistas[1], "los dos turnos corrieron sobre conversaciones distintas"
+
+
+def test_dos_mensajes_a_la_vez_de_una_conversacion_VIVA_leen_turnos_distintos(monkeypatch):
+    """La otra cara del mismo hueco, y la que le cuesta un aviso al doctor.
+
+    Con la lectura fuera del candado, los dos mensajes leían el mismo `turno_actual` y
+    armaban la misma clave `conv-x:escalamiento:N`. El turno A escala por dolor, el turno B
+    escala por otra cosa, `insertar_escalamiento` descarta el segundo como duplicado, y el
+    doctor se entera de UNO SOLO.
+
+    Es palabra por palabra lo que el docstring del módulo dice que pasa *sin* candado.
+    """
+    limpiar_estado()
+    base = BaseFalsa(viva=("conv-x", 5, True, 0)).instalar(monkeypatch)
+
+    tocar_original = persistencia.tocar_conversacion
+
+    def tocar_y_persistir(conn, id_conversacion, *, turno_actual=None):
+        tocar_original(conn, id_conversacion, turno_actual=turno_actual)
+        if turno_actual is not None:
+            # Es lo que hace `tocar_conversacion` de verdad: el turno queda en la base y el
+            # siguiente mensaje lo lee de ahí.
+            base.viva = (id_conversacion, turno_actual, True, 0)
+
+    monkeypatch.setattr(persistencia, "tocar_conversacion", tocar_y_persistir)
+
+    claves: list[str] = []
+
+    async def responder(entrada, *, ctx, sesion=None, al_escalar=None, **extra):
+        ctx.turno.reiniciar()
+        ctx.turno_actual += 1
+        claves.append(ctx.clave("escalamiento", ctx.turno_actual))
+        for _ in range(5):
+            await asyncio.sleep(0)
+        return _respuesta_simple(ctx)
+
+    monkeypatch.setattr(conversacion, "responder", responder)
+
+    async def correr():
+        await asyncio.gather(
+            _atender(mensaje_texto("A", wamid="wamid-a")),
+            _atender(mensaje_texto("B", wamid="wamid-b")),
+        )
+
+    asyncio.run(asyncio.wait_for(correr(), timeout=10))
+
+    assert claves[0] != claves[1], (
+        "los dos turnos comparten clave de idempotencia: el segundo escalamiento se "
+        "descartaría como duplicado y el doctor no se enteraría"
+    )
+    assert sorted(claves) == ["conv-x:escalamiento:6", "conv-x:escalamiento:7"]
+
+
 def test_dos_telefonos_distintos_no_se_bloquean_entre_si(monkeypatch):
     """La otra mitad del candado: que no sea un cuello de botella global.
 
@@ -754,6 +907,41 @@ def test_si_el_turno_revienta_el_paciente_igual_recibe_algo(monkeypatch):
     assert whatsapp.textos == [conversacion.MENSAJE_SEGURO]
     assert resultado.texto_enviado == conversacion.MENSAJE_SEGURO
     assert resultado.motivo and "una tool con un bug" in resultado.motivo
+
+
+def test_un_turno_reventado_que_SI_respondio_deja_rastro_del_fallo(monkeypatch):
+    """Respondido y con fallo interno no son excluyentes, y tratarlos como si lo fueran
+    borraba el dato.
+
+    Un turno que explota sale con `MENSAJE_SEGURO`, que ES una respuesta: entraba por
+    `marcar_respondido`, y esa función pone `fallo_respuesta = NULL` --con razón, porque un
+    reintento que sí sale tiene que borrar el fallo del intento anterior--. Resultado: en
+    `mensajes_entrantes` un turno que reventó quedaba EXACTAMENTE IGUAL que uno que fue
+    bien, y «¿a cuántos pacientes les contestamos con el mensaje de emergencia?» no se podía
+    responder.
+    """
+    base, _ = preparar(monkeypatch, turnos=Turnos(revienta=RuntimeError("una tool con un bug")))
+
+    atender(mensaje_texto())
+
+    assert "marcar_respondido" in base.nombres, "el paciente sí recibió el mensaje seguro"
+    assert "marcar_fallo_respuesta" in base.nombres, (
+        "el turno reventó y en la base no queda ni rastro: indistinguible de uno normal"
+    )
+    # Y en ese orden: al revés, `marcar_respondido` borraría el motivo que se acaba de poner.
+    assert base.nombres.index("marcar_respondido") < base.nombres.index("marcar_fallo_respuesta")
+    assert "una tool con un bug" in base.argumentos("marcar_fallo_respuesta")[1]
+
+
+def test_un_turno_normal_no_deja_un_fallo_inventado(monkeypatch):
+    """La otra mitad: si `marcar_fallo_respuesta` se llamara siempre, el informe de «a quién
+    no le contestamos» daría positivo para todos y dejaría de servir para nada."""
+    base, _ = preparar(monkeypatch)
+
+    atender(mensaje_texto())
+
+    assert "marcar_respondido" in base.nombres
+    assert "marcar_fallo_respuesta" not in base.nombres
 
 
 # ==========================================================================================

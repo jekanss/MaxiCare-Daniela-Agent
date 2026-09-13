@@ -250,6 +250,54 @@ def test_el_mismo_intento_repetido_no_consume_un_segundo_cupo(esquema, contexto_
     assert primero == segundo, "el reintento se llevó un cupo nuevo"
 
 
+def test_crear_la_misma_cita_dos_veces_no_duplica_el_evento_ni_la_fila(esquema, contexto_de):
+    """La idempotencia completa, contra la base y el calendario de verdad.
+
+    `tomar_cupo` ya era idempotente; la tool no. Un acierto de clave devolvía la reserva que
+    ya existía y el código seguía derecho a `crear_evento` + `registrar_cita`. Medido antes
+    del arreglo, con la misma conversación y el mismo horario: **1 reserva, 2 eventos en el
+    calendario del doctor y 2 filas en `citas`**, las dos confirmadas al paciente con ids
+    distintos.
+
+    Se prueba contra Neon porque lo que decide es una consulta: `cita_viva_de_reserva`
+    filtra por `reserva_id` y por `estado <> 'cancelada'`, y eso no lo demuestra un doble.
+    """
+    inicio = _hora_libre(7)
+    ctx = contexto_de("573001110010", "Elena Doble")
+
+    def pedir() -> str:
+        return asyncio.run(
+            h._crear_cita(
+                ctx,
+                SolicitudCita(
+                    nombre_completo="Elena Doble",
+                    inicio=inicio,
+                    tratamiento="limpieza",
+                    clave_idempotencia="lo-que-el-modelo-quiera-poner",
+                ),
+            )
+        )
+
+    primero = pedir()
+    segundo = pedir()
+
+    assert "Cita confirmada" in primero and "Cita confirmada" in segundo
+    id_primero = primero.rsplit("Id de la cita: ", 1)[1].rstrip(".")
+    id_segundo = segundo.rsplit("Id de la cita: ", 1)[1].rstrip(".")
+    assert id_primero == id_segundo, "se le dieron al paciente dos ids para la misma hora"
+
+    # Un solo evento en el calendario del doctor.
+    assert len(ctx.calendario.eventos) == 1, (
+        f"hay {len(ctx.calendario.eventos)} eventos en el calendario para una sola cita"
+    )
+
+    with persistencia.conectar(esquema) as conn, conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM reservas WHERE inicio = %s", (inicio,))
+        assert cur.fetchone()[0] == 1
+        cur.execute("SELECT count(*) FROM citas WHERE inicio = %s", (inicio,))
+        assert cur.fetchone()[0] == 1, "dos citas colgando de una sola reserva"
+
+
 def test_un_escalamiento_sin_telegram_se_distingue_de_uno_ya_avisado(esquema, contexto_de):
     """La diferencia entre «ya se avisó» y «se intentó avisar», contra el SQL de verdad.
 

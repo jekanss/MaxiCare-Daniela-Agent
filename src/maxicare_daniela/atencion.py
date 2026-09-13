@@ -51,10 +51,12 @@ Cuatro límites conocidos, y ninguno es un descuido
 2. **El candado es de proceso.** Con varios workers de uvicorn o varias réplicas deja de
    proteger, porque cada proceso tiene su propio `_candados`. La versión que sí escalaría es
    un `pg_advisory_lock` sobre el uuid de la conversación. Hoy corre un solo worker.
-3. **`_sesiones` se poda por antigüedad**, con la misma ventana de 24 h de
+3. **`_sesiones` y `_candados` se podan por antigüedad**, con la misma ventana de 24 h de
    `conversacion_viva`: pasada esa ventana la conversación ya está muerta para la base, así
-   que su historial tampoco sirve. Sin la poda, el diccionario crece con cada número que
-   escriba a la clínica y no baja nunca.
+   que su historial tampoco sirve. Sin la poda, los diccionarios crecen con cada número que
+   escriba a la clínica y no bajan nunca. Se podan por separado porque tienen claves
+   distintas --`_sesiones` por conversación, `_candados` por teléfono-- y un candado cogido
+   no se tira nunca.
 4. **`tomada_por` siempre será `None` hasta la entrega 6C**, que es la que trae el relevo a
    los doctores. Se lee desde ya porque no cuesta una consulta aparte y evita volver aquí.
 """
@@ -90,7 +92,33 @@ VENTANA_CONVERSACION_HORAS = 24
 # no encontraría su historial. El despliegue de la clínica corre un solo worker y el volumen
 # lo justifica de sobra; si eso cambia, lo que hay que cambiar es esto (ver el límite 2).
 
-_candados: dict[str, asyncio.Lock] = {}
+#: El candado va por TELÉFONO, y esa elección es la que hace que sirva de algo.
+#:
+#: La versión anterior lo indexaba por `id_conversacion`, que parece lo natural --es la
+#: conversación lo que hay que serializar-- y dejaba dos huecos, porque el id de la
+#: conversación SALE DE LA BASE: había que leer antes de poder cerrar el candado, así que la
+#: lectura quedaba fuera y dos mensajes simultáneos la hacían a la vez.
+#:
+#: 1. **Conversación existente:** los dos leían el mismo `turno_actual` y armaban la misma
+#:    clave de idempotencia. Un paciente que escala por dolor en un mensaje y por otra cosa
+#:    en el siguiente llegaba al doctor UNA vez: `insertar_escalamiento` descartaba el
+#:    segundo como duplicado del primero. Es exactamente lo que el docstring de este módulo
+#:    decía que pasaba *sin* candado -- y seguía pasando con él.
+#: 2. **Primer contacto:** dos mensajes a la vez de un número nuevo abrían DOS
+#:    conversaciones, cada una con su candado y su historial. Daniela contestaba dos veces
+#:    sin saber de la otra mitad, y del tercer mensaje en adelante `conversacion_viva` elegía
+#:    una y la otra mitad del hilo se perdía. En el momento de más valor: alguien que escribe
+#:    a la clínica por primera vez.
+#:
+#: El teléfono, en cambio, viene EN EL MENSAJE: se conoce antes de tocar la base, así que
+#: `_leer_estado` cabe dentro del candado. Y es estrictamente más fuerte que el otro, porque
+#: un teléfono no tiene dos conversaciones vivas a la vez: todo lo que serializaba el candado
+#: por conversación lo serializa este, y además las dos carreras de arriba.
+#:
+#: Guarda `(candado, último uso)` porque la poda ya no puede colgarse de `_sesiones`: las dos
+#: tablas tienen claves distintas --teléfono aquí, id de conversación allá-- y un candado sin
+#: marca de tiempo propia no se podría tirar nunca.
+_candados: dict[str, tuple[asyncio.Lock, float]] = {}
 _sesiones: dict[str, tuple[conversacion.SesionEnMemoria, float]] = {}
 
 
@@ -256,6 +284,21 @@ def _anotar_resultado(
         with persistencia.conectar(database_url) as conn:
             if wamid_respuesta is not None:
                 persistencia.marcar_respondido(conn, wamid, wamid_respuesta=wamid_respuesta)
+                if motivo:
+                    # Respondido Y con fallo interno: son compatibles, y perder el segundo
+                    # dato era un agujero real. Un turno que reventó --dos tripwires
+                    # seguidos, `MaxTurnsExceeded`, una excepción del SDK-- sale con
+                    # `MENSAJE_SEGURO`, que ES una respuesta, así que entraba por la rama de
+                    # arriba y `marcar_respondido` ponía `fallo_respuesta = NULL`. En
+                    # `mensajes_entrantes` quedaba EXACTAMENTE IGUAL que un turno que fue
+                    # bien: la pregunta «¿a cuántos pacientes les contestamos con el mensaje
+                    # de emergencia?» no se podía responder.
+                    #
+                    # El orden importa y es este a propósito: `marcar_respondido` limpia el
+                    # motivo --y tiene razón en hacerlo, porque un reintento que sí sale
+                    # tiene que borrar el fallo del intento anterior-- así que el motivo se
+                    # escribe DESPUÉS.
+                    persistencia.marcar_fallo_respuesta(conn, wamid, motivo=motivo)
             elif motivo:
                 persistencia.marcar_fallo_respuesta(conn, wamid, motivo=motivo)
             # Siempre, incluso si el envío falló: el turno ocurrió, y la conversación tiene
@@ -277,19 +320,50 @@ def _anotar_resultado(
 
 
 def _podar_sesiones(ahora: float) -> None:
-    """Tira las sesiones que ya pasaron la ventana, y sus candados con ellas.
+    """Tira las sesiones que ya pasaron la ventana.
 
-    El candado solo se tira si nadie lo tiene cogido. Borrar un `Lock` que alguien está
-    usando es peor que no borrarlo: el siguiente mensaje crearía uno nuevo y los dos turnos
-    correrían a la vez creyendo cada uno que tiene la exclusiva.
+    Ya no tira candados: desde que el candado va por teléfono, las dos tablas tienen claves
+    distintas y borrar `_candados[id_conversacion]` no habría borrado nunca nada. De los
+    candados se encarga `_podar_candados`.
     """
     limite = VENTANA_CONVERSACION_HORAS * 3600
     viejas = [id_ for id_, (_, ultimo) in _sesiones.items() if ahora - ultimo > limite]
     for id_ in viejas:
         del _sesiones[id_]
-        candado = _candados.get(id_)
-        if candado is not None and not candado.locked():
-            del _candados[id_]
+
+
+def _podar_candados(ahora: float) -> None:
+    """Tira los candados que nadie ha usado en la ventana. Sin esto, el diccionario crece
+    con cada número que le escriba a la clínica y no baja nunca.
+
+    **Un candado cogido no se tira jamás**, y no es una precaución de más: borrar un `Lock`
+    que alguien está usando es peor que no borrarlo. El siguiente mensaje crearía uno nuevo
+    y los dos turnos correrían a la vez, cada uno creyendo que tiene la exclusiva -- es
+    decir, exactamente el fallo que este candado existe para impedir, pero solo cuando la
+    conversación lleva un día abierta.
+    """
+    limite = VENTANA_CONVERSACION_HORAS * 3600
+    viejos = [
+        tel
+        for tel, (candado, ultimo) in _candados.items()
+        if ahora - ultimo > limite and not candado.locked()
+    ]
+    for tel in viejos:
+        del _candados[tel]
+
+
+def _candado_de(telefono: str, ahora: float) -> asyncio.Lock:
+    """El candado de ese número, creándolo si es el primer mensaje.
+
+    Se poda ANTES de buscar: si el candado de este teléfono ya estaba caducado, se tira y se
+    crea uno limpio, que es lo correcto porque nadie lo tiene cogido. Y el que se devuelve
+    queda con la marca de ahora, así que nunca se poda el que se acaba de pedir.
+    """
+    _podar_candados(ahora)
+    guardado = _candados.get(telefono)
+    candado = guardado[0] if guardado else asyncio.Lock()
+    _candados[telefono] = (candado, ahora)
+    return candado
 
 
 def _sesion_de(id_conversacion: str, ahora: float) -> conversacion.SesionEnMemoria:
@@ -455,34 +529,48 @@ async def atender(
 
     texto = _entrada_para_el_modelo(mensaje)
 
-    try:
-        # `persistencia` es psycopg SÍNCRONO. Llamarlo directo desde aquí bloquearía el bucle
-        # de eventos mientras Neon responde, es decir, a todos los demás pacientes a la vez.
-        estado = await asyncio.to_thread(
-            _leer_estado, config.database_url, mensaje.telefono, mensaje.wamid
-        )
-    except Exception as e:  # noqa: BLE001
-        # Sin base no hay contexto, y sin contexto no hay turno. Pero la regla de
-        # `fallos.escalamiento` no admite excepciones: pase lo que pase sale un mensaje. Y la
-        # promesa que hace `MENSAJE_SEGURO` se cumple igual, porque `ingesta.procesar_mensaje`
-        # ya le reenvió este mensaje a los doctores antes de llegar aquí.
-        log.exception("no se pudo leer el estado de %s; se responde lo mínimo", mensaje.telefono)
-        try:
-            await whatsapp.enviar_texto(mensaje.telefono, conversacion.MENSAJE_SEGURO)
-        except Exception:  # noqa: BLE001 -- mismo motivo que en el envío de abajo
-            log.exception("tampoco se pudo responder a %s", mensaje.telefono)
-            return Atendido(mensaje.wamid, None, False, motivo=f"sin base y sin envío: {e}")
-        return Atendido(
-            mensaje.wamid,
-            None,
-            True,
-            texto_enviado=conversacion.MENSAJE_SEGURO,
-            motivo=f"sin base: {e}",
-        )
-
-    candado = _candados.setdefault(estado.id_conversacion, asyncio.Lock())
+    # El candado se coge ANTES de leer la base, y ese orden es el arreglo entero.
+    #
+    # Antes se leía primero --hacía falta, porque el candado iba por `id_conversacion` y ese
+    # id sale de la lectura-- así que el candado serializaba la ejecución del turno pero no
+    # su lectura. Dos mensajes simultáneos leían a la vez: el mismo `turno_actual` (y por
+    # tanto la misma clave de idempotencia, con lo que el segundo escalamiento se descartaba
+    # como duplicado del primero) o, en un primer contacto, ninguna conversación -- y cada
+    # uno creaba la suya. Ver el comentario de `_candados`.
+    #
+    # El teléfono viene en el mensaje, así que aquí ya se conoce y la lectura cabe dentro.
+    candado = _candado_de(mensaje.telefono, time.time())
 
     async with candado:
+        try:
+            # `persistencia` es psycopg SÍNCRONO. Llamarlo directo desde aquí bloquearía el
+            # bucle de eventos mientras Neon responde, es decir, a todos los demás pacientes
+            # a la vez. Dentro del candado sigue siendo cierto: `to_thread` cede el control,
+            # y lo único que espera es otro mensaje DEL MISMO número.
+            estado = await asyncio.to_thread(
+                _leer_estado, config.database_url, mensaje.telefono, mensaje.wamid
+            )
+        except Exception as e:  # noqa: BLE001
+            # Sin base no hay contexto, y sin contexto no hay turno. Pero la regla de
+            # `fallos.escalamiento` no admite excepciones: pase lo que pase sale un mensaje.
+            # Y la promesa que hace `MENSAJE_SEGURO` se cumple igual, porque
+            # `ingesta.procesar_mensaje` ya le reenvió este mensaje a los doctores.
+            log.exception(
+                "no se pudo leer el estado de %s; se responde lo mínimo", mensaje.telefono
+            )
+            try:
+                await whatsapp.enviar_texto(mensaje.telefono, conversacion.MENSAJE_SEGURO)
+            except Exception:  # noqa: BLE001 -- mismo motivo que en el envío de abajo
+                log.exception("tampoco se pudo responder a %s", mensaje.telefono)
+                return Atendido(mensaje.wamid, None, False, motivo=f"sin base y sin envío: {e}")
+            return Atendido(
+                mensaje.wamid,
+                None,
+                True,
+                texto_enviado=conversacion.MENSAJE_SEGURO,
+                motivo=f"sin base: {e}",
+            )
+
         operativa = estado.operativa or {}
         ctx = ContextoDaniela(
             id_conversacion=estado.id_conversacion,

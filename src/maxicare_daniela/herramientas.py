@@ -460,7 +460,7 @@ async def _crear_cita(ctx: ContextoDaniela, solicitud: SolicitudCita) -> str:
     # y el `inicio` detrás, que es lo que hace imposible el 1 sin romper el 2.
     clave = ctx.clave("cita", inicio.isoformat())
 
-    def tomar(conn) -> tuple[tuple[int, int] | None, list[datetime]]:
+    def tomar(conn) -> tuple[tuple[int, int] | None, dict[str, Any] | None, list[datetime]]:
         cupo = persistencia.tomar_cupo(
             conn,
             inicio=inicio,
@@ -469,13 +469,19 @@ async def _crear_cita(ctx: ContextoDaniela, solicitud: SolicitudCita) -> str:
             conversacion_id=ctx.id_conversacion,
         )
         if cupo is not None:
-            return (cupo, [])
+            # `tomar_cupo` era idempotente y esta tool no: un acierto de clave devuelve la
+            # reserva que ya existía, y el código seguía derecho a `crear_evento` +
+            # `registrar_cita`. Dos llamadas con la misma conversación y el mismo horario
+            # dejaban UNA reserva, DOS eventos en el calendario del doctor y DOS citas, las
+            # dos confirmadas al paciente con ids distintos. Esta consulta es lo que
+            # convierte «el cupo ya era tuyo» en «la cita ya era tuya».
+            return (cupo, persistencia.cita_viva_de_reserva(conn, cupo[0]), [])
         # Solo se buscan alternativas si hizo falta: una consulta de más en el camino feliz
         # es latencia que paga cada paciente.
         ventana_fin = inicio + timedelta(hours=8)
-        return (None, _huecos_libres(conn, ctx, inicio, ventana_fin))
+        return (None, None, _huecos_libres(conn, ctx, inicio, ventana_fin))
 
-    cupo, alternativas = await _con_base(ctx, tomar)
+    cupo, ya_existente, alternativas = await _con_base(ctx, tomar)
 
     if cupo is None:
         # RESULTADO, no error. El modelo tiene que poder seguir conversando con esto.
@@ -490,6 +496,27 @@ async def _crear_cita(ctx: ContextoDaniela, solicitud: SolicitudCita) -> str:
         return texto
 
     reserva_id, _cupo_num = cupo
+
+    if ya_existente is not None:
+        # Esta reserva ya tiene su cita: este intento es un duplicado, no una cita nueva. Se
+        # devuelve LA MISMA confirmación, con el id que ya existe, y no se toca el
+        # calendario. Decirle al modelo que se creó otra le haría confirmarle al paciente un
+        # id distinto para la misma hora, y dejaría un segundo evento en la agenda del
+        # doctor sobre un solo cupo.
+        #
+        # No se libera el cupo: es del paciente, y la cita que cuelga de él es válida.
+        texto = (
+            f"Cita confirmada para {ya_existente['nombre_completo']}, "
+            f"{_formatear_hora(inicio)}, {ya_existente['tratamiento']}. "
+            f"Id de la cita: {ya_existente['id']}."
+        )
+        log.info(
+            "crear_cita repetida sobre la reserva %s: se devuelve la cita %s sin crear otra",
+            reserva_id,
+            ya_existente["id"],
+        )
+        ctx.turno.horas_autorizadas |= horas_de(texto)
+        return texto
 
     # El cupo ya está apartado. A partir de aquí, cualquier salida que no sea una cita
     # completa tiene que devolverlo.
@@ -911,11 +938,35 @@ async def _escalar_a_doctores(
     escalamiento_id = await _con_base(ctx, registrar)
 
     if escalamiento_id is None:
-        # Ya se escaló este turno. No es un fallo: es lo que impide que un reintento de red
-        # le mande al doctor la misma alerta tres veces.
-        return (
-            "Este turno ya estaba escalado; no se volvió a avisar. Dile al paciente que lo "
-            "estás revisando con los doctores."
+        # La clave ya existía. Antes se salía aquí, y eso quemaba la clave al INTENTAR en
+        # vez de al CONSEGUIR: si el primer intento escribió la fila y el Telegram NO salió
+        # --un 502, un límite de tasa, un HTML que Telegram rechaza-- el doctor se quedaba
+        # sin enterarse para siempre, porque nadie volvía a mirar esa fila.
+        #
+        # Y no bastaba con arreglarlo en `runtime._avisar_a_doctores`: ese solo corre cuando
+        # el turno CIERRA escalado. Si el modelo llama a esta tool, el envío falla,
+        # `failure_error_function` se traga el error y el modelo termina con
+        # `requiere_escalamiento=False` --porque cree que ya avisó-- el aviso de cierre no se
+        # llama nunca. Medido: cero telegrams, una fila pendiente, y al paciente se le dijo
+        # «ya le estoy avisando al doctor». Por eso el reintento vive también aquí, que es
+        # donde nace el problema.
+        def pendiente(conn) -> int | None:
+            return persistencia.escalamiento_pendiente_de_aviso(conn, clave)
+
+        escalamiento_id = await _con_base(ctx, pendiente)
+
+        if escalamiento_id is None:
+            # La fila existe Y tiene su `telegram_message_id`: el doctor ya recibió la
+            # alerta. Esto sí es un duplicado, y repetirlo es lo que hace que a la cuarta
+            # deje de mirarlas.
+            return (
+                "Este turno ya estaba escalado; no se volvió a avisar. Dile al paciente que "
+                "lo estás revisando con los doctores."
+            )
+
+        log.warning(
+            "el escalamiento %s se había registrado sin llegar a avisar; se reintenta",
+            escalamiento_id,
         )
 
     canal = telegram or Telegram(ctx.telegram_bot_token, ctx.telegram_chat_doctores)

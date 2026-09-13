@@ -217,6 +217,39 @@ def test_el_orden_es_primero_el_doctor_y_luego_daniela(cliente, espias):
     assert espias.orden == ["doctor", "daniela"]
 
 
+def test_un_reintento_de_Meta_no_hace_que_Daniela_conteste_otra_vez(cliente, espias, monkeypatch):
+    """Meta reintenta el mismo webhook, y el proyecto ya lo tenía asumido.
+
+    `procesar_mensaje` deduplica por `wamid` con un `ON CONFLICT DO NOTHING` y devuelve
+    `nuevo=False` cuando reconoce un reintento --hasta lo dice en el log--. Ese dato se
+    tiraba: el archivo llegaba al doctor una sola vez, pero Daniela corría el turno entero
+    otra vez. Medido antes del arreglo, el mismo POST firmado tres veces: 1 reenvío al
+    doctor y **3 respuestas al paciente**, con sus tres corridas del modelo pagadas.
+    """
+    vistos: set[str] = set()
+
+    async def procesar_deduplicando(m, **_kwargs):
+        espias.orden.append("doctor")
+        nuevo = m.wamid not in vistos
+        vistos.add(m.wamid)
+        if nuevo:
+            espias.procesados.append(m)
+        return ingesta.Resultado(m.wamid, nuevo=nuevo, reenviado=nuevo)
+
+    monkeypatch.setattr(ingesta, "procesar_mensaje", procesar_deduplicando)
+
+    payload = _mensaje_de_texto("wamid.reintentado")
+    for _ in range(3):
+        r = _enviar(cliente, payload)
+        assert r.status_code == 200
+
+    assert len(espias.procesados) == 1, "el doctor recibió el archivo más de una vez"
+    assert len(espias.atendidos) == 1, (
+        "Daniela contestó a un reintento de Meta: el paciente recibe respuestas repetidas "
+        "y la clínica paga una corrida del modelo por cada reintento"
+    )
+
+
 def test_si_la_entrega_al_doctor_revienta_Daniela_contesta_igual(cliente, espias, monkeypatch):
     """La garantía espejo, y no es simétrica por gusto.
 
@@ -244,6 +277,29 @@ def test_si_la_entrega_al_doctor_revienta_Daniela_contesta_igual(cliente, espias
     assert espias.orden == ["doctor", "daniela"]
 
 
+def test_si_procesar_mensaje_revienta_Daniela_contesta_aunque_no_sepa_si_es_reintento(
+    cliente, espias, monkeypatch
+):
+    """El matiz del corte por reintento, y hace falta escribirlo.
+
+    Solo se corta cuando `procesar_mensaje` DIJO que es un reintento. Si revienta antes de
+    devolver nada --Telegram caído, la descarga del archivo-- no sabemos si es nuevo, y
+    entonces se atiende: un fallo entregando al doctor no puede dejar además al paciente sin
+    respuesta. Un `if not resultado.nuevo` escrito sobre un `resultado` que puede ser `None`
+    convertiría cada fallo de Telegram en un paciente ignorado.
+    """
+
+    async def procesar_revienta(m, **_kwargs):
+        espias.orden.append("doctor")
+        raise RuntimeError("Telegram no responde")
+
+    monkeypatch.setattr(ingesta, "procesar_mensaje", procesar_revienta)
+
+    _enviar(cliente, _mensaje_de_texto("wamid.sin.resultado"))
+
+    assert [m.wamid for m in espias.atendidos] == ["wamid.sin.resultado"]
+
+
 def test_a_daniela_se_le_pasa_el_calendario_construido_al_arrancar(cliente, espias, monkeypatch):
     """Sin el argumento `calendario=`, `atender` cae a construir uno POR MENSAJE.
 
@@ -266,6 +322,40 @@ def test_a_daniela_se_le_pasa_el_calendario_construido_al_arrancar(cliente, espi
     assert recibidos == [centinela], (
         "atender no recibió el calendario del arranque: lo construiría por mensaje"
     )
+
+
+def test_el_motivo_de_un_turno_con_incidencia_queda_en_el_log(cliente, monkeypatch, caplog):
+    """El `Atendido` traía `motivo`, `turno` y `escalado_por`, y `_entregar` lo descartaba
+    entero (`await atencion.atender(...)` sin asignar).
+
+    Un turno que respondió con el mensaje de emergencia se veía en el log igual que uno que
+    fue bien, y el único rastro quedaba en `mensajes_entrantes` -- que hay que ir a
+    consultar sabiendo ya que pasó algo.
+    """
+
+    async def procesar_falso(m, **_kwargs):
+        return ingesta.Resultado(m.wamid, nuevo=True, reenviado=True)
+
+    async def atender_con_incidencia(m, **_kwargs):
+        return atencion.Atendido(
+            wamid=m.wamid,
+            id_conversacion="conv-7",
+            respondido=True,
+            texto_enviado="mensaje seguro",
+            motivo="RuntimeError: una tool con un bug",
+            turno=4,
+            escalado_por="dato_faltante",
+        )
+
+    monkeypatch.setattr(ingesta, "procesar_mensaje", procesar_falso)
+    monkeypatch.setattr(atencion, "atender", atender_con_incidencia)
+
+    with caplog.at_level("WARNING", logger="maxicare.runtime"):
+        _enviar(cliente, _mensaje_de_texto("wamid.incidencia"))
+
+    registrado = "\n".join(r.getMessage() for r in caplog.records)
+    assert "una tool con un bug" in registrado
+    assert "conv-7" in registrado
 
 
 def test_un_webhook_sin_mensajes_no_llama_a_daniela(cliente, espias):
