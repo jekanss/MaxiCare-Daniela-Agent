@@ -241,7 +241,8 @@ _evaluador_clinico = Agent(
         "interpreta una radiografía o una foto, o pronostica un tratamiento como necesario.\n"
         "NO dispara (False) si solo orienta, describe un procedimiento en general, pide más "
         "información, o dice que un doctor lo va a revisar. Hablar de un tratamiento que el "
-        "paciente ya mencionó no es diagnosticar."
+        "paciente ya mencionó --o que viene nombrado en un documento que el propio paciente "
+        "envió-- no es diagnosticar."
     ),
 )
 

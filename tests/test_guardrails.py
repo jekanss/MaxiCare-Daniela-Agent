@@ -9,11 +9,14 @@ reales. La medida de un buen freno no es cuánto frena, es que frene exactamente
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
+from agents import RunContextWrapper
 
 from maxicare_daniela import guardrails as g
 from maxicare_daniela.calendario import CalendarioDoble
-from maxicare_daniela.contratos import ContextoDaniela
+from maxicare_daniela.contratos import ContextoDaniela, RespuestaDaniela
 
 
 def contexto(**cambios) -> ContextoDaniela:
@@ -207,3 +210,101 @@ def test_lo_autorizado_no_sobrevive_al_turno():
     assert ctx.turno.cifras_autorizadas == set()
     assert ctx.turno.hubo_adjunto is False
     assert g.revisar_cifras("son $1.900.000", ctx.turno.cifras_autorizadas).dispara is True
+# ==========================================================================================
+# La excepción del evaluador clínico (fase 6B)
+# ==========================================================================================
+#
+# Con `hubo_adjunto = True` el prefiltro deja pasar la revisión SIEMPRE en el turno del
+# documento, así que el evaluador opina sobre cada mensaje de ese turno. La excepción de sus
+# instrucciones se amplió en 6B: hablar de un tratamiento que viene nombrado en un documento
+# que el propio paciente envió tampoco es diagnosticar. Sin eso, «ya me llegó tu remisión
+# para ortodoncia» podía autobloquear a Daniela justo en el turno que 6B existe para mejorar.
+#
+# Un doble no puede juzgar semántica: lo que estas dos pruebas sostienen es el CABLEADO --que
+# el mensaje llega íntegro al evaluador y que su veredicto se respeta en los dos sentidos--
+# y, la segunda, que al ampliar la excepción nadie borró la regla de disparo.
+
+AVISO_DE_REMISION = "Ya me llegó tu remisión para ortodoncia, el doctor la revisa"
+INTERPRETANDO_LA_IMAGEN = "Por la radiografía que mandaste, tienes una caries profunda en el 46"
+
+
+def _revisar_lo_clinico(monkeypatch, mensaje: str, *, el_evaluador_dispara: bool):
+    """Corre `sin_lectura_clinica` sobre un turno con adjunto, con el evaluador doblado.
+
+    Se dobla `_preguntar` --la llamada al modelo-- y no el guardrail: el prefiltro, el
+    envoltorio del SDK y el armado del `GuardrailFunctionOutput` son los de producción.
+    Mismo patrón que el `sin_evaluadores` de `tests/test_agentes.py`.
+
+    Devuelve `(resultado, visto)`, donde `visto` es lo que le llegó a cada evaluador.
+    """
+    visto: list[tuple[str, str]] = []
+
+    async def evaluador_doblado(evaluador, texto):
+        visto.append((evaluador.name, texto))
+        return g.Veredicto(el_evaluador_dispara, "lo dictó la prueba")
+
+    monkeypatch.setattr(g, "_preguntar", evaluador_doblado)
+
+    ctx = contexto()
+    ctx.turno.hubo_adjunto = True  # el turno del documento
+    salida = RespuestaDaniela(
+        mensaje_al_paciente=mensaje,
+        estado_oportunidad="explorando",
+        barrera_detectada="ninguna",
+        requiere_escalamiento=False,
+        motivo_escalamiento="ninguno",
+        fuera_de_alcance=False,
+    )
+    resultado = asyncio.run(
+        g.sin_lectura_clinica.run(
+            context=RunContextWrapper(ctx), agent=None, agent_output=salida
+        )
+    )
+    return resultado, visto
+
+
+def test_avisar_que_la_remision_llego_no_bloquea_el_turno(monkeypatch):
+    """El caso que la excepción nueva protege: decir QUÉ llegó no es decir qué tiene.
+
+    Si esto disparara, Daniela se quedaría muda precisamente en el turno en que el paciente
+    acaba de mandar su remisión — y el paciente no sabría ni que llegó.
+    """
+    resultado, visto = _revisar_lo_clinico(
+        monkeypatch, AVISO_DE_REMISION, el_evaluador_dispara=False
+    )
+
+    assert resultado.output.tripwire_triggered is False
+    assert visto == [("evaluador_lectura_clinica", AVISO_DE_REMISION)], (
+        "el mensaje tiene que llegarle al evaluador entero y sin recortar: si el prefiltro "
+        "lo hubiera saltado, el guardrail no estaría vigilando este turno"
+    )
+
+
+def test_interpretar_la_radiografia_sigue_disparando(monkeypatch):
+    """LA que importa: sin ella, la excepción nueva sería una puerta abierta.
+
+    Dos mitades, y ninguna sobra. La de arriba es el cableado: cuando el evaluador dice que
+    sí, el guardrail dispara aunque el mensaje empiece hablando de un documento que el
+    propio paciente envió. La de abajo es la instrucción, que es lo que 6B tocó: la
+    excepción nueva ampara nombrar un TRATAMIENTO que el documento trae, no cualquier cosa
+    que venga en un documento, y la regla que manda disparar al interpretar una imagen
+    sigue entera. Un doble no puede juzgar semántica; que nadie borró el disparo al ampliar
+    la excepción sí se puede afirmar offline, y es justo el descuido que abriría el hueco.
+    """
+    resultado, visto = _revisar_lo_clinico(
+        monkeypatch, INTERPRETANDO_LA_IMAGEN, el_evaluador_dispara=True
+    )
+
+    assert resultado.output.tripwire_triggered is True
+    assert visto == [("evaluador_lectura_clinica", INTERPRETANDO_LA_IMAGEN)]
+
+    instrucciones = g._evaluador_clinico.instructions
+    assert "interpreta una radiografía o una foto" in instrucciones, (
+        "se borró la regla de disparo al ampliar la excepción: el evaluador dejaría pasar "
+        "una interpretación de imagen, que es lo más caro que Daniela puede decir"
+    )
+    assert "nombrado en un documento que el propio paciente envió" in instrucciones
+    assert "un tratamiento que el " in instrucciones, (
+        "la excepción tiene que seguir acotada a NOMBRAR UN TRATAMIENTO. Redactada como "
+        "«lo que venga en un documento no es diagnosticar», ampara también el diagnóstico."
+    )
