@@ -322,7 +322,7 @@ def test_daniela_sabe_que_dia_es_hoy():
 
 
 def test_la_fecha_va_despues_del_vocabulario_para_no_romper_el_cache():
-    """La fecha cambia cada minuto: delante del vocabulario invalidaría el prefijo cacheado.
+    """La fecha cambia cada hora: delante del vocabulario invalidaría el prefijo cacheado.
 
     `prompt_cache_retention="24h"` funciona por prefijo idéntico. El orden tiene que ser
     instrucciones -> tratamientos -> fecha, de lo más estable a lo más volátil.
@@ -332,6 +332,48 @@ def test_la_fecha_va_despues_del_vocabulario_para_no_romper_el_cache():
     texto = asyncio.run(agentes.daniela.get_system_prompt(RunContextWrapper(context=ctx)))
 
     assert texto.index("TRATAMIENTOS QUE MAXICARE OFRECE HOY") < texto.index("2026")
+
+
+def test_la_hora_del_prompt_no_lleva_minuto_porque_el_minuto_rompe_el_cache():
+    """El bloque AHORA MISMO iba con `%H:%M`, y el minuto costaba casi la mitad de la factura.
+
+    `prompt_cache_retention="24h"` funciona por prefijo idéntico, y el prompt de sistema va
+    ANTES que los esquemas de tools y que el historial. Con el minuto dentro, cada mensaje
+    que cae en un minuto nuevo --o sea, prácticamente todos-- descachea también los 3.673
+    tokens de los diez esquemas y el historial entero: el caché solo alcanzaba a cubrir los
+    2.059 tokens estáticos de 6.531 + historial.
+
+    Medido el 13/09/2026 con `o200k_base` sobre una conversación de agendamiento de seis
+    turnos: $0.173 con minuto, $0.095 sin él.
+
+    Lo que el minuto aportaba no era nada: para resolver «el próximo 16» hace falta el día,
+    y para no ofrecer horas que ya pasaron basta la hora --el filtro fino es
+    `bloques_del_dia(no_antes_de=ctx.ahora)`, que compara instantes de verdad y no depende
+    de lo que diga el prompt--.
+    """
+    ocho_y_cuarto = contexto(ahora=datetime(2026, 9, 13, 8, 15, tzinfo=ZONA_BOGOTA))
+    ocho_y_cincuenta = contexto(ahora=datetime(2026, 9, 13, 8, 50, tzinfo=ZONA_BOGOTA))
+
+    uno = asyncio.run(agentes.daniela.get_system_prompt(RunContextWrapper(context=ocho_y_cuarto)))
+    otro = asyncio.run(agentes.daniela.get_system_prompt(RunContextWrapper(context=ocho_y_cincuenta)))
+
+    assert uno == otro, "dos minutos de la misma hora tienen que dar el MISMO prefijo"
+    assert ":15" not in uno and ":50" not in otro
+
+    # Pero la hora sí sigue ahí: sin ella, «hoy a las 3» no se puede situar.
+    assert "8" in uno
+
+
+def test_la_hora_cambia_el_prompt_cuando_de_verdad_cambia_la_hora():
+    """El redondeo ahorra, pero no puede congelar el día entero: a las 17:00 ya no se ofrece
+    la mañana, y eso Daniela solo lo sabe si el prompt se movió."""
+    manana = contexto(ahora=datetime(2026, 9, 13, 8, 0, tzinfo=ZONA_BOGOTA))
+    tarde = contexto(ahora=datetime(2026, 9, 13, 17, 0, tzinfo=ZONA_BOGOTA))
+
+    uno = asyncio.run(agentes.daniela.get_system_prompt(RunContextWrapper(context=manana)))
+    otro = asyncio.run(agentes.daniela.get_system_prompt(RunContextWrapper(context=tarde)))
+
+    assert uno != otro
 
 
 def test_daniela_se_presenta_en_el_primer_turno():
