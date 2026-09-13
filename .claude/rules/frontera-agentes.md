@@ -213,6 +213,25 @@ Daniela no podía cerrar ninguna conversación con el precio de la cita que esta
 MaxiCare fijó **$50.000, abonables a cualquier tratamiento posterior**, lo que además responde
 la segunda mitad de la nota vieja: quien solo asiste a consulta paga esos $50.000.
 
+# Un solo reloj, y viaja en el contexto
+
+**Ninguna tool llama a `datetime.now()`.** El instante lo pone `ctx.ahora`, una sola vez por
+turno, y de ahí salen las tres validaciones de fecha: `crear_cita`, `reprogramar_cita` y
+`programar_seguimiento`. `herramientas.py` tenía además un `_ahora()` propio —lo usaba solo
+el seguimiento— y se borró: dos relojes en un módulo son dos relojes que un día discrepan, y
+el que no viaja en el contexto no se puede fijar desde una prueba.
+
+Las tres validan **antes de tocar la base**, y en `reprogramar_cita` eso importa más que en
+las otras dos. Crear una cita en el pasado deja una cita fantasma sobre un cupo que nadie
+libera; MOVER una al pasado además **destruye una cita buena**: `mover_cita` la lleva al día
+que ya pasó, `liberar_cupo` suelta el cupo que el paciente sí tenía y `mover_evento` arrastra
+el evento del doctor detrás. El paciente se queda sin la cita que tenía y Daniela se lo
+confirma como un cambio normal.
+
+El orden dentro de cada tool es: hora pasada primero, bloqueo del doctor después. La primera
+es una comparación local; la segunda es una llamada a Google. Una hora del pasado no merece
+esa llamada.
+
 # Convenciones del paquete
 
 - `SolicitudCita` **no tiene campo de teléfono**: la tool lo lee del contexto local.
