@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import html
 import logging
 
 from agents import Runner
@@ -231,8 +232,13 @@ async def leer_y_repartir(
         return None
 
     clinico, no_clinica = repartir(leida)
+    # Este canal va en HTML (`canales.py` fija `parse_mode: "HTML"` siempre): un `<` o un `&`
+    # en `clinico` («canal < 2 mm») lo devuelve Telegram como 400, y ese 400 se traga la
+    # lectura entera. No se reutiliza `ingesta._escapar` --misma lógica, `html.escape`-- para
+    # no crear un import circular: `ingesta` ya importa `lectura`.
+    clinico_seguro = html.escape(clinico, quote=False)
     try:
-        await telegram.enviar_mensaje(f"📄 <b>Lectura</b>\n{clinico}", tema_id=tema_id)
+        await telegram.enviar_mensaje(f"📄 <b>Lectura</b>\n{clinico_seguro}", tema_id=tema_id)
     except Exception:  # noqa: BLE001
         log.exception("la lectura no llegó a Telegram; el archivo sí está")
     return no_clinica

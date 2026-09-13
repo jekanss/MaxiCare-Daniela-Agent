@@ -659,28 +659,42 @@ def test_un_archivo_enorme_no_arranca_el_lector(monkeypatch):
 
     assert resultado.lectura is None
     assert tg.archivos, "el archivo grande tiene que llegar al doctor igual"
-    """Sin esto, un `ok: false` devolveria un KeyError sin nombre y el archivo se perderia
-    buscando un tema que no existe."""
+
+
+def test_el_aviso_al_general_no_invalida_una_entrega_que_ya_ocurrio(monkeypatch):
+    """Hallazgo 3 de la ronda de arreglo.
+
+    Cuando el aviso al General se intenta, el archivo YA esta depositado en el tema del
+    paciente. Si ese aviso revienta, la fila tiene que seguir diciendo `reenviado=True`
+    --lo que paso de verdad-- y el lector tiene que haber arrancado igual: un aviso fallido
+    no puede quitarle al doctor ni la entrega ni la lectura.
+    """
     import asyncio
-    import httpx
 
-    from maxicare_daniela.canales import ErrorDeCanal, Telegram
+    from maxicare_daniela import ingesta, lectura
+    from maxicare_daniela.canales import ErrorDeCanal
 
-    transporte = httpx.MockTransport(
-        lambda r: httpx.Response(
-            200, json={"ok": False, "description": "not enough rights to manage topics"}
+    _sin_base(monkeypatch)
+    monkeypatch.setattr(lectura, "asegurar_tema", _devuelve_async(TEMA_DE_ANA))
+    monkeypatch.setattr(lectura, "leer_y_repartir", _devuelve_async(None))
+
+    class TelegramQueFallaElAviso(TelegramConTemas):
+        async def enviar_mensaje(self, texto, *, tema_id=None, teclado=None) -> int:
+            raise ErrorDeCanal("Telegram no respondio")
+
+    tg = TelegramQueFallaElAviso()
+
+    resultado = asyncio.run(
+        ingesta.procesar_mensaje(
+            _mensaje_con_foto(),
+            whatsapp=WhatsAppConArchivo(),
+            telegram=tg,
+            database_url="postgresql://x",
+            tema_general=TEMA_GENERAL,
         )
     )
-    original = httpx.AsyncClient
 
-    class ClienteFalso(original):
-        def __init__(self, *a, **kw):
-            kw["transport"] = transporte
-            super().__init__(*a, **kw)
-
-    httpx.AsyncClient = ClienteFalso
-    try:
-        with pytest.raises(ErrorDeCanal, match="not enough rights"):
-            asyncio.run(Telegram("t", "-100123").crear_tema("Ana"))
-    finally:
-        httpx.AsyncClient = original
+    assert resultado.reenviado is True, "el archivo SI llego; el aviso fallido no lo cambia"
+    assert tg.archivos == [("radio.jpg", TEMA_DE_ANA)]
+    assert resultado.lectura is not None, "el lector tiene que arrancar aunque el aviso falle"
+    resultado.lectura.cancel()

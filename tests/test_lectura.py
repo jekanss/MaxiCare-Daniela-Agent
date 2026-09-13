@@ -374,3 +374,50 @@ def test_si_el_lector_revienta_devuelve_none_y_no_propaga():
         lectura.leer_archivo(_archivo(), tipo="image", correr=correr_que_revienta)
     )
     assert salida is None
+
+
+# ==========================================================================================
+# leer_y_repartir: el reparto entero, con el canal de Telegram de por medio
+# ==========================================================================================
+
+
+class TelegramQueCaptura:
+    """Lo minimo para ver que texto llego a `enviar_mensaje`. Nada mas se mide aqui."""
+
+    def __init__(self) -> None:
+        self.mensajes: list[str] = []
+
+    async def enviar_mensaje(self, texto, *, tema_id=None, teclado=None) -> int:
+        self.mensajes.append(texto)
+        return 1
+
+
+def test_el_contexto_clinico_se_escapa_antes_de_ir_a_telegram():
+    """Hallazgo 2 de la ronda de arreglo.
+
+    `canales.py` manda todo con `parse_mode: "HTML"`. Un `contexto_clinico` con `<` o `&`
+    sin escapar --«canal < 2 mm & pieza #46»-- le devuelve a Telegram un 400, y ese 400 lo
+    traga el `except` de `leer_y_repartir`: el archivo llega igual, pero la lectura clinica
+    se pierde en silencio. Esta prueba vigila que el texto que sale ya vino escapado.
+    """
+    import asyncio
+    from types import SimpleNamespace
+
+    async def correr_con_html(*a, **kw):
+        return SimpleNamespace(
+            final_output=_lectura(contexto_clinico="canal < 2 mm & pieza #46")
+        )
+
+    tg = TelegramQueCaptura()
+
+    no_clinica = asyncio.run(
+        lectura.leer_y_repartir(
+            _archivo(), tipo="image", telegram=tg, tema_id=901, correr=correr_con_html
+        )
+    )
+
+    assert no_clinica is not None
+    assert len(tg.mensajes) == 1
+    assert "canal &lt; 2 mm &amp; pieza #46" in tg.mensajes[0], (
+        f"el contexto clinico llego sin escapar a un canal HTML: {tg.mensajes[0]!r}"
+    )

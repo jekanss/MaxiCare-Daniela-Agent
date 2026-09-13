@@ -25,6 +25,8 @@ from datetime import datetime, timezone
 from . import lectura as lectura_mod
 from . import persistencia
 from .canales import ErrorDeCanal, Telegram, WhatsApp
+# Congela el nombre en el namespace de `ingesta`: un parcheo posterior de
+# `lectura.vale_la_pena_leer` (por ejemplo en una prueba) no afecta a este import directo.
 from .lectura import vale_la_pena_leer
 
 log = logging.getLogger("maxicare.ingesta")
@@ -248,20 +250,31 @@ async def procesar_mensaje(
             telegram_id = await telegram.enviar_archivo(
                 archivo, tipo_whatsapp=m.tipo, pie=pie, tema_id=destino
             )
-            if tema:
-                # El archivo ya no cae en el General, así que el General tiene que enterarse
-                # igual: es donde los doctores miran.
-                await telegram.enviar_mensaje(
-                    f"📎 Llegó un archivo de {_escapar(m.nombre_perfil or m.telefono)}"
-                    f" — está en su tema.",
-                    tema_id=tema_general,
-                )
+            # A partir de aquí el archivo YA está entregado. Nada de lo que sigue —el aviso
+            # al General, el arranque del lector— puede convertir esta entrega en un fallo,
+            # así que el aviso queda en su propio try/except y el lector arranca ANTES de
+            # intentarlo: un aviso que revienta no puede quitarle al doctor la lectura.
             if vale_la_pena_leer(m.tipo, archivo.tamano):
                 tarea = asyncio.create_task(
                     lectura_mod.leer_y_repartir(
                         archivo, tipo=m.tipo, telegram=telegram, tema_id=destino
                     )
                 )
+            if tema:
+                # El archivo ya no cae en el General, así que el General tiene que enterarse
+                # igual: es donde los doctores miran. Degradación, no entrega: si esto falla,
+                # el archivo sigue estando donde ya quedó.
+                try:
+                    await telegram.enviar_mensaje(
+                        f"📎 Llegó un archivo de {_escapar(m.nombre_perfil or m.telefono)}"
+                        f" — está en su tema.",
+                        tema_id=tema_general,
+                    )
+                except Exception:  # noqa: BLE001
+                    log.exception(
+                        "el archivo de %s ya está entregado; solo falló el aviso al General",
+                        m.wamid,
+                    )
             tamano = archivo.tamano
         else:
             telegram_id = await telegram.enviar_mensaje(
