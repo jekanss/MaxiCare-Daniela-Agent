@@ -167,6 +167,36 @@ def test_el_pool_esta_dimensionado_a_mano():
     assert pool.size() == persistencia.TAMANO_POOL_SESIONES
 
 
+def test_el_desbordo_del_pool_esta_dimensionado_a_mano():
+    """`max_overflow` es la otra mitad del presupuesto de conexiones contra el techo de
+    Neon: el pico real de un engine es `pool_size + max_overflow`, no `pool_size`. Con el
+    default de SQLAlchemy (10) el pico se triplicaría en silencio."""
+    sesion = persistencia.sesion_de_agente("conv-1", database_url=URL_NEON)
+
+    assert sesion._engine.pool._max_overflow == persistencia.DESBORDO_POOL_SESIONES
+
+
+def test_el_pool_comprueba_la_conexion_antes_de_usarla():
+    """Neon cierra las conexiones ociosas por su cuenta. Sin `pool_pre_ping`, la primera
+    consulta después de un rato tranquilo revienta con una conexión muerta -- y sería el
+    primer paciente de la mañana quien se lo encontrara.
+
+    El docstring de `_engine_de` ya decía esto y no lo comprobaba nadie: quitar el ajuste
+    dejaba la suite entera en verde."""
+    sesion = persistencia.sesion_de_agente("conv-1", database_url=URL_NEON)
+
+    assert sesion._engine.pool._pre_ping is True
+
+
+def test_el_pool_recicla_las_conexiones_antes_que_neon():
+    """`pool_recycle` es el cinturón del `pre_ping`: descarta por edad una conexión que
+    lleva demasiado tiempo abierta en vez de esperar a descubrir que está muerta. Cinco
+    minutos es lo que se eligió; el default de SQLAlchemy es -1, o sea nunca reciclar."""
+    sesion = persistencia.sesion_de_agente("conv-1", database_url=URL_NEON)
+
+    assert sesion._engine.pool._recycle == 300
+
+
 def test_cerrar_engines_vacia_la_cache():
     """Sin esto, una prueba deja un engine atado a su bucle de eventos y la siguiente se
     encuentra un `got Future attached to a different loop`."""
@@ -178,3 +208,49 @@ def test_cerrar_engines_vacia_la_cache():
     asyncio.run(persistencia.cerrar_engines())
 
     assert not persistencia._engines
+
+
+class _EngineFalso:
+    """Un engine que puede negarse a cerrarse. No toca la red: `cerrar_engines` solo llama
+    a `dispose()`, así que un objeto con ese método basta."""
+
+    def __init__(self, *, revienta: bool = False) -> None:
+        self.revienta = revienta
+        self.dispuesto = False
+
+    async def dispose(self) -> None:
+        if self.revienta:
+            raise RuntimeError("este pool ya estaba roto")
+        self.dispuesto = True
+
+
+def test_un_engine_que_no_cierra_no_impide_cerrar_los_demas(monkeypatch):
+    """El peor estado posible era el que dejaba la versión anterior: con el bucle delante
+    del `clear()` y sin `try`, el primer `dispose()` que lanzara dejaba los engines
+    siguientes SIN cerrar y el diccionario LLENO de engines a medio disponer -- que es
+    justo lo que esta función existe para impedir, porque la siguiente
+    `sesion_de_agente` los encontraría en la caché y escribiría contra ellos."""
+    import asyncio
+
+    roto = _EngineFalso(revienta=True)
+    sano = _EngineFalso()
+    monkeypatch.setattr(
+        persistencia, "_engines", {("url-a", None): roto, ("url-b", None): sano}
+    )
+
+    asyncio.run(persistencia.cerrar_engines())
+
+    assert sano.dispuesto is True, "un pool roto se llevó por delante a los demás"
+    assert not persistencia._engines, "la caché quedó con engines a medio disponer"
+
+
+def test_un_engine_que_no_cierra_no_tumba_el_apagado(monkeypatch):
+    """`cerrar_engines` la llama el `shutdown` del servidor. Si dejara subir la excepción,
+    un pool ya roto convertiría un apagado ordenado en un error."""
+    import asyncio
+
+    monkeypatch.setattr(
+        persistencia, "_engines", {("url-a", None): _EngineFalso(revienta=True)}
+    )
+
+    asyncio.run(persistencia.cerrar_engines())  # no debe lanzar

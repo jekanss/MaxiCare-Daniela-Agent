@@ -207,6 +207,25 @@ def _engine_de(database_url: str, esquema: str | None):
     Por eso la clave de caché lleva el esquema: `public` y `pruebas_web` no pueden compartir
     engine, o compartirían pool y las filas de una prueba podrían acabar mezcladas con las
     de la clínica real bajo carga.
+
+    ------------------------------------------------------------------------------------
+    Por qué NO lleva `connect_args={"prepare_threshold": None}`
+    ------------------------------------------------------------------------------------
+
+    Este es el primer sitio del proyecto donde una conexión a Neon se REUSA --`conectar`
+    abre y cierra una por llamada-- y con el reuso aparece un riesgo que hasta ahora no
+    podía darse: psycopg 3 auto-prepara una sentencia tras 5 ejecuciones en la misma
+    conexión (`prepare_threshold=5`, comprobado en el driver), y un pooler en modo
+    transacción es históricamente hostil a las prepared statements. Si el de Neon no las
+    soportara, el historial reventaría en producción y no en las pruebas, que hasta hoy
+    iban todas por el host directo.
+
+    Se midió el 13/09/2026 contra el pooler real antes de tocar nada, y lo soporta: sobre
+    una conexión del pool se creó una prepared statement (`pg_prepared_statements` = 1) y
+    se reusó sin error. Desactivar el auto-prepare habría sido pagar un coste por un
+    problema que esta base no tiene. Lo vigila
+    `test_sesion_neon.py::test_la_sesion_funciona_contra_el_pooler`, que es el único sitio
+    del repositorio que ejercita el camino de producción.
     """
     clave = (database_url, esquema)
     engine = _engines.get(clave)
@@ -237,10 +256,31 @@ async def cerrar_engines() -> None:
     En las pruebas hace falta de verdad: un `AsyncEngine` queda atado al bucle de eventos
     en el que se usó por primera vez, y reusarlo desde otro `asyncio.run` da un
     `got Future attached to a different loop` que no se lee como lo que es.
+
+    ------------------------------------------------------------------------------------
+    Por qué se vacía la caché ANTES de disponer, y por qué cada `dispose` va en su `try`
+    ------------------------------------------------------------------------------------
+
+    Con el bucle delante y el `clear()` detrás, un `dispose()` que lanzara dejaba el peor
+    estado posible: los engines siguientes sin cerrar Y el diccionario lleno de engines a
+    medio disponer -- exactamente lo que esta función existe para impedir. La siguiente
+    `sesion_de_agente` los encontraría en la caché y escribiría contra ellos.
+
+    Vaciar primero cierra además una segunda rendija: un engine creado por otra corrutina
+    durante uno de los `await` ya no se pierde del diccionario sin disponerse, porque lo que
+    se dispone es la lista copiada y lo que quede en `_engines` después es de quien lo puso.
+
+    El `try` por engine es lo que hace que un pool roto no se lleve por delante a los demás.
     """
-    for engine in list(_engines.values()):
-        await engine.dispose()
+    engines = list(_engines.values())
     _engines.clear()
+    for engine in engines:
+        try:
+            await engine.dispose()
+        except Exception:
+            # Cerrar el resto importa más que este fallo, y el apagado del servidor no
+            # puede reventar por un pool que ya estaba roto.
+            log.exception("cerrar_engines: no se pudo disponer un engine")
 
 
 def sesion_de_agente(

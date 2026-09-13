@@ -12,11 +12,9 @@ de por medio, así que el DDL (crear y borrar el esquema) y las comprobaciones c
 rechaza `options` como parámetro de arranque, así que sin quitarle el `-pooler.` al host no
 hay forma de fijar el `search_path` de la sesión.
 
-Cuando las Tareas 3, 7 y 13 amplíen este archivo con `SQLAlchemySession`, ese segundo
-mecanismo va a convivir con este: las sesiones del SDK se aislarán por
-`schema_translate_map`, que cualifica las sentencias al compilarlas porque ahí sí hay
-SQLAlchemy por debajo. Los dos conviven, cada uno con lo suyo: `search_path` para el
-`psycopg` crudo de este archivo, `schema_translate_map` para lo que el SDK escriba encima.
+Los dos mecanismos conviven en este archivo, cada uno con lo suyo: `search_path` para el
+`psycopg` crudo de aquí, `schema_translate_map` para lo que el SDK escriba encima. Y
+conviven SEPARADOS, que es la parte que costó: ver `_sin_options`.
 
 ------------------------------------------------------------------------------------------
 `_correr` -- por qué las pruebas de la Tarea 3 no usan `asyncio.run` a secas
@@ -37,6 +35,7 @@ import os
 import selectors
 import sys
 from typing import Any, Coroutine, TypeVar
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import pytest
 
@@ -62,14 +61,52 @@ def _correr(corutina: Coroutine[Any, Any, _T]) -> _T:
     return asyncio.run(corutina)
 
 
-def _url_directa() -> str:
-    """La URL de Neon sin el pooler. Hace falta para crear y borrar el esquema con
-    `search_path`, que es lo único de aquí que sigue necesitando la conexión directa."""
+def _url_cruda() -> str:
+    """La `MAXICARE_DATABASE_URL` tal cual la trae el entorno: CON `-pooler.`, que es por
+    donde entra producción."""
     cargar_dotenv()
     base = os.environ.get("MAXICARE_DATABASE_URL", "").strip()
     if not base:
         pytest.skip("falta MAXICARE_DATABASE_URL")
-    return base.replace("-pooler.", ".")
+    return base
+
+
+def _url_directa() -> str:
+    """La URL de Neon sin el pooler. Hace falta para crear y borrar el esquema con
+    `search_path`, que es lo único de aquí que sigue necesitando la conexión directa."""
+    return _url_cruda().replace("-pooler.", ".")
+
+
+def _sin_options(url: str) -> str:
+    """La misma URL sin el parámetro de consulta `options`, y con todo lo demás intacto.
+
+    ------------------------------------------------------------------------------------
+    Por qué esto NO se puede hacer con un `split("?options=")`
+    ------------------------------------------------------------------------------------
+
+    Es lo que hacía antes, y no cortaba nada. La `MAXICARE_DATABASE_URL` de Neon YA trae
+    query (`sslmode`, `channel_binding`), así que la fixture añadió el parámetro con `&` y
+    no con `?`: la cadena `"?options="` no aparecía en ninguna parte y el corte devolvía la
+    URL entera.
+
+    Lo que eso rompía no era la corrección --las filas cayeron donde tenían que caer, se
+    comprobó-- sino la ATRIBUCIÓN: la sesión del SDK viajaba con `search_path` Y con
+    `schema_translate_map` a la vez, así que
+    `test_las_tablas_de_sesion_no_se_crean_en_public` habría pasado igual con
+    `schema_translate_map` borrado de `_engine_de`, porque el `search_path` de la conexión
+    mandaba la fila al mismo sitio. La prueba que más peso carga de la fase no probaba el
+    mecanismo que dice probar.
+
+    Con el parámetro fuera de verdad, `schema_translate_map` queda solo frente al
+    aislamiento, que es lo único que hay en producción.
+    """
+    partes = urlsplit(url)
+    query = [
+        (clave, valor)
+        for clave, valor in parse_qsl(partes.query, keep_blank_values=True)
+        if clave != "options"
+    ]
+    return urlunsplit(partes._replace(query=urlencode(query)))
 
 
 @pytest.fixture(scope="module")
@@ -188,7 +225,7 @@ def test_ida_y_vuelta_contra_las_tablas_de_la_migracion(esquema):
     migración se quede vieja en silencio y nadie se entere hasta producción.
     """
     sesion = persistencia.sesion_de_agente(
-        "conv-ida-vuelta", database_url=esquema.split("?options=")[0], esquema=ESQUEMA
+        "conv-ida-vuelta", database_url=_sin_options(esquema), esquema=ESQUEMA
     )
 
     async def correr():
@@ -211,9 +248,21 @@ def test_ida_y_vuelta_contra_las_tablas_de_la_migracion(esquema):
 
 def test_las_tablas_de_sesion_no_se_crean_en_public(esquema):
     """El aislamiento por `schema_translate_map` es lo único que separa una prueba de la
-    base real de la clínica. Se comprueba consultando el catálogo, no asumiendo."""
+    base real de la clínica. Se comprueba consultando el catálogo, no asumiendo.
+
+    La primera aserción no es ceremonia: es lo que hace verdadera a la frase anterior. Con
+    un `options=-csearch_path=` colado en la URL, la conexión mandaría la fila al esquema
+    de pruebas por su cuenta y esta prueba pasaría igual con `schema_translate_map` borrado
+    de `_engine_de`. Ver `_sin_options`.
+    """
+    base = _sin_options(esquema)
+    assert "options" not in base, (
+        "la URL de la sesión lleva un search_path: el aislamiento ya no lo sostiene "
+        "schema_translate_map solo, y esta prueba dejó de probar lo que dice"
+    )
+
     sesion = persistencia.sesion_de_agente(
-        "conv-aislada", database_url=esquema.split("?options=")[0], esquema=ESQUEMA
+        "conv-aislada", database_url=base, esquema=ESQUEMA
     )
     _correr(sesion.add_items([{"role": "user", "content": "hola"}]))
     _correr(persistencia.cerrar_engines())
@@ -246,7 +295,7 @@ def test_el_historial_sobrevive_a_tirar_la_sesion(esquema):
     """El reinicio simulado: una sesión escribe, se tira, otra con el mismo `session_id`
     lee, y está todo. Es la mitad del entregable de la fase que se puede comprobar sin
     levantar dos procesos; la otra mitad la hace `scripts/probar_persistencia.py`."""
-    base = esquema.split("?options=")[0]
+    base = _sin_options(esquema)
 
     primera = persistencia.sesion_de_agente(
         "conv-reinicio", database_url=base, esquema=ESQUEMA
@@ -262,3 +311,69 @@ def test_el_historial_sobrevive_a_tirar_la_sesion(esquema):
     _correr(persistencia.cerrar_engines())
 
     assert [i["content"] for i in items] == ["me llamo Ana"]
+
+
+# ==========================================================================================
+# El camino de producción: el POOLER, con la conexión reusada
+# ==========================================================================================
+
+
+def test_la_sesion_funciona_contra_el_pooler(esquema):
+    """EL ÚNICO SITIO DEL REPOSITORIO QUE EJERCITA EL CAMINO DE PRODUCCIÓN.
+
+    Todo lo demás de este archivo va por el host DIRECTO --sin `-pooler.`-- porque necesita
+    fijar `search_path`, que el pooler rechaza como parámetro de arranque. Producción no:
+    producción entra por el pooler, y la `SQLAlchemySession` no necesita `search_path`
+    porque se aísla al compilar. Sin esta prueba, la pieza sobre la que se construyen diez
+    tareas más no la tocaba nadie por el camino en el que va a correr.
+
+    ------------------------------------------------------------------------------------
+    Por qué DIEZ vueltas y no una
+    ------------------------------------------------------------------------------------
+
+    Esta es la primera vez en todo el proyecto en que una conexión a Neon se REUSA:
+    `persistencia.conectar` abre y cierra una por llamada, así que nunca se topó con lo que
+    un pool sí provoca. Y lo que provoca es esto: psycopg 3 auto-prepara una sentencia tras
+    5 ejecuciones en la misma conexión (`prepare_threshold=5`), y un pooler en modo
+    transacción es históricamente hostil a las prepared statements. Diez vueltas cruzan ese
+    umbral con margen.
+
+    Medido el 13/09/2026 contra el pooler real antes de escribir nada: pasa. Y el pooler de
+    Neon sí soporta prepared statements -- ejecutando doce veces la MISMA consulta sobre una
+    conexión del pool, `pg_prepared_statements` llegó a 1 y se reusó sin error. Por eso
+    `_engine_de` NO lleva `prepare_threshold=None`: no hay problema que desactivar.
+
+    (El matiz medido, para que nadie lo dé por más de lo que es: el pool de SQLAlchemy hace
+    `ROLLBACK` al devolver cada conexión, y psycopg descarta su estado de preparadas en cada
+    `ROLLBACK` -- `PrepareManager._should_discard`. Así que por este camino el contador
+    vuelve a cero en cada checkout y el umbral, en la práctica, no se cruza. Lo que esta
+    prueba garantiza de verdad es el ida y vuelta repetido contra el pooler con la conexión
+    reusada; que las preparadas funcionen se comprobó aparte y está dicho arriba.)
+    """
+    cruda = _url_cruda()
+    if "-pooler." not in cruda:
+        pytest.skip("MAXICARE_DATABASE_URL no apunta al pooler: no hay camino que probar")
+    assert "options" not in cruda, (
+        "el pooler rechaza `options` como parámetro de arranque: esta URL no es la de "
+        "producción"
+    )
+    # La fixture ya creó el esquema y aplicó las migraciones: es la misma base, se llegue
+    # por el pooler o por el host directo.
+    assert esquema
+
+    sesion = persistencia.sesion_de_agente(
+        "conv-pooler", database_url=cruda, esquema=ESQUEMA
+    )
+
+    async def correr():
+        for vuelta in range(1, 11):
+            await sesion.add_items([{"role": "user", "content": f"vuelta {vuelta}"}])
+            await sesion.get_items()
+        return await sesion.get_items()
+
+    try:
+        items = _correr(correr())
+    finally:
+        _correr(persistencia.cerrar_engines())
+
+    assert [i["content"] for i in items] == [f"vuelta {v}" for v in range(1, 11)]
