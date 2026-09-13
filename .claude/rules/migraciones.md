@@ -25,6 +25,25 @@ cada vez que se corre. De ahí las dos reglas:
   los `Literal` de `contratos.py`: un valor nuevo pasa por una migración, no se cuela
   como un string cualquiera.
 
+# La 010 es distinta: su esquema no lo decidimos nosotros
+
+`010_sesiones_agente.sql` crea `agent_sessions` y `agent_messages`, y **el que fija esas
+columnas es el SDK de agentes**, no este proyecto. `SQLAlchemySession` corre con
+`create_tables=False` —crear tablas desde el proceso que atiende pacientes es una carrera
+esperando a ocurrir— así que el SQL de la migración tiene que coincidir con lo que el SDK
+espera, hasta el tipo. Dos consecuencias:
+
+- `created_at` / `updated_at` van **`TIMESTAMP` sin zona**, al revés que el resto del
+  esquema, que usa `TIMESTAMPTZ`. No lo "arregles": es lo que el SDK declara.
+- Quien suba la versión del SDK tiene que volver a comparar columna por columna. Lo que
+  caza que la migración se quede vieja es `tests/test_sesion_neon.py`, que corre contra
+  Neon de verdad: `MAXICARE_PRUEBAS_NEON=1 uv run pytest -q -m neon`. Sin esa suite, un
+  desajuste solo aparece cuando un paciente escribe.
+
+El esquema `pruebas_web` del chat del panel recibe estas tablas por su cuenta:
+`runtime._preparar_esquema_de_pruebas` llama a `aplicar_esquema` la primera vez que alguien
+abre el chat, y aplica todas las migraciones con `IF NOT EXISTS`.
+
 # Configuración
 
 Lo que la clínica puede cambiar sin tocar código vive en la tabla `configuracion`,

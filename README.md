@@ -192,6 +192,7 @@ gastan tokens de la API; los demás, ni uno.
 | `scripts/probar_agentes.py` | los dos agentes y sus guardrails, contra la API real | **sí** |
 | `scripts/probar_atencion.py` | el turno de WhatsApp de punta a punta | solo con `--chat` |
 | `scripts/probar_lectura.py` | **el muro** y el hilo de cada paciente | solo con `--chat` |
+| `scripts/probar_persistencia.py` | que una conversación sobrevive a reiniciar el proceso | solo con `--chat` |
 | `scripts/probar_calendario.py` | Google Calendar; `--diagnosticar` solo lee | no |
 | `scripts/probar_panel.py` | el panel interno | solo con `--chat` |
 
@@ -226,7 +227,7 @@ entorno, los invariantes y el porqué de cada uno.
 ## Estado
 
 El proyecto se construye en diez fases, cada una cerrada por algo que una persona puede
-correr y mirar. Seis están cerradas, una a medias, y tres sin empezar:
+correr y mirar. Siete están cerradas, una a medias, y dos sin empezar:
 
 | | Fase | |
 |---|---|---|
@@ -236,7 +237,7 @@ correr y mirar. Seis están cerradas, una a medias, y tres sin empezar:
 | ✅ | 4 · Los dos agentes y sus guardrails | |
 | ✅ | 5 · Cascarón web y chat de pruebas | |
 | 🟡 | 6 · Ingesta, **el muro** y **el relevo** | el muro sí; el relevo no |
-| ⬜ | 7 · Persistencia y observabilidad | ver abajo |
+| ✅ | 7 · Persistencia y observabilidad | una conversación sobrevive al reinicio |
 | ✅ | 8 · Pantallas de operación | |
 | ⬜ | 9 · Evals y piloto real | 22 evals antes de atender pacientes |
 | ⬜ | 10 · Documento de caso de éxito | depende del piloto |
@@ -245,8 +246,24 @@ correr y mirar. Seis están cerradas, una a medias, y tres sin empezar:
 Telegram y hable él con el paciente, con cierre automático por tiempo. El andamiaje ya está
 —la columna `tomada_por`, el tema del paciente naciendo cerrado— pero nada lo escribe aún.
 
-**La fase 7** son dos cosas. La observabilidad tiene media hecha: desde el 13/09/2026 ninguna
-llamada al modelo sube el contenido de la conversación a las trazas de OpenAI, y las tres
-puertas pasan por `config.config_de_corrida`. Falta agruparlas por `group_id`. La otra mitad
-es la persistencia: hoy el historial del diálogo vive en memoria del proceso y un reinicio lo
-borra —los datos no: paciente, citas y estado de oportunidad están en Neon.
+**La fase 7** eran dos cosas, y las dos están hechas.
+
+La **persistencia**: el historial del diálogo vivía en un diccionario del proceso, y un
+reinicio lo borraba —los datos no: paciente, citas y estado de oportunidad siempre
+estuvieron en Neon—. Ahora vive en la base, en `agent_sessions` y `agent_messages`
+(migración `010`), con el `session_id` igual al id de la conversación para que `/clearstate`
+pueda borrarlo y para que nadie quede atado para siempre a todo lo que dijo alguna vez.
+`scripts/probar_persistencia.py --chat` lo demuestra con un reinicio de verdad: un proceso
+recibe «hola, soy Ana» y muere; otro proceso, con la memoria vacía por construcción,
+responde a «¿cómo me llamo?».
+
+La **observabilidad**: ninguna llamada al modelo sube el contenido de la conversación a las
+trazas de OpenAI, las tres puertas pasan por `config.config_de_corrida`, y desde el
+13/09/2026 van agrupadas por conversación —el `group_id` es el UUID de `conversaciones`,
+nunca el teléfono— con el canal y la versión del prompt como metadatos.
+
+Queda un número por medir, y está marcado `PENDIENTE` a propósito: cuánto historial recordar
+(`LIMITE_HISTORIAL_SESION`). El SDK cuenta *items*, no mensajes, y un turno en que Daniela
+consulte el conocimiento, mire la agenda y registre el estado gasta seis o siete él solo.
+Hasta que haya conversaciones reales que contar, `scripts/medir_historial.py` no tiene sobre
+qué correr, y un número inventado hoy no se distinguiría de uno medido.

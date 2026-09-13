@@ -64,6 +64,12 @@ Entregables por fase. **Los marcados gastan tokens**; los demás, ni uno:
   clínica, y **lo restaura en un `finally` comprobando la restauración con una aserción**.
 - `probar_calendario.py --diagnosticar` **solo lee**: es lo primero que hay que correr
   cuando Calendar «no funciona».
+- **Estos scripts doblan funciones de `src/` con firmas escritas a mano, y `pytest -q` no
+  los corre.** Añadirle un parámetro a algo que un script dobla —`lectura.leer_archivo`,
+  `conversacion.responder`— los rompe en silencio: la suite entera sigue verde. Pasó en la
+  fase 7, y solo apareció al ejecutarlos (`TypeError: lector_doblado() got an unexpected
+  keyword argument 'group_id'`). Quien cambie una de esas firmas corre los cinco que no
+  gastan.
 
 # No negociables
 
@@ -90,6 +96,14 @@ una —qué se midió, qué costó— está en la regla que cubre ese archivo.
    a uno por hora en vez de a dos.
 8. **`uv run pytest -q` a secas NO caza una regresión en `tocar_conversacion`.** Quien toque
    esa función corre además las de Neon y `scripts/probar_atencion.py`.
+9. **El historial del diálogo YA está en Postgres** (`agent_sessions` / `agent_messages`,
+   `session_id = id_conversacion`). Quien toque `/clearstate` tiene que borrarlo, y va
+   ANTES del `DELETE FROM conversaciones`: los `session_id` SON esos ids.
+10. **Las columnas de la 010 las fija el SDK, no nosotros.** `SQLAlchemySession` corre con
+   `create_tables=False`, así que `agent_sessions` y `agent_messages` tienen que coincidir
+   con lo que el SDK espera —incluido el `TIMESTAMP` **sin zona**, al revés que el resto del
+   esquema—. Quien suba la versión del SDK compara columna por columna; lo que caza el
+   desajuste es `tests/test_sesion_neon.py`, y solo corre con `-m neon`.
 
 # Dónde está el resto
 
@@ -134,6 +148,11 @@ El detalle de cada área se carga solo cuando tocas sus archivos:
   combinantes invisibles dentro de un regex. Se esquiva escribiendo esos archivos con
   here-strings de PowerShell, y conviene comprobar el resultado (contar bytes NUL y
   caracteres de categoría `Cc`/`Cf`/`Mn`) cuando el contenido lleve `\u`.
+- **Pero PowerShell no vale para EDITAR un archivo que ya existe.** El here-string de arriba
+  sirve para crear uno nuevo; el ciclo leer-modificar-escribir con `Get-Content -Raw` /
+  `Set-Content` **destroza el encoding de este repo** y deja mojibake en todos los acentos
+  (`configuración` → `configuraciÃ³n`). Pasó en la fase 7 y hubo que restaurar con
+  `git checkout`. Para modificar un archivo del proyecto, la herramienta `Edit`.
 - **Tres documentos de diseño son enormes y están versionados.** `plan-agentes.json`
   (~22.000 tokens) está bloqueado por `.claude/settings.json`: léelo con `ver_plan.py`.
   `plan-agentes.md` (~12.000) y `brief-agentes.json` (~7.000) no están bloqueados porque no

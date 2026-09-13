@@ -459,7 +459,7 @@ async def cuatro(url: str) -> None:
     tg = TelegramCaptura()
     m = mensaje_documento(TEL_ARCHIVO, nombre_archivo="remision-prueba.pdf", texto="Aqui esta mi remision")
 
-    async def lector_doblado(archivo, *, tipo, correr=None) -> LecturaArchivo:
+    async def lector_doblado(archivo, *, tipo, correr=None, group_id=None) -> LecturaArchivo:
         return _lectura_canonica()
 
     lectura.leer_archivo = lector_doblado
@@ -508,7 +508,7 @@ async def cinco(url: str, cfg: Config) -> None:
     tg = TelegramCaptura()
     m = mensaje_documento(TEL_MURO, nombre_archivo="remision-muro.pdf", texto="Hola, aqui esta mi remision")
 
-    async def lector_doblado(archivo, *, tipo, correr=None) -> LecturaArchivo:
+    async def lector_doblado(archivo, *, tipo, correr=None, group_id=None) -> LecturaArchivo:
         return _lectura_canonica()
 
     lectura.leer_archivo = lector_doblado
@@ -653,7 +653,7 @@ async def ocho(url: str) -> None:
     tg = TelegramCaptura()
     m = mensaje_documento(TEL_DESCONOCIDO, nombre_archivo="foto-desconocido.pdf")
 
-    async def lector_doblado(archivo, *, tipo, correr=None) -> LecturaArchivo:
+    async def lector_doblado(archivo, *, tipo, correr=None, group_id=None) -> LecturaArchivo:
         return _lectura_canonica()
 
     lectura.leer_archivo = lector_doblado
