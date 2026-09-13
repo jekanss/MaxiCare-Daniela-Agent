@@ -20,7 +20,6 @@ import asyncio
 import logging
 
 from . import persistencia
-from .canales import ErrorDeCanal
 from .contratos import LecturaArchivo, LecturaNoClinica
 
 log = logging.getLogger("maxicare.lectura")
@@ -91,15 +90,21 @@ async def asegurar_tema(
         nombre = nombre_del_tema(telefono, nombre_perfil)
         try:
             tema = await telegram.crear_tema(nombre)
-        except ErrorDeCanal:
+        except Exception:  # noqa: BLE001 -- ancho a propósito: no solo `ErrorDeCanal`
+            # (Telegram respondió "ok: false") sino también un fallo de transporte real
+            # (timeout, conexión caída). Cualquiera de los dos degrada al General; propagarlo
+            # tumbaría la entrega del archivo al doctor, que es la garantía de la fase 2.
             log.exception("Telegram no dejó crear el tema de %s; va al General", telefono)
             return None
 
         # Cerrarlo es lo que pone el candado, y va antes de guardarlo: si el cierre falla,
         # queremos el id igual --el tema existe-- pero con constancia de que quedó abierto.
+        quedo_abierto = False
         try:
             await telegram.cerrar_tema(tema)
-        except ErrorDeCanal:
+        except Exception:  # noqa: BLE001 -- misma razón que arriba: un fallo de transporte
+            # al cerrar tampoco puede tumbar la entrega del archivo.
+            quedo_abierto = True
             log.error(
                 "el tema %s de %s quedó ABIERTO: cualquiera del grupo puede escribirle al "
                 "paciente hasta que alguien lo cierre a mano",
@@ -109,7 +114,7 @@ async def asegurar_tema(
 
         try:
             await asyncio.to_thread(
-                _guardar_tema, database_url, telefono, nombre_perfil, tema
+                _guardar_tema, database_url, telefono, nombre_perfil, tema, quedo_abierto
             )
         except Exception:  # noqa: BLE001
             log.exception("el tema %s no quedó guardado; se usa igual en este turno", tema)
@@ -122,11 +127,17 @@ def _leer_tema(database_url: str, telefono: str) -> int | None:
 
 
 def _guardar_tema(
-    database_url: str, telefono: str, nombre_perfil: str | None, tema: int
+    database_url: str,
+    telefono: str,
+    nombre_perfil: str | None,
+    tema: int,
+    abierto: bool = False,
 ) -> None:
     with persistencia.conectar(database_url) as conn:
         id_paciente = persistencia.asegurar_paciente(
             conn, nombre_completo=(nombre_perfil or "").strip() or f"+{telefono}",
             telefono=telefono,
         )
-        persistencia.guardar_tema(conn, id_paciente=id_paciente, topic_id=tema)
+        persistencia.guardar_tema(
+            conn, id_paciente=id_paciente, topic_id=tema, abierto=abierto
+        )

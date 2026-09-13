@@ -289,18 +289,21 @@ def tema_del_paciente(conn, telefono: str) -> int | None:
     return fila[0] if fila else None
 
 
-def guardar_tema(conn, *, id_paciente: int, topic_id: int) -> None:
-    """Ata el tema al paciente. `telegram_topic_abierto` queda en FALSE a propósito: el
-    tema nace cerrado y solo el relevo (6C) lo abre."""
+def guardar_tema(conn, *, id_paciente: int, topic_id: int, abierto: bool = False) -> None:
+    """Ata el tema al paciente. El tema nace cerrado, y por eso `abierto` es FALSE por
+    defecto: el relevo (6C) es quien lo abre. El parámetro existe para el caso en que
+    Telegram no dejó cerrarlo -- ahí la base tiene que decir la verdad («quedó abierto»),
+    no la intención con la que se creó."""
     with conn.cursor() as cur:
         cur.execute(
             """
             UPDATE pacientes
-               SET telegram_topic_id = %s, telegram_topic_abierto = FALSE
+               SET telegram_topic_id = %s, telegram_topic_abierto = %s
              WHERE id = %s
             """,
-            (topic_id, id_paciente),
+            (topic_id, abierto, id_paciente),
         )
+    conn.commit()
 
 
 def asegurar_conversacion(

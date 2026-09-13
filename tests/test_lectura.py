@@ -81,10 +81,16 @@ def test_con_confianza_alta_el_tratamiento_se_respeta():
 class TelegramDeTemas:
     """Cuenta cuántos temas se crearon y cuáles se cerraron."""
 
-    def __init__(self, *, falla_al_crear: Exception | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        falla_al_crear: Exception | None = None,
+        falla_al_cerrar: Exception | None = None,
+    ) -> None:
         self.creados: list[str] = []
         self.cerrados: list[int] = []
         self._falla_al_crear = falla_al_crear
+        self._falla_al_cerrar = falla_al_cerrar
 
     async def crear_tema(self, nombre: str) -> int:
         if self._falla_al_crear is not None:
@@ -93,6 +99,8 @@ class TelegramDeTemas:
         return 900 + len(self.creados)
 
     async def cerrar_tema(self, tema_id: int) -> None:
+        if self._falla_al_cerrar is not None:
+            raise self._falla_al_cerrar
         self.cerrados.append(tema_id)
 
 
@@ -102,6 +110,7 @@ class BaseDeTemas:
     def __init__(self, tema: int | None = None) -> None:
         self.tema = tema
         self.guardados: list[int] = []
+        self.abiertos: list[bool] = []
 
     def instalar(self, monkeypatch):
         from maxicare_daniela import persistencia
@@ -119,8 +128,9 @@ class BaseDeTemas:
             persistencia, "asegurar_paciente", lambda conn, **kw: 42
         )
 
-        def guardar(conn, *, id_paciente, topic_id):
+        def guardar(conn, *, id_paciente, topic_id, abierto=False):
             self.guardados.append(topic_id)
+            self.abiertos.append(abierto)
             self.tema = topic_id
 
         monkeypatch.setattr(persistencia, "guardar_tema", guardar)
@@ -247,3 +257,53 @@ def test_si_telegram_no_deja_crear_el_tema_se_cae_al_general(monkeypatch):
 def test_sin_nombre_de_perfil_el_tema_se_llama_con_el_telefono():
     assert lectura.nombre_del_tema("573001112233", None) == "+573001112233"
     assert lectura.nombre_del_tema("573001112233", "  ") == "+573001112233"
+
+
+def test_si_no_se_puede_cerrar_el_tema_queda_guardado_como_abierto(monkeypatch):
+    """Hallazgo 2 de la ronda de arreglo: el log no basta, la base tiene que decir la verdad.
+
+    Si `cerrar_tema` falla, el tema existe en Telegram (no se pierde) pero
+    `telegram_topic_abierto` no puede quedar en FALSE: es justo el campo que la fase 6C leerá
+    para saber si ese hilo necesita atención.
+    """
+    import asyncio
+
+    from maxicare_daniela.canales import ErrorDeCanal
+
+    base = BaseDeTemas().instalar(monkeypatch)
+    tg = TelegramDeTemas(falla_al_cerrar=ErrorDeCanal("not enough rights"))
+
+    tema = asyncio.run(
+        lectura.asegurar_tema(
+            telefono="573001112233", nombre_perfil="Ana",
+            database_url="postgresql://x", telegram=tg,
+        )
+    )
+
+    assert tema == 901, "el tema existe aunque no se pudo cerrar: no se pierde"
+    assert base.guardados == [901]
+    assert base.abiertos == [True], "el cierre fallo: la base tiene que decir abierto=True"
+
+
+def test_un_fallo_de_transporte_al_crear_tambien_cae_al_general(monkeypatch):
+    """Hallazgo 3 de la ronda de arreglo.
+
+    No solo `ErrorDeCanal` (Telegram respondió "ok: false") degrada al General: un fallo de
+    transporte real -- un timeout, una conexion caida -- tiene que hacer lo mismo. Propagarlo
+    tumbaria la entrega del archivo al doctor, que es la garantia de la fase 2.
+    """
+    import asyncio
+
+    import httpx
+
+    BaseDeTemas().instalar(monkeypatch)
+    tg = TelegramDeTemas(falla_al_crear=httpx.ConnectError("sin red"))
+
+    tema = asyncio.run(
+        lectura.asegurar_tema(
+            telefono="573001112233", nombre_perfil="Ana",
+            database_url="postgresql://x", telegram=tg,
+        )
+    )
+
+    assert tema is None
