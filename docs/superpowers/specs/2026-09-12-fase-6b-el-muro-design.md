@@ -88,10 +88,10 @@ temas lo llevaría a 500 y a tres responsabilidades.
 
 | Símbolo | Qué hace |
 |---|---|
-| `MITAD_CLINICA_FUERA` | El reparto. Función **pura**: `LecturaArchivo -> LecturaNoClinica` |
+| `repartir(...)` | El reparto. Función **pura**: `LecturaArchivo -> (str, LecturaNoClinica)` |
 | `leer_archivo(...)` | Corre `lector_archivos` sobre los bytes. Devuelve `LecturaArchivo` o `None` |
 | `asegurar_tema(...)` | Encuentra o crea el tema del paciente. Idempotente |
-| `procesar_en_segundo_plano(...)` | Une los tres: lee, manda lo clínico a Telegram, devuelve la mitad no clínica |
+| `leer_y_repartir(...)` | Une los tres: lee, manda lo clínico a Telegram, devuelve la mitad no clínica |
 
 Que el reparto sea una función pura, y no lógica repartida por tres archivos, es lo que
 permite probar el muro sin levantar nada.
