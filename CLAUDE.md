@@ -22,6 +22,11 @@ llegue a la cita correcta.
 - Los dos agentes contra la API real (entregable fase 4, **gasta tokens**):
   `uv run python scripts/probar_agentes.py`
 - El webhook en producción: `uv run python scripts/probar_webhook.py https://daniela.maxicarecol.com`
+- El turno de WhatsApp de punta a punta (entregable fase 6A):
+  `uv run python scripts/probar_atencion.py`
+  Escribe en el esquema `pruebas_atencion` —lo crea y lo borra, comprobando el borrado—, y el
+  WhatsApp es falso: no le llega nada a ningún paciente. Sin `--chat` no gasta un token; con
+  `--chat` los turnos corren contra el modelo de verdad y **gasta tokens**.
 - El cascarón web (entregable fase 5): `uv run python scripts/probar_web.py`
   Con `--chat` habla de verdad con Daniela y **gasta tokens**.
 - El panel de tratamientos (entregable fase 8, primera mitad):
@@ -109,6 +114,35 @@ uv run uvicorn maxicare_daniela.runtime:app --port 8080
   `pruebas_web`—. El cableado real es de la fase 6, en el camino de WhatsApp.
 - `ZONA_BOGOTA` vive en `calendario.py` y `herramientas.py` la reexporta. Una sola
   definición: dos copias de un desfase horario son dos cosas que un día divergen.
+
+# Daniela en WhatsApp
+
+- **`asegurar_conversacion` SIEMPRE inserta una fila nueva**, pese al nombre: no es un
+  get-or-create. En el camino de WhatsApp se usa `conversacion_viva`, que reutiliza la de las
+  últimas 24 h. Usar la primera aquí abriría una conversación por mensaje: Daniela no
+  recordaría ni la frase anterior, `turno_actual` sería siempre 1 y las claves de
+  idempotencia (`id_conversacion + turno`) no colisionarían nunca, con lo que dejarían de
+  proteger.
+- **El candado de `atencion.py` es de proceso** (`_candados`, un `asyncio.Lock` por
+  conversación). Con más de un worker o más de una réplica deja de proteger y haría falta un
+  `pg_advisory_lock`. El contenedor corre con uno solo, y por eso hoy alcanza.
+- **El historial vive en memoria** (`_sesiones`). Un reinicio borra el hilo del diálogo, no
+  los datos: paciente, citas y estado de oportunidad están en Neon. Lo arregla la fase 7 con
+  `SQLAlchemySession`.
+- **Si el calendario no arranca, Daniela queda con `CalendarioCaido`, nunca con
+  `CalendarioDoble`**, y la diferencia es la razón de ser del proyecto. El doble dice que sí a
+  todo: `crear_cita` tomaría el cupo, «crearía» el evento en un diccionario y le confirmaría
+  la cita al paciente, que llegaría a una clínica donde nadie lo espera. El caído lanza
+  `ErrorDeCalendario`, y las tools ya saben qué hacer con eso: liberar el cupo, no confirmar
+  nada y escalar. `/salud` publica qué clase acabó ahí.
+- **`MAXICARE_DANIELA_RESPONDE`**: por defecto activa (cualquier valor que no sea `0`). Con
+  `0`, el webhook sigue registrando el mensaje y reenviando el archivo a Telegram exactamente
+  como antes, y lo único que se apaga es la respuesta al paciente. Existe para poder callarla
+  en diez segundos sin desplegar código.
+- **`uv run pytest -q` a secas NO caza una regresión en el SQL de `tocar_conversacion`.** Está
+  comprobado: mutando el `UPDATE` para que ignore `turno_actual`, la suite offline queda
+  entera en verde y solo falla la de Neon. Quien toque esa función tiene que correr las dos
+  —`MAXICARE_PRUEBAS_NEON=1 uv run pytest -q -m neon` y `scripts/probar_atencion.py`—.
 
 # Trampas de este entorno
 

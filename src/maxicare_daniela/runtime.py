@@ -528,7 +528,7 @@ async def salud() -> dict:
     Un `{"ok": true}` que no comprueba nada es peor que no tener endpoint: da confianza sin
     respaldo. Este mira de verdad las tres piezas de las que depende la fase.
     """
-    estado: dict = {"servicio": "maxicare-daniela", "fase": 5}
+    estado: dict = {"servicio": "maxicare-daniela", "fase": "6A"}
 
     try:
         with persistencia.conectar(config.database_url) as conn, conn.cursor() as cur:
@@ -557,6 +557,20 @@ async def salud() -> dict:
     ]
     estado["configuracion"] = "ok" if not faltantes else {"faltan": faltantes}
     estado["tema_general"] = _tema_general
+
+    # QUÉ calendario acabó en `_calendario`, no si la variable está puesta. Sin esta línea, el
+    # único rastro de un calendario que no arrancó es un `log.error` del arranque que nadie
+    # vuelve a mirar, mientras `/salud` sigue diciendo `configuracion: ok` y Daniela escala a
+    # los doctores cada vez que alguien intenta agendar. `CalendarioGoogle` es el bueno;
+    # `CalendarioCaido` es «no puede agendar»; un `CalendarioDoble` aquí sería el peor caso de
+    # todos --confirmarle al paciente una cita que no existe en ningún calendario-- y por eso
+    # `_construir_el_calendario` no deja que ocurra: lo degrada a caído. Que se pueda LEER
+    # desde fuera es lo que convierte esa decisión en algo comprobable.
+    estado["calendario"] = type(_calendario).__name__
+
+    # Sin esto no hay forma de saber desde fuera si Daniela está callada. Un `0` en el `.env`
+    # del VPS y un reinicio la apagan sin dejar rastro en ninguna respuesta de este endpoint.
+    estado["daniela_responde"] = config.daniela_responde
     return estado
 
 
