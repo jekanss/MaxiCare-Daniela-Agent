@@ -990,3 +990,150 @@ def marcar_acceso(conn, usuario: str) -> None:
             (usuario.strip().lower(),),
         )
     conn.commit()
+
+
+# ==========================================================================================
+# Borrar todo rastro de un teléfono -- `/clearstate`
+#
+# Las dos únicas funciones del proyecto que borran filas de un paciente. Viven juntas y
+# aquí abajo porque se leen juntas: `rastro_de` dice qué hay que eliminar FUERA de la base
+# antes de que `borrar_rastro` haga imposible saberlo.
+# ==========================================================================================
+
+#: Las conversaciones de un teléfono, por los DOS caminos que tiene el esquema: la columna
+#: `telefono` desnormalizada y el `paciente_id`. Buscar solo por una deja filas atrás --una
+#: conversación puede existir sin `paciente_id`, y un paciente puede tener conversaciones
+#: cuyo `telefono` alguien normalizó distinto.
+_CONVERSACIONES_DEL_TELEFONO = """
+    SELECT id FROM conversaciones
+     WHERE telefono = %(tel)s
+        OR paciente_id IN (SELECT id FROM pacientes WHERE telefono = %(tel)s)
+"""
+
+
+def rastro_de(conn, telefono: str) -> dict:
+    """Qué hay que borrar fuera de Postgres: eventos de Calendar y mensajes de Telegram.
+
+    Se lee ANTES de borrar y no después, por una razón que no tiene vuelta atrás: una vez
+    borrada la fila de `citas`, su `evento_calendar_id` no existe en ningún sitio y el evento
+    se queda en el calendario de la clínica ocupando un hueco que ya nadie puede cancelar
+    desde el sistema.
+
+    Las citas canceladas se excluyen: su evento ya se eliminó al cancelarlas, y pedirle a
+    Google que borre dos veces el mismo id es pedir un 404 por gusto.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            f"""
+            SELECT evento_calendar_id FROM citas
+             WHERE (telefono = %(tel)s
+                    OR conversacion_id IN ({_CONVERSACIONES_DEL_TELEFONO}))
+               AND evento_calendar_id IS NOT NULL
+               AND estado <> 'cancelada'
+            """,
+            {"tel": telefono},
+        )
+        eventos = [f[0] for f in cur.fetchall()]
+
+        cur.execute(
+            "SELECT telegram_topic_id FROM pacientes WHERE telefono = %(tel)s",
+            {"tel": telefono},
+        )
+        fila = cur.fetchone()
+        topic_id = fila[0] if fila else None
+
+        cur.execute(
+            f"""
+            SELECT telegram_message_id FROM mensajes_entrantes
+             WHERE telefono = %(tel)s AND telegram_message_id IS NOT NULL
+             UNION
+            SELECT e.telegram_message_id FROM escalamientos e
+             WHERE e.conversacion_id IN ({_CONVERSACIONES_DEL_TELEFONO})
+               AND e.telegram_message_id IS NOT NULL
+            """,
+            {"tel": telefono},
+        )
+        mensajes = sorted(f[0] for f in cur.fetchall())
+
+    return {"eventos": eventos, "topic_id": topic_id, "mensajes_telegram": mensajes}
+
+
+def borrar_rastro(conn, telefono: str, *, conservar_wamid: str | None = None) -> dict[str, int]:
+    """Borra de la base todo lo que ata un teléfono a este sistema. Devuelve el conteo.
+
+    EL ORDEN NO ES ESTILO: ES LO QUE LA BASE PERMITE. `citas`, `reservas` y
+    `mensajes_entrantes` apuntan a `conversaciones` sin `ON DELETE CASCADE`, y
+    `conversaciones.paciente_id` apunta a `pacientes` igual de desnudo. Empezar por el
+    paciente --que es por donde uno empezaría-- falla con un error de integridad y no borra
+    nada. De la hoja a la raíz, y las cuatro tablas con CASCADE (`estado_oportunidad`,
+    `notas_archivo`, `seguimientos`, `escalamientos`) se van solas al caer la conversación.
+
+    `conservar_wamid` deja en pie la fila de `mensajes_entrantes` del propio mensaje que pidió
+    el borrado, con su `conversacion_id` en NULL. Sin eso, un reintento del webhook de Meta
+    --que reintenta, y por eso existe la deduplicación por `wamid`-- ejecutaría el comando una
+    segunda vez. La fila que se queda no vuelve conocido a nadie: `atencion._leer_estado` no
+    mira esta tabla.
+
+    Todo va en una transacción. Un borrado a medias es peor que ninguno: dejaría, por
+    ejemplo, un paciente sin conversaciones, que es un estado que el resto del código no
+    espera ver nunca.
+    """
+    parametros = {"tel": telefono, "wamid": conservar_wamid}
+    borradas: dict[str, int] = {}
+
+    try:
+        with conn.cursor() as cur:
+            if conservar_wamid is not None:
+                # Antes de borrar la conversación a la que apunta, o la clave foránea lo
+                # impide. Queda apuntando a nada, que es exactamente lo que es.
+                cur.execute(
+                    "UPDATE mensajes_entrantes SET conversacion_id = NULL WHERE wamid = %(wamid)s",
+                    parametros,
+                )
+
+            filtro_wamid = "" if conservar_wamid is None else "AND wamid <> %(wamid)s"
+            cur.execute(
+                f"""
+                DELETE FROM mensajes_entrantes
+                 WHERE (telefono = %(tel)s
+                        OR conversacion_id IN ({_CONVERSACIONES_DEL_TELEFONO}))
+                   {filtro_wamid}
+                """,
+                parametros,
+            )
+            borradas["mensajes_entrantes"] = cur.rowcount
+
+            cur.execute(
+                f"""
+                DELETE FROM citas
+                 WHERE telefono = %(tel)s
+                    OR conversacion_id IN ({_CONVERSACIONES_DEL_TELEFONO})
+                    OR paciente_id IN (SELECT id FROM pacientes WHERE telefono = %(tel)s)
+                """,
+                parametros,
+            )
+            borradas["citas"] = cur.rowcount
+
+            cur.execute(
+                f"""
+                DELETE FROM reservas
+                 WHERE conversacion_id IN ({_CONVERSACIONES_DEL_TELEFONO})
+                """,
+                parametros,
+            )
+            borradas["reservas"] = cur.rowcount
+
+            cur.execute(
+                f"DELETE FROM conversaciones WHERE id IN ({_CONVERSACIONES_DEL_TELEFONO})",
+                parametros,
+            )
+            borradas["conversaciones"] = cur.rowcount
+
+            cur.execute("DELETE FROM pacientes WHERE telefono = %(tel)s", parametros)
+            borradas["pacientes"] = cur.rowcount
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+    return borradas

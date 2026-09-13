@@ -5,8 +5,12 @@ paths:
   - "src/maxicare_daniela/ingesta.py"
   - "src/maxicare_daniela/conversacion.py"
   - "src/maxicare_daniela/persistencia.py"
+  - "src/maxicare_daniela/reseteo.py"
   - "tests/test_atencion.py"
   - "tests/test_webhook_responde.py"
+  - "tests/test_reseteo.py"
+  - "tests/test_reseteo_cable.py"
+  - "tests/test_reseteo_neon.py"
   - "scripts/probar_atencion.py"
 ---
 
@@ -168,6 +172,63 @@ pueden mover.
   a las 19:03:28 se entregó después de un texto recibido a las 19:03:29 — si el lector hubiera
   ido delante, Daniela habría contestado el texto sin saber todavía que había una foto. Lo que
   no llegue a tiempo se descarta con un `log.info`, nunca con una excepción que tumbe el turno.
+
+## `/clearstate` — resetear un número a primer contacto
+
+Un número listado en `MAXICARE_TELEFONOS_PRUEBA` puede escribir `/clearstate` y quedar, para
+Daniela, como uno que nunca ha escrito. Existe para poder probar conversaciones enteras sin
+estrenar una línea de teléfono. Vive en `reseteo.py`, y `runtime._entregar` lo intercepta.
+
+- **La garantía es una igualdad, no una promesa:** tras el reseteo, `atencion._leer_estado`
+  devuelve para ese teléfono los mismos ocho campos que para un número virgen — solo cambia
+  `id_conversacion`, que es un UUID nuevo por definición. Lo sostiene
+  `test_reseteo_neon.py::test_tras_el_reset_daniela_ve_lo_mismo_que_en_un_primer_contacto`,
+  con su control: antes del borrado, esa misma prueba comprueba que Daniela SÍ lo conocía.
+  El historial del diálogo no hay que borrarlo porque `_sesiones` se indexa por
+  `id_conversacion`: conversación borrada, id nuevo, sesión vacía. Lo único de memoria que sí
+  hay que sacar es el búfer, y de eso se encarga `atencion.olvidar`.
+- **La lista vacía apaga el comando para todo el mundo, y ese es el default.** Sin números
+  listados, `/clearstate` llega a Daniela como cualquier otro texto. Dos pruebas lo vigilan
+  (`test_reseteo_cable.py`), y las dos caen al mutar la condición de `_entregar`: sin ellas,
+  un error ahí convertiría el borrado en algo disponible para cualquier paciente.
+- **La interceptación va DESPUÉS de la deduplicación por `wamid` y ANTES de `atender`.**
+  Después, porque un reintento de Meta no puede borrar dos veces. Antes, porque el turno
+  escribiría sobre la conversación recién borrada. Y como `procesar_mensaje` ya corrió, el
+  comando queda reenviado a Telegram: un borrado irreversible que deja rastro visible para
+  los doctores es mejor que uno silencioso.
+- **El orden es lo externo primero, y Calendar ABORTA mientras Telegram degrada.** Mientras
+  las filas sigan en la base, un borrado a medias se puede reintentar; al revés no, porque el
+  `evento_calendar_id` deja de existir y el evento se queda ocupando un cupo real de la
+  clínica que ya nadie puede cancelar desde el sistema — un paciente de verdad que no puede
+  agendar a esa hora. Un tema huérfano en Telegram, en cambio, es ruido y no daño. La
+  asimetría la decide el principio del proyecto, y la vigila
+  `test_si_calendar_falla_no_se_borra_ni_una_fila`.
+- **El orden de los DELETE lo impone la base, no el gusto:** `citas`, `reservas` y
+  `mensajes_entrantes` apuntan a `conversaciones` sin `ON DELETE CASCADE`, y
+  `conversaciones.paciente_id` a `pacientes` igual. Empezar por el paciente falla con un
+  error de integridad y no borra nada.
+- **Se conserva la fila de `mensajes_entrantes` del propio comando**, con `conversacion_id`
+  en NULL. Si se borrara, el reintento de Meta ejecutaría el comando otra vez. No vuelve
+  conocido a nadie: `_leer_estado` no mira esa tabla.
+- **También se limpia `pruebas_web`**, que tiene las mismas doce tablas y no se purga nunca.
+  Sin eso, un número probado desde el chat del panel seguiría conocido por esa mitad.
+- **Lo que NO borra, y está dicho en el código:** las trazas de OpenAI (`conversacion.py`
+  sigue sin `trace_include_sensitive_data=False`, aplazado a la fase 7) y los logs del
+  contenedor. Ninguna de las dos afecta al comportamiento de Daniela; el rastro existe.
+- **Telegram necesita `can_delete_messages`**, que `obtener_chat_telegram.py` no comprueba
+  hoy — solo mira `can_manage_topics`. Si falta, el tema no se borra, se informa en la
+  confirmación y el resto del reseteo sigue.
+- **El mismo comando funciona en el chat web del panel, y ahí NO exige la lista blanca.** La
+  diferencia es deliberada: el «teléfono» de ese carril es `web-<usuario>`, una cadena que no
+  existe ni puede existir en `public`; la conexión apunta con `search_path` a `pruebas_web`; y
+  para llegar hace falta sesión abierta en el panel. Cada persona de la clínica borra su
+  propio carril y solo el suyo (`test_el_chat_web_no_le_corta_el_hilo_a_otra_persona`). El
+  endpoint devuelve `conversacion: null`, que es lo que hace que el turno siguiente abra una
+  conversación nueva en vez de pedir un id que acaba de borrarse.
+- **`/api/pruebas/reiniciar` no es esto y sigue como estaba:** olvida la conversación en
+  memoria y DEJA las filas en `pruebas_web` — a propósito, para que quede rastro de qué se
+  probó. Por eso el botón «reiniciar» no te devuelve a primer contacto: el paciente que te
+  inventaste sigue en la tabla y el turno siguiente te reconoce. Para eso está `/clearstate`.
 
 ## Lo que la suite offline NO caza
 

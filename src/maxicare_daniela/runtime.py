@@ -50,7 +50,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from starlette.exceptions import HTTPException as HTTPExceptionStarlette
 
-from . import atencion, autenticacion, contratos, conversacion, ingesta, panel, persistencia
+from . import atencion, autenticacion, contratos, conversacion, ingesta, panel, persistencia, reseteo
 from .calendario import CalendarioCaido, CalendarioDoble, calendario_desde_config
 from .canales import Telegram, WhatsApp
 from .config import Config, cargar_dotenv, descartar_vacias_de_terceros
@@ -527,6 +527,20 @@ async def _entregar(m: ingesta.MensajeEntrante) -> None:
         log.info("%s ya estaba atendido: reintento de Meta, Daniela no vuelve a contestar", m.wamid)
         return
 
+    # `/clearstate`: devolver un número de pruebas al estado de primer contacto.
+    #
+    # Va AQUÍ, después de la deduplicación y antes del turno, por tres razones. (1) Pasada la
+    # dedupe, un reintento de Meta no ejecuta el borrado dos veces. (2) `procesar_mensaje` ya
+    # corrió, así que el comando queda reenviado a Telegram: un borrado irreversible que deja
+    # rastro visible para los doctores es mejor que uno silencioso. (3) `atender` no se toca
+    # en absoluto -- ni búfer, ni candado del turno, ni sesión.
+    #
+    # Con `MAXICARE_TELEFONOS_PRUEBA` vacía --su default-- esta rama no existe para nadie y el
+    # texto sigue su camino hasta Daniela como cualquier otro mensaje.
+    if reseteo.es_comando(m.texto) and reseteo.autorizado(m.telefono, config.telefonos_prueba):
+        await _resetear_numero(m)
+        return
+
     try:
         atendido = await atencion.atender(
             m,
@@ -564,6 +578,69 @@ async def _entregar(m: ingesta.MensajeEntrante) -> None:
             atendido.id_conversacion or m.telefono,
             atendido.escalado_por,
         )
+
+
+def _bases_secundarias() -> tuple[str, ...]:
+    """El carril de pruebas del panel, si su esquema existe ya.
+
+    Se comprueba en vez de intentarlo y fallar: el esquema se crea perezosamente la primera
+    vez que alguien abre el chat web, así que en un despliegue donde nadie lo ha abierto no
+    existe -- y eso no es un fallo del reseteo, es que no hay nada que borrar ahí. Sin esta
+    comprobación, la confirmación le diría al usuario «no pude con: base secundaria» en el
+    caso más normal de todos.
+    """
+    try:
+        with persistencia.conectar(config.database_url) as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT 1 FROM information_schema.schemata WHERE schema_name = %s",
+                (ESQUEMA_PRUEBAS_WEB,),
+            )
+            existe = cur.fetchone() is not None
+    except Exception:  # noqa: BLE001
+        log.warning("no se pudo comprobar si existe el esquema del chat de pruebas")
+        return ()
+    return (_url_de_pruebas(),) if existe else ()
+
+
+async def _resetear_numero(m: ingesta.MensajeEntrante) -> None:
+    """Atiende `/clearstate`. Nunca lanza: quien pidió el reseteo tiene que recibir algo.
+
+    Un comando destructivo que se queda mudo es peor que uno que falla: el usuario no sabe si
+    borró, si no borró o si borró a medias, y lo único que puede hacer es volver a mandarlo.
+    """
+    try:
+        borrado = await reseteo.resetear(
+            m.telefono,
+            database_url=config.database_url,
+            telegram=_telegram,
+            calendario=_calendario,
+            conservar_wamid=m.wamid,
+            bases_extra=await asyncio.to_thread(_bases_secundarias),
+        )
+    except reseteo.ErrorDeReseteo as exc:
+        # El único caso en que se aborta a propósito: Calendar no dejó borrar un evento y
+        # borrar las filas lo habría vuelto un cupo fantasma de la clínica.
+        log.warning("reseteo de %s abortado: %s", m.telefono, exc)
+        await _avisar_del_reseteo(m.telefono, f"No reseteé nada. {exc}")
+        return
+    except Exception:  # noqa: BLE001
+        log.exception("el reseteo de %s reventó", m.telefono)
+        await _avisar_del_reseteo(
+            m.telefono,
+            "No pude resetear el número: algo falló a mitad. Revisa los logs antes de "
+            "volver a intentarlo.",
+        )
+        return
+
+    log.info("RESETEO de %s: %s", m.telefono, borrado)
+    await _avisar_del_reseteo(m.telefono, reseteo.confirmacion(borrado))
+
+
+async def _avisar_del_reseteo(telefono: str, texto: str) -> None:
+    try:
+        await _whatsapp.enviar_texto(telefono, texto)
+    except Exception:  # noqa: BLE001
+        log.exception("no se pudo confirmar el reseteo a %s", telefono)
 
 
 # ==========================================================================================
@@ -868,6 +945,49 @@ def _contexto_de_prueba(
     return par
 
 
+async def _resetear_chat_de_prueba(quien: dict) -> dict:
+    """`/clearstate` en el carril web. Devuelve la misma forma que un turno normal.
+
+    NO exige `MAXICARE_TELEFONOS_PRUEBA`, y la diferencia con WhatsApp es deliberada: aquí no
+    hay ningún número de teléfono que proteger. El «teléfono» es `web-<usuario>`, una cadena
+    que no existe ni puede existir en `public`; la conexión apunta con `search_path` al
+    esquema `pruebas_web`, que es un carril de pruebas de punta a punta; y para llegar hasta
+    aquí hay que tener sesión abierta en el panel. Lo único que alguien puede borrar es su
+    propio carril, que es exactamente para lo que existe el botón de al lado.
+
+    Tampoco se le pasan Telegram ni Calendar, porque en este carril no hay ninguno de los
+    dos: el contexto de prueba se construye con `CalendarioDoble` y sin credenciales de
+    Telegram, así que no hay eventos reales que eliminar ni temas que borrar.
+    """
+    telefono = f"web-{quien['usuario']}"
+    url = await asyncio.to_thread(_preparar_esquema_de_pruebas)
+    borrado = await reseteo.resetear(
+        telefono, database_url=url, telegram=None, calendario=None
+    )
+
+    # Las conversaciones vivas de ESTE usuario, no todas: dos personas de la clínica pueden
+    # estar probando a la vez, y reiniciar la tuya no puede cortarle el hilo a la otra.
+    for id_conversacion, (ctx, _sesion) in list(_conversaciones_de_prueba.items()):
+        if ctx.telefono_completo == telefono:
+            del _conversaciones_de_prueba[id_conversacion]
+
+    log.info("RESETEO del carril web de %s: %s", quien["usuario"], borrado)
+    return {
+        # `None` es lo que hace que el turno siguiente abra una conversación nueva: el
+        # frontend guarda lo que venga aquí y lo manda en la próxima petición.
+        "conversacion": None,
+        "mensaje": reseteo.confirmacion(borrado),
+        "turno": 0,
+        "estado_oportunidad": "explorando",
+        "barrera": "ninguna",
+        "requiere_escalamiento": False,
+        "motivo_escalamiento": "",
+        "fuera_de_alcance": False,
+        "tripwires": [],
+        "regenerado": False,
+    }
+
+
 @app.post("/api/pruebas/chat")
 async def chat_de_prueba(entrada: MensajeDePrueba, quien: dict = Depends(usuario_actual)) -> dict:
     """Un turno contra la Daniela de producción.
@@ -876,6 +996,12 @@ async def chat_de_prueba(entrada: MensajeDePrueba, quien: dict = Depends(usuario
     nueve tools, las mismas instrucciones, los mismos seis guardrails. Lo único distinto es
     dónde aterriza lo que escribe.
     """
+    # `/clearstate` también aquí, y por la misma razón que en WhatsApp: el botón «reiniciar»
+    # olvida la conversación pero DEJA las filas, así que el paciente que te inventaste sigue
+    # en `pruebas_web` y el turno siguiente te reconoce. Esto sí borra.
+    if reseteo.es_comando(entrada.mensaje):
+        return await _resetear_chat_de_prueba(quien)
+
     ctx, sesion_chat = _contexto_de_prueba(quien, entrada.conversacion)
 
     resultado = await conversacion.responder(

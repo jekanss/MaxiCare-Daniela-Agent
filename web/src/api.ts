@@ -21,7 +21,9 @@ export type RespuestaChat = {
   fuera_de_alcance: boolean
   tripwires: string[]
   regenerado: boolean
-  conversacion: string
+  // `null` cuando el turno fue un `/clearstate`: la conversación se borró y la siguiente
+  // petición tiene que pedir una nueva, no reusar un id que ya no existe.
+  conversacion: string | null
 }
 
 export class SesionCaducada extends Error {}
