@@ -21,11 +21,12 @@ import base64
 import html
 import logging
 
-from agents import Runner
+from agents import RunConfig, Runner
 
 from . import persistencia
 from .agentes import lector_archivos
 from .canales import ArchivoDescargado
+from .config import TRACE_INCLUDE_SENSITIVE_DATA, WORKFLOW_NAME
 from .contratos import LecturaArchivo, LecturaNoClinica
 
 log = logging.getLogger("maxicare.lectura")
@@ -65,6 +66,16 @@ def repartir(lectura: LecturaArchivo) -> tuple[str, LecturaNoClinica]:
 #: El contenedor corre con un solo worker a propósito, y por eso hoy alcanza.
 _candados_de_tema: dict[str, asyncio.Lock] = {}
 
+#: Cuánto puede tardar «buscar o crear el tema» antes de que el archivo se mande al General.
+#:
+#: `ingesta.procesar_mensaje` es quien lo aplica, porque es quien tiene el archivo en la mano.
+#: Vive aquí porque es el reloj de ESTA operación: en el primer archivo de un paciente,
+#: `asegurar_tema` encadena `crear_tema` y `cerrar_tema`, cada una con `TIMEOUT_NORMAL` (15 s),
+#: así que con Telegram lento el archivo del doctor esperaría medio minuto por algo que el
+#: propio diseño clasifica como degradable. Y el candado por teléfono lo multiplica: el
+#: segundo archivo del mismo número espera detrás del primero.
+TOPE_SEGUNDOS_TEMA = 5.0
+
 
 def nombre_del_tema(telefono: str, nombre_perfil: str | None) -> str:
     """«Ana Perez · +573001112233», o solo el teléfono si WhatsApp no mandó perfil.
@@ -78,18 +89,43 @@ def nombre_del_tema(telefono: str, nombre_perfil: str | None) -> str:
 async def asegurar_tema(
     *, telefono: str, nombre_perfil: str | None, database_url: str, telegram
 ) -> int | None:
-    """El tema de ese paciente. Lo crea si no existe. Devuelve `None` si no se pudo.
+    """El tema de ese paciente, si ya es paciente. Devuelve `None` si no se pudo.
 
     Ese `None` no es un error que haya que propagar: significa «manda el archivo al tema
     General, como antes». Degradar es aceptable; perder el archivo no lo es.
+
+    **Un desconocido no abre tema.** Esta función NO crea la fila de `pacientes`: si el
+    número no está registrado, se queda sin hilo y su archivo va al General. La razón es de
+    seguridad, no de orden: `atencion._leer_estado` deriva `identidad_verificada` de la
+    EXISTENCIA de esa fila, así que crearla aquí convertía a cualquier desconocido que
+    mandara una foto en un paciente verificado —con el nombre que él mismo puso en su perfil
+    de WhatsApp de por medio—, y en el mismo turno, porque `runtime._entregar` corre
+    `procesar_mensaje` antes que `atender`. Eso desactivaba `revisar_identidad` y el
+    `tool_input_guardrail` `identidad_antes_de_datos` para él.
+
+    Lo que se pierde es poco: el hilo por paciente vale por lo que CONSERVA —el historial de
+    esa persona— y un desconocido no tiene historial que conservar. En cuanto se identifique
+    o le abran una cita, su siguiente archivo le abrirá el hilo.
+
+    La comprobación va ANTES de `crear_tema`, no después: al revés dejaría un tema huérfano
+    en Telegram al que nadie volvería a escribir.
     """
     candado = _candados_de_tema.setdefault(telefono, asyncio.Lock())
     async with candado:
         try:
-            existente = await asyncio.to_thread(_leer_tema, database_url, telefono)
+            encontrado = await asyncio.to_thread(_paciente_y_tema, database_url, telefono)
         except Exception:  # noqa: BLE001
             log.exception("no se pudo consultar el tema de %s; va al General", telefono)
             return None
+        if encontrado is None:
+            log.info(
+                "+%s no está registrado como paciente: su archivo va al General y no se le "
+                "abre hilo. Tendrá uno en cuanto se identifique o le abran una cita.",
+                telefono,
+            )
+            return None
+
+        id_paciente, existente = encontrado
         if existente:
             return existente
 
@@ -120,30 +156,34 @@ async def asegurar_tema(
 
         try:
             await asyncio.to_thread(
-                _guardar_tema, database_url, telefono, nombre_perfil, tema, quedo_abierto
+                _guardar_tema, database_url, id_paciente, tema, quedo_abierto
             )
         except Exception:  # noqa: BLE001
             log.exception("el tema %s no quedó guardado; se usa igual en este turno", tema)
         return tema
 
 
-def _leer_tema(database_url: str, telefono: str) -> int | None:
+def _paciente_y_tema(database_url: str, telefono: str) -> tuple[int, int | None] | None:
+    """`(id_paciente, tema)` del número, o `None` si ese número no es paciente todavía.
+
+    Las dos consultas van sobre la MISMA conexión: el id y el tema tienen que salir de la
+    misma foto de la fila, no de dos momentos distintos.
+    """
     with persistencia.conectar(database_url) as conn:
-        return persistencia.tema_del_paciente(conn, telefono)
+        paciente = persistencia.buscar_paciente_por_telefono(conn, telefono)
+        if paciente is None:
+            return None
+        return paciente[0], persistencia.tema_del_paciente(conn, telefono)
 
 
 def _guardar_tema(
     database_url: str,
-    telefono: str,
-    nombre_perfil: str | None,
+    id_paciente: int,
     tema: int,
     abierto: bool = False,
 ) -> None:
+    """Cuelga el tema de una fila que YA existe. No crea pacientes -- ver `asegurar_tema`."""
     with persistencia.conectar(database_url) as conn:
-        id_paciente = persistencia.asegurar_paciente(
-            conn, nombre_completo=(nombre_perfil or "").strip() or f"+{telefono}",
-            telefono=telefono,
-        )
         persistencia.guardar_tema(
             conn, id_paciente=id_paciente, topic_id=tema, abierto=abierto
         )
@@ -193,6 +233,28 @@ def entrada_para_el_lector(archivo: ArchivoDescargado, tipo: str) -> list[dict]:
     return [{"role": "user", "content": [contenido]}]
 
 
+def _config_de_corrida() -> RunConfig:
+    """La CUARTA salida del muro: los traces, que se exportan fuera de la clínica.
+
+    Comprobado contra la 0.22.2 instalada: `RunConfig()` nace con
+    `trace_include_sensitive_data=True` y `tracing_disabled=False`. Sin este `run_config`,
+    cada archivo que manda un paciente subía a la plataforma de OpenAI el data URL entero de
+    su radiografía Y el `LecturaArchivo` completo, con el `contexto_clinico` dentro.
+
+    `TRACE_INCLUDE_SENSITIVE_DATA` es `False` y `config.py` ya decía por qué: «obligatorio en
+    False porque `datos.datos_sensibles` tiene contenido y `LecturaArchivo.contexto_clinico`
+    es la excepción declarada en `contratos[]`». Lo que faltaba era cablearla.
+
+    Con `False` los spans se siguen creando --latencia, coste, errores-- y lo único que se
+    omite son las entradas y las salidas. Se construye una por corrida y no una constante de
+    módulo: un `RunConfig` compartido entre corridas concurrentes es estado compartido.
+    """
+    return RunConfig(
+        workflow_name=WORKFLOW_NAME,
+        trace_include_sensitive_data=TRACE_INCLUDE_SENSITIVE_DATA,
+    )
+
+
 async def leer_archivo(
     archivo: ArchivoDescargado, *, tipo: str, correr=None
 ) -> LecturaArchivo | None:
@@ -203,7 +265,9 @@ async def leer_archivo(
     Que devuelva `None` en vez de lanzar no es pereza: quien llama es una tarea de fondo que
     ya entregó el archivo al doctor. Una excepción ahí solo llegaría a un log.
     """
-    ejecutar = correr or (lambda entrada: Runner.run(lector_archivos, entrada))
+    ejecutar = correr or (
+        lambda entrada: Runner.run(lector_archivos, entrada, run_config=_config_de_corrida())
+    )
     try:
         corrida = await ejecutar(entrada_para_el_lector(archivo, tipo))
     except Exception:  # noqa: BLE001 -- ver el docstring

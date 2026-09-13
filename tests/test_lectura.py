@@ -106,12 +106,21 @@ class TelegramDeTemas:
 
 
 class BaseDeTemas:
-    """Lo mínimo de `persistencia` que `asegurar_tema` toca."""
+    """Lo mínimo de `persistencia` que `asegurar_tema` toca.
 
-    def __init__(self, tema: int | None = None) -> None:
+    `id_paciente=None` es el caso nuevo: un número que NO está registrado como paciente.
+    `pacientes_creados` existe para que una prueba pueda afirmar que la ingesta no creó
+    ninguno -- se anota en vez de reventar, porque un `raise` aquí lo tragaría el `except`
+    de `asegurar_tema` y la prueba pasaría por la razón equivocada.
+    """
+
+    def __init__(self, tema: int | None = None, *, id_paciente: int | None = 42) -> None:
         self.tema = tema
+        self.id_paciente = id_paciente
         self.guardados: list[int] = []
         self.abiertos: list[bool] = []
+        self.id_guardados: list[int] = []
+        self.pacientes_creados: list[dict] = []
 
     def instalar(self, monkeypatch):
         from maxicare_daniela import persistencia
@@ -124,14 +133,23 @@ class BaseDeTemas:
                 return False
 
         monkeypatch.setattr(persistencia, "conectar", lambda url: ConexionFalsa())
-        monkeypatch.setattr(persistencia, "tema_del_paciente", lambda conn, tel: self.tema)
         monkeypatch.setattr(
-            persistencia, "asegurar_paciente", lambda conn, **kw: 42
+            persistencia,
+            "buscar_paciente_por_telefono",
+            lambda conn, tel: (self.id_paciente, "Ana Perez") if self.id_paciente else None,
         )
+        monkeypatch.setattr(persistencia, "tema_del_paciente", lambda conn, tel: self.tema)
+
+        def anotar_creacion(conn, **kw):
+            self.pacientes_creados.append(kw)
+            return 42
+
+        monkeypatch.setattr(persistencia, "asegurar_paciente", anotar_creacion)
 
         def guardar(conn, *, id_paciente, topic_id, abierto=False):
             self.guardados.append(topic_id)
             self.abiertos.append(abierto)
+            self.id_guardados.append(id_paciente)
             self.tema = topic_id
 
         monkeypatch.setattr(persistencia, "guardar_tema", guardar)
@@ -160,6 +178,67 @@ def test_el_tema_se_crea_una_vez_y_nace_cerrado(monkeypatch):
         "del grupo, que es justo lo que el relevo existe para controlar"
     )
     assert base.guardados == [901]
+    assert base.id_guardados == [42], "el tema se colgó de una fila que no es la del paciente"
+    assert base.pacientes_creados == [], (
+        "la ingesta creó una fila en `pacientes`: eso convierte a un desconocido en paciente "
+        "verificado, porque `atencion._leer_estado` deriva la identidad de esa fila"
+    )
+
+
+def test_un_desconocido_no_abre_tema_y_su_archivo_va_al_general(monkeypatch):
+    """CRITICO de la revisión final: mandar una foto no puede verificar a nadie.
+
+    `atencion._leer_estado` deriva `identidad_verificada` de la EXISTENCIA de la fila en
+    `pacientes`, y `runtime._entregar` corre `procesar_mensaje` ANTES que `atender`. Con
+    `asegurar_tema` creando la fila, un número desconocido que mandaba una imagen quedaba
+    verificado en ese mismo turno --con el nombre que él mismo puso en su perfil de
+    WhatsApp-- y `revisar_identidad` dejaba de protegerlo.
+
+    El tema no se le abre, y el archivo le llega al doctor igual: al General.
+    """
+    import asyncio
+
+    base = BaseDeTemas(id_paciente=None).instalar(monkeypatch)
+    tg = TelegramDeTemas()
+
+    tema = asyncio.run(
+        lectura.asegurar_tema(
+            telefono="573009999999",
+            nombre_perfil="Nombre Que El Mismo Puso",
+            database_url="postgresql://x",
+            telegram=tg,
+        )
+    )
+
+    assert tema is None, "un número sin fila en `pacientes` no tiene hilo propio"
+    assert tg.creados == [], (
+        "se creó el tema ANTES de comprobar que el paciente existe: eso deja un tema "
+        "huérfano en Telegram al que nadie volverá a escribir"
+    )
+    assert base.pacientes_creados == [], (
+        "la ingesta creó la fila del desconocido: esa fila ES la identidad verificada"
+    )
+    assert base.guardados == []
+
+
+def test_el_camino_de_la_ingesta_no_nombra_asegurar_paciente():
+    """La aserción que impide que esto vuelva por otro sitio.
+
+    No basta con que `asegurar_tema` ya no cree pacientes: la fuga vuelve en cuanto alguien
+    escriba la llamada un poco más arriba o un poco más abajo. `asegurar_paciente` tiene un
+    solo uso legítimo --las tools, donde el paciente se identifica de verdad-- y ninguno en
+    el camino por el que entra un archivo.
+    """
+    import inspect
+
+    from maxicare_daniela import ingesta
+
+    for modulo in (lectura, ingesta):
+        fuente = inspect.getsource(modulo)
+        assert "asegurar_paciente" not in fuente, (
+            f"`{modulo.__name__}` vuelve a crear pacientes: mandar un archivo no puede "
+            "convertir a un desconocido en paciente verificado"
+        )
 
 
 def test_el_segundo_archivo_reusa_el_tema(monkeypatch):
@@ -363,6 +442,50 @@ def test_un_documento_viaja_como_input_file_con_su_nombre():
     assert contenido["file_data"].startswith("data:application/pdf;base64,")
 
 
+def test_el_lector_no_sube_el_contenido_clinico_a_los_traces(monkeypatch):
+    """La CUARTA salida del muro, y la unica que sale de la clinica sin que nadie la vea.
+
+    Comprobado contra la 0.22.2 instalada: `RunConfig()` nace con
+    `trace_include_sensitive_data=True`. Sin un `run_config` explicito, cada archivo que
+    manda un paciente subia a la plataforma de OpenAI el data URL entero de su radiografia Y
+    el `LecturaArchivo` completo, con el `contexto_clinico` dentro. `config.py` ya decia por
+    que eso importa; lo que faltaba era cablear la constante.
+    """
+    import asyncio
+    from types import SimpleNamespace
+
+    from maxicare_daniela.config import TRACE_INCLUDE_SENSITIVE_DATA, WORKFLOW_NAME
+
+    capturado: dict = {}
+
+    class RunnerFalso:
+        @staticmethod
+        async def run(agente, entrada, **kw):
+            capturado["agente"] = agente
+            capturado.update(kw)
+            return SimpleNamespace(final_output=_lectura())
+
+    monkeypatch.setattr(lectura, "Runner", RunnerFalso)
+
+    salida = asyncio.run(lectura.leer_archivo(_archivo(), tipo="image"))
+
+    assert salida is not None, "el doble del Runner no llego a correr"
+    assert "run_config" in capturado, (
+        "`Runner.run` se llamo SIN run_config: el SDK usa sus defaults y sube el contenido "
+        "clinico a los traces, que se exportan fuera de la clinica"
+    )
+    run_config = capturado["run_config"]
+    assert run_config.trace_include_sensitive_data is False, (
+        "EL MURO SE CAYO POR LA CUARTA SALIDA: el contexto clinico y la radiografia entera "
+        "acaban en los traces de OpenAI"
+    )
+    assert run_config.trace_include_sensitive_data is TRACE_INCLUDE_SENSITIVE_DATA
+    assert run_config.workflow_name == WORKFLOW_NAME
+    # Y los spans se siguen creando: apagar el tracing entero costaria la latencia, el coste
+    # y los errores del lector, que es justo lo que se quiere seguir viendo.
+    assert run_config.tracing_disabled is False
+
+
 def test_si_el_lector_revienta_devuelve_none_y_no_propaga():
     """El doctor YA tiene el archivo. Un lector caido no puede tumbar nada mas."""
     import asyncio
@@ -382,13 +505,19 @@ def test_si_el_lector_revienta_devuelve_none_y_no_propaga():
 
 
 class TelegramQueCaptura:
-    """Lo minimo para ver que texto llego a `enviar_mensaje`. Nada mas se mide aqui."""
+    """Que texto llego a `enviar_mensaje` Y A QUE TEMA.
+
+    El `tema_id` se guarda porque tirarlo dejaba un agujero medido: cambiando el destino de
+    la lectura al tema General, la suite entera seguia en verde. El contenido clinico de un
+    paciente acabaria en el hilo donde miran todos los doctores y nadie se enteraria.
+    """
 
     def __init__(self) -> None:
-        self.mensajes: list[str] = []
+        #: (texto, tema_id)
+        self.mensajes: list[tuple[str, int | None]] = []
 
     async def enviar_mensaje(self, texto, *, tema_id=None, teclado=None) -> int:
-        self.mensajes.append(texto)
+        self.mensajes.append((texto, tema_id))
         return 1
 
 
@@ -418,6 +547,54 @@ def test_el_contexto_clinico_se_escapa_antes_de_ir_a_telegram():
 
     assert no_clinica is not None
     assert len(tg.mensajes) == 1
-    assert "canal &lt; 2 mm &amp; pieza #46" in tg.mensajes[0], (
-        f"el contexto clinico llego sin escapar a un canal HTML: {tg.mensajes[0]!r}"
+    texto, tema = tg.mensajes[0]
+    assert "canal &lt; 2 mm &amp; pieza #46" in texto, (
+        f"el contexto clinico llego sin escapar a un canal HTML: {texto!r}"
     )
+    assert tema == 901, (
+        "la lectura clinica se mando a un tema que no es el del paciente: en el General la "
+        "verian todos los doctores mezclada con la de los demas"
+    )
+
+
+def test_la_lectura_va_al_tema_que_le_dieron_y_no_al_general():
+    """El complemento del anterior, sin HTML de por medio: el destino ES la aserción.
+
+    Medido por mutación en la revisión final: con `tema_id=tema_general` en `ingesta.py` las
+    393 pruebas seguían en verde, porque ningún doble offline miraba a qué tema iba nada.
+    """
+    import asyncio
+    from types import SimpleNamespace
+
+    async def correr(*a, **kw):
+        return SimpleNamespace(final_output=_lectura())
+
+    tg = TelegramQueCaptura()
+
+    asyncio.run(
+        lectura.leer_y_repartir(
+            _archivo(), tipo="image", telegram=tg, tema_id=777, correr=correr
+        )
+    )
+
+    assert [tema for _, tema in tg.mensajes] == [777]
+    assert CENTINELA in tg.mensajes[0][0]
+
+
+def test_una_lectura_fallida_avisa_al_tema_del_paciente_tambien():
+    """Hasta el «no se pudo leer» es de ese paciente: al General no le dice nada a nadie."""
+    import asyncio
+
+    async def correr_que_revienta(*a, **kw):
+        raise RuntimeError("el modelo no contesto")
+
+    tg = TelegramQueCaptura()
+
+    salida = asyncio.run(
+        lectura.leer_y_repartir(
+            _archivo(), tipo="image", telegram=tg, tema_id=777, correr=correr_que_revienta
+        )
+    )
+
+    assert salida is None
+    assert [tema for _, tema in tg.mensajes] == [777]
