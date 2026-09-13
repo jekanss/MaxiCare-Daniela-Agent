@@ -123,9 +123,28 @@ uv run uvicorn maxicare_daniela.runtime:app --port 8080
   recordaría ni la frase anterior, `turno_actual` sería siempre 1 y las claves de
   idempotencia (`id_conversacion + turno`) no colisionarían nunca, con lo que dejarían de
   proteger.
-- **El candado de `atencion.py` es de proceso** (`_candados`, un `asyncio.Lock` por
-  conversación). Con más de un worker o más de una réplica deja de proteger y haría falta un
-  `pg_advisory_lock`. El contenedor corre con uno solo, y por eso hoy alcanza.
+- **El candado de `atencion.py` va por TELÉFONO, no por conversación, y la lectura de la
+  base va DENTRO.** No es un detalle: el teléfono se conoce desde el mensaje y la
+  conversación no, así que un candado por conversación obliga a leer la base antes de
+  cerrarlo. Con esa lectura fuera se medió lo siguiente: dos mensajes simultáneos de un
+  número nuevo abren **dos conversaciones** —Daniela contesta dos veces sin saber de la otra
+  mitad, y del tercer mensaje en adelante una de las dos se pierde—, y dos de una
+  conversación existente leen el **mismo `turno_actual`**, así que arman la misma clave de
+  escalamiento y el doctor se entera de uno solo. Si alguien mueve `_leer_estado` fuera del
+  candado «para que el candado dure menos», vuelven los dos.
+- **El candado es de proceso.** Con más de un worker o más de una réplica deja de proteger y
+  haría falta un `pg_advisory_lock`; la clave natural ya es el teléfono, que se conoce sin
+  tocar la base. El contenedor corre con un solo worker, y por eso hoy alcanza.
+- **Meta reintenta los webhooks, y hay DOS deduplicaciones, no una.** `procesar_mensaje`
+  protege el reenvío al doctor con `ON CONFLICT (wamid)`; el turno de Daniela lo protege
+  `_entregar` mirando `Resultado.nuevo`. Sin lo segundo, el mismo POST tres veces daba **un
+  reenvío y tres turnos**: el paciente recibía la misma pregunta contestada tres veces con
+  tres textos distintos. Si `procesar_mensaje` revienta antes de devolver nada, se atiende
+  igual — un fallo de Telegram no puede dejar al paciente sin respuesta.
+- **Ninguna clave de idempotencia la escribe el modelo.** Las cuatro (`cita`, `reprogramar`,
+  `seguimiento`, `escalamiento`) las arma el código con `ctx.clave(...)`. `crear_cita` fue
+  la última en caer: con la clave del modelo, dos pacientes distintos pidiendo el mismo
+  bloque generaban la misma cadena y **ambos salían confirmados sobre un solo cupo**.
 - **El historial vive en memoria** (`_sesiones`). Un reinicio borra el hilo del diálogo, no
   los datos: paciente, citas y estado de oportunidad están en Neon. Lo arregla la fase 7 con
   `SQLAlchemySession`.
