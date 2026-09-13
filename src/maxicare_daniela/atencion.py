@@ -488,24 +488,40 @@ async def _recoger_lecturas(
     `margen` es corto a propósito: la ventana ya le dio al lector sus 20 segundos. Esto es
     la cola, no la espera.
 
+    Y es un plazo COMPARTIDO, no uno por archivo. Los lectores corrieron todos a la vez
+    durante la ventana, así que a todos les queda lo mismo por terminar; dárselo a cada uno
+    por separado convertiría las tres páginas de una remisión --el caso que el búfer existe
+    para agrupar-- en 3 × 3 s de cola. Contra el presupuesto de `limites.latencia_maxima`
+    eso no cabe: 45 de tope + 9 de cola + 6 del turno se pasan del minuto. Con el plazo
+    compartido el techo es uno y no depende de cuántos archivos mandara el paciente.
+
     El default se resuelve AQUÍ y no en la firma porque un valor por defecto se evalúa al
     definir la función: con `margen: float = MARGEN_LECTURA_SEGUNDOS`, un `monkeypatch` del
     módulo no cambiaría nada y la prueba del lector lento mediría la constante de verdad.
     """
     margen = MARGEN_LECTURA_SEGUNDOS if margen is None else margen
-    listas: dict[str, LecturaNoClinica] = {}
+    fin = time.monotonic() + margen
+    recogidas: dict[str, LecturaNoClinica] = {}
     for wamid, tarea in tareas.items():
         try:
             # `shield` para que el timeout NO cancele la tarea: el lector sigue corriendo y
             # su mensaje a Telegram llega igual, tarde pero llega. Cancelarla dejaría al
             # doctor sin la lectura solo porque Daniela ya no la necesitaba.
-            valor = await asyncio.wait_for(asyncio.shield(tarea), timeout=margen)
-        except Exception:  # noqa: BLE001 -- TimeoutError incluido; ninguna puede tumbar el turno
+            valor = await asyncio.wait_for(
+                asyncio.shield(tarea), timeout=max(0.0, fin - time.monotonic())
+            )
+        except TimeoutError:
             log.info("la lectura de %s no llegó a tiempo; el turno sale sin ella", wamid)
             continue
+        except Exception:  # noqa: BLE001 -- ninguna puede tumbar el turno
+            # Hoy no debería verse: `leer_y_repartir` se traga lo suyo y devuelve `None`. Si
+            # aparece es que algo cambió, y un `log.info` sin traza diciendo «no llegó a
+            # tiempo» sería la pista equivocada.
+            log.exception("la lectura de %s falló de una forma inesperada", wamid)
+            continue
         if valor is not None:
-            listas[wamid] = valor
-    return listas
+            recogidas[wamid] = valor
+    return recogidas
 
 
 def _entrada_para_el_modelo(
@@ -531,8 +547,12 @@ def _entrada_para_el_modelo(
     if mensaje.trae_archivo:
         que = ingesta.NOMBRE_HUMANO.get(mensaje.tipo, f"algo de tipo «{mensaje.tipo}»")
         if lectura is not None:
-            aviso = f"[El paciente acaba de enviar {que}. Un lector automático lo revisó y "
-            aviso += "el doctor ya lo tiene. "
+            aviso = f"[El paciente acaba de enviar {que}"
+            if mensaje.nombre_archivo:
+                # Igual que la rama sin lectura. Que el lector acierte no es razón para que
+                # Daniela deje de saber cómo se llamaba el archivo.
+                aviso += f", con el nombre «{mensaje.nombre_archivo}»"
+            aviso += ". Un lector automático lo revisó y el doctor ya lo tiene. "
             if lectura.tratamiento != "no_identificado":
                 aviso += f"Es sobre {lectura.tratamiento.replace('_', ' ')}. "
             else:

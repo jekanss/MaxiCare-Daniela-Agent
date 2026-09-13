@@ -31,6 +31,13 @@ from .lectura import vale_la_pena_leer
 
 log = logging.getLogger("maxicare.ingesta")
 
+#: La única referencia FUERTE a las tareas del lector. `asyncio` solo las guarda en un
+#: `WeakSet`, así que una tarea que nadie sostiene se la puede llevar el recolector a
+#: medias: el turno de Daniela ya terminó --ese es justo el caso en que el `shield` de
+#: `atencion._recoger_lecturas` existe-- y el doctor se quedaría sin su lectura clínica en
+#: silencio. El `add_done_callback` la saca en cuanto acaba, así que el `set` no crece.
+_lectores_vivos: set[asyncio.Task] = set()
+
 #: Los tipos de WhatsApp que traen un archivo adjunto. `sticker` está incluido porque técnica
 #: mente es media aunque nunca sea clínico; excluirlo haría que un sticker se procesara como
 #: un texto vacío y se perdiera el registro.
@@ -260,6 +267,10 @@ async def procesar_mensaje(
                         archivo, tipo=m.tipo, telegram=telegram, tema_id=destino
                     )
                 )
+                # Ver `_lectores_vivos`: sin esta referencia fuerte, la tarea puede morir a
+                # medias en cuanto el turno de Daniela suelte la suya.
+                _lectores_vivos.add(tarea)
+                tarea.add_done_callback(_lectores_vivos.discard)
             if tema:
                 # El archivo ya no cae en el General, así que el General tiene que enterarse
                 # igual: es donde los doctores miran. Degradación, no entrega: si esto falla,

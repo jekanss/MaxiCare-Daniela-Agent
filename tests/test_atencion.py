@@ -33,7 +33,7 @@ import pytest
 from maxicare_daniela import atencion, conversacion, ingesta, persistencia
 from maxicare_daniela.calendario import CalendarioCaido, CalendarioDoble, ErrorDeCalendario
 from maxicare_daniela.canales import ErrorDeCanal
-from maxicare_daniela.config import Config
+from maxicare_daniela.config import MARGEN_LECTURA_SEGUNDOS, Config
 from maxicare_daniela.contratos import LecturaNoClinica, RespuestaDaniela
 
 TELEFONO = "573001112233"
@@ -1643,7 +1643,15 @@ def test_con_confianza_alta_daniela_sabe_que_documento_llego(monkeypatch):
     )
 
 
-def test_por_debajo_de_alta_daniela_pregunta_en_vez_de_asumir(monkeypatch):
+def test_con_el_tratamiento_sin_identificar_daniela_pregunta_en_vez_de_asumir(monkeypatch):
+    """La rama `no_identificado`: lo unico que Daniela puede hacer es preguntar.
+
+    Ojo con lo que esta prueba NO cubre. `confianza` va aqui solo para que la lectura se
+    parezca a una de verdad: `atencion` no la lee nunca. La regla de que una confianza por
+    debajo de `alta` degrade el tratamiento a `no_identificado` vive en `lectura.repartir`,
+    y la prueban las de `tests/test_lectura.py`. Si alguien la rompe alli, esta sigue en
+    verde -- por eso el nombre ya no promete vigilarla.
+    """
     _, turnos = preparar(monkeypatch)
 
     async def corrida():
@@ -1688,9 +1696,13 @@ def test_el_lector_lento_no_se_suma_a_la_ventana(monkeypatch):
     """El invariante que el CLAUDE.md lista: el retardo se descuenta, no se suma.
 
     Con una ventana de 0.4 s y un lector que tarda mucho mas que el margen, el turno sale
-    SIN la lectura en vez de esperarla. Si alguien encadena el lector delante del bufer,
-    esta prueba cae -- y tambien cae si alguien sube `MARGEN_LECTURA_SEGUNDOS` pensando que
-    «asi da tiempo».
+    SIN la lectura en vez de esperarla: lo que no llego a tiempo se descarta, no se espera.
+
+    Lo que esta prueba NO vigila, porque el margen va monkeypatcheado a 0.1: el valor de
+    produccion de `MARGEN_LECTURA_SEGUNDOS`. Ese lo fija
+    `test_el_margen_de_produccion_es_el_que_cabe_en_el_presupuesto`. Y tampoco vigila que
+    la recogida siga DESPUES de la ventana; eso es
+    `test_la_ventana_le_sirve_de_plazo_al_lector`.
     """
     _, turnos = preparar(monkeypatch)
     monkeypatch.setattr(atencion, "MARGEN_LECTURA_SEGUNDOS", 0.1)
@@ -1719,6 +1731,73 @@ def test_el_lector_lento_no_se_suma_a_la_ventana(monkeypatch):
     assert atendido.respondido is True
     assert tardo < 2.0, f"el turno espero al lector: tardo {tardo:.1f} s"
     assert "no puedes verlo" in turnos.llamadas[-1]["entrada"]
+
+
+def test_el_margen_de_produccion_es_el_que_cabe_en_el_presupuesto():
+    """Las dos pruebas que miden el margen lo monkeypatchean, asi que ninguna fija su valor.
+
+    3 s es lo que cabe: el tope del bufer son 45, un turno tarda del orden de 6, y
+    `limites.latencia_maxima` es un minuto. Subirlo se come el margen que queda, y encima no
+    sirve de nada -- la ventana ya le dio al lector sus 20 segundos en paralelo.
+    """
+    assert MARGEN_LECTURA_SEGUNDOS == 3.0
+    assert atencion.MARGEN_LECTURA_SEGUNDOS == 3.0, (
+        "`atencion` no lo importa en su cabecera: el monkeypatch de las pruebas del bufer "
+        "no estaria tocando el valor que usa `_recoger_lecturas`"
+    )
+
+
+def test_el_margen_es_del_grupo_entero_y_no_de_cada_archivo(monkeypatch):
+    """Dos archivos en un grupo no valen dos margenes.
+
+    Los lectores corrieron TODOS a la vez durante la ventana, asi que a todos les queda lo
+    mismo por terminar. Un margen por archivo convertiria las tres paginas de una remision
+    --el caso que el bufer existe para agrupar-- en 3 x 3 s de cola detras de un tope de 45,
+    fuera del minuto que fija `limites.latencia_maxima`.
+    """
+    _, turnos = preparar(monkeypatch)
+    margen = 0.5
+    monkeypatch.setattr(atencion, "MARGEN_LECTURA_SEGUNDOS", margen)
+
+    async def corrida():
+        lentas = [_tarea(_no_clinica(), tarda=5.0) for _ in range(2)]
+        try:
+            arranque = time.monotonic()
+            lider = asyncio.ensure_future(
+                _atender(
+                    mensaje_imagen(),
+                    lectura=lentas[0],
+                    ventana=VENTANA_CORTA,
+                    tope=TOPE_CORTO,
+                )
+            )
+            await asyncio.sleep(0.05)
+            await _atender(
+                mensaje_imagen(wamid="wamid-foto-2", media_id="media-2"),
+                lectura=lentas[1],
+                ventana=VENTANA_CORTA,
+                tope=TOPE_CORTO,
+            )
+            await lider
+            return time.monotonic() - arranque
+        finally:
+            for tarea in lentas:
+                tarea.cancel()
+            for tarea in lentas:
+                with contextlib.suppress(asyncio.CancelledError):
+                    await tarea
+
+    tardo = asyncio.run(corrida())
+
+    # La ventana cierra a los ~0.45 s (el segundo mensaje la reinicio a los 0.05). Con el
+    # plazo compartido detras van 0.5 s; con uno por archivo irian 1.0.
+    assert tardo < VENTANA_CORTA + margen * 1.6, (
+        f"el turno tardo {tardo:.2f} s: el margen se esta dando por archivo, no al grupo"
+    )
+    entrada = turnos.llamadas[-1]["entrada"]
+    assert entrada.count("no puedes verlo") == 2, (
+        "ninguno de los dos lectores llego a tiempo, asi que los dos salen sin lectura"
+    )
 
 
 def test_la_ventana_le_sirve_de_plazo_al_lector(monkeypatch):
