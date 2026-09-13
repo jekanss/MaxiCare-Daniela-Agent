@@ -586,6 +586,76 @@ def test_el_lector_no_retrasa_la_entrega_del_archivo(monkeypatch):
     assert resultado.lectura is not None, "no se arranco el lector"
 
 
+def test_un_tema_lento_tampoco_retrasa_la_entrega_del_archivo(monkeypatch):
+    """IMPORTANTE de la revisión final: `asegurar_tema` tenía hasta 30 s de reloj delante.
+
+    En el primer archivo de un paciente, `asegurar_tema` encadena `crear_tema` y
+    `cerrar_tema`, cada una con `TIMEOUT_NORMAL` (15 s). Con Telegram lento, la radiografía
+    del doctor esperaba medio minuto por algo que el propio diseño clasifica como degradable
+    --y el candado por teléfono se lo sumaba al segundo archivo del mismo número.
+
+    Lo que se afirma: vencido el tope, el archivo va al General y `procesar_mensaje` vuelve
+    en seguida. Y la operación NO se cancela: sigue por detrás, para que el hilo esté listo
+    para el próximo archivo en vez de quedar huérfano en Telegram a medio crear.
+    """
+    import asyncio
+    import time
+
+    from maxicare_daniela import ingesta, lectura
+
+    _sin_base(monkeypatch)
+    monkeypatch.setattr(lectura, "leer_y_repartir", _devuelve_async(None))
+    monkeypatch.setattr(lectura, "TOPE_SEGUNDOS_TEMA", 0.05)
+
+    termino = []
+
+    async def tema_lentisimo(**kw):
+        await asyncio.sleep(0.5)
+        termino.append(TEMA_DE_ANA)
+        return TEMA_DE_ANA
+
+    monkeypatch.setattr(lectura, "asegurar_tema", tema_lentisimo)
+    tg = TelegramConTemas()
+
+    async def corrida():
+        arranque = time.monotonic()
+        resultado = await ingesta.procesar_mensaje(
+            _mensaje_con_foto(),
+            whatsapp=WhatsAppConArchivo(),
+            telegram=tg,
+            database_url="postgresql://x",
+            tema_general=TEMA_GENERAL,
+        )
+        tardo = time.monotonic() - arranque
+        if resultado.lectura is not None:
+            resultado.lectura.cancel()
+        # La tarea del tema sigue viva a propósito: se le da tiempo de acabar para
+        # comprobar que NO se canceló --si se cancelara a mitad de `crear_tema`, Telegram
+        # se quedaría con un tema que nadie guardó.
+        pendientes = list(ingesta._temas_en_curso)
+        await asyncio.gather(*pendientes, return_exceptions=True)
+        return resultado, tardo
+
+    resultado, tardo = asyncio.run(corrida())
+
+    assert resultado.reenviado is True
+    assert tg.archivos == [("radio.jpg", TEMA_GENERAL)], (
+        "vencido el tope, el archivo tiene que irse al General: degradar, no esperar"
+    )
+    assert tardo < 0.3, f"la entrega del archivo espero al tema: tardo {tardo:.2f} s"
+    assert termino == [TEMA_DE_ANA], (
+        "la creación del tema se canceló: eso deja un tema a medio crear en Telegram y el "
+        "siguiente archivo del mismo número abriría otro"
+    )
+
+
+def test_el_tope_del_tema_cabe_dentro_de_la_entrega():
+    """El valor, no solo el mecanismo: con el default de 15 s + 15 s no habría tope."""
+    from maxicare_daniela import lectura
+
+    assert lectura.TOPE_SEGUNDOS_TEMA == 5.0
+
+
 def test_si_no_hay_tema_el_archivo_cae_al_general(monkeypatch):
     """Degradar, no perder. Un fallo de Telegram al crear el tema no puede dejar al doctor
     sin la radiografia."""
