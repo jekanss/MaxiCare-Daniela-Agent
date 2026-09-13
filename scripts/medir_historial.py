@@ -2,9 +2,12 @@
 
     uv run python scripts/medir_historial.py
 
-SOLO LEE. No escribe ni una fila, y mira `public` -- la base real de la clinica -- porque es
-el unico sitio donde hay conversaciones reales que contar. Los esquemas de prueba no sirven:
-sus turnos son los que alguien invento para una prueba.
+SOLO LEE. No escribe ni una fila. Mira el esquema al que apunte `MAXICARE_DATABASE_URL`, que
+en produccion es `public` -- la base real de la clinica, y el unico sitio donde hay
+conversaciones reales que contar; los turnos de un esquema de prueba son los que alguien
+invento para una prueba, y no miden nada--. Que sea la URL y no un `public` escrito a fuego
+es lo que permite ensayar el camino CON datos contra un esquema desechable sin inventarse
+filas en la base de la clinica, que es como se comprobo que la consulta de aqui corre.
 
 Por que esto existe
 ------------------------------------------------------------------------------------------
@@ -21,11 +24,18 @@ El orden del spec es obligado y este script es el paso 2:
 
 Por que puede no medir nada, y por que eso NO es un fallo
 ------------------------------------------------------------------------------------------
-Hacen falta AL MENOS VEINTE turnos reales. Con menos, el percentil no significa nada y
-estariamos sustituyendo una suposicion por otra mas cara -- que es exactamente lo que el
-`40` era--. Mientras no los haya, este script lo dice y `config.LIMITE_HISTORIAL_SESION` se
-queda en `PENDIENTE`, o sea `None`, o sea el historial entero. Lo que desbloquea la medicion
-es desplegar y dejar correr conversaciones reales, no correr esto otra vez.
+Hacen falta AL MENOS VEINTE turnos repartidos en CINCO conversaciones, y los dos numeros se
+cuentan sobre el conjunto que de verdad se va a medir: conversaciones con filas en
+`agent_messages`. NO sobre `sum(conversaciones.turno_actual)`, que es lo que contaba la
+primera version de este script y cuenta lo que no es -- las conversaciones anteriores a la
+fase 7 no tienen ni un item que medir y empujaban la puerta igual. Ver el comentario del
+`CENSO`.
+
+Con menos, el percentil no significa nada y estariamos sustituyendo una suposicion por otra
+mas cara -- que es exactamente lo que el `40` era--. Mientras no los haya, este script lo
+dice y `config.LIMITE_HISTORIAL_SESION` se queda en `PENDIENTE`, o sea `None`, o sea el
+historial entero. Lo que desbloquea la medicion es desplegar y dejar correr conversaciones
+reales, no correr esto otra vez.
 """
 
 from __future__ import annotations
@@ -50,7 +60,17 @@ from maxicare_daniela import persistencia  # noqa: E402
 #: Por debajo de esto no se mide: se dice que no hay datos. Lo fija el spec de la fase, y la
 #: razon es que un p95 sobre cuatro conversaciones es un numero con la misma autoridad que
 #: el `40` que este script existe para sustituir.
+#:
+#: Se cuentan los turnos MEDIBLES --los de conversaciones que tienen filas en
+#: `agent_messages`--, no los de la tabla `conversaciones`. Ver el comentario del `CENSO`.
 MINIMO_TURNOS = 20
+
+#: La otra mitad de la puerta, y no sale del spec: la pone este script. `percentile_cont(0.95)`
+#: sobre dos o tres conversaciones es el maximo con otro nombre --interpola entre los valores
+#: mas altos y no hay cola que recortar--, asi que veinte turnos repartidos entre dos
+#: conversaciones largas seguirian sin dar un p95 con sentido. Cinco es el minimo elegido
+#: aqui, no un numero medido; si resulta corto, subirlo es barato y bajarlo es lo caro.
+MINIMO_CONVERSACIONES = 5
 
 #: Los turnos que hay que poder recordar: una conversacion de agendamiento completa --saludo,
 #: tratamiento, fecha, disponibilidad, nombre y consentimiento, confirmacion--.
@@ -81,12 +101,37 @@ SELECT
 """
 
 #: El censo que decide si hay algo que medir. Va aparte para no tocar la consulta del spec.
+#:
+#: Las dos ultimas columnas son la puerta, y salen del MISMO `JOIN` que la consulta de arriba:
+#: son las conversaciones y los turnos que de verdad se van a medir. Contar
+#: `sum(turno_actual)` de TODAS las conversaciones --que es lo que hacia antes-- cuenta lo que
+#: no es: las conversaciones anteriores a la fase 7 no tienen ni un item en `agent_messages`
+#: y empujaban la puerta sin aportar nada medible, y una sola conversacion con
+#: `turno_actual >= 20` la abria ella sola -- con lo que el p95 saldria sobre una o dos
+#: conversaciones, que es exactamente lo que la puerta existe para impedir.
 CENSO = """
+WITH por_sesion AS (
+    SELECT session_id, count(*) AS items
+      FROM agent_messages
+     GROUP BY session_id
+),
+turnos AS (
+    SELECT c.id::text AS session_id, c.turno_actual
+      FROM conversaciones c
+     WHERE c.turno_actual > 0
+),
+medible AS (
+    SELECT t.turno_actual
+      FROM por_sesion p
+      JOIN turnos t USING (session_id)
+)
 SELECT
     (SELECT count(*) FROM agent_messages)                            AS items,
     (SELECT count(*) FROM agent_sessions)                            AS sesiones,
     (SELECT count(*) FROM conversaciones WHERE turno_actual > 0)     AS conversaciones,
-    (SELECT coalesce(sum(turno_actual), 0) FROM conversaciones)      AS turnos
+    (SELECT coalesce(sum(turno_actual), 0) FROM conversaciones)      AS turnos_en_la_base,
+    (SELECT count(*) FROM medible)                                   AS medibles,
+    (SELECT coalesce(sum(turno_actual), 0) FROM medible)             AS turnos_medibles
 """
 
 
@@ -126,26 +171,47 @@ def main() -> int:
 
     with persistencia.conectar(url) as conn, conn.cursor() as cur:
         cur.execute(CENSO)
-        items, sesiones, conversaciones_con_turno, turnos = cur.fetchone()
+        (
+            items,
+            sesiones,
+            conversaciones_con_turno,
+            turnos_en_la_base,
+            medibles,
+            turnos_medibles,
+        ) = cur.fetchone()
         cur.execute(CONSULTA)
         fila = cur.fetchone()
 
     print("\n" + "=" * 78)
     print("Censo -- que hay ahi para medir")
     print("=" * 78)
-    print(f"  filas en agent_messages          : {items}")
-    print(f"  filas en agent_sessions          : {sesiones}")
-    print(f"  conversaciones con al menos 1 turno: {conversaciones_con_turno}")
-    print(f"  turnos reales acumulados         : {turnos}")
+    print(f"  filas en agent_messages                  : {items}")
+    print(f"  filas en agent_sessions                  : {sesiones}")
+    print(f"  conversaciones con al menos 1 turno      : {conversaciones_con_turno}")
+    print(f"  turnos en la tabla `conversaciones`      : {turnos_en_la_base}"
+          "   <- NO es lo que se mide")
+    print(f"  conversaciones MEDIBLES (con items)      : {medibles}"
+          "   <- la puerta cuenta estas dos")
+    print(f"  turnos MEDIBLES (de esas conversaciones) : {turnos_medibles}")
 
-    if turnos < MINIMO_TURNOS or items == 0:
+    if turnos_medibles < MINIMO_TURNOS or medibles < MINIMO_CONVERSACIONES:
         print("\n" + "=" * 78)
         print("SIN DATOS: no hay nada que medir todavia")
         print("=" * 78)
         print(
-            f"  Hacen falta al menos {MINIMO_TURNOS} turnos reales en public.agent_messages "
-            f"y hay {turnos}."
+            f"  Hacen falta al menos {MINIMO_TURNOS} turnos y {MINIMO_CONVERSACIONES} "
+            f"conversaciones CON HISTORIAL GUARDADO --o sea, con filas en agent_messages--\n"
+            f"  y hay {turnos_medibles} "
+            f"{'turno' if turnos_medibles == 1 else 'turnos'} en {medibles} "
+            f"{'conversacion' if medibles == 1 else 'conversaciones'}."
         )
+        if turnos_en_la_base > turnos_medibles:
+            print(
+                f"  Los {turnos_en_la_base} turnos de la tabla `conversaciones` NO cuentan "
+                f"para esto: {turnos_en_la_base - turnos_medibles} son de conversaciones "
+                f"sin un solo item\n  en `agent_messages` -- anteriores a la fase 7, o de "
+                f"un carril que no persiste."
+            )
         if items == 0:
             print(
                 "  `agent_messages` esta VACIA: el historial persistido todavia no ha "
@@ -156,10 +222,10 @@ def main() -> int:
             "  seria otra suposicion, mas cara que la que sustituye."
         )
         print(
-            f"\n  LIMITE_HISTORIAL_SESION = PENDIENTE (hoy `None`: el historial va entero,\n"
-            f"  que es lo correcto mientras no haya medicion).\n"
-            f"  Lo desbloquea DESPLEGAR y dejar correr conversaciones reales; despues,\n"
-            f"  volver a correr este script."
+            "\n  LIMITE_HISTORIAL_SESION = PENDIENTE (hoy `None`: el historial va entero,\n"
+            "  que es lo correcto mientras no haya medicion).\n"
+            "  Lo desbloquea DESPLEGAR y dejar correr conversaciones reales; despues,\n"
+            "  volver a correr este script."
         )
         return 0
 

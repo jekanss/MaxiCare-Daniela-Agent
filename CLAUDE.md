@@ -17,6 +17,11 @@ llegue a la cita correcta.
   `uv run python scripts/inicializar_base.py` · `--solo-verificar` no escribe.
 - Ver el diseño sin leerlo entero: `uv run python scripts/ver_plan.py <clave>`
   (`fases`, `herramientas`, `guardrails`, `agentes`, `contexto`, `fallos`…).
+- Cuánto historial gasta un turno: `uv run python scripts/medir_historial.py` (solo lee).
+  Es el único camino para cerrar el límite del historial: mientras no haya **20 turnos en 5
+  conversaciones con filas en `public.agent_messages`** el script lo dice y
+  `config.LIMITE_HISTORIAL_SESION` se queda en `PENDIENTE` (`None`, historial entero). Eso
+  exige desplegar primero: hasta que corra en producción no hay nada que medir.
 - Desplegar en el VPS: `bash scripts/desplegar.sh`
 - Usuarios del panel: `uv run python scripts/crear_usuario.py` (`--listar`, `--quitar-acceso`)
 - Revisar el grupo de Telegram: `uv run python scripts/obtener_chat_telegram.py`

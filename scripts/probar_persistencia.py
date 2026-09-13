@@ -38,19 +38,33 @@ OK sin probar nada de la fase 7. Por eso se comprueba que `pacientes` sigue sin 
 telefono: con esa puerta cerrada, lo unico que puede llevar el nombre de un proceso al
 siguiente es `agent_messages`.
 
-Donde escribe
+Donde escribe, y las tres cosas que impiden que escriba en `public`
 ------------------------------------------------------------------------------------------
-En el esquema `pruebas_persistencia`, que este script crea al empezar y BORRA al terminar,
-comprobando el borrado con una asercion --un `DROP SCHEMA` que no se verifica es una promesa,
-no un hecho--. NUNCA en `public`, donde hay pacientes reales de una clinica: la MITAD A
-cuenta las filas de `public.agent_messages` antes y despues y exige que no se haya movido
-ninguna.
+En los esquemas `pruebas_persistencia` --con las migraciones aplicadas-- y
+`pruebas_persistencia_vacio` --a proposito sin ellas, para una sola comprobacion--. Los crea
+al empezar y los BORRA al terminar, comprobando el borrado con una asercion: un `DROP SCHEMA`
+que no se verifica es una promesa, no un hecho.
+
+NUNCA en `public`, donde hay pacientes reales de una clinica. Y eso no se sostiene con una
+promesa en un docstring, porque ya fallo: con `schema_translate_map` borrado de `_engine_de`,
+una version anterior de este script escribio de verdad tres filas en la base de la clinica y
+se limito a denunciarlo. Son tres cosas, en este orden:
+
+1. **Un prevuelo que ABORTA.** Antes del primer INSERT se comprueba que el mapa de esquema
+   esta puesto. Si no lo esta, la MITAD A se corta sin escribir una sola fila.
+2. **La cuenta de `public` antes y despues**, que toma `main` y cubre las dos mitades. Es un
+   detector, no una salvaguarda: cuando se dispara, el dano ya esta hecho.
+3. **La limpieza, si el detector se dispara.** Se borra por `session_id` --los que este
+   script escribio, nunca un DELETE a ciegas-- y se COMPRUEBA. Corre en el `finally`, asi
+   que tambien cuando algo revienta a mitad.
 
 El WhatsApp es falso en las dos modalidades: captura en vez de enviar, y la API de Meta no se
 toca. Telegram y Google van vacios a proposito, para que un turno que decidiera escalar no le
 haga sonar el telefono a un doctor de verdad, y el calendario es un `CalendarioDoble()`
-explicito --el unico caso en que el doble es legitimo, porque aqui no hay cupo real que
-confirmarle a nadie--.
+explicito: el mismo caso que en `probar_agentes.py`, `probar_atencion.py` y
+`probar_lectura.py`, que es donde el doble es legitimo --una prueba no confirma cupos reales
+de la clinica a nadie--. En produccion el doble esta prohibido y lo que hay es
+`CalendarioCaido`.
 """
 
 from __future__ import annotations
@@ -89,6 +103,20 @@ from maxicare_daniela.config import Config  # noqa: E402
 #: `pruebas_lectura`, ni `pruebas_web`. Uno propio, para que dos entregables puedan correr a
 #: la vez sin pisarse.
 ESQUEMA = "pruebas_persistencia"
+
+#: Un esquema hermano que se crea VACIO, sin migraciones. Existe para una sola comprobacion:
+#: que la sesion falla contra un esquema sin tablas en vez de crearselas (`create_tables=
+#: False`). Se borra con el otro.
+ESQUEMA_SIN_TABLAS = "pruebas_persistencia_vacio"
+
+#: El `session_id` de la MITAD A. Es constante y no aleatorio a proposito: es la cuerda por
+#: la que se recuperan sus filas si el aislamiento fallara y acabaran en `public`.
+SESION_CABLEADO = "conv-cableado"
+
+#: Los `session_id` que este script llego a escribir, anotados ANTES de escribirlos. Es lo
+#: unico que hace posible limpiar `public` por clave en vez de a ciegas. Ver
+#: `cerrar_lo_de_public`.
+_escritas: list[str] = []
 
 #: Un movil colombiano valido en forma y de mentira de verdad: el `WhatsAppFalso` no envia
 #: nada a ningun numero. Tiene que ser EL MISMO en los dos procesos: es por telefono como
@@ -253,11 +281,11 @@ class DormirFalso:
 # ==========================================================================================
 
 
-def _tablas_del_esquema(directa: str) -> set[str]:
+def _tablas_del_esquema(directa: str, esquema: str = ESQUEMA) -> set[str]:
     with persistencia.conectar(directa) as conn, conn.cursor() as cur:
         cur.execute(
             "SELECT table_name FROM information_schema.tables WHERE table_schema = %s",
-            (ESQUEMA,),
+            (esquema,),
         )
         return {fila[0] for fila in cur.fetchall()}
 
@@ -282,7 +310,7 @@ def mitad_a(directa: str, url: str) -> None:
     )
 
     sesion = persistencia.sesion_de_agente(
-        "conv-cableado", database_url=sin_options(url), esquema=ESQUEMA
+        SESION_CABLEADO, database_url=sin_options(url), esquema=ESQUEMA
     )
     revisar(
         "la fabrica devuelve una sesion PERSISTIDA, no una de memoria",
@@ -291,19 +319,36 @@ def mitad_a(directa: str, url: str) -> None:
         type(sesion).__name__,
     )
     revisar(
-        "no crea sus tablas: las crea la migracion",
-        sesion._create_tables is False,
-    )
-    revisar(
         "guarda los acentos sin escapar (`ensure_ascii=False`)",
         sesion._ensure_ascii is False,
     )
     opciones = sesion._engine.sync_engine.get_execution_options()
+    aislada = opciones.get("schema_translate_map") == {None: ESQUEMA}
     revisar(
         "el esquema se traduce al compilar (`schema_translate_map`), no por `search_path`",
-        opciones.get("schema_translate_map") == {None: ESQUEMA},
+        aislada,
         str(opciones.get("schema_translate_map")),
     )
+
+    # ---------------------------------------------------------------------------------
+    # EL PREVUELO. Va aqui y no mas abajo por una razon concreta: contar las filas de
+    # `public` antes y despues es un DETECTOR, no una salvaguarda -- cuando esa linea se
+    # pone en FALLA, las filas ya estan escritas en la base de una clinica con pacientes
+    # reales. Se midio: borrando `schema_translate_map` de `_engine_de`, este script dejo
+    # una fila en `public.agent_sessions` y dos en `public.agent_messages`.
+    #
+    # Con el aislamiento roto NO se escribe nada, y la corrida se corta aqui. La red que
+    # queda debajo --contar `public` y borrar por `session_id` lo que este script escribio--
+    # es para el caso en que el aislamiento falle por un camino que este prevuelo no vea.
+    # ---------------------------------------------------------------------------------
+    if not aislada:
+        revisar(
+            "PREVUELO: no se escribe ni una fila sin aislamiento comprobado",
+            False,
+            "ABORTADA la MITAD A antes del primer INSERT -- con el mapa de esquema mal, "
+            "lo que se escribiera caeria en `public`",
+        )
+        return
 
     # ---------------------------------------------------------------------------------
     # A4: el ida y vuelta por `schema_translate_map`, que es el camino de produccion.
@@ -312,13 +357,28 @@ def mitad_a(directa: str, url: str) -> None:
         {"role": "user", "content": "quiero una valoracion de ortodoncia"},
         {"role": "assistant", "content": "Claro, con mucho gusto. ¿Qué dia te sirve?"},
     ]
+    # Desde aqui hay filas escritas con este `session_id`, y por el se limpian si acabaran
+    # donde no deben. Se anota ANTES de escribir: anotarlo despues dejaria sin rastro justo
+    # el caso en que el INSERT cae en `public` y luego algo revienta.
+    _escritas.append(SESION_CABLEADO)
 
-    async def ida_y_vuelta():
+    sesion_sin_tablas = persistencia.sesion_de_agente(
+        "conv-sin-tablas", database_url=sin_options(url), esquema=ESQUEMA_SIN_TABLAS
+    )
+
+    async def contra_neon():
         await sesion.add_items(puestos)
-        return await sesion.get_items()
+        vueltos = await sesion.get_items()
+        # La sonda de `create_tables=False`: contra un esquema VACIO, la sesion tiene que
+        # fallar en vez de crear las tablas por su cuenta.
+        try:
+            await sesion_sin_tablas.add_items([{"role": "user", "content": "hola"}])
+        except Exception as e:  # noqa: BLE001 -- lo que importa es que NO pase de aqui
+            return vueltos, type(e).__name__
+        return vueltos, None
 
     try:
-        vueltos = _correr(ida_y_vuelta())
+        vueltos, fallo_sin_tablas = _correr(contra_neon())
     finally:
         _correr(persistencia.cerrar_engines())
 
@@ -327,15 +387,33 @@ def mitad_a(directa: str, url: str) -> None:
         [i.get("content") for i in vueltos] == [i["content"] for i in puestos],
         f"{len(vueltos)} items",
     )
+
+    # ---------------------------------------------------------------------------------
+    # `ensure_ascii=False`, comprobado donde se nota: en el TEXT almacenado.
+    #
+    # Mirar el valor deserializado no comprueba nada -- el ida y vuelta JSON restaura el
+    # caracter con el flag en cualquiera de sus dos valores--. Lo unico que compra
+    # `ensure_ascii=False` es que `message_data` se pueda leer a ojo el dia que haya que
+    # mirar un historial a mano, y eso solo se ve leyendo la columna cruda.
+    # ---------------------------------------------------------------------------------
+    fila = una_fila(
+        url,
+        "SELECT message_data FROM agent_messages "
+        " WHERE session_id = %s AND message_data LIKE '%%dia te sirve%%' LIMIT 1",
+        (SESION_CABLEADO,),
+    )
+    crudo = fila[0] if fila else ""
+    bien_guardado = "é" in crudo and "\\u00e9" not in crudo
     revisar(
-        "los acentos vuelven sin escapar",
-        any("¿Qué" in str(i.get("content")) for i in vueltos),
+        "el TEXT guardado lleva el acento, no su escape `\\u00e9`",
+        bien_guardado,
+        "" if bien_guardado else (crudo[:120] or "no se encontro la fila en la base"),
     )
 
     filas = _cuenta(
         url,
         "SELECT count(*) FROM agent_messages WHERE session_id = %s",
-        ("conv-cableado",),
+        (SESION_CABLEADO,),
     )
     revisar(
         "las filas cayeron en el esquema de pruebas",
@@ -343,18 +421,82 @@ def mitad_a(directa: str, url: str) -> None:
         f"{filas} filas en {ESQUEMA}.agent_messages",
     )
 
+    # ---------------------------------------------------------------------------------
+    # `create_tables=False`, comprobado por comportamiento y no por el atributo.
+    #
+    # `sesion._create_tables is False` no puede caer si alguien BORRA el argumento: el
+    # default del SDK 0.22.2 ya es `False`, asi que borrarlo es indistinguible de ponerlo
+    # --ningun control en tiempo de ejecucion puede separar un valor de su default
+    # identico--. Lo que si cambia el comportamiento, y es la direccion que hace dano, es
+    # `create_tables=True`: el proceso web ejecutaria DDL al arrancar y el esquema del
+    # proyecto dejaria de leerse entero en `migraciones/`. Eso es lo que se prueba aqui:
+    # contra un esquema vacio, la sesion FALLA en vez de crearse las tablas.
+    # ---------------------------------------------------------------------------------
+    revisar(
+        "no crea sus tablas: contra un esquema vacio FALLA en vez de crearlas",
+        fallo_sin_tablas is not None,
+        "escribio sin protestar: se las creo ella" if fallo_sin_tablas is None else "",
+    )
+    creadas = sorted(_tablas_del_esquema(directa, ESQUEMA_SIN_TABLAS))
+    revisar(
+        f"y el esquema '{ESQUEMA_SIN_TABLAS}' sigue vacio: no quedo ni una tabla",
+        not creadas,
+        "" if not creadas else f"se las creo ella: {creadas}",
+    )
 
-def mitad_a_no_toco_public(directa: str, antes: tuple[int, int]) -> None:
-    """La segunda mitad de la comprobacion que importa: no basta con que las filas esten en
-    `pruebas_persistencia`; tienen que NO estar en `public`, que es la base de la clinica."""
+
+def cerrar_lo_de_public(directa: str, antes: tuple[int, int]) -> None:
+    """Que `public` este como estaba, y si no lo esta, dejarlo como estaba.
+
+    Corre en el `finally` de `main` y NO dentro del `try`: el caso en que mas falta hace
+    saber si se toco la base de la clinica es justo aquel en que algo revento a mitad -- un
+    `TimeoutExpired` del proceso hijo, por ejemplo.
+
+    Si aparecieron filas, se borran POR `session_id` --los que este script escribio, que
+    lleva anotados en `_escritas`-- y nunca a ciegas: un `DELETE FROM public.agent_messages`
+    sin `WHERE` en la base de una clinica es peor que el problema que arregla. Y el borrado
+    se COMPRUEBA, igual que el del esquema: restaurar sin verificar es una promesa.
+    """
     ahora = (
         _cuenta(directa, "SELECT count(*) FROM public.agent_sessions"),
         _cuenta(directa, "SELECT count(*) FROM public.agent_messages"),
     )
+    if ahora == antes:
+        revisar(
+            "no cayo ni una fila en `public.agent_sessions` / `public.agent_messages`",
+            True,
+            f"antes {antes}, ahora {ahora}",
+        )
+        return
+
     revisar(
         "no cayo ni una fila en `public.agent_sessions` / `public.agent_messages`",
-        ahora == antes,
-        f"antes {antes}, ahora {ahora}",
+        False,
+        f"antes {antes}, ahora {ahora} -- el aislamiento fallo; se limpia por session_id",
+    )
+    with persistencia.conectar(directa) as conn:
+        with conn.cursor() as cur:
+            for session_id in _escritas:
+                # Los mensajes primero: `agent_messages.session_id` referencia a
+                # `agent_sessions` y al reves el DELETE fallaria por integridad.
+                cur.execute(
+                    "DELETE FROM public.agent_messages WHERE session_id = %s", (session_id,)
+                )
+                cur.execute(
+                    "DELETE FROM public.agent_sessions WHERE session_id = %s", (session_id,)
+                )
+        conn.commit()
+    despues = (
+        _cuenta(directa, "SELECT count(*) FROM public.agent_sessions"),
+        _cuenta(directa, "SELECT count(*) FROM public.agent_messages"),
+    )
+    revisar(
+        "lo que este script escribio en `public` quedo borrado",
+        despues == antes,
+        f"antes {antes}, ahora {despues} -- QUEDA BASURA EN LA BASE DE LA CLINICA: "
+        f"session_id en {_escritas}"
+        if despues != antes
+        else f"borrado y comprobado ({_escritas})",
     )
 
 
@@ -380,16 +522,22 @@ def _turno_en_proceso_nuevo(url: str, texto: str) -> dict:
     entorno["MAXICARE_DATABASE_URL"] = url
     entorno["PYTHONIOENCODING"] = "utf-8"
 
-    proceso = subprocess.run(
-        [sys.executable, str(Path(__file__).resolve()), "--turno-hijo", "--texto", texto],
-        cwd=str(RAIZ),
-        env=entorno,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        timeout=600,
-    )
+    try:
+        proceso = subprocess.run(
+            [sys.executable, str(Path(__file__).resolve()), "--turno-hijo", "--texto", texto],
+            cwd=str(RAIZ),
+            env=entorno,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=600,
+        )
+    except subprocess.TimeoutExpired:
+        # Se atrapa a proposito y no se deja subir: un turno que se cuelga es un FALLA que
+        # hay que poder leer en el resumen, no una traza que se lleva por delante la
+        # comprobacion de `public` y el borrado del esquema.
+        return {"error": "el proceso hijo no termino en 600 s"}
     for linea in (proceso.stdout or "").splitlines():
         if linea.startswith("RESULTADO_JSON "):
             return json.loads(linea[len("RESULTADO_JSON ") :])
@@ -425,6 +573,11 @@ def mitad_b(directa: str, url: str) -> None:
     if not a.get("texto_enviado"):
         return
     print(f"       A (pid {a.get('pid')}) dijo: {a['texto_enviado'][:160]}")
+    # El hijo escribio historial con este `session_id`: se anota para poder limpiarlo de
+    # `public` si su aislamiento --que va por `search_path`, no por `schema_translate_map`--
+    # hubiera fallado. Lo comprueba `cerrar_lo_de_public`.
+    if a.get("id_conversacion"):
+        _escritas.append(a["id_conversacion"])
 
     guardadas = _cuenta(
         url,
@@ -463,8 +616,9 @@ def mitad_b(directa: str, url: str) -> None:
         f"y esta comprobacion dejaria de probar la fase 7",
     )
 
-    print(f"  ... proceso B (interprete NUEVO): <<¿como me llamo?>>")
-    b = _turno_en_proceso_nuevo(url, "Una cosa, ¿te acuerdas de como me llamo?")
+    pregunta = "Una cosa, ¿te acuerdas de como me llamo?"
+    print(f"  ... proceso B (interprete NUEVO): <<{pregunta}>>")
+    b = _turno_en_proceso_nuevo(url, pregunta)
     revisar(
         "el proceso B contesto",
         bool(b.get("texto_enviado")) and not b.get("error"),
@@ -481,7 +635,8 @@ def mitad_b(directa: str, url: str) -> None:
     )
     revisar(
         "los dos turnos cayeron en la MISMA conversacion",
-        a.get("id_conversacion") == b.get("id_conversacion") and b.get("id_conversacion"),
+        bool(b.get("id_conversacion"))
+        and a.get("id_conversacion") == b.get("id_conversacion"),
         f"A {a.get('id_conversacion')}, B {b.get('id_conversacion')}",
     )
     # Esto NO prueba la fase 7 y esta dicho aqui a proposito: `turno_actual` sale de
@@ -621,7 +776,10 @@ def main() -> int:
         return 1
 
     print(f"Base: {enmascarar(directa)}")
-    print(f"Esquema de pruebas: {ESQUEMA} (se borra al terminar; 'public' no se toca)")
+    print(
+        f"Esquemas de prueba: {ESQUEMA} y {ESQUEMA_SIN_TABLAS} "
+        "(se borran al terminar; 'public' no se toca)"
+    )
     print(
         "Modo: "
         + (
@@ -633,9 +791,12 @@ def main() -> int:
 
     with persistencia.conectar(directa) as conn:
         with conn.cursor() as cur:
-            cur.execute(f"DROP SCHEMA IF EXISTS {ESQUEMA} CASCADE")
-            cur.execute(f"CREATE SCHEMA {ESQUEMA}")
+            for esquema in (ESQUEMA, ESQUEMA_SIN_TABLAS):
+                cur.execute(f"DROP SCHEMA IF EXISTS {esquema} CASCADE")
+                cur.execute(f"CREATE SCHEMA {esquema}")
         conn.commit()
+    # Las migraciones van SOLO en el primero. El segundo se queda VACIO a proposito: es
+    # contra el que se comprueba que la sesion falla en vez de crearse sus tablas.
     with persistencia.conectar(url) as conn:
         persistencia.aplicar_esquema(conn)
         persistencia.cargar_base_conocimiento(conn, persistencia.cargar_semilla())
@@ -652,42 +813,54 @@ def main() -> int:
             mitad_b(directa, url)
         else:
             print("\n  (MITAD B omitida: hace falta --chat, que gasta tokens)")
-        mitad_a_no_toco_public(directa, publico_antes)
     finally:
         print("\n" + "=" * 78)
-        print("Limpieza -- el esquema de pruebas tiene que desaparecer")
+        print("Limpieza -- `public` como estaba y el esquema de pruebas borrado")
         print("=" * 78)
+        # Lo de `public` va PRIMERO y va en el `finally`: si la mitad de en medio revienta
+        # --un hijo colgado, una conexion caida--, saber si se toco la base de la clinica es
+        # justo lo que mas falta hace, y era lo unico que antes se quedaba sin correr.
+        try:
+            cerrar_lo_de_public(directa, publico_antes)
+        except Exception as e:  # noqa: BLE001
+            revisar(
+                "no cayo ni una fila en `public.agent_sessions` / `public.agent_messages`",
+                False,
+                f"no se pudo ni comprobar ({e}) -- revisalo a mano, buscando los "
+                f"session_id {_escritas} en public.agent_sessions",
+            )
         # La limpieza se COMPRUEBA. Un `DROP SCHEMA` sin verificar es una promesa: si la
         # conexion se cae a mitad, el esquema queda con datos de prueba dentro y el script
         # diria OK igual. Y el fallo pasa por `revisar`, no por un `print`, para que cuente
         # en el resumen y en el codigo de salida.
-        try:
-            with persistencia.conectar(directa) as conn:
-                with conn.cursor() as cur:
-                    cur.execute(f"DROP SCHEMA IF EXISTS {ESQUEMA} CASCADE")
-                conn.commit()
-                with conn.cursor() as cur:
-                    cur.execute(
-                        "SELECT count(*) FROM information_schema.schemata "
-                        " WHERE schema_name = %s",
-                        (ESQUEMA,),
-                    )
-                    quedan = cur.fetchone()[0]
-            revisar(
-                f"el esquema '{ESQUEMA}' ya no existe",
-                quedan == 0,
-                ""
-                if quedan == 0
-                else f"QUEDO EN PIE con los datos de prueba dentro "
-                f"-- borralo a mano: DROP SCHEMA {ESQUEMA} CASCADE",
-            )
-        except Exception as e:  # noqa: BLE001
-            revisar(
-                f"el esquema '{ESQUEMA}' ya no existe",
-                False,
-                f"no se pudo comprobar ni borrar ({e}) -- revisalo a mano: "
-                f"DROP SCHEMA {ESQUEMA} CASCADE",
-            )
+        for esquema in (ESQUEMA, ESQUEMA_SIN_TABLAS):
+            try:
+                with persistencia.conectar(directa) as conn:
+                    with conn.cursor() as cur:
+                        cur.execute(f"DROP SCHEMA IF EXISTS {esquema} CASCADE")
+                    conn.commit()
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            "SELECT count(*) FROM information_schema.schemata "
+                            " WHERE schema_name = %s",
+                            (esquema,),
+                        )
+                        quedan = cur.fetchone()[0]
+                revisar(
+                    f"el esquema '{esquema}' ya no existe",
+                    quedan == 0,
+                    ""
+                    if quedan == 0
+                    else f"QUEDO EN PIE con los datos de prueba dentro "
+                    f"-- borralo a mano: DROP SCHEMA {esquema} CASCADE",
+                )
+            except Exception as e:  # noqa: BLE001
+                revisar(
+                    f"el esquema '{esquema}' ya no existe",
+                    False,
+                    f"no se pudo comprobar ni borrar ({e}) -- revisalo a mano: "
+                    f"DROP SCHEMA {esquema} CASCADE",
+                )
 
     print("\n" + "=" * 78)
     print(

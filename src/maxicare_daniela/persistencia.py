@@ -377,8 +377,9 @@ def sesion_de_agente(
     persona con todo lo que dijo alguna vez, y resetear a primer contacto dejaría de ser
     posible sin perder el historial entero.
 
-    `esquema` existe para los carriles de prueba (`pruebas`, `pruebas_web`,
-    `pruebas_sesion`). Va por `schema_translate_map` y NO por `search_path`: el pooler de
+    `esquema` existe para los carriles de prueba (`pruebas`, `pruebas_web`, `pruebas_sesion`
+    y `pruebas_persistencia`, que estrenó el entregable de la fase 7). Va por
+    `schema_translate_map` y NO por `search_path`: el pooler de
     Neon rechaza `options` como parámetro de arranque, y eso ya costó una tarde en la fase 3.
     SQLAlchemy cualifica las sentencias al COMPILARLAS, así que el pooler no ve nada raro.
 

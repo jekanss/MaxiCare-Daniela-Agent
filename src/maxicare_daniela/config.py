@@ -128,7 +128,8 @@ def config_de_corrida(
 #: seis o siete él solo. Por eso el 40 del plan --justificado como «5 conversaciones
 #: completas»-- era falso: podían ser cinco o seis TURNOS.
 #:
-#: Medido con `scripts/medir_historial.py` el PENDIENTE sobre PENDIENTE conversaciones reales:
+#: Por medir con `scripts/medir_historial.py`. Todavía no se ha medido nada:
+#:   fecha de la medición: PENDIENTE   conversaciones medidas: PENDIENTE
 #:   items por turno, media: PENDIENTE   peor caso: PENDIENTE
 #:   items por conversación, p95: PENDIENTE   máximo: PENDIENTE
 #: El número será <peor caso> x 6 turnos, que es una conversación de agendamiento completa
@@ -136,8 +137,10 @@ def config_de_corrida(
 #:
 #: `None` mientras tanto, y `None` NO es un descuido: es el paso 1 de los tres del spec
 #: --persistir sin límite, medir items/turno, fijar el número con el dato al lado--. Sale de
-#: `None` cuando `scripts/medir_historial.py` tenga al menos VEINTE turnos reales que contar
-#: en `public.agent_messages`, lo que exige desplegar primero. Con menos, el percentil no
+#: `None` cuando `scripts/medir_historial.py` tenga al menos VEINTE turnos repartidos en
+#: cinco conversaciones QUE TENGAN FILAS en `public.agent_messages` --no turnos de
+#: `conversaciones`, que los hay desde antes de esta fase y no traen un solo item que
+#: contar--, lo que exige desplegar primero. Con menos, el percentil no
 #: significa nada y estaríamos sustituyendo una suposición por otra más cara. El `40` de
 #: antes era exactamente esa suposición, y por eso se fue.
 LIMITE_HISTORIAL_SESION: int | None = None
