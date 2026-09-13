@@ -27,10 +27,35 @@ echo "==> Empaquetando"
 # diseño y no tiene por que estar en un servidor de produccion.
 TAR="$(mktemp -t daniela-XXXXXX.tar.gz)"
 tar --exclude='.venv' --exclude='__pycache__' --exclude='.pytest_cache' \
-    --exclude='docs' --exclude='.claude' --exclude='*.pyc' \
+    --exclude='docs' --exclude='.claude' --exclude='*.pyc' --exclude='web/node_modules' --exclude='web/dist' \
     -czf "$TAR" \
     pyproject.toml uv.lock Dockerfile docker-compose.yml .dockerignore \
-    src migraciones datos scripts
+    src migraciones datos scripts web
+
+echo "==> Comprobando que el paquete trae lo que el Dockerfile copia"
+# Esta comprobacion existe porque la lista de arriba ya se desincronizo una vez, y costo
+# un despliegue entero: web/ entro al Dockerfile en la fase 5 y nunca entro a este tar,
+# asi que el primer intento de desplegar algo posterior a la fase 2 murio en el VPS,
+# minutos despues, con un error sobre checksums que no menciona este archivo por ninguna
+# parte.
+#
+# Las rutas se leen del propio Dockerfile en vez de mantenerse a mano aqui: una lista a
+# mano se vuelve a desincronizar el dia que alguien anada un COPY, y el fallo reaparece
+# en el sitio equivocado. Se saltan los 'COPY --from=', que traen cosas de otra etapa de
+# la construccion y no de este paquete.
+CONTENIDO="$(tar -tzf "$TAR")"
+FALTAN=""
+RUTAS="$(grep -E '^COPY ' Dockerfile | grep -v -- '--from=' | sed -E 's/^COPY +//; s/ +[^ ]+$//' | sed -E 's/[*]//g')"
+for ruta in $RUTAS; do
+  grep -qE "^[.]?/?${ruta}" <<<"$CONTENIDO" || FALTAN="$FALTAN $ruta"
+done
+if [[ -n "$FALTAN" ]]; then
+  echo "ERROR: el Dockerfile copia rutas que el paquete no lleva:$FALTAN" >&2
+  echo "       Anadelas al 'tar' de este script." >&2
+  rm -f "$TAR"
+  exit 1
+fi
+
 
 echo "==> Copiando a $VPS:$DESTINO"
 ssh "$VPS" "mkdir -p '$DESTINO'"
