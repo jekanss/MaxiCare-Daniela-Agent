@@ -156,6 +156,22 @@ def instrucciones_daniela(ctx, agente) -> str:
     # `context=None` en varias pruebas que solo miran el vocabulario, y en ese caso el bloque
     # de fecha sobra en vez de reventar.
     contexto = getattr(ctx, "context", None)
+
+    # Presentación: solo en el turno 1, y con el mismo cuidado defensivo que la fecha. Va
+    # aquí -- después del vocabulario, antes de la fecha -- porque cambia una vez por
+    # conversación: menos volátil que "AHORA MISMO" (que cambia cada minuto), más volátil
+    # que la lista de tratamientos.
+    if getattr(contexto, "turno_actual", None) == 1:
+        texto = (
+            f"{texto}\n\n"
+            "PRIMER CONTACTO\n"
+            "Es el primer mensaje de esta conversación: el paciente no sabe todavía con "
+            "quién escribe. Te presentas por tu nombre y dices que haces parte del equipo "
+            "de MaxiCare, con calidez genuina -no un saludo protocolario-. En los turnos "
+            "siguientes NO vuelvas a presentarte: repetir tu nombre en cada mensaje suena "
+            "a robot."
+        )
+
     ahora = getattr(contexto, "ahora", None)
     if ahora is None:
         return texto
