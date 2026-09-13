@@ -313,11 +313,29 @@ async def procesar_mensaje(
             # así que el aviso queda en su propio try/except y el lector arranca ANTES de
             # intentarlo: un aviso que revienta no puede quitarle al doctor la lectura.
             if lectura_mod.vale_la_pena_leer(m.tipo, archivo.tamano):
-                tarea = asyncio.create_task(
-                    lectura_mod.leer_y_repartir(
-                        archivo, tipo=m.tipo, telegram=telegram, tema_id=destino
+                # El `group_id` del lector es la conversación viva, si la hay -- pero se
+                # resuelve DENTRO de la tarea de fondo, nunca antes de crearla:
+                # `_conversacion_viva` habla con Neon, y esperarla aquí retrasaría el
+                # regreso de `procesar_mensaje`, que es justo la garantía que la fase 2 ya
+                # midió y protegió (`tests/test_ingesta.py::test_el_lector_no_retrasa_la_
+                # entrega_del_archivo`). Si es el PRIMER mensaje de un paciente nuevo,
+                # todavía no existe conversación --la crea `atencion._leer_estado`, después
+                # de que esto arranque-- y ese trace queda fuera del grupo. Se acepta:
+                # inventarle un id que no corresponde a ninguna conversación sería peor que
+                # no tenerlo.
+                async def _leer_con_grupo() -> lectura_mod.LecturaNoClinica | None:
+                    grupo = await asyncio.to_thread(
+                        _conversacion_viva, database_url, m.telefono
                     )
-                )
+                    return await lectura_mod.leer_y_repartir(
+                        archivo,
+                        tipo=m.tipo,
+                        telegram=telegram,
+                        tema_id=destino,
+                        group_id=grupo,
+                    )
+
+                tarea = asyncio.create_task(_leer_con_grupo())
                 # Ver `_lectores_vivos`: sin esta referencia fuerte, la tarea puede morir a
                 # medias en cuanto el turno de Daniela suelte la suya.
                 _lectores_vivos.add(tarea)
@@ -378,6 +396,21 @@ def _registrar(database_url: str, m: MensajeEntrante) -> bool:
             (m.wamid, m.telefono, m.nombre_perfil, m.tipo, m.texto, m.media_id, m.mime),
         )
         return cur.fetchone() is not None
+
+
+def _conversacion_viva(database_url: str, telefono: str) -> str | None:
+    """El id de la conversación abierta de este número, o `None`. Solo para el `group_id`.
+
+    Se traga cualquier fallo: una traza mal agrupada no puede costarle a un doctor la
+    lectura de una radiografía.
+    """
+    try:
+        with persistencia.conectar(database_url) as conn:
+            viva = persistencia.conversacion_viva(conn, telefono)
+    except Exception:  # noqa: BLE001 -- ver el docstring
+        log.warning("no se pudo resolver la conversación de %s para el trace", telefono)
+        return None
+    return viva[0] if viva else None
 
 
 def _marcar_reenviado(

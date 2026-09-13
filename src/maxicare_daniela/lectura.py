@@ -24,7 +24,7 @@ import logging
 from agents import RunConfig, Runner
 
 from . import persistencia
-from .agentes import lector_archivos
+from .agentes import VERSION_PROMPT_LECTOR, lector_archivos
 from .canales import ArchivoDescargado
 from .config import TRACE_INCLUDE_SENSITIVE_DATA, WORKFLOW_NAME, config_de_corrida
 from .contratos import LecturaArchivo, LecturaNoClinica
@@ -233,7 +233,7 @@ def entrada_para_el_lector(archivo: ArchivoDescargado, tipo: str) -> list[dict]:
     return [{"role": "user", "content": [contenido]}]
 
 
-def _config_de_corrida() -> RunConfig:
+def _config_de_corrida(group_id: str | None) -> RunConfig:
     """La CUARTA salida del muro: los traces, que se exportan fuera de la clínica.
 
     Comprobado contra la 0.22.2 instalada: `RunConfig()` nace con
@@ -249,12 +249,18 @@ def _config_de_corrida() -> RunConfig:
     de modelo del proyecto. Estaba duplicada aquí, y esa duplicación es cómo la misma fuga
     siguió abierta en `conversacion.py` y en los evaluadores de guardrail mientras este lado
     ya estaba cerrado.
+
+    `group_id` es el `id_conversacion` de quien mandó el archivo, o `None` cuando todavía no
+    hay una conversación viva que agrupe esta traza -- ver `ingesta._conversacion_viva`. Se
+    acepta el agujero antes que inventar un id que no corresponde a ninguna conversación.
     """
-    return config_de_corrida()
+    return config_de_corrida(
+        group_id=group_id, canal="whatsapp", version_prompt=VERSION_PROMPT_LECTOR
+    )
 
 
 async def leer_archivo(
-    archivo: ArchivoDescargado, *, tipo: str, correr=None
+    archivo: ArchivoDescargado, *, tipo: str, correr=None, group_id: str | None = None
 ) -> LecturaArchivo | None:
     """Corre `lector_archivos`. Devuelve `None` si falla, y NUNCA propaga.
 
@@ -264,7 +270,9 @@ async def leer_archivo(
     ya entregó el archivo al doctor. Una excepción ahí solo llegaría a un log.
     """
     ejecutar = correr or (
-        lambda entrada: Runner.run(lector_archivos, entrada, run_config=_config_de_corrida())
+        lambda entrada: Runner.run(
+            lector_archivos, entrada, run_config=_config_de_corrida(group_id)
+        )
     )
     try:
         corrida = await ejecutar(entrada_para_el_lector(archivo, tipo))
@@ -275,7 +283,13 @@ async def leer_archivo(
 
 
 async def leer_y_repartir(
-    archivo: ArchivoDescargado, *, tipo: str, telegram, tema_id: int | None, correr=None
+    archivo: ArchivoDescargado,
+    *,
+    tipo: str,
+    telegram,
+    tema_id: int | None,
+    correr=None,
+    group_id: str | None = None,
 ) -> LecturaNoClinica | None:
     """Lee, manda lo clínico al tema del paciente y devuelve SOLO la mitad no clínica.
 
@@ -283,7 +297,7 @@ async def leer_y_repartir(
     la otra es el valor de retorno. La clínica no se guarda en ninguna variable que
     sobreviva a esta función.
     """
-    leida = await leer_archivo(archivo, tipo=tipo, correr=correr)
+    leida = await leer_archivo(archivo, tipo=tipo, correr=correr, group_id=group_id)
     if leida is None:
         try:
             await telegram.enviar_mensaje(
