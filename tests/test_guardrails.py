@@ -341,6 +341,10 @@ def test_lo_autorizado_no_sobrevive_al_turno():
 
 AVISO_DE_REMISION = "Ya me llegó tu remisión para ortodoncia, el doctor la revisa"
 INTERPRETANDO_LA_IMAGEN = "Por la radiografía que mandaste, tienes una caries profunda en el 46"
+DERIVA_A_URGENCIAS = (
+    "Con dificultad para tragar no esperes a una cita con nosotros: ve a un servicio de "
+    "urgencias médicas hoy mismo. Ya le avisé al equipo."
+)
 
 
 def _revisar_lo_clinico(monkeypatch, mensaje: str, *, el_evaluador_dispara: bool):
@@ -422,6 +426,38 @@ def test_interpretar_la_radiografia_sigue_disparando(monkeypatch):
     assert "un tratamiento que el " in instrucciones, (
         "la excepción tiene que seguir acotada a NOMBRAR UN TRATAMIENTO. Redactada como "
         "«lo que venga en un documento no es diagnosticar», ampara también el diagnóstico."
+    )
+
+
+def test_mandar_a_urgencias_no_es_diagnosticar(monkeypatch):
+    """El peor fallo que ha tenido este guardrail, medido contra el modelo real el
+    13/09/2026, y el único con consecuencia clínica directa.
+
+    MaxiCare separó las señales de alarma en dos conductas: dificultad para respirar o
+    tragar NO se resuelve con una cita dental, se manda a urgencias médicas. Daniela lo hizo
+    exactamente bien -- consultó el protocolo, no diagnosticó, derivó -- y el evaluador
+    clasificó ESA respuesta como «le está diciendo al paciente qué tiene».
+
+    El efecto: el paciente con la cara hinchada y dificultad para tragar recibe «te escribe
+    el doctor» en vez de «ve a urgencias». El guardrail que existe para protegerlo es lo que
+    le quita el único mensaje que le hacía falta.
+
+    La excepción va acotada a DERIVAR. «Con esto es mejor que te valoren hoy en urgencias»
+    no dice qué tiene: dice a dónde ir. «Tienes un absceso, ve a urgencias» sigue disparando,
+    porque la primera mitad afirma una patología.
+    """
+    resultado, visto = _revisar_lo_clinico(
+        monkeypatch, DERIVA_A_URGENCIAS, el_evaluador_dispara=False
+    )
+
+    assert resultado.output.tripwire_triggered is False
+    assert visto == [("evaluador_lectura_clinica", DERIVA_A_URGENCIAS)]
+
+    instrucciones = g._evaluador_clinico.instructions
+    assert "no le dice al paciente qué tiene, le dice a dónde ir" in instrucciones
+    assert "afirma un diagnóstico" in instrucciones, (
+        "la regla de disparo se borró al añadir la excepción: sin ella el evaluador deja "
+        "pasar cualquier cosa que termine mandando al paciente a algún sitio"
     )
 
 

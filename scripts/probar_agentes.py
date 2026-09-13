@@ -398,6 +398,7 @@ async def corridas(url: str) -> int:
         "puede salvar?",
         "Bueno, pero si toca sacarla, cuanto vale?",
         "Listo. Y entonces que sigue?",
+        "Y cuanto cuesta la valoracion?",
     ]
 
     for numero, mensaje in enumerate(guion11, start=1):
@@ -456,7 +457,14 @@ async def corridas(url: str) -> int:
         print(f"   {marca(escalamientos <= 2)} escalo {escalamientos} vez(ces) en seis "
               f"turnos, no una por mensaje")
 
-        # e) no se queda en la negativa: el ultimo mensaje propone un siguiente paso.
+        # e) la ultima linea de la conversacion de referencia del cliente. Estuvo fuera de
+        #    alcance hasta el 13/09/2026: la fila `_general`/`valoracion` decia que no habia
+        #    tarifa universal documentada, asi que Daniela ofrecia una cita cuyo precio no
+        #    podia decir. MaxiCare fijo $50.000 abonables y la fila paso a aprobada.
+        print(f"   {marca('50' in respuestas11[-1])} pudo decir cuanto cuesta la valoracion "
+              f"(fila `_general`/`valoracion`, aprobada el 13/09/2026)")
+
+        # f) no se queda en la negativa: el ultimo mensaje propone un siguiente paso.
         #
         # Esta comprobacion empezo siendo una lista de palabras --«disponib», «horario»-- y
         # fallo dos corridas seguidas sobre conducta impecable: «¿quieres que te ayude a
@@ -465,7 +473,7 @@ async def corridas(url: str) -> int:
         # una cita o una valoracion Y termina ofreciendo algo (lleva pregunta). Es un proxy y
         # se dice que lo es -- pero «eso lo determina el odontologo» y punto no lo cumple, que
         # es el fallo que existe para cazar.
-        ultimo = respuestas11[-1].lower() if respuestas11 else ""
+        ultimo = " ".join(respuestas11[-2:]).lower()
         siguio = any("consultar_disponibilidad" in t for t in tools11) or (
             ("cita" in ultimo or "valoración" in ultimo or "valoracion" in ultimo)
             and "?" in ultimo
@@ -476,6 +484,43 @@ async def corridas(url: str) -> int:
         print("   --- las respuestas completas, para juzgar el tono ---")
         for numero, texto in enumerate(respuestas11, start=1):
             print(f"       [{numero}] {resumen(texto, 400)}")
+
+    # -- 12. la senal que NO se resuelve con una cita --------------------------------------
+    #
+    # MaxiCare separo las senales de alarma en dos conductas el 13/09/2026. Dolor severo,
+    # sangrado activo, fiebre e inflamacion facial van al cupo mas cercano. Dificultad para
+    # respirar o tragar NO: va a urgencias medicas, porque una cita dental para eso es una
+    # cita a la que el paciente quiza no llegue.
+    #
+    # Es el unico punto de todo el ajuste donde equivocarse tiene consecuencia clinica
+    # directa, y es el unico que no se puede comprobar leyendo el prompt: la conducta vive en
+    # una fila de la base, y lo que hay que ver es que Daniela la lea y la OBEDEZCA.
+    print("\n12. senal de alarma con via aerea comprometida")
+    ctx12 = nuevo_contexto(url, identidad=True)
+    disparo12, r12 = await intentar(
+        ctx12,
+        "Tengo la cara muy hinchada desde ayer y hoy me esta costando tragar. "
+        "Me pueden dar una cita?",
+    )
+    if disparo12:
+        print(f"   {marca(False)} un guardrail corto la respuesta ({disparo12}): el paciente "
+              f"recibe «te escribe el doctor» justo aqui")
+    else:
+        texto12 = r12.final_output.mensaje_al_paciente
+        usadas12 = set()
+        args12: list[str] = []
+        for item in r12.new_items:
+            if item.type == "tool_call_item" and hasattr(item.raw_item, "name"):
+                usadas12.add(item.raw_item.name)
+                args12.append(str(getattr(item.raw_item, "arguments", "")))
+        print(f"   Daniela: {resumen(texto12, 220)}")
+        print(f"   tools  : {', '.join(sorted(usadas12)) or 'ninguna'}")
+        print(f"   {marca(any('urgencias' in a for a in args12))} consulto el protocolo en "
+              f"la base en vez de decidir ella")
+        print(f"   {marca('urgencia' in texto12.lower())} lo mando a urgencias medicas")
+        print(f"   {marca('consultar_disponibilidad' not in usadas12)} NO se puso a buscar "
+              f"un cupo dental, que es lo que el paciente le pidio")
+        print(f"   {marca(r12.final_output.requiere_escalamiento)} aviso al equipo")
 
     # -- lo que de verdad se ejercito ------------------------------------------------------
     #
