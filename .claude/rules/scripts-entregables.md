@@ -39,6 +39,19 @@ argument 'group_id'`). **Quien cambie una de esas firmas corre los cinco que no 
   clínica, y **lo restaura en un `finally` comprobando la restauración con una aserción**.
 - `probar_calendario.py --diagnosticar` **solo lee**: es lo primero que hay que correr
   cuando Calendar «no funciona».
+- `probar_atencion.py` tiene **un fallo intermitente conocido**, y no es del producto: la
+  comprobación «el segundo turno empezó sin esperar al primero (el candado es POR
+  conversación)» compara el orden de eventos de dos corrutinas que tardan 0,15 s. Si la
+  latencia de Neon hace que la segunda llegue tarde al candado, la secuencia sale
+  `entra:1, sale:1, entra:2, sale:2` y la prueba lo lee como un candado global. Medido el
+  13/09/2026 sobre `main` limpio: **falla aproximadamente una de cada dos corridas**, sin
+  ningún cambio de por medio. Si aparece, repite antes de investigar; si falla dos veces
+  seguidas, ahí sí hay algo.
+- `probar_tools.py`: su helper `hora(n)` cuenta **bloques hábiles**, no horas de reloj. Era
+  `ahora + 45 días + N horas` y dejó de valer cuando la rejilla aprendió el horario de la
+  clínica: corriendo de noche, la base caía fuera de jornada y las tools rechazaban todo
+  —seis comprobaciones en rojo, incluida la de concurrencia que cierra la fase 3—. Quien
+  añada un `hora(N)` grande no está pidiendo N horas después.
 - `probar_agentes.py` es el único que gasta siempre, y gasta en TRECE bloques. Iterar sobre
   la conducta de un bloque pagando los otros doce es la forma más cara de trabajar aquí;
   el cliente ya lo señaló. Los bloques comparten teléfono salvo donde se parametriza

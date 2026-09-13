@@ -102,6 +102,69 @@ class Bloqueo:
         return self.inicio < hasta and desde < self.fin
 
 
+@dataclass(frozen=True)
+class Jornada:
+    """El horario en que la clínica atiende. Lo que impide ofrecer la madrugada.
+
+    Hasta el 13/09/2026 esto no existía y la rejilla salía tal cual de la ventana que el
+    modelo pidiera. El fallo se vio en producción a las 6:22 p. m.: el paciente pidió cita
+    «el próximo martes 15», el modelo consultó el día completo —`{"desde":
+    "2026-09-15T00:00:00-05:00","hasta":"2026-09-15T23:59:59-05:00"}`, leído de
+    `agent_messages`— y la tool le devolvió los tres primeros bloques de esa ventana. Daniela
+    ofreció «12:00 am, 1:00 am o 2:00 am», que es la traducción CORRECTA de 00:00, 01:00 y
+    02:00. El modelo no alucinó nada: el sistema le dio esas horas.
+
+    Pedir el día entero es razonable cuando el paciente dice «el martes». Acotar la respuesta
+    al horario de la clínica es trabajo del código, no del prompt: una instrucción se puede
+    desobedecer y un filtro no.
+
+    **Los valores vienen de la tabla `configuracion` de Neon**, igual que `capacidad_por_hora`,
+    para que la clínica los cambie desde el panel sin desplegar. Los defaults de aquí son los
+    del documento aprobado por MaxiCare —«Lunes a viernes de 8:00 am a 5:00 pm. Sábados de
+    8:00 am a 3:00 pm.»— y el domingo cerrado, que ese texto dice por omisión.
+
+    **El horario vive en DOS sitios y hay que moverlos juntos:** estos números, que filtran, y
+    la fila `_general`/`horario` de la base de conocimiento, que es la que Daniela recita
+    cuando le preguntan. Si divergen, dice una cosa y ofrece otra.
+    `test_la_jornada_configurada_coincide_con_el_horario_que_daniela_recita` es lo que lo caza.
+
+    Las horas son enteros porque la tabla `configuracion` guarda enteros. Una clínica que
+    abriera a las 8:30 necesitaría minutos; hoy ninguna lo pide y no se inventa la columna.
+    """
+
+    apertura: int = 8
+    cierre: int = 17
+    cierre_sabado: int = 15
+    atiende_domingo: bool = False
+
+    def cierre_de(self, momento: datetime) -> int | None:
+        """La hora de cierre de ese día, o `None` si la clínica no abre."""
+        dia = momento.weekday()  # 0 = lunes, 5 = sábado, 6 = domingo
+        if dia == 6:
+            return self.cierre if self.atiende_domingo else None
+        if dia == 5:
+            return self.cierre_sabado
+        return self.cierre
+
+    def cabe(self, inicio: datetime, duracion_minutos: int) -> bool:
+        """Si un bloque entero cabe dentro de la jornada del día en que empieza.
+
+        Se mira el bloque COMPLETO y no solo su inicio: una cita de una hora que arranque a
+        las 16:30 termina a las 17:30, con la clínica cerrada y el paciente en la puerta.
+        """
+        cierre = self.cierre_de(inicio)
+        if cierre is None:
+            return False
+        fin = inicio + timedelta(minutes=duracion_minutos)
+        # El fin cae en el día siguiente solo si el bloque cruza la medianoche, y entonces
+        # nunca cabe: ninguna jornada termina después de las 24:00.
+        if fin.date() != inicio.date():
+            return False
+        minutos_inicio = inicio.hour * 60 + inicio.minute
+        minutos_fin = fin.hour * 60 + fin.minute
+        return minutos_inicio >= self.apertura * 60 and minutos_fin <= cierre * 60
+
+
 @runtime_checkable
 class Calendario(Protocol):
     """Lo que las tools necesitan de un calendario. Nada más.
@@ -640,6 +703,7 @@ def bloques_del_dia(
     *,
     duracion_minutos: int,
     no_antes_de: datetime | None = None,
+    jornada: "Jornada | None" = None,
 ) -> list[datetime]:
     """Los inicios de bloque entre dos instantes, cada `duracion_minutos`.
 
@@ -652,6 +716,11 @@ def bloques_del_dia(
     devolvió cuatro bloques «libres»—, y una cita en una fecha que ya pasó es la versión
     peor de que el paciente llegue a una clínica donde nadie lo espera: el día ni siquiera
     existe ya.
+
+    `jornada` descarta los bloques fuera del horario de la clínica. Sin él, la ventana que
+    pida el modelo ES la oferta: el 13/09/2026 una consulta del día completo devolvió las
+    00:00, 01:00 y 02:00. Es opcional porque la rejilla sigue siendo útil sin horario —las
+    pruebas de la ventana la usan así—, pero las tres tools de agenda lo pasan siempre.
     """
     if duracion_minutos <= 0:
         raise ValueError("la duración de un bloque tiene que ser positiva")
@@ -660,7 +729,9 @@ def bloques_del_dia(
     bloques: list[datetime] = []
     actual = desde
     while actual + paso <= hasta:
-        if no_antes_de is None or actual >= no_antes_de:
+        del_pasado = no_antes_de is not None and actual < no_antes_de
+        fuera_de_horario = jornada is not None and not jornada.cabe(actual, duracion_minutos)
+        if not del_pasado and not fuera_de_horario:
             bloques.append(actual)
         actual += paso
     return bloques

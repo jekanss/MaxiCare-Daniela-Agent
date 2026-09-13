@@ -51,7 +51,7 @@ from pydantic import BaseModel, Field
 from starlette.exceptions import HTTPException as HTTPExceptionStarlette
 
 from . import atencion, autenticacion, contratos, conversacion, ingesta, panel, persistencia, reseteo
-from .calendario import CalendarioCaido, CalendarioDoble, calendario_desde_config
+from .calendario import CalendarioCaido, CalendarioDoble, Jornada, calendario_desde_config
 from .canales import Telegram, WhatsApp
 from .config import Config, cargar_dotenv, descartar_vacias_de_terceros
 from .contratos import ContextoDaniela
@@ -1006,6 +1006,14 @@ def _contexto_de_prueba(quien: dict, id_conversacion: str | None) -> tuple[Conte
         ctx.capacidad_por_hora = operativa["capacidad_por_hora"]
         ctx.duracion_cita_minutos = operativa["duracion_cita_minutos"]
         ctx.cierre_relevo_minutos = operativa["cierre_relevo_minutos"]
+        # La jornada también, o el chat de pruebas ofrecería horarios que WhatsApp no ofrece
+        # y la pantalla dejaría de servir para probar lo que de verdad pasa.
+        ctx.jornada = Jornada(
+            apertura=operativa["hora_apertura"],
+            cierre=operativa["hora_cierre"],
+            cierre_sabado=operativa["hora_cierre_sabado"],
+            atiende_domingo=bool(operativa["atiende_domingo"]),
+        )
     except Exception:  # noqa: BLE001 -- los defaults del dataclass son los mismos
         log.warning("chat de pruebas sin configuración operativa; se usan los defaults")
 

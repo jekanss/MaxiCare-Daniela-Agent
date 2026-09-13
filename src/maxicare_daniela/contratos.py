@@ -44,7 +44,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 # `calendario` no importa `contratos`, así que esto no cierra ningún ciclo. Se importa en vez
 # de volver a escribir `timezone(timedelta(hours=-5))` aquí: dos definiciones de la misma
 # zona son dos sitios donde arreglar el día que Colombia adopte horario de verano.
-from .calendario import ZONA_BOGOTA
+from .calendario import ZONA_BOGOTA, Jornada
 
 # ---------------------------------------------------------------------------------------
 # Vocabularios cerrados
@@ -570,6 +570,11 @@ class ContextoDaniela:
     capacidad_por_hora: int = 2
     duracion_cita_minutos: int = 60
     cierre_relevo_minutos: int = 180
+
+    #: El horario en que la clínica atiende. Lo que impide ofrecer —y agendar— la madrugada.
+    #: Viaja en el contexto por lo mismo que `calendario` y `ahora`: una prueba lo fija. Ver
+    #: `calendario.Jornada`, que explica el fallo de producción que lo trajo.
+    jornada: Jornada = field(default_factory=Jornada)
 
     #: Tema General del grupo de Telegram. `0` significa «General, omitiendo
     #: message_thread_id» -- ver la migración 005 y el comentario de `canales.py`.

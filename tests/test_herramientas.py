@@ -25,7 +25,7 @@ import pytest
 from maxicare_daniela import contratos
 from maxicare_daniela import herramientas as h
 from maxicare_daniela import persistencia
-from maxicare_daniela.calendario import Bloqueo, CalendarioDoble, bloques_del_dia
+from maxicare_daniela.calendario import Bloqueo, CalendarioDoble, Jornada, bloques_del_dia
 from maxicare_daniela.contratos import (
     ContextoDaniela,
     SolicitudCancelacion,
@@ -187,6 +187,139 @@ def test_la_disponibilidad_no_ofrece_horas_de_hoy_que_ya_pasaron(monkeypatch):
 
 
 # ==========================================================================================
+# La jornada de la clínica: una rejilla sin horario ofrece la madrugada
+# ==========================================================================================
+
+
+def test_la_rejilla_no_sale_del_horario_de_la_clinica():
+    """Función pura. L-V de 8 a 17, y el último bloque de 60 min empieza a las 16:00."""
+    martes = datetime(2026, 9, 15, 0, 0, tzinfo=h.ZONA_BOGOTA)
+
+    bloques = bloques_del_dia(
+        martes,
+        martes + timedelta(hours=24),
+        duracion_minutos=60,
+        jornada=Jornada(),
+    )
+
+    assert [b.hour for b in bloques] == [8, 9, 10, 11, 12, 13, 14, 15, 16]
+
+
+def test_la_jornada_configurada_coincide_con_el_horario_que_daniela_recita():
+    """El horario vive en DOS sitios, y esta prueba es el precio de esa decisión.
+
+    Los números de `CONFIGURACION_POR_DEFECTO` filtran la rejilla; la fila `_general`/
+    `horario` de la base de conocimiento es lo que Daniela recita cuando le preguntan. Si
+    divergen, dice «abrimos hasta las 5» y ofrece hasta las 3, o al revés.
+
+    **Lo que esta prueba NO cubre:** la divergencia que de verdad puede pasar en producción
+    es entre la fila de Neon —que la clínica edita desde el panel— y ese mismo texto, y eso
+    no se puede comprobar offline. Aquí solo se caza a quien cambie los defaults del código
+    sin tocar el documento. Es la mitad del problema, y la otra mitad vive en el panel.
+    """
+    ruta = persistencia.RUTA_SEMILLA_CONOCIMIENTO
+    if not ruta.exists():
+        pytest.skip("la base de conocimiento no está en un clone limpio: es gitignored")
+
+    import json
+
+    filas = json.loads(ruta.read_text(encoding="utf-8"))
+    horario = next(
+        (f for f in filas if f.get("tratamiento") == "_general" and f.get("concepto") == "horario"),
+        None,
+    )
+    assert horario is not None, "no hay fila de horario: Daniela no sabría qué contestar"
+
+    texto = horario["contenido"].lower()
+    defecto = persistencia.CONFIGURACION_POR_DEFECTO
+
+    # No se parsea la frase entera --es texto libre y hacerlo sería frágil--: se comprueba
+    # que cada número configurado aparezca en ella, en formato de 12 horas, que es como la
+    # clínica lo escribe.
+    def en_doce_horas(hora: int) -> str:
+        return f"{hora - 12 if hora > 12 else hora}:00"
+
+    assert en_doce_horas(defecto["hora_apertura"]) in texto
+    assert en_doce_horas(defecto["hora_cierre"]) in texto
+    assert en_doce_horas(defecto["hora_cierre_sabado"]) in texto
+    assert ("domingo" in texto) == bool(defecto["atiende_domingo"]), (
+        "o el texto nombra los domingos y la configuración no los atiende, o al revés"
+    )
+
+
+def test_el_sabado_cierra_antes_y_el_domingo_no_abre():
+    """El texto aprobado dice sábados hasta las 3 y no menciona el domingo."""
+    sabado = datetime(2026, 9, 19, 0, 0, tzinfo=h.ZONA_BOGOTA)
+    domingo = datetime(2026, 9, 20, 0, 0, tzinfo=h.ZONA_BOGOTA)
+    dia = timedelta(hours=24)
+
+    del_sabado = bloques_del_dia(sabado, sabado + dia, duracion_minutos=60, jornada=Jornada())
+    del_domingo = bloques_del_dia(domingo, domingo + dia, duracion_minutos=60, jornada=Jornada())
+
+    assert [b.hour for b in del_sabado] == [8, 9, 10, 11, 12, 13, 14]
+    assert del_domingo == []
+
+
+def test_la_disponibilidad_del_dia_entero_no_ofrece_la_madrugada(monkeypatch):
+    """El fallo real, del 13/09/2026 a las 6:22 p. m., reproducido tal cual.
+
+    El paciente pidió «el próximo martes 15» y «10 am». El modelo llamó a la tool con la
+    ventana del día completo --leído de `public.agent_messages`, literal::
+
+        {"desde":"2026-09-15T00:00:00-05:00","hasta":"2026-09-15T23:59:59-05:00"}
+
+    y la rejilla, que no sabía que la clínica tiene horario, devolvió los tres primeros
+    bloques de esa ventana: 00:00, 01:00 y 02:00. Daniela se los ofreció como «12:00 am,
+    1:00 am o 2:00 am», que es la traducción correcta de unas horas equivocadas.
+
+    Pedir el día entero es razonable cuando el paciente dice «el martes». Lo que no puede
+    ser es que el sistema conteste con la madrugada.
+    """
+    ctx = contexto(ahora=datetime(2026, 9, 13, 18, 22, tzinfo=h.ZONA_BOGOTA))
+
+    async def base_falsa(_ctx, trabajo):
+        return trabajo(BaseFalsa())
+
+    monkeypatch.setattr(h, "_con_base", base_falsa)
+    monkeypatch.setattr(persistencia, "bloques_ocupados", lambda conn, desde, hasta: {})
+
+    texto = asyncio.run(
+        h._consultar_disponibilidad(ctx, "2026-09-15T00:00:00", "2026-09-15T23:59:59")
+    )
+
+    for madrugada in ("00:00", "01:00", "02:00", "03:00", "04:00", "05:00", "06:00", "07:00"):
+        assert madrugada not in texto, f"ofreció las {madrugada}, con la clínica cerrada"
+    assert "08:00" in texto, "la primera hora de la jornada sí se ofrece"
+
+
+def test_no_se_agenda_fuera_del_horario_de_la_clinica(monkeypatch):
+    """Ofrecer bien no basta, igual que con los bloqueos: el paciente puede pedir «a las 7»."""
+    ctx = contexto(ahora=datetime(2026, 9, 13, 18, 0, tzinfo=h.ZONA_BOGOTA))
+    tocada = []
+
+    async def base_falsa(_ctx, trabajo):
+        tocada.append("la base")
+        return trabajo(BaseFalsa())
+
+    monkeypatch.setattr(h, "_con_base", base_falsa)
+
+    texto = asyncio.run(
+        h._crear_cita(
+            ctx,
+            SolicitudCita(
+                nombre_completo="Jean Chamorro",
+                inicio=datetime(2026, 9, 15, 2, 0, tzinfo=h.ZONA_BOGOTA),
+                tratamiento="limpieza",
+                clave_idempotencia="da-igual",
+            ),
+        )
+    )
+
+    assert "no atiende" in texto
+    assert tocada == [], "tomó un cupo a las dos de la mañana"
+
+
+# ==========================================================================================
 # Google Calendar es la fuente de la disponibilidad
 # ==========================================================================================
 #
@@ -216,7 +349,10 @@ def test_un_bloqueo_del_doctor_tapa_esas_horas_en_la_disponibilidad(monkeypatch)
     texto = asyncio.run(h._consultar_disponibilidad(ctx, "2026-09-16T13:00", "2026-09-16T18:00"))
 
     assert "13:00" in texto, "la hora anterior al bloqueo sigue libre"
-    assert "17:00" in texto, "el bloqueo termina a las 17:00 y esa hora vuelve a ser suya"
+    # Las 17:00 NO salen, y no es por el bloqueo: la clínica cierra a esa hora, así que un
+    # bloque de 60 min que empiece ahí terminaría con todo el mundo fuera. El bloqueo de 2 a
+    # 5 y el cierre a las 5 se tocan, y por eso ese día no queda nada después de la una.
+    assert "17:00" not in texto
     for tapada in ("14:00", "15:00", "16:00"):
         assert tapada not in texto, f"ofreció {tapada}, que el doctor apartó"
 

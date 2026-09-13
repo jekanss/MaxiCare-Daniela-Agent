@@ -32,7 +32,7 @@ if hasattr(sys.stdout, "reconfigure"):
 
 from maxicare_daniela import herramientas as h  # noqa: E402
 from maxicare_daniela import persistencia  # noqa: E402
-from maxicare_daniela.calendario import CalendarioDoble  # noqa: E402
+from maxicare_daniela.calendario import CalendarioDoble, Jornada  # noqa: E402
 from maxicare_daniela.config import cargar_dotenv  # noqa: E402
 from maxicare_daniela.contratos import (  # noqa: E402
     ContextoDaniela,
@@ -66,8 +66,30 @@ def url_de_pruebas() -> tuple[str, str]:
 
 
 def hora(desplazamiento: int = 0) -> datetime:
-    base = datetime.now(h.ZONA_BOGOTA).replace(minute=0, second=0, microsecond=0)
-    return base + timedelta(days=45, hours=desplazamiento)
+    """El bloque hábil número `desplazamiento`, contando desde dentro de 45 días.
+
+    Era `ahora + 45 días + N horas`, y eso dejó de valer el 13/09/2026, cuando la rejilla
+    aprendió el horario de la clínica: corriendo a las 7 de la tarde, la base caía a las
+    19:00 y las tools rechazaban TODO --seis comprobaciones en rojo, incluida la de
+    concurrencia que cierra la fase 3--. Los desplazamientos grandes (`hora(20)`, `hora(72)`)
+    caían además en madrugada y en fines de semana.
+
+    Contar bloques hábiles en vez de horas de reloj conserva lo que el script necesita --que
+    dos desplazamientos distintos sean horas distintas, y que los consecutivos sean
+    contiguos-- y añade lo que ahora hace falta: que todos existan para la clínica. Lo que
+    cambia es que `hora(20)` ya no son 20 horas después, sino el bloque hábil 20.
+    """
+    jornada = Jornada()
+    actual = (datetime.now(h.ZONA_BOGOTA) + timedelta(days=45)).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    habiles = 0
+    while True:
+        if jornada.cabe(actual, 60):
+            if habiles == desplazamiento:
+                return actual
+            habiles += 1
+        actual += timedelta(hours=1)
 
 
 def contexto(url: str, telefono: str, nombre: str) -> ContextoDaniela:

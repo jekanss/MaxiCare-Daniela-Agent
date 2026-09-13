@@ -66,6 +66,18 @@ CONFIGURACION_POR_DEFECTO: dict[str, int] = {
     "duracion_cita_minutos": 60,
     "cierre_relevo_minutos": 180,
     "aviso_relevo_minutos": 120,
+    # La jornada de la clínica. Los valores son los del documento aprobado por MaxiCare
+    # («Lunes a viernes de 8:00 am a 5:00 pm. Sábados de 8:00 am a 3:00 pm.»), y el domingo
+    # cerrado, que ese texto dice por omisión. Sin esto, la rejilla ofrecía la madrugada:
+    # ver `calendario.Jornada`.
+    #
+    # OJO: el horario vive también como TEXTO en la fila `_general`/`horario` de la base de
+    # conocimiento, que es la que Daniela recita cuando le preguntan. Los dos se mueven
+    # juntos o dice una cosa y ofrece otra.
+    "hora_apertura": 8,
+    "hora_cierre": 17,
+    "hora_cierre_sabado": 15,
+    "atiende_domingo": 0,
 }
 
 RAIZ_PROYECTO = Path(__file__).resolve().parents[2]
