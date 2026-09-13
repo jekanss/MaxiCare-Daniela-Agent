@@ -115,9 +115,18 @@ class SesionEnMemoria:
     el WhatsApp de pacientes reales corre `persistencia.sesion_de_agente`, sobre Neon, desde
     la fase 7 (`atencion.atender`, con su default cableado a esa fábrica). Desde la Tarea 6,
     el chat de pruebas del panel también: `runtime._contexto_de_prueba` pide su sesión a
-    `persistencia.sesion_de_agente(..., esquema=runtime.ESQUEMA_PRUEBAS_WEB)`, así que su
-    historial vive en `agent_messages` de `pruebas_web` y ya no se pierde al reiniciar el
-    proceso.
+    `persistencia.sesion_de_agente(..., esquema=runtime.ESQUEMA_PRUEBAS_WEB)`, así que cada
+    turno del chat web SÍ queda escrito en `agent_messages` de `pruebas_web`, filas incluidas.
+
+    Lo que NO sobrevive es el REENGANCHE con esas filas: tras reiniciar el proceso,
+    `runtime._conversaciones_de_prueba` (el diccionario en memoria) está vacío, así que el
+    `id_conversacion` que el navegador todavía recuerda no se reconoce, y
+    `persistencia.asegurar_conversacion` -- que SIEMPRE inserta, nunca reutiliza -- le abre
+    una fila nueva. Las filas viejas quedan huérfanas en `pruebas_web`, alcanzables solo con
+    una consulta manual. Es una decisión, no un defecto: este carril es la pantalla donde la
+    clínica prueba a Daniela desde cero, y tiene que poder abrir un «primer contacto» sin
+    pedirle a nadie un `/clearstate` antes. En WhatsApp esto no pasa -- ahí
+    `conversacion_viva` SÍ reutiliza la conversación de las últimas 24 h.
 
     Y sigue siendo, además, el doble de las pruebas offline: existe para que
     `uv run pytest -q` siga corriendo en dos segundos y sin señal -- una suite que exige

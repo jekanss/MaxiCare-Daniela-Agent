@@ -744,12 +744,22 @@ ESQUEMA_PRUEBAS_WEB = "pruebas_web"
 _secreto_sesion = config.secreto_sesion
 
 #: El contexto vivo de cada conversación del chat de pruebas. El HISTORIAL ya no está aquí:
-#: desde la fase 7 vive en `agent_messages` del esquema `pruebas_web`, igual que el de
-#: WhatsApp vive en el de `public` (`persistencia.sesion_de_agente`). Lo que queda en memoria
-#: es el contexto --calendario doble, credenciales vacías de Telegram, configuración
-#: operativa-- que se reconstruye solo si el proceso se reinicia y no vale la pena persistir.
-#: Se pierde al reiniciar, y está bien: el contenedor corre con un solo worker (ver el `CMD`
-#: del Dockerfile), así que no hay dos procesos que puedan discrepar.
+#: desde la fase 7 cada turno queda escrito en `agent_messages` del esquema `pruebas_web`,
+#: igual que el de WhatsApp en el de `public` (`persistencia.sesion_de_agente`). Lo que queda
+#: en memoria es el contexto --calendario doble, credenciales vacías de Telegram,
+#: configuración operativa--, barato de reconstruir.
+#:
+#: Se pierde al reiniciar el proceso, y con él se pierde el REENGANCHE con esas filas -- no
+#: las filas en sí. Este diccionario es lo único que traduce un `id_conversacion` conocido a
+#: su contexto; vacío tras un reinicio, el id que el navegador todavía recuerda deja de
+#: reconocerse, `_contexto_de_prueba` lo trata como conversación nueva y
+#: `persistencia.asegurar_conversacion` -- que SIEMPRE inserta -- abre una fila distinta. Las
+#: filas del `id_conversacion` viejo quedan huérfanas en `pruebas_web`, sin que nada las
+#: vuelva a leer. Es la decisión correcta para este carril, no un descuido: el chat de
+#: pruebas es la pantalla donde la clínica prueba a Daniela desde cero, y tiene que poder
+#: abrir un primer contacto sin pedir un `/clearstate` antes. El contenedor corre además con
+#: un solo worker (ver el `CMD` del Dockerfile), así que no hay dos procesos que puedan
+#: discrepar sobre este diccionario.
 _conversaciones_de_prueba: dict[str, ContextoDaniela] = {}
 
 #: Se prepara una sola vez, la primera vez que alguien abre el chat. Hacerlo al arrancar
@@ -1009,7 +1019,13 @@ async def _resetear_chat_de_prueba(quien: dict) -> dict:
 
     # Las conversaciones vivas de ESTE usuario, no todas: dos personas de la clínica pueden
     # estar probando a la vez, y reiniciar la tuya no puede cortarle el hilo a la otra. Solo
-    # se olvida el CONTEXTO -- el historial de Neon ya lo borró `reseteo.resetear` arriba.
+    # se olvida el CONTEXTO -- el historial en `agent_messages`/`agent_sessions` NO lo borra
+    # `reseteo.resetear`: `persistencia.borrar_rastro` borra `mensajes_entrantes`, `citas`,
+    # `reservas`, `conversaciones` y `pacientes`, y ninguna es esa tabla; la migración 010
+    # declara `session_id` sin clave foránea, así que tampoco cascadea. Esas filas quedan
+    # huérfanas -- el `id_conversacion` que se borra aquí abajo nunca se vuelve a pedir, pero
+    # sigue en `pruebas_web`. Cerrarlo es la Tarea 8 (ver `.claude/rules/atencion-whatsapp.md`,
+    # sección `/clearstate`, donde está el mismo hueco documentado para WhatsApp).
     for id_conversacion, ctx in list(_conversaciones_de_prueba.items()):
         if ctx.telefono_completo == telefono:
             del _conversaciones_de_prueba[id_conversacion]

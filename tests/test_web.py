@@ -16,6 +16,7 @@ pacientes abierto a cualquiera que sepa la URL.
 
 from __future__ import annotations
 
+import dataclasses
 import os
 
 import pytest
@@ -265,6 +266,16 @@ def test_el_chat_usa_el_agente_de_produccion_y_el_carril_de_pruebas(cliente, mon
     monkeypatch.setattr(runtime, "_preparar_esquema_de_pruebas", lambda: "postgresql://x/y?options=-csearch_path%3Dpruebas_web")
     monkeypatch.setattr(persistencia, "asegurar_conversacion", lambda conn, **kw: "conv-web-1")
     monkeypatch.setattr(persistencia, "leer_configuracion", lambda conn: persistencia.CONFIGURACION_POR_DEFECTO)
+    # Desde la Tarea 6, `_contexto_de_prueba` también pide una sesión persistida a
+    # `persistencia.sesion_de_agente`. Sin este doble, la llamada es real: construye un
+    # `AsyncEngine` de SQLAlchemy con la URL de Neon de `config.database_url` (perezoso, no
+    # abre conexión, pero queda vivo y sin disponer en `persistencia._engines`) y contradice
+    # la promesa de la cabecera del archivo de que ninguna prueba de aquí abre una conexión
+    # de verdad.
+    monkeypatch.setattr(
+        persistencia, "sesion_de_agente",
+        lambda id_conversacion, *, database_url, esquema=None, limite=None: conversacion.SesionEnMemoria(id_conversacion),
+    )
     monkeypatch.setattr(conversacion, "responder", falso_responder)
     cliente.cookies.set(runtime.COOKIE, autenticacion.firmar_token("ana.rodriguez", secreto=SECRETO))
 
@@ -332,23 +343,42 @@ def test_el_chat_de_pruebas_persiste_en_su_propio_esquema(monkeypatch):
         runtime._conversaciones_de_prueba.clear()
 
 
-def test_la_sesion_del_chat_va_por_schema_translate_map_no_por_search_path(monkeypatch):
+def test_la_llamada_a_sesion_de_agente_usa_config_database_url_no_la_url_de_pruebas(monkeypatch):
     """El aviso de la revisión de las Tareas 3 y 4: una URL con `options=-csearch_path=`
     colada aquí haría que el aislamiento lo diera el `search_path` de la conexión y no
     `schema_translate_map`, igual que le pasó a `test_las_tablas_de_sesion_no_se_crean_en_public`
     en `tests/test_sesion_neon.py` antes de `_sin_options`. `_preparar_esquema_de_pruebas()`
     SÍ trae ese `options=` -- lo necesita la conexión síncrona de `asegurar_conversacion` y
     `leer_configuracion`, que no pasan por SQLAlchemy --, así que la prueba existe para que
-    nadie reemplace `config.database_url` por esa URL en la llamada a `sesion_de_agente`."""
+    nadie reemplace `config.database_url` por esa URL en la llamada a `sesion_de_agente`.
+
+    Lo que esto comprueba es el CONTRATO de esa llamada -- qué argumentos recibe
+    `sesion_de_agente` --, no el mecanismo de `schema_translate_map` en sí: con
+    `sesion_de_agente` doblada, ese mecanismo nunca se ejercita aquí, y la prueba pasaría
+    igual si `schema_translate_map` desapareciera de `persistencia._engine_de`. Ese nivel
+    de aserción es el correcto para este diff -- ver `test_sesion_neon.py` para la prueba
+    que sí ejercita el mecanismo contra Neon.
+
+    Las dos URLs comparadas son inventadas y distinguibles entre sí a propósito: si esta
+    prueba comparara contra `runtime.config.database_url` de verdad, en cualquier máquina
+    con el `.env` de la clínica cargado esa aserción fallida volcaría la contraseña real de
+    Neon a la salida de pytest -- pasó una vez, durante la verificación por mutación de esta
+    misma prueba en la Tarea 6. `dataclasses.replace` sustituye `runtime.config` por uno con
+    una URL de mentira antes de comparar, así que ninguna caída puede ya imprimir la cadena
+    real."""
     pedidas: list[dict] = []
 
     def fabrica(id_conversacion, *, database_url, esquema=None, limite=None):
         pedidas.append({"database_url": database_url, "esquema": esquema})
         return conversacion.SesionEnMemoria(id_conversacion)
 
+    config_de_mentira = dataclasses.replace(
+        runtime.config, database_url="postgresql://u:c@prod-falsa/db"
+    )
+    monkeypatch.setattr(runtime, "config", config_de_mentira)
     monkeypatch.setattr(runtime.persistencia, "sesion_de_agente", fabrica)
     # La URL "de pruebas" lleva el `options` a propósito, para poder distinguirla de
-    # `config.database_url` en la aserción de abajo.
+    # `config.database_url` en la aserción de abajo. Ninguna de las dos es una URL real.
     monkeypatch.setattr(
         runtime,
         "_preparar_esquema_de_pruebas",
@@ -367,7 +397,7 @@ def test_la_sesion_del_chat_va_por_schema_translate_map_no_por_search_path(monke
         runtime._contexto_de_prueba({"usuario": "ana"}, None)
 
         assert len(pedidas) == 1
-        assert pedidas[0]["database_url"] == runtime.config.database_url
+        assert pedidas[0]["database_url"] == config_de_mentira.database_url
         assert "options" not in pedidas[0]["database_url"], (
             "la sesion del chat web no puede llevar search_path: el aislamiento tiene que "
             "quedar solo a cargo de schema_translate_map, vía esquema="
