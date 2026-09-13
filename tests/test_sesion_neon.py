@@ -377,3 +377,95 @@ def test_la_sesion_funciona_contra_el_pooler(esquema):
         _correr(persistencia.cerrar_engines())
 
     assert [i["content"] for i in items] == [f"vuelta {v}" for v in range(1, 11)]
+
+
+# ==========================================================================================
+# El recorte no puede partir una llamada a tool de su salida (Tarea 7)
+# ==========================================================================================
+
+#: Un turno con una tool, en items del SDK. La llamada y su salida son DOS items: es la
+#: diferencia que hace falsa la equivalencia «40 items = 5 conversaciones».
+_LLAMADA = {
+    "type": "function_call",
+    "call_id": "call_abc",
+    "name": "consultar_disponibilidad",
+    "arguments": '{"inicio":"2026-09-16T10:00:00-05:00"}',
+}
+_SALIDA = {
+    "type": "function_call_output",
+    "call_id": "call_abc",
+    "output": "10:00; 11:00; 14:00",
+}
+
+
+def test_el_recorte_no_deja_una_llamada_a_tool_sin_su_salida(esquema):
+    """El borde que más va a doler, y que no aparecería en desarrollo: aparecería en la
+    conversación número siete de un paciente real.
+
+    Se construye un historial cuyo `limit` cae EXACTAMENTE entre `function_call` y su
+    `function_call_output`, y se exige que lo que vuelve no tenga una llamada huérfana. Una
+    petición con una llamada sin salida la rechaza la API de OpenAI.
+
+    Comprobado contra la 0.22.2: el SDK lo maneja. Esta prueba es la que avisará si deja de
+    hacerlo.
+    """
+    base = esquema.split("?options=")[0]
+    sesion = persistencia.sesion_de_agente(
+        "conv-borde", database_url=base, esquema=ESQUEMA
+    )
+
+    async def correr():
+        await sesion.add_items(
+            [
+                {"role": "user", "content": "hola"},
+                {"role": "assistant", "content": "hola, ¿en qué te ayudo?"},
+                _LLAMADA,
+                _SALIDA,
+            ]
+        )
+        # limit=2 deja fuera los dos primeros y corta justo por el borde de la tool.
+        return await sesion.get_items(limit=2)
+
+    items = _correr(correr())
+    _correr(persistencia.cerrar_engines())
+
+    llamadas = {i.get("call_id") for i in items if i.get("type") == "function_call"}
+    salidas = {i.get("call_id") for i in items if i.get("type") == "function_call_output"}
+
+    assert llamadas <= salidas, (
+        f"el recorte dejó una llamada a tool sin su salida: {llamadas - salidas}. "
+        "La API de OpenAI rechaza esa petición."
+    )
+
+
+def test_un_corte_impar_tampoco_deja_la_llamada_huerfana(esquema):
+    """El caso de verdad: `limit=3` corta entre la llamada y su salida, no entre turnos.
+
+    Comprobado contra la 0.22.2: el SDK lo maneja. Esta prueba es la que avisará si deja de
+    hacerlo.
+    """
+    base = esquema.split("?options=")[0]
+    sesion = persistencia.sesion_de_agente(
+        "conv-borde-impar", database_url=base, esquema=ESQUEMA
+    )
+
+    async def correr():
+        await sesion.add_items(
+            [
+                {"role": "user", "content": "hola"},
+                _LLAMADA,
+                _SALIDA,
+                {"role": "assistant", "content": "tengo las 10, 11 y 2"},
+            ]
+        )
+        return await sesion.get_items(limit=3)
+
+    items = _correr(correr())
+    _correr(persistencia.cerrar_engines())
+
+    llamadas = {i.get("call_id") for i in items if i.get("type") == "function_call"}
+    salidas = {i.get("call_id") for i in items if i.get("type") == "function_call_output"}
+
+    assert llamadas <= salidas, (
+        f"el recorte dejó una llamada a tool sin su salida: {llamadas - salidas}"
+    )
