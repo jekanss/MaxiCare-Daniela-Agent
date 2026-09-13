@@ -671,7 +671,10 @@ async def salud() -> dict:
     Un `{"ok": true}` que no comprueba nada es peor que no tener endpoint: da confianza sin
     respaldo. Este mira de verdad las tres piezas de las que depende la fase.
     """
-    estado: dict = {"servicio": "maxicare-daniela", "fase": "6A"}
+    # Se actualiza al cerrar cada fase. Nadie lo comprueba automáticamente, así que se quedó
+    # diciendo "6A" durante toda la fase 7 --incluido el despliegue-- y lo único que lo
+    # delató fue leer la respuesta de `/salud` a mano.
+    estado: dict = {"servicio": "maxicare-daniela", "fase": "7"}
 
     try:
         with persistencia.conectar(config.database_url) as conn, conn.cursor() as cur:
