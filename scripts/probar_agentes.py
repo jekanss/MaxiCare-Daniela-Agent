@@ -52,6 +52,12 @@ CAPACIDAD = 2
 TELEFONO = "573009998877"
 NOMBRE = "Laura Prueba Agente"
 
+#: Numero propio para el bloque 13. Los bloques comparten `TELEFONO`, asi que la cita que
+#: siembra el 10 sigue viva cuando corre el 13: con las dos encima, Daniela pregunta cual de
+#: las dos hay que cancelar --que es correcto-- y el escenario marcaba FALLA sobre conducta
+#: impecable. Un numero por escenario cuesta nada y aisla de verdad.
+TELEFONO_CANCELA = "573009998866"
+
 fallos = 0
 
 #: Los guardrails cuyo tripwire llego a saltar de verdad en esta corrida. Se informa al
@@ -89,21 +95,23 @@ class TelegramFalso:
         return 1
 
 
-def nuevo_contexto(url: str, *, identidad: bool) -> ContextoDaniela:
+def nuevo_contexto(
+    url: str, *, identidad: bool, telefono: str = TELEFONO, nombre: str = NOMBRE
+) -> ContextoDaniela:
     with persistencia.conectar(url) as conn:
         id_paciente = persistencia.asegurar_paciente(
-            conn, nombre_completo=NOMBRE, telefono=TELEFONO
+            conn, nombre_completo=nombre, telefono=telefono
         )
         id_conv = persistencia.asegurar_conversacion(
-            conn, telefono=TELEFONO, paciente_id=id_paciente
+            conn, telefono=telefono, paciente_id=id_paciente
         )
     return ContextoDaniela(
         id_conversacion=id_conv,
-        telefono_completo=TELEFONO,
+        telefono_completo=telefono,
         database_url=url,
         calendario=CalendarioDoble(),
         id_paciente=id_paciente if identidad else None,
-        nombre_paciente=NOMBRE if identidad else None,
+        nombre_paciente=nombre if identidad else None,
         identidad_verificada=identidad,
         capacidad_por_hora=CAPACIDAD,
         duracion_cita_minutos=60,
@@ -521,6 +529,82 @@ async def corridas(url: str) -> int:
         print(f"   {marca('consultar_disponibilidad' not in usadas12)} NO se puso a buscar "
               f"un cupo dental, que es lo que el paciente le pidio")
         print(f"   {marca(r12.final_output.requiere_escalamiento)} aviso al equipo")
+
+    # -- 13. cancelar: intentar recuperar UNA vez, y despues cancelar de verdad ------------
+    #
+    # La conversacion real del 13/09/2026: «ola lo sineto quisiera canclear mi cita» ->
+    # «Tu cita del martes 15 a las 10:00 am quedo cancelada». Correcta y vacia: nadie
+    # pregunto que paso, nadie ofrecio otra hora, el cupo se perdio entero y el campo
+    # `motivo` --que existe desde la fase 1 para medir recuperaciones-- quedo en NULL.
+    #
+    # Las dos mitades importan y la segunda mas: que lo intente UNA vez, y que a la segunda
+    # cancele. Un agente que pone trabas para cancelar no salva la cita, la convierte en un
+    # no-show: el cupo se pierde igual y encima sin avisar.
+    print("\n13. cancelar: recuperar una vez, y a la segunda cancelar")
+    ctx13 = nuevo_contexto(url, identidad=True, telefono=TELEFONO_CANCELA)
+    cuando13 = (
+        datetime.now(herramientas.ZONA_BOGOTA).replace(minute=0, second=0, microsecond=0)
+        + timedelta(days=75)
+    )
+    await herramientas._crear_cita(
+        ctx13,
+        SolicitudCita(
+            nombre_completo="Laura Prueba Cancela",
+            inicio=cuando13,
+            tratamiento="limpieza",
+            clave_idempotencia=f"{ctx13.id_conversacion}:cancelar",
+        ),
+    )
+
+    def _citas_vivas() -> int:
+        with persistencia.conectar(url) as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT count(*) FROM citas WHERE telefono = %s AND estado <> 'cancelada'",
+                (TELEFONO_CANCELA,),
+            )
+            return cur.fetchone()[0]
+
+    def _tools_de(resultado) -> set[str]:
+        return {
+            item.raw_item.name
+            for item in resultado.new_items
+            if item.type == "tool_call_item" and hasattr(item.raw_item, "name")
+        }
+
+    # Conversacion NUEVA, como la real: el paciente no trae el id de nada.
+    ctx_cancela = nuevo_contexto(url, identidad=True, telefono=TELEFONO_CANCELA)
+    r13a = await hablar(ctx_cancela, "ola lo sineto quisiera canclear mi cita")
+    tools13a = _tools_de(r13a)
+    texto13a = r13a.final_output.mensaje_al_paciente
+    print(f"   [1] Daniela: {resumen(texto13a, 200)}")
+    print(f"       tools  : {', '.join(sorted(tools13a)) or 'ninguna'}")
+    print(f"   {marca('cancelar_cita' not in tools13a)} no cancelo a la primera")
+    print(f"   {marca('?' in texto13a)} pregunto o propuso algo en vez de solo obedecer")
+
+    r13b = await hablar(
+        ctx_cancela,
+        "No, de verdad no puedo ese dia, me salio un viaje. Cancelala por favor.",
+        r13a.to_input_list(),
+    )
+    tools13b = _tools_de(r13b)
+    texto13b = r13b.final_output.mensaje_al_paciente
+    print(f"   [2] Daniela: {resumen(texto13b, 200)}")
+    print(f"       tools  : {', '.join(sorted(tools13b)) or 'ninguna'}")
+    print(f"   {marca('cancelar_cita' in tools13b)} a la segunda cancelo, sin volver a "
+          f"insistir")
+    print(f"   {marca(_citas_vivas() == 0)} la cita quedo cancelada en la base, no solo en "
+          f"el texto")
+
+    with persistencia.conectar(url) as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT motivo_cancelacion FROM citas WHERE telefono = %s "
+            "AND estado = 'cancelada' ORDER BY actualizada_en DESC LIMIT 1",
+            (TELEFONO_CANCELA,),
+        )
+        fila = cur.fetchone()
+    motivo = (fila[0] if fila else None) or ""
+    print(f"   {marca(bool(motivo.strip()))} quedo registrado el motivo, que es lo que "
+          f"alimenta la metrica de recuperaciones: {resumen(motivo, 90) or 'VACIO'}")
 
     # -- lo que de verdad se ejercito ------------------------------------------------------
     #

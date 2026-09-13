@@ -251,6 +251,30 @@ def test_un_limite_clinico_no_es_un_escalamiento():
     assert "Un límite clínico no es un escalamiento" in texto
 
 
+def test_cancelar_se_intenta_recuperar_UNA_vez_y_despues_se_cancela():
+    """Visto en producción el 13/09/2026, conversación real:
+
+        16:48  Jean     ola lo sineto quisiera canclear mi cita
+        16:49  Daniela  Listo, Jean. Tu cita del martes 15 a las 10:00 am quedó cancelada.
+
+    Correcto y vacío. Nadie preguntó qué pasó, nadie ofreció otra hora, y el cupo se
+    perdió entero. `SolicitudCancelacion.motivo` existe desde la fase 1 --«alimenta la
+    métrica de recuperaciones»-- y no lo llenaba nadie, porque nada le decía que preguntara.
+
+    El límite es igual de importante que el intento: **una vez**. Poner trabas a quien
+    quiere cancelar no salva la cita, la convierte en un no-show -- el cupo se pierde igual
+    y encima sin avisar -- y quien pasó un mal rato cancelando no vuelve a agendar.
+    """
+    texto = agentes.INSTRUCCIONES_DANIELA
+
+    assert "`cancelar_cita`" in texto
+    assert "una sola vez" in texto
+    assert "no insistes ni una vez" in texto, (
+        "un motivo de salud, o no querer decirlo, no admite ni el primer intento"
+    )
+    assert "no llega, que para la clínica es peor" in texto
+
+
 def test_daniela_atiende_el_motivo_nuevo_sin_perder_el_viejo():
     """La muela partida pasa a ser la prioridad; el sangrado de encías no se borra, porque
     el profesional necesita ver los dos."""
