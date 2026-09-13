@@ -145,6 +145,49 @@ def test_la_fecha_va_despues_del_vocabulario_para_no_romper_el_cache():
     assert texto.index("TRATAMIENTOS QUE MAXICARE OFRECE HOY") < texto.index("2026")
 
 
+def test_daniela_se_presenta_en_el_primer_turno():
+    """Turno 1: el paciente no sabe con quien escribe. Daniela se presenta."""
+    ctx = contexto(turno_actual=1)
+
+    texto = asyncio.run(agentes.daniela.get_system_prompt(RunContextWrapper(context=ctx)))
+
+    assert "PRIMER CONTACTO" in texto
+    assert "te presentas" in texto.lower()
+
+
+def test_daniela_no_se_repite_en_turnos_siguientes():
+    """Repetir el nombre en cada mensaje suena a robot: solo pasa en el turno 1."""
+    ctx = contexto(turno_actual=2)
+
+    texto = asyncio.run(agentes.daniela.get_system_prompt(RunContextWrapper(context=ctx)))
+
+    assert "PRIMER CONTACTO" not in texto
+
+
+def test_el_bloque_de_presentacion_va_entre_tratamientos_y_fecha():
+    """Cambia una vez por conversación: menos volátil que la fecha, más que el vocabulario
+    fijo -- por eso va entre TRATAMIENTOS y AHORA MISMO, el orden estabilidad-decreciente
+    que exige el docstring de `instrucciones_daniela`."""
+    ctx = contexto(
+        turno_actual=1, ahora=datetime(2026, 9, 13, 8, 15, tzinfo=ZONA_BOGOTA)
+    )
+
+    texto = asyncio.run(agentes.daniela.get_system_prompt(RunContextWrapper(context=ctx)))
+
+    assert (
+        texto.index("TRATAMIENTOS QUE MAXICARE OFRECE HOY")
+        < texto.index("PRIMER CONTACTO")
+        < texto.index("AHORA MISMO")
+    )
+
+
+def test_el_bloque_de_presentacion_no_revienta_sin_contexto():
+    """`context=None` en varias pruebas que solo miran el vocabulario."""
+    texto = asyncio.run(agentes.daniela.get_system_prompt(RunContextWrapper(context=None)))
+
+    assert "PRIMER CONTACTO" not in texto
+
+
 def test_las_instrucciones_traen_el_vocabulario_vivo():
     contratos.fijar_vocabulario(["carillas", "implantes"])
     try:
