@@ -81,6 +81,12 @@ log = logging.getLogger("maxicare.herramientas")
 #: distinto al registrado.
 MAX_INTENTOS_IDENTIFICACION = 2
 
+#: Cuánto se mira hacia adelante para ofrecer alternativas cuando la hora pedida no sirve.
+#: Ocho horas es una jornada: alternativas del MISMO día, que es lo que un paciente que ya
+#: eligió un día quiere oír. `crear_cita` y `consultar_disponibilidad` usan la misma para no
+#: ofrecer dos repertorios distintos según por dónde se entre.
+VENTANA_ALTERNATIVAS = timedelta(hours=8)
+
 
 # ==========================================================================================
 # Utilidades internas
@@ -140,7 +146,14 @@ def _huecos_libres(
     calendario para una cirugía. Ofrecerlo sería mandar a alguien a una hora en la que no
     hay nadie.
     """
-    rejilla = bloques_del_dia(desde, hasta, duracion_minutos=ctx.duracion_cita_minutos)
+    rejilla = bloques_del_dia(
+        desde,
+        hasta,
+        duracion_minutos=ctx.duracion_cita_minutos,
+        # Un bloque que ya empezó no es un hueco libre. El filtro va aquí, en el único sitio
+        # por el que pasan las tres consultas de agenda, y no en cada una.
+        no_antes_de=ctx.ahora,
+    )
     ocupados = persistencia.bloques_ocupados(conn, desde, hasta)
     bloqueos = ctx.calendario.bloqueos(desde, hasta)
     paso = timedelta(minutes=ctx.duracion_cita_minutos)
@@ -293,9 +306,29 @@ async def _consultar_disponibilidad(ctx: ContextoDaniela, desde: str, hasta: str
     if fin <= inicio:
         return "La ventana consultada está al revés: 'hasta' tiene que ser posterior a 'desde'."
 
+    # Una ventana más corta que un bloque produce una rejilla VACÍA, y hasta el 13/09/2026 eso
+    # se contaba como «no hay cupo»: exactamente el mismo texto que con la agenda saturada.
+    # El paciente pedía «el 16 tipo 10 am» --que invita a pedir 10:00-10:30-- con la agenda
+    # entera libre, y se iba creyendo que no había nada. Se estira lo justo para que el bloque
+    # que el paciente tiene en la cabeza quepa: preguntó por las 10, se le responde por las 10.
+    paso = timedelta(minutes=ctx.duracion_cita_minutos)
+    ventana_corta = fin - inicio < paso
+    fin_efectivo = inicio + paso if ventana_corta else fin
+
     def trabajo(conn) -> str:
-        libres = _huecos_libres(conn, ctx, inicio, fin)
-        return _texto_alternativas(libres)
+        libres = _huecos_libres(conn, ctx, inicio, fin_efectivo)
+        if libres:
+            return _texto_alternativas(libres)
+        # Antes de declarar que no hay nada, se mira el resto de la jornada. Es la misma
+        # ventana que `crear_cita` usa para sus alternativas: sin esto, la consulta era la
+        # única de las dos que dejaba al paciente sin una sola opción concreta.
+        cercanos = _huecos_libres(conn, ctx, inicio, inicio + VENTANA_ALTERNATIVAS)
+        if not cercanos:
+            return _texto_alternativas([])
+        return (
+            f"En {_formatear_hora(inicio)} no hay cupo. Estos sí están libres el mismo día: "
+            + "; ".join(_formatear_hora(b) for b in cercanos)
+        )
 
     texto = await _con_base(ctx, trabajo)
     ctx.turno.horas_autorizadas |= horas_de(texto)
@@ -437,6 +470,16 @@ async def _crear_cita(ctx: ContextoDaniela, solicitud: SolicitudCita) -> str:
         else solicitud.inicio.replace(tzinfo=ZONA_BOGOTA)
     )
 
+    # Antes de tocar la base, y como RESULTADO y no como excepción: el modelo tiene que poder
+    # seguir conversando con esto. Un cupo consumido sobre una hora del pasado no lo libera
+    # nadie, y la cita sería para un día que ya pasó.
+    if inicio < ctx.ahora:
+        return (
+            f"Esa hora ({_formatear_hora(inicio)}) ya pasó: hoy es "
+            f"{_formatear_hora(ctx.ahora)}. NO la agendes. Confirma con el paciente qué "
+            "fecha futura quiere y consulta la disponibilidad de nuevo."
+        )
+
     # La clave la arma el orquestador, igual que en `reprogramar` y en `seguimiento`, y se
     # ancla al HORARIO pedido -- no al «intento», que es lo que el modelo cree que significa.
     #
@@ -478,8 +521,7 @@ async def _crear_cita(ctx: ContextoDaniela, solicitud: SolicitudCita) -> str:
             return (cupo, persistencia.cita_viva_de_reserva(conn, cupo[0]), [])
         # Solo se buscan alternativas si hizo falta: una consulta de más en el camino feliz
         # es latencia que paga cada paciente.
-        ventana_fin = inicio + timedelta(hours=8)
-        return (None, None, _huecos_libres(conn, ctx, inicio, ventana_fin))
+        return (None, None, _huecos_libres(conn, ctx, inicio, inicio + VENTANA_ALTERNATIVAS))
 
     cupo, ya_existente, alternativas = await _con_base(ctx, tomar)
 

@@ -15,6 +15,7 @@ tokens y corre bajo demanda.
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime
 from typing import get_args
 
 import pytest
@@ -29,7 +30,7 @@ from agents import (
 from maxicare_daniela import agentes
 from maxicare_daniela import contratos
 from maxicare_daniela import guardrails as g
-from maxicare_daniela.calendario import CalendarioDoble
+from maxicare_daniela.calendario import ZONA_BOGOTA, CalendarioDoble
 from maxicare_daniela.contratos import ContextoDaniela, LecturaArchivo, RespuestaDaniela
 
 from .dobles import ModeloGuionizado, responde, respuesta_daniela, usa_tool
@@ -113,6 +114,35 @@ def test_las_instrucciones_no_perdieron_las_prohibiciones_del_plan():
     assert "Nunca pides cédula ni documentos de identidad" in texto
     assert "NUNCA le dices a un paciente qué tiene" in texto
     assert "no venga de una tool en este mismo turno" in texto
+
+
+def test_daniela_sabe_que_dia_es_hoy():
+    """Hasta hoy no lo sabía, y por eso preguntaba el año.
+
+    Sin fecha en el prompt, «el próximo 16 de septiembre» no se puede convertir en un ISO
+    sin inventar el año -- y el prompt le prohíbe inventar. Preguntar era lo correcto dado
+    el diseño; el fallo estaba en lo que no se le daba.
+    """
+    ctx = contexto(ahora=datetime(2026, 9, 13, 8, 15, tzinfo=ZONA_BOGOTA))
+
+    texto = asyncio.run(agentes.daniela.get_system_prompt(RunContextWrapper(context=ctx)))
+
+    assert "2026" in texto
+    assert "septiembre" in texto.lower()
+    assert "domingo" in texto.lower()
+
+
+def test_la_fecha_va_despues_del_vocabulario_para_no_romper_el_cache():
+    """La fecha cambia cada minuto: delante del vocabulario invalidaría el prefijo cacheado.
+
+    `prompt_cache_retention="24h"` funciona por prefijo idéntico. El orden tiene que ser
+    instrucciones -> tratamientos -> fecha, de lo más estable a lo más volátil.
+    """
+    ctx = contexto(ahora=datetime(2026, 9, 13, 8, 15, tzinfo=ZONA_BOGOTA))
+
+    texto = asyncio.run(agentes.daniela.get_system_prompt(RunContextWrapper(context=ctx)))
+
+    assert texto.index("TRATAMIENTOS QUE MAXICARE OFRECE HOY") < texto.index("2026")
 
 
 def test_las_instrucciones_traen_el_vocabulario_vivo():

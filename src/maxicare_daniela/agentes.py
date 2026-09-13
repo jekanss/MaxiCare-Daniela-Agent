@@ -99,25 +99,75 @@ máximo tres.\
 """
 
 
+#: Los nombres en español, que `strftime` no da sin depender del locale del sistema -- y el
+#: locale del VPS no es el de esta máquina.
+_DIAS = ("lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo")
+_MESES = (
+    "enero",
+    "febrero",
+    "marzo",
+    "abril",
+    "mayo",
+    "junio",
+    "julio",
+    "agosto",
+    "septiembre",
+    "octubre",
+    "noviembre",
+    "diciembre",
+)
+
+
+def fecha_en_palabras(momento) -> str:
+    """«domingo 13 de septiembre de 2026, 08:15»."""
+    return (
+        f"{_DIAS[momento.weekday()]} {momento.day} de {_MESES[momento.month - 1]} "
+        f"de {momento.year}, {momento:%H:%M}"
+    )
+
+
 def instrucciones_daniela(ctx, agente) -> str:
-    """Las instrucciones de siempre, con el vocabulario vivo pegado AL FINAL.
+    """Las instrucciones de siempre, con el vocabulario vivo y la fecha pegados AL FINAL.
 
     Al final, y no al principio, por dinero: `prompt_cache_retention="24h"` baja la entrada
     de $2.00 a $0.20 por millón, y el caché funciona por prefijo idéntico. Si la lista
     cambiara al comienzo del prompt, cada corrida pagaría el precio completo.
 
-    El SDK exige exactamente dos parámetros en este callable (`get_system_prompt` lanza
-    `TypeError` si no), aunque aquí no se use ninguno de los dos: el vocabulario vive en un
-    módulo, no en el contexto de la corrida.
+    El orden de los dos añadidos no es indiferente, y va de lo más estable a lo más volátil:
+    los tratamientos cambian cuando la clínica toca una pantalla; la fecha cambia cada
+    minuto. Con la fecha delante, el vocabulario dejaría de cachearse también.
+
+    Hasta el 13/09/2026 aquí no llegaba ninguna fecha, y el efecto se vio en una conversación
+    real: el paciente pidió cita «el próximo 16 de septiembre» y Daniela le preguntó el año.
+    No era torpeza. Sin saber en qué año vive, convertir eso en un ISO exigía inventar un
+    dato, y el prompt le prohíbe inventar: preguntar era lo correcto. El fallo estaba en lo
+    que no se le daba.
     """
     ofrecidos = sorted(c for c in contratos.vocabulario() if c != "no_identificado")
-    return (
+    texto = (
         f"{INSTRUCCIONES_DANIELA}\n\n"
         "TRATAMIENTOS QUE MAXICARE OFRECE HOY\n"
         f"{', '.join(ofrecidos)}.\n"
         "Usa exactamente una de esas claves al agendar y al registrar el estado de la "
         "oportunidad. Si el paciente pregunta por algo que no está en la lista, no lo "
         "ofrezcas: escala."
+    )
+
+    # `context=None` en varias pruebas que solo miran el vocabulario, y en ese caso el bloque
+    # de fecha sobra en vez de reventar.
+    contexto = getattr(ctx, "context", None)
+    ahora = getattr(contexto, "ahora", None)
+    if ahora is None:
+        return texto
+
+    return (
+        f"{texto}\n\n"
+        "AHORA MISMO\n"
+        f"Hoy es {fecha_en_palabras(ahora)}, hora de Bogotá.\n"
+        "Con eso resuelves tú las fechas relativas —«el próximo 16 de septiembre», «este "
+        "viernes», «mañana»— a la próxima ocurrencia futura, y las pasas a las tools en ISO "
+        "completo. No preguntes el año si se deduce sin ambigüedad. Pregunta solo el dato "
+        "que falte cuando de verdad haya más de una lectura posible."
     )
 
 

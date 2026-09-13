@@ -635,13 +635,23 @@ def calendario_desde_config(config: Any) -> Calendario:
 
 
 def bloques_del_dia(
-    desde: datetime, hasta: datetime, *, duracion_minutos: int
+    desde: datetime,
+    hasta: datetime,
+    *,
+    duracion_minutos: int,
+    no_antes_de: datetime | None = None,
 ) -> list[datetime]:
     """Los inicios de bloque entre dos instantes, cada `duracion_minutos`.
 
     Función pura, sin calendario de por medio: `consultar_disponibilidad` la usa para saber
     qué bloques EXISTEN antes de preguntar cuáles están libres. Separarlas permite probar la
     rejilla sin base de datos ni calendario.
+
+    `no_antes_de` descarta los bloques que ya empezaron. Sin ese filtro la rejilla ofrecía
+    horas del pasado —comprobado el 13/09/2026 pidiendo el 16 de septiembre de 2025, que
+    devolvió cuatro bloques «libres»—, y una cita en una fecha que ya pasó es la versión
+    peor de que el paciente llegue a una clínica donde nadie lo espera: el día ni siquiera
+    existe ya.
     """
     if duracion_minutos <= 0:
         raise ValueError("la duración de un bloque tiene que ser positiva")
@@ -650,6 +660,7 @@ def bloques_del_dia(
     bloques: list[datetime] = []
     actual = desde
     while actual + paso <= hasta:
-        bloques.append(actual)
+        if no_antes_de is None or actual >= no_antes_de:
+            bloques.append(actual)
         actual += paso
     return bloques
