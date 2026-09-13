@@ -72,6 +72,34 @@ RAIZ_PROYECTO = Path(__file__).resolve().parents[2]
 RUTA_MIGRACIONES = RAIZ_PROYECTO / "migraciones"
 RUTA_SEMILLA_CONOCIMIENTO = RAIZ_PROYECTO / "datos" / "base_conocimiento.json"
 
+#: El carril de pruebas del panel. Vive AQUÍ y no en `runtime.py` porque no es transporte:
+#: es un esquema de esta base, y hay dos sitios que lo tienen que poner al día -- el chat web
+#: (perezosamente, la primera vez que alguien lo abre) y `scripts/inicializar_base.py`, que
+#: es la puerta del despliegue. Con la constante duplicada, un renombre dejaría al segundo
+#: actualizando un esquema que ya no existe, en silencio. `runtime` la reexporta.
+ESQUEMA_PRUEBAS_WEB = "pruebas_web"
+
+
+def url_directa(database_url: str) -> str:
+    """La misma URL sin el `-pooler.` del host.
+
+    PgBouncer rechaza `options` como parámetro de arranque (`unsupported startup parameter
+    in options: search_path`), así que todo lo que necesite fijar un `search_path` --que es
+    como se aísla el carril de pruebas del panel-- tiene que ir por el host directo.
+    """
+    return database_url.replace("-pooler.", ".")
+
+
+def url_con_search_path(database_url: str, esquema: str) -> str:
+    """La conexión DIRECTA con el `search_path` fijado a `esquema`.
+
+    El aislamiento que da es FÍSICO, no una convención: con `search_path=pruebas_web`, una
+    consulta que diga `INSERT INTO citas` no puede tocar `public.citas` ni queriendo.
+    """
+    directa = url_directa(database_url)
+    separador = "&" if "?" in directa else "?"
+    return f"{directa}{separador}options=-csearch_path%3D{esquema}"
+
 
 # ==========================================================================================
 # Lógica pura -- se prueba sin base de datos
@@ -385,9 +413,11 @@ def sesion_de_agente(
 
     `limite` recorta el historial que se le manda al modelo, contando ITEMS y no mensajes
     -- una llamada a tool y su resultado son dos. Por omisión sale de
-    `config.LIMITE_HISTORIAL_SESION`, que hoy vale `None`: el historial va entero, que es el
-    paso 1 de los tres de la fase (persistir, medir, fijar). Ver el docstring de la constante
-    para qué lo desbloquea.
+    `config.LIMITE_HISTORIAL_SESION`, que hoy es un TOPE DE SEGURIDAD derivado del techo de
+    tokens de la cuenta: acota el crecimiento para que una conversación larga no acabe en un
+    `context_length_exceeded` del que el paciente no sale. NO es todavía el límite medido de
+    la 13b, que será más pequeño porque optimiza coste y no seguridad. La aritmética de los
+    dos está junto a la constante.
 
     El centinela del parámetro es `-1` y NO `None`, aunque `None` sea lo que parecería
     natural: `None` es un valor legítimo --«sin límite»-- y las pruebas del borde necesitan

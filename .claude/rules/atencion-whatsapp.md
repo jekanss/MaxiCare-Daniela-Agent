@@ -225,8 +225,17 @@ estrenar una línea de teléfono. Vive en `reseteo.py`, y `runtime._entregar` lo
 - **Se conserva la fila de `mensajes_entrantes` del propio comando**, con `conversacion_id`
   en NULL. Si se borrara, el reintento de Meta ejecutaría el comando otra vez. No vuelve
   conocido a nadie: `_leer_estado` no mira esa tabla.
-- **También se limpia `pruebas_web`**, que tiene las mismas doce tablas y no se purga nunca.
-  Sin eso, un número probado desde el chat del panel seguiría conocido por esa mitad.
+- **También se limpia `pruebas_web`**, que tiene las mismas tablas que `public` y no se purga
+  nunca. Sin eso, un número probado desde el chat del panel seguiría conocido por esa mitad.
+  **Ese borrado secundario exige que `pruebas_web` esté al día, y hasta el 13/09/2026 no lo
+  estaba:** su única puesta al día era `runtime._preparar_esquema_de_pruebas`, que es
+  perezosa —corre cuando alguien abre el chat web— y nadie lo había abierto desde las
+  migraciones 009 y 010. Medido contra la base real: le faltaban `agent_sessions`,
+  `agent_messages` y cuatro columnas de `mensajes_entrantes`, y `borrar_rastro` reventaba ahí
+  con `UndefinedColumn` mientras este documento afirmaba que funcionaba. Ahora lo pone al día
+  `scripts/inicializar_base.py`, que es lo que corre `desplegar.sh` en cada despliegue, y su
+  verificación comprueba las dos tablas del historial **en los dos esquemas**. Comprobado
+  después del arreglo: `borrar_rastro` sobre `pruebas_web` devuelve ceros en vez de reventar.
 - **Lo que NO borra, y está dicho en el código:** las trazas que ya se subieron a OpenAI
   entre la fase 6A y el 13/09/2026 —la fuga está cerrada desde entonces, pero lo que salió
   vive en el dashboard de otra empresa, no en la base— y los logs del contenedor. Ninguna de
@@ -278,8 +287,12 @@ de entorno se olvida en el siguiente servidor. Tres pruebas lo sostienen —una 
 y las tres caen al quitar el campo.
 
 **Lo que esto NO arregla:** lo ya subido sigue en el dashboard de OpenAI. Cerrar la fuga
-detiene la hemorragia; no borra lo que salió entre la fase 6A y hoy. Y falta la otra mitad
-del entregable de la fase 7: agrupar las trazas por `group_id`, que sigue sin hacerse.
+detiene la hemorragia; no borra lo que salió entre la fase 6A y hoy.
+
+**La otra mitad del entregable de la fase 7 —agrupar las trazas por `group_id`— YA ESTÁ
+HECHA** (`1dd75bd`, integrada en `a0e922d`). El `group_id` es el UUID de la conversación en
+los dos carriles, nunca el teléfono, y lo pasan los tres consumidores de modelo. Hay prueba
+por consumidor y caen las tres desde la única puerta.
 
 ## Lo que la suite offline NO caza
 

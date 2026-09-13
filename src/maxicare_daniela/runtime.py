@@ -594,11 +594,16 @@ async def _entregar(m: ingesta.MensajeEntrante) -> None:
 def _bases_secundarias() -> tuple[str, ...]:
     """El carril de pruebas del panel, si su esquema existe ya.
 
-    Se comprueba en vez de intentarlo y fallar: el esquema se crea perezosamente la primera
-    vez que alguien abre el chat web, así que en un despliegue donde nadie lo ha abierto no
-    existe -- y eso no es un fallo del reseteo, es que no hay nada que borrar ahí. Sin esta
-    comprobación, la confirmación le diría al usuario «no pude con: base secundaria» en el
-    caso más normal de todos.
+    Se comprueba en vez de intentarlo y fallar: en una base recién creada el esquema puede no
+    existir todavía -- y eso no es un fallo del reseteo, es que no hay nada que borrar ahí.
+    Sin esta comprobación, la confirmación le diría al usuario «no pude con: base secundaria»
+    en el caso más normal de todos.
+
+    Que el esquema EXISTA no bastaba, y eso costó un hallazgo: existía desde hacía meses pero
+    con dos migraciones de retraso, porque su única puesta al día era
+    `_preparar_esquema_de_pruebas`, que es perezosa. `borrar_rastro` reventaba ahí con
+    `UndefinedColumn`. Desde el 13/09/2026 lo pone al día `scripts/inicializar_base.py`, que
+    corre en cada despliegue y verifica las tablas del historial en los dos esquemas.
     """
     try:
         with persistencia.conectar(config.database_url) as conn, conn.cursor() as cur:
@@ -739,7 +744,10 @@ COOKIE = "maxicare_sesion"
 #: El esquema del carril de pruebas. NO es `pruebas`, que usan `probar_tools.py` y
 #: `probar_agentes.py` -- y que ambos BORRAN al terminar. Si compartieran nombre, correr una
 #: prueba desde la terminal le vaciaría la conversación a quien estuviera usando el chat web.
-ESQUEMA_PRUEBAS_WEB = "pruebas_web"
+#: Reexportada de `persistencia`, que es donde vive: no es transporte, es un esquema de
+#: esta base, y quien lo pone al día son DOS -- este chat, perezosamente, y
+#: `scripts/inicializar_base.py`, que es la puerta del despliegue.
+ESQUEMA_PRUEBAS_WEB = persistencia.ESQUEMA_PRUEBAS_WEB
 
 _secreto_sesion = config.secreto_sesion
 
@@ -777,9 +785,7 @@ def _url_de_pruebas() -> str:
     2. El aislamiento es FÍSICO, no una convención: con `search_path=pruebas_web`, una
        consulta que diga `INSERT INTO citas` no puede tocar `public.citas` ni queriendo.
     """
-    directa = config.database_url.replace("-pooler.", ".")
-    sep = "&" if "?" in directa else "?"
-    return f"{directa}{sep}options=-csearch_path%3D{ESQUEMA_PRUEBAS_WEB}"
+    return persistencia.url_con_search_path(config.database_url, ESQUEMA_PRUEBAS_WEB)
 
 
 def _preparar_esquema_de_pruebas() -> str:
@@ -794,7 +800,7 @@ def _preparar_esquema_de_pruebas() -> str:
     if _esquema_de_pruebas_listo:
         return url
 
-    directa = config.database_url.replace("-pooler.", ".")
+    directa = persistencia.url_directa(config.database_url)
     with persistencia.conectar(directa) as conn:
         with conn.cursor() as cur:
             cur.execute(f"CREATE SCHEMA IF NOT EXISTS {ESQUEMA_PRUEBAS_WEB}")

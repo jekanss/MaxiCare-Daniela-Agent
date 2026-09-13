@@ -61,23 +61,80 @@ def _correr(corutina: Coroutine[Any, Any, _T]) -> _T:
     return asyncio.run(corutina)
 
 
-def _url_cruda() -> str:
+class _UrlOculta(str):
+    """Una cadena de conexión que no se imprime entera. Es un `str` y funciona como uno.
+
+    Cuando una prueba de este archivo falla, pytest encabeza el informe con los valores de
+    sus argumentos -- y el argumento `esquema` ES la URL de Neon, con la contraseña de la
+    base de la clínica en claro. No hace falta ninguna aserción torcida para filtrarla:
+    basta con que la prueba caiga. Ya pasó una vez en esta fase por otro camino (Tarea 6);
+    esto cierra el que queda.
+
+    `repr` y no `str`: pytest usa `saferepr` para ese encabezado, y `persistencia.conectar`
+    y `urlsplit` siguen recibiendo la cadena entera, que es lo que necesitan.
+
+    ------------------------------------------------------------------------------------
+    La devuelven TODOS los ayudantes de este archivo, y aun así NO basta ella sola
+    ------------------------------------------------------------------------------------
+
+    La primera versión solo la usaban las fixtures, y la fuga volvió por el otro lado:
+    `assert "options" not in base`, con `base` un `str` pelado salido de `_sin_options`.
+    Que la devuelvan también los ayudantes cierra la mitad que depende de acordarse: aquí
+    ya no hay forma de tener en la mano una URL de Neon que no sea una `_UrlOculta`.
+
+    Pero esa mitad NO es suficiente, y está medido con una contraseña falsa:
+
+        assert "options" not in base        # base es una _UrlOculta
+
+        E  AssertionError: assert 'options' not in '***@neon (oculta: ver _UrlOculta)'
+        E    'options' is contained here:
+        E      postgresql://neondb_owner:CONTRASENA_FALSA@ep-x-pooler.neon.tech/neondb?...
+                                        ^^^^^^^^^^^^^^^^ LA CONTRASEÑA, EN CLARO
+
+    La explicación detallada del operador `in` NO pasa por `repr`: pytest imprime el
+    operando crudo debajo, con `-vv` entero, y `-vv` es justo lo que uno teclea cuando una
+    prueba de Neon le está fallando. Por eso las dos aserciones de `options` de este archivo
+    no comparan subcadenas: comparan CLAVES, con `_claves_de_query`, cuyo operando impreso
+    es `{'sslmode', 'channel_binding'}` y no una cadena de conexión. Los dos cinturones
+    juntos son lo que cierra la tercera fuga de esta misma familia en una sola fase.
+    """
+
+    def __repr__(self) -> str:
+        return "'***@neon (oculta: ver _UrlOculta)'"
+
+
+def _claves_de_query(url: str) -> set[str]:
+    """Los NOMBRES de los parámetros de consulta de una URL, sin sus valores.
+
+    Existe para que «esta URL no lleva `options`» se pueda afirmar sin poner la URL dentro
+    de la aserción: lo que pytest imprime cuando esto falla es `{'sslmode',
+    'channel_binding'}`, no una cadena de conexión. Un `"options" not in url` dice lo mismo
+    y filtra la contraseña al caer.
+    """
+    return {clave for clave, _ in parse_qsl(urlsplit(url).query, keep_blank_values=True)}
+
+
+def _url_cruda() -> _UrlOculta:
     """La `MAXICARE_DATABASE_URL` tal cual la trae el entorno: CON `-pooler.`, que es por
-    donde entra producción."""
+    donde entra producción. Envuelta, como todo lo que aquí huela a cadena de conexión."""
     cargar_dotenv()
     base = os.environ.get("MAXICARE_DATABASE_URL", "").strip()
     if not base:
         pytest.skip("falta MAXICARE_DATABASE_URL")
-    return base
+    return _UrlOculta(base)
 
 
-def _url_directa() -> str:
+def _url_directa() -> _UrlOculta:
     """La URL de Neon sin el pooler. Hace falta para crear y borrar el esquema con
-    `search_path`, que es lo único de aquí que sigue necesitando la conexión directa."""
-    return _url_cruda().replace("-pooler.", ".")
+    `search_path`, que es lo único de aquí que sigue necesitando la conexión directa.
+
+    El `replace` de `str` devuelve un `str` pelado: hay que volver a envolver, o la URL sale
+    de aquí desnuda. Es exactamente por donde se escapó la fuga de I1.
+    """
+    return _UrlOculta(_url_cruda().replace("-pooler.", "."))
 
 
-def _sin_options(url: str) -> str:
+def _sin_options(url: str) -> _UrlOculta:
     """La misma URL sin el parámetro de consulta `options`, y con todo lo demás intacto.
 
     ------------------------------------------------------------------------------------
@@ -106,24 +163,7 @@ def _sin_options(url: str) -> str:
         for clave, valor in parse_qsl(partes.query, keep_blank_values=True)
         if clave != "options"
     ]
-    return urlunsplit(partes._replace(query=urlencode(query)))
-
-
-class _UrlOculta(str):
-    """Una cadena de conexión que no se imprime entera. Es un `str` y funciona como uno.
-
-    Cuando una prueba de este archivo falla, pytest encabeza el informe con los valores de
-    sus argumentos -- y el argumento `esquema` ES la URL de Neon, con la contraseña de la
-    base de la clínica en claro. No hace falta ninguna aserción torcida para filtrarla:
-    basta con que la prueba caiga. Ya pasó una vez en esta fase por otro camino (Tarea 6);
-    esto cierra el que queda.
-
-    `repr` y no `str`: pytest usa `saferepr` para ese encabezado, y `persistencia.conectar`
-    y `urlsplit` siguen recibiendo la cadena entera, que es lo que necesitan.
-    """
-
-    def __repr__(self) -> str:
-        return "'***@neon (oculta: ver _UrlOculta)'"
+    return _UrlOculta(urlunsplit(partes._replace(query=urlencode(query))))
 
 
 @pytest.fixture(scope="module")
@@ -233,6 +273,59 @@ def test_el_indice_por_sesion_y_tiempo_existe(esquema):
 # ==========================================================================================
 
 
+def test_la_sesion_no_se_crea_sus_tablas(url):
+    """`create_tables=False`, comprobado por COMPORTAMIENTO y no por el atributo.
+
+    La versión anterior de esta prueba vivía offline y decía `assert sesion._create_tables
+    is False`. No podía caer: `inspect.signature(SQLAlchemySession.__init__)` sobre el SDK
+    0.22.2 instalado da `create_tables=False` como DEFAULT, así que borrar el argumento de
+    `sesion_de_agente` dejaba la aserción en verde. Una comprobación no puede distinguir un
+    valor de su default idéntico -- no hay diferencia que observar.
+
+    Lo que sí cambia el comportamiento, y es la dirección que hace daño, es `True`: el
+    proceso web ejecutaría DDL al arrancar y el esquema del proyecto dejaría de leerse
+    entero en `migraciones/`. Eso es lo que se prueba aquí, igual que en
+    `scripts/probar_persistencia.py`: contra un esquema SIN las tablas, la sesión tiene que
+    fallar en vez de creárselas, y el esquema tiene que seguir vacío después.
+
+    Usa un esquema propio --creado vacío a propósito, sin migraciones-- y no la fixture
+    `esquema`, que las aplica todas.
+    """
+    vacio = f"{ESQUEMA}_vacio"
+    with persistencia.conectar(url) as conn:
+        with conn.cursor() as cur:
+            cur.execute(f"DROP SCHEMA IF EXISTS {vacio} CASCADE")
+            cur.execute(f"CREATE SCHEMA {vacio}")
+        conn.commit()
+
+    try:
+        sesion = persistencia.sesion_de_agente(
+            "conv-sin-tablas", database_url=_sin_options(url), esquema=vacio
+        )
+
+        with pytest.raises(Exception) as excepcion:
+            _correr(sesion.add_items([{"role": "user", "content": "hola"}]))
+        _correr(persistencia.cerrar_engines())
+
+        # Que falle no basta: podría haber fallado DESPUÉS de crear las tablas.
+        with persistencia.conectar(url) as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT table_name FROM information_schema.tables WHERE table_schema = %s",
+                (vacio,),
+            )
+            tablas = {fila[0] for fila in cur.fetchall()}
+
+        assert not tablas, f"la sesión se creó sus tablas: {sorted(tablas)}"
+        assert "agent_sessions" in str(excepcion.value) or "does not exist" in str(
+            excepcion.value
+        ), "falló, pero no por la tabla que falta"
+    finally:
+        with persistencia.conectar(url) as conn:
+            with conn.cursor() as cur:
+                cur.execute(f"DROP SCHEMA IF EXISTS {vacio} CASCADE")
+            conn.commit()
+
+
 def test_ida_y_vuelta_contra_las_tablas_de_la_migracion(esquema):
     """LA PRUEBA QUE CAZA QUE EL SDK HAYA CAMBIADO SU ESQUEMA.
 
@@ -273,7 +366,7 @@ def test_las_tablas_de_sesion_no_se_crean_en_public(esquema):
     de `_engine_de`. Ver `_sin_options`.
     """
     base = _sin_options(esquema)
-    assert "options" not in base, (
+    assert "options" not in _claves_de_query(base), (
         "la URL de la sesión lleva un search_path: el aislamiento ya no lo sostiene "
         "schema_translate_map solo, y esta prueba dejó de probar lo que dice"
     )
@@ -370,7 +463,7 @@ def test_la_sesion_funciona_contra_el_pooler(esquema):
     cruda = _url_cruda()
     if "-pooler." not in cruda:
         pytest.skip("MAXICARE_DATABASE_URL no apunta al pooler: no hay camino que probar")
-    assert "options" not in cruda, (
+    assert "options" not in _claves_de_query(cruda), (
         "el pooler rechaza `options` como parámetro de arranque: esta URL no es la de "
         "producción"
     )

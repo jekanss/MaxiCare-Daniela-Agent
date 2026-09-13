@@ -131,9 +131,19 @@ async def resetear(
     - **Si Telegram falla, se informa y se sigue.** Un tema huérfano en el grupo de los
       doctores es ruido, no daño: no bloquea a nadie ni le miente a ningún paciente.
 
-    `bases_extra` existe por `pruebas_web`, el esquema con las mismas doce tablas que alimenta
-    el chat del panel y que no se purga nunca. Sin él, un número que alguna vez se probó desde
-    la interfaz web seguiría siendo conocido por esa mitad del sistema.
+    `bases_extra` existe por `pruebas_web`, el esquema con las mismas tablas que `public` que
+    alimenta el chat del panel y que no se purga nunca. Sin él, un número que alguna vez se
+    probó desde la interfaz web seguiría siendo conocido por esa mitad del sistema.
+
+    Ese borrado secundario **exige que `pruebas_web` tenga las migraciones al día**, y esa
+    condición no se cumplía sola: hasta el 13/09/2026, el único sitio que lo actualizaba era
+    `runtime._preparar_esquema_de_pruebas`, que es perezoso, y el esquema llevaba dos
+    migraciones de retraso -- `borrar_rastro` reventaba ahí con `UndefinedColumn` y este
+    docstring afirmaba un borrado que no ocurría. Lo pone al día el despliegue
+    (`scripts/inicializar_base.py`), que además verifica las dos tablas del historial en los
+    dos esquemas. Si aun así fallara, no se pierde nada de `public`: `resetear` lo anota en
+    `Borrado.fallos` y sigue, que es la degradación correcta -- el carril de pruebas no puede
+    bloquear el reseteo del carril real.
     """
     # Aquí y no arriba: `atencion` arrastra los agentes y el SDK, y `reseteo` se importa
     # también desde sitios que no los necesitan.

@@ -18,10 +18,13 @@ llegue a la cita correcta.
 - Ver el diseño sin leerlo entero: `uv run python scripts/ver_plan.py <clave>`
   (`fases`, `herramientas`, `guardrails`, `agentes`, `contexto`, `fallos`…).
 - Cuánto historial gasta un turno: `uv run python scripts/medir_historial.py` (solo lee).
-  Es el único camino para cerrar el límite del historial: mientras no haya **20 turnos en 5
-  conversaciones con filas en `public.agent_messages`** el script lo dice y
-  `config.LIMITE_HISTORIAL_SESION` se queda en `PENDIENTE` (`None`, historial entero). Eso
-  exige desplegar primero: hasta que corra en producción no hay nada que medir.
+  Es el único camino para cerrar el límite MEDIDO del historial: mientras no haya **20 turnos
+  en 5 conversaciones con filas en `public.agent_messages`** el script lo dice y esos cuatro
+  números siguen en `PENDIENTE`. Exige desplegar primero: hasta que corra en producción no
+  hay nada que medir. Ojo con no confundirlo con el otro número:
+  `config.LIMITE_HISTORIAL_SESION = 230` es un **tope de seguridad** derivado del techo de
+  tokens de la cuenta —impide que un historial crezca hasta reventar la petición y dejar al
+  paciente atascado en el mensaje seguro—, no la medición.
 - Desplegar en el VPS: `bash scripts/desplegar.sh`
 - Usuarios del panel: `uv run python scripts/crear_usuario.py` (`--listar`, `--quitar-acceso`)
 - Revisar el grupo de Telegram: `uv run python scripts/obtener_chat_telegram.py`
@@ -30,7 +33,9 @@ llegue a la cita correcta.
   vacía —su default— el comando no existe para nadie. Borra paciente, conversaciones,
   mensajes, citas (y sus eventos de Calendar), **el historial del agente** (`agent_sessions`
   y, por cascada, `agent_messages`: desde la fase 7 el diálogo vive en la base, no en la
-  memoria del proceso) y el tema de Telegram, en `public` y en `pruebas_web`. **En el chat web del panel** funciona sin lista: ahí el teléfono es
+  memoria del proceso) y el tema de Telegram, en `public` y en `pruebas_web` —ese segundo
+  borrado exige que `pruebas_web` tenga las migraciones al día, y de eso se encarga el
+  despliegue (`inicializar_base.py`), no la primera persona que abra el chat web—. **En el chat web del panel** funciona sin lista: ahí el teléfono es
   `web-<usuario>` y solo se toca `pruebas_web`. Es irreversible.
   Ver `.claude/rules/atencion-whatsapp.md`.
 

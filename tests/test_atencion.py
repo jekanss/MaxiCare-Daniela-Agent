@@ -1029,7 +1029,11 @@ def test_atender_sin_sesion_inyectada_pide_la_persistida(monkeypatch):
     preparar(monkeypatch)
     pedidas: list[tuple[str, str]] = []
 
-    def espia(id_conversacion, *, database_url, esquema=None, limite=None):
+    # `limite=-1` y no `None`: es el centinela real de `persistencia.sesion_de_agente`, y un
+    # doble que declare el default contrario codifica la semántica contraria a la de
+    # producción -- «sin límite» en vez de «usa el de `config`». Hoy no lo mira nadie, pero
+    # la deriva de firmas entre un doble y su original ya costó una regresión en esta fase.
+    def espia(id_conversacion, *, database_url, esquema=None, limite=-1):
         pedidas.append((id_conversacion, database_url))
         return conversacion.SesionEnMemoria(id_conversacion)
 

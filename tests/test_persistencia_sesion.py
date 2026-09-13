@@ -73,13 +73,19 @@ def test_url_malformada_no_filtra_credenciales():
 # ==========================================================================================
 
 
-def test_la_sesion_no_crea_sus_tablas():
-    """`create_tables=False` es un no negociable de la fase: las tablas las crea la
-    migración 010. Con `True`, el proceso web ejecutaría DDL al arrancar y el esquema del
-    proyecto dejaría de leerse entero en `migraciones/`."""
-    sesion = persistencia.sesion_de_agente("conv-1", database_url=URL_NEON)
-
-    assert sesion._create_tables is False
+# `create_tables=False` NO se comprueba aquí, y la ausencia es deliberada.
+#
+# Aquí vivía `test_la_sesion_no_crea_sus_tablas`, con `assert sesion._create_tables is
+# False`. No podía caer: el default del SDK 0.22.2 es ese mismo valor, así que borrar el
+# argumento de `sesion_de_agente` dejaba la prueba en verde -- comprobado por la revisión
+# final borrándolo entero: 25 passed. Una comprobación no puede distinguir un valor de su
+# default idéntico.
+#
+# Lo que sí vigila el invariante son dos sondas de comportamiento, y las dos necesitan base:
+# `tests/test_sesion_neon.py::test_la_sesion_no_se_crea_sus_tablas` y la MITAD A de
+# `scripts/probar_persistencia.py`. Las dos hacen lo mismo: contra un esquema SIN las tablas,
+# la sesión tiene que fallar en vez de creárselas. Que `uv run pytest -q` no las corra es
+# cierto y está dicho; una prueba offline que no puede caer no lo arregla, lo disimula.
 
 
 def test_la_sesion_guarda_los_acentos_sin_escapar():
@@ -125,29 +131,30 @@ def test_el_engine_usa_el_dialecto_asincrono():
     assert sesion._engine.dialect.is_async is True
 
 
-def test_sin_limite_el_historial_va_entero():
-    """Paso 1 de los tres del spec --persistir, medir, fijar-- y sigue siendo el paso 1.
+def test_el_historial_va_acotado_por_un_tope_de_seguridad():
+    """Por defecto el historial va ACOTADO, y esta prueba existe para que no pueda volver a
+    `None` sin que alguien lo note.
 
-    Esta prueba NO sobrevive porque nadie se haya acordado de borrarla: sobrevive porque
-    `config.LIMITE_HISTORIAL_SESION` vale `PENDIENTE` --o sea `None`-- y eso es lo correcto
-    hoy. El `40` que había era una estimación («40 items = 5 conversaciones completas») y era
-    falsa: el SDK cuenta ITEMS, no mensajes, y un turno en que Daniela consulte el
-    conocimiento, mire la agenda y registre el estado gasta seis o siete él solo. Un límite
-    puesto ahora sustituiría una suposición por otra.
+    Aquí decía lo contrario --`assert ... is None`-- y era correcto mientras «sin límite» solo
+    significara «más caro en tokens». No era eso. La ventana de conversación de 24 h es
+    deslizante, así que un historial puede crecer sin tope; cuando la petición cruza el techo
+    de la cuenta, la API devuelve un `openai.BadRequestError` que NO es una `AgentsException`,
+    nadie lo traduce, y el paciente recibe el mensaje seguro en ese turno y en todos los
+    siguientes, sin caducidad y sin `/clearstate` si su número no está en la lista. Un
+    paciente atascado para siempre no es un problema de coste.
 
-    Qué la va a cambiar, y es lo único que puede: `scripts/medir_historial.py` sobre al menos
-    veinte turnos reales en `public.agent_messages` --que exigen desplegar primero--. Cuando
-    ese número exista, la constante deja de ser `None` y esta prueba pasa a afirmar el
-    recorte en vez de su ausencia.
-
-    Lo que se prueba aquí es la AUSENCIA de límite por defecto, no el cableado: el cableado
-    --que el default salga de `config` y no de un `None` escrito en la firma-- lo prueba
-    `test_sin_limite_explicito_el_default_sale_de_config`, que es la única que cae si alguien
-    desconecta la constante.
+    Lo que se afirma aquí es solo que hay tope. NO se afirma el número: la aritmética que lo
+    deriva --techo de la cuenta x fracción segura / tokens por item, todo medido-- vive junto
+    a la constante, y el día que la 13b ponga el límite MEDIDO (más pequeño, porque optimiza
+    coste y no seguridad) esta prueba tiene que seguir en verde sin tocarla.
     """
     sesion = persistencia.sesion_de_agente("conv-1", database_url=URL_NEON)
 
-    assert sesion.session_settings.limit is None
+    assert sesion.session_settings.limit is not None, (
+        "el historial volvió a ir entero: sin tope, una conversación larga acaba en un "
+        "`context_length_exceeded` del que el paciente no sale nunca"
+    )
+    assert sesion.session_settings.limit == config.LIMITE_HISTORIAL_SESION
 
 
 def test_un_limite_explicito_gana_al_de_config():

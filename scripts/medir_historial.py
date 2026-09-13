@@ -32,10 +32,15 @@ fase 7 no tienen ni un item que medir y empujaban la puerta igual. Ver el coment
 `CENSO`.
 
 Con menos, el percentil no significa nada y estariamos sustituyendo una suposicion por otra
-mas cara -- que es exactamente lo que el `40` era--. Mientras no los haya, este script lo
-dice y `config.LIMITE_HISTORIAL_SESION` se queda en `PENDIENTE`, o sea `None`, o sea el
-historial entero. Lo que desbloquea la medicion es desplegar y dejar correr conversaciones
-reales, no correr esto otra vez.
+mas cara -- que es exactamente lo que el `40` era--. Lo que desbloquea la medicion es
+desplegar y dejar correr conversaciones reales, no correr esto otra vez.
+
+Mientras tanto, `config.LIMITE_HISTORIAL_SESION` NO vale `None`: vale un TOPE DE SEGURIDAD
+(230 items) derivado del techo de tokens de la cuenta, no de ninguna medicion de uso. Los dos
+numeros son distintos y no se confunden: el tope solo impide que el historial crezca hasta
+reventar la peticion --y con ella al paciente, que se queda recibiendo el mensaje seguro para
+siempre--; el limite que mide ESTE script optimiza coste y sera mas pequeno. Que el tope
+exista no cierra la 13b.
 """
 
 from __future__ import annotations
@@ -222,8 +227,11 @@ def main() -> int:
             "  seria otra suposicion, mas cara que la que sustituye."
         )
         print(
-            "\n  LIMITE_HISTORIAL_SESION = PENDIENTE (hoy `None`: el historial va entero,\n"
-            "  que es lo correcto mientras no haya medicion).\n"
+            "\n  El LIMITE MEDIDO sigue en PENDIENTE. Lo que hay hoy en\n"
+            "  config.LIMITE_HISTORIAL_SESION es otra cosa: un TOPE DE SEGURIDAD de 230\n"
+            "  items, derivado del techo de tokens de la cuenta, que solo impide que el\n"
+            "  historial crezca hasta reventar la peticion. No sale de ninguna medicion de\n"
+            "  uso y no cierra esta tarea.\n"
             "  Lo desbloquea DESPLEGAR y dejar correr conversaciones reales; despues,\n"
             "  volver a correr este script."
         )

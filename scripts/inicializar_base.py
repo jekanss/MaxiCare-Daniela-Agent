@@ -6,6 +6,24 @@ todas las veces que haga falta.
 
 Lee `MAXICARE_DATABASE_URL` de `.env` (que no se versiona) o del entorno del proceso. No
 imprime la cadena de conexión ni ningún secreto.
+
+------------------------------------------------------------------------------------------
+Pone al día DOS esquemas, no uno
+------------------------------------------------------------------------------------------
+`public` --la base de la clínica-- y `pruebas_web` --el carril del chat del panel--. El
+segundo no es un capricho de simetría: lo creaba solo `runtime._preparar_esquema_de_pruebas`,
+que es PEREZOSO --corre la primera vez que alguien abre el chat web-- y nadie lo había
+abierto desde que existen las migraciones 009 y 010. Medido el 13/09/2026 contra la base
+real: `public` tenía 16 tablas y `pruebas_web` 14 --le faltaban `agent_sessions` y
+`agent_messages`--, y a su `mensajes_entrantes` le faltaban cuatro columnas
+(`conversacion_id`, `respondido_en`, `wamid_respuesta`, `fallo_respuesta`).
+
+Lo que eso rompía no era el chat: era `/clearstate`, cuyo borrado secundario sobre
+`pruebas_web` reventaba con `UndefinedColumn` mientras tres documentos afirmaban que
+funcionaba. Que el carril de pruebas esté al día no puede depender de que alguien se acuerde
+de abrir una pantalla: depende del despliegue, que es esto.
+
+`--solo-verificar` NO escribe en ninguno de los dos: se limita a decir cuál está atrasado.
 """
 
 from __future__ import annotations
@@ -26,6 +44,12 @@ from maxicare_daniela import persistencia  # noqa: E402
 from maxicare_daniela.config import Config, cargar_dotenv  # noqa: E402
 
 
+#: Las dos tablas que trajo la fase 7 (`migraciones/010_sesiones_agente.sql`). Se verifican
+#: por nombre en los dos esquemas: sin ellas, el historial del diálogo no se persiste y el
+#: turno de cada paciente muere con el proceso -- que es exactamente lo que la fase arregla.
+TABLAS_DEL_HISTORIAL = ("agent_sessions", "agent_messages")
+
+
 def _enmascarar(url: str) -> str:
     """Deja ver a qué host se conectó, nunca las credenciales."""
     try:
@@ -33,6 +57,51 @@ def _enmascarar(url: str) -> str:
         return "***@" + resto.split("?", 1)[0]
     except IndexError:
         return "..."
+
+
+def _tablas_de(conn, esquema: str) -> set[str]:
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT table_name FROM information_schema.tables WHERE table_schema = %s",
+            (esquema,),
+        )
+        return {fila[0] for fila in cur.fetchall()}
+
+
+def _existe_esquema(conn, esquema: str) -> bool:
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT 1 FROM information_schema.schemata WHERE schema_name = %s", (esquema,)
+        )
+        return cur.fetchone() is not None
+
+
+def _poner_al_dia_pruebas_web(database_url: str) -> int:
+    """Crea `pruebas_web` si falta, le aplica las migraciones y le carga la semilla.
+
+    Hace lo mismo que `runtime._preparar_esquema_de_pruebas`, y a propósito: ese camino es
+    perezoso --espera a que alguien abra el chat-- y este es el del despliegue. El que llegue
+    primero deja al otro sin trabajo, porque las diez migraciones son idempotentes
+    (`CREATE TABLE IF NOT EXISTS`, `ADD COLUMN IF NOT EXISTS`) y la carga es un UPSERT.
+
+    No se importa `runtime` para reusar su función: importarlo levanta FastAPI y construye la
+    app entera, y esto es un script de base de datos. Lo que sí se comparte es lo que puede
+    derivar -- el nombre del esquema y la forma de la URL -- que viven en `persistencia`.
+    """
+    directa = persistencia.url_directa(database_url)
+    esquema = persistencia.ESQUEMA_PRUEBAS_WEB
+    with persistencia.conectar(directa) as conn:
+        with conn.cursor() as cur:
+            cur.execute(f"CREATE SCHEMA IF NOT EXISTS {esquema}")
+        conn.commit()
+
+    url = persistencia.url_con_search_path(database_url, esquema)
+    with persistencia.conectar(url) as conn:
+        aplicadas = persistencia.aplicar_esquema(conn)
+        total = persistencia.cargar_base_conocimiento(conn, persistencia.cargar_semilla())
+    print(f"  esquema '{esquema}': {len(aplicadas)} migraciones aplicadas, {total} filas "
+          f"de conocimiento")
+    return total
 
 
 def main() -> int:
@@ -60,6 +129,12 @@ def main() -> int:
             semilla = persistencia.cargar_semilla()
             total = persistencia.cargar_base_conocimiento(conn, semilla)
             print(f"Base de conocimiento cargada: {total} filas")
+
+            # El carril de pruebas del panel, que hasta hoy solo se ponia al dia si alguien
+            # abria el chat web. Ver el docstring del modulo.
+            print()
+            print("Carril de pruebas del panel:")
+            _poner_al_dia_pruebas_web(config.database_url)
 
         print()
         print("=" * 78)
@@ -116,8 +191,45 @@ def main() -> int:
         if not tiene_unique:
             return 1
 
+        # ---------------------------------------------------------------------------
+        # 6. Las tablas de la FASE 7, en los DOS esquemas.
+        #
+        # La verificación del lunes tiene que incluir lo que se despliega el lunes: sin
+        # esto, `--solo-verificar` decía OK sobre una base sin la 010 aplicada, que es
+        # justo el estado en que el historial no se persiste y el diálogo de cada
+        # paciente muere con el proceso.
+        # ---------------------------------------------------------------------------
+        print()
+        print("=" * 78)
+        print("VERIFICACIÓN DEL ENTREGABLE DE LA FASE 7 (el historial persistido)")
+        print("=" * 78)
+
+        faltan_en_public = set(TABLAS_DEL_HISTORIAL) - _tablas_de(conn, "public")
+        print(f"\n  public: {'OK  ' if not faltan_en_public else 'FALLA'} "
+              + (", ".join(TABLAS_DEL_HISTORIAL) if not faltan_en_public
+                 else f"faltan {sorted(faltan_en_public)} -- corre este script sin "
+                      "--solo-verificar"))
+        if faltan_en_public:
+            return 1
+
+        esquema_pruebas = persistencia.ESQUEMA_PRUEBAS_WEB
+        if not _existe_esquema(conn, esquema_pruebas):
+            # Legítimo en una base recién creada: el esquema lo crea este mismo script o
+            # la primera apertura del chat. No es un fallo, es que no hay nada que mirar.
+            print(f"\n  {esquema_pruebas}: no existe todavía (nada que verificar)")
+        else:
+            faltan_en_pruebas = set(TABLAS_DEL_HISTORIAL) - _tablas_de(conn, esquema_pruebas)
+            al_dia = not faltan_en_pruebas
+            print(f"\n  {esquema_pruebas}: {'OK  ' if al_dia else 'FALLA'} "
+                  + (", ".join(TABLAS_DEL_HISTORIAL) if al_dia
+                     else f"faltan {sorted(faltan_en_pruebas)} -- el carril del chat del "
+                          "panel está atrasado y `/clearstate` fallará ahí; corre este "
+                          "script sin --solo-verificar"))
+            if not al_dia:
+                return 1
+
     print("\n" + "=" * 78)
-    print("FASE 1 — segunda mitad: OK")
+    print("FASE 1 — segunda mitad: OK  ·  FASE 7 — las dos tablas del historial: OK")
     print("=" * 78)
     return 0
 
