@@ -458,12 +458,22 @@ async def _revienta_si_se_llama(*a, **kw):
 
 
 def _sin_base(monkeypatch):
-    """`procesar_mensaje` registra en Neon; aquí eso no es lo que se mide."""
+    """`procesar_mensaje` registra en Neon; aquí eso no es lo que se mide.
+
+    `_conversacion_viva` va aquí desde la ronda de arreglo de la revisión de las Tareas
+    9-11: sin doblarla, la tarea de fondo del lector (`_leer_con_grupo`, en cualquier
+    prueba donde el mensaje trae una imagen que sí vale la pena leer) abre una conexión de
+    verdad a `postgresql://x` en un hilo. `.cancel()` no cancela ese hilo -- el coste se
+    paga en el teardown de `asyncio.run`, que espera al executor -- y cinco pruebas de esta
+    suite pasaron de instantáneas a tardar entre 2.27 s y 2.77 s cada una. Medido: la suite
+    entera pasó de ser prácticamente instantánea a 14.2 s.
+    """
     from maxicare_daniela import ingesta as mod
 
     monkeypatch.setattr(mod, "_registrar", lambda url, m: True)
     monkeypatch.setattr(mod, "_marcar_reenviado", lambda url, w, t, s: None)
     monkeypatch.setattr(mod, "_marcar_fallo", lambda url, w, e: None)
+    monkeypatch.setattr(mod, "_conversacion_viva", lambda url, telefono: None)
 
 
 def _mensaje_con_foto(**cambios):
@@ -768,3 +778,94 @@ def test_el_aviso_al_general_no_invalida_una_entrega_que_ya_ocurrio(monkeypatch)
     assert tg.archivos == [("radio.jpg", TEMA_DE_ANA)]
     assert resultado.lectura is not None, "el lector tiene que arrancar aunque el aviso falle"
     resultado.lectura.cancel()
+
+
+# ==========================================================================================
+# El group_id que agrupa las trazas del lector (fase 7, Tarea 11)
+# ==========================================================================================
+
+
+def test_ingesta_resuelve_la_conversacion_viva_y_se_la_pasa_al_lector(monkeypatch):
+    """Cierra el Importante 1 de la revision del lote B.
+
+    Nadie probaba que `ingesta.procesar_mensaje` resolviera la conversacion viva del
+    telefono y se la pasara a `leer_y_repartir` como `group_id`: la unica prueba que
+    atravesaba `leer_archivo` de verdad lo llamaba SIN grupo. Borrar el `group_id=grupo` de
+    `_leer_con_grupo`, o cambiar la llamada a `_conversacion_viva` por otra cosa, dejaba la
+    suite entera en verde.
+
+    Se dobla `ingesta._conversacion_viva` (no `persistencia.conversacion_viva`: la frontera
+    de esta prueba es el cable de `procesar_mensaje`, no la consulta SQL) para que devuelva
+    un id de conversacion fijo, y se espera la tarea del lector hasta que termine -- si no
+    se espera, `_leer_con_grupo` puede no haber corrido todavia cuando se mira `capturado`.
+    """
+    import asyncio
+
+    from maxicare_daniela import ingesta, lectura
+
+    _sin_base(monkeypatch)
+    monkeypatch.setattr(ingesta, "_conversacion_viva", lambda url, telefono: "conv-viva-1")
+    monkeypatch.setattr(lectura, "asegurar_tema", _devuelve_async(TEMA_DE_ANA))
+
+    capturado: dict = {}
+
+    async def capturar_group_id(*a, **kw):
+        capturado["group_id"] = kw.get("group_id")
+        return None
+
+    monkeypatch.setattr(lectura, "leer_y_repartir", capturar_group_id)
+    tg = TelegramConTemas()
+
+    async def corrida():
+        resultado = await ingesta.procesar_mensaje(
+            _mensaje_con_foto(),
+            whatsapp=WhatsAppConArchivo(),
+            telegram=tg,
+            database_url="postgresql://x",
+            tema_general=TEMA_GENERAL,
+        )
+        assert resultado.lectura is not None, "el lector no arranco"
+        await resultado.lectura
+        return resultado
+
+    asyncio.run(corrida())
+
+    assert capturado["group_id"] == "conv-viva-1", (
+        "el group_id resuelto no llego al lector: se rompio el cable entre "
+        "_conversacion_viva y leer_y_repartir dentro de _leer_con_grupo"
+    )
+
+
+def test_sin_conversacion_viva_el_lector_no_recibe_un_grupo_inventado(monkeypatch):
+    """El complemento del anterior: el primer archivo de un paciente nuevo, sin conversacion
+    todavia, no debe inventarle un `group_id` a la tarea del lector."""
+    import asyncio
+
+    from maxicare_daniela import ingesta, lectura
+
+    _sin_base(monkeypatch)
+    monkeypatch.setattr(lectura, "asegurar_tema", _devuelve_async(TEMA_DE_ANA))
+
+    capturado: dict = {}
+
+    async def capturar_group_id(*a, **kw):
+        capturado["group_id"] = kw.get("group_id")
+        return None
+
+    monkeypatch.setattr(lectura, "leer_y_repartir", capturar_group_id)
+    tg = TelegramConTemas()
+
+    async def corrida():
+        resultado = await ingesta.procesar_mensaje(
+            _mensaje_con_foto(),
+            whatsapp=WhatsAppConArchivo(),
+            telegram=tg,
+            database_url="postgresql://x",
+            tema_general=TEMA_GENERAL,
+        )
+        await resultado.lectura
+        return resultado
+
+    asyncio.run(corrida())
+
+    assert capturado["group_id"] is None

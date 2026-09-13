@@ -510,6 +510,49 @@ def test_sin_conversacion_viva_el_lector_no_se_inventa_un_grupo():
     assert corrida.trace_include_sensitive_data is False
 
 
+def test_leer_y_repartir_reenvia_el_group_id_hasta_el_runner(monkeypatch):
+    """El cable completo, no solo `_config_de_corrida` en aislamiento.
+
+    `test_el_lector_corre_bajo_el_group_id_que_le_dan` llama a `_config_de_corrida` directo:
+    prueba la función, no el cableado. `test_el_lector_no_sube_el_contenido_clinico_a_los_
+    traces` sí atraviesa `leer_archivo` de verdad, pero SIN `group_id` (queda `None` porque
+    nadie se lo pasa). Ninguna de las dos nota si alguien borra el `group_id=group_id` del
+    lambda de `leer_archivo`, el reenvío de `group_id` en `leer_y_repartir`, o si dejan de
+    pasarle `correr=None` explícitamente -- las tres formas de romper este cable dejaban
+    (antes de esta prueba) la suite entera en verde.
+
+    Por eso aquí NO se pasa `correr`: se dobla `Runner` entero, igual que en
+    `test_el_lector_no_sube_el_contenido_clinico_a_los_traces`, para que el lambda por
+    defecto de `leer_archivo` sea el que de verdad corra y construya el `run_config`.
+    """
+    import asyncio
+    from types import SimpleNamespace
+
+    capturado: dict = {}
+
+    class RunnerFalso:
+        @staticmethod
+        async def run(agente, entrada, **kw):
+            capturado.update(kw)
+            return SimpleNamespace(final_output=_lectura())
+
+    monkeypatch.setattr(lectura, "Runner", RunnerFalso)
+    tg = TelegramQueCaptura()
+
+    no_clinica = asyncio.run(
+        lectura.leer_y_repartir(
+            _archivo(), tipo="image", telegram=tg, tema_id=777, group_id="conv-x",
+        )
+    )
+
+    assert no_clinica is not None, "el doble del Runner no llego a correr"
+    assert "run_config" in capturado
+    assert capturado["run_config"].group_id == "conv-x", (
+        "el group_id no llego hasta el Runner: se rompio el cable entre leer_y_repartir, "
+        "leer_archivo y _config_de_corrida"
+    )
+
+
 def test_si_el_lector_revienta_devuelve_none_y_no_propaga():
     """El doctor YA tiene el archivo. Un lector caido no puede tumbar nada mas."""
     import asyncio
