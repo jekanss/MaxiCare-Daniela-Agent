@@ -4,7 +4,9 @@
       "Read(./.venv/**/*)",
       "Read(./.pytest_cache/**/*)",
       "Read(./**/__pycache__/**/*)",
-      "Read(./docs/agentes/plan-agentes.json)"
+      "Read(./docs/agentes/plan-agentes.json)",
+      "Read(./docs/superpowers/plans/**/*)",
+      "Read(./docs/superpowers/specs/**/*)"
     ]
   }
 }

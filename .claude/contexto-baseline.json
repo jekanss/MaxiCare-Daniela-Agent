@@ -2,38 +2,37 @@
   "version": 1,
   "mediciones": [
     {
-      "fecha": "2026-09-13T02:52:00.000Z",
-      "fuente": "estimacion",
-      "nota": "Antes de la optimizacion. Inventario del repo, ~4 bytes por token.",
-      "tokensArranque": 4919,
+      "fecha": "2026-09-13T22:20:00.000Z",
+      "fuente": "context",
+      "nota": "ANTES. Salida de /context pegada por el usuario, sesion en curso.",
+      "tokensArranque": 113000,
       "desglose": {
-        "instrucciones": 4919,
-        "mcp": null,
-        "skills": null,
-        "systemPrompt": null
+        "instrucciones": 7000,
+        "mcp": 189200,
+        "skills": 9600,
+        "systemPrompt": 4200
       },
       "cambiosAplicados": []
     },
     {
-      "fecha": "2026-09-13T03:05:00.000Z",
+      "fecha": "2026-09-13T22:45:00.000Z",
       "fuente": "estimacion",
-      "nota": "Despues de partir CLAUDE.md. Solo cuenta la raiz: web/CLAUDE.md (758 tok) y las ocho reglas con paths cargan bajo demanda. El script del inventario etiqueta web/CLAUDE.md como carga-siempre, y no lo es.",
-      "tokensArranque": 2285,
+      "nota": "DESPUES de escribir los cambios. Suma de tokensEstimados de lo que carga siempre, segun scripts/inventario.mjs. NO es comparable con la medicion anterior: aquella es /context real y esta es una estimacion del script. La cifra real la dara el proximo /context en sesion nueva.",
+      "tokensArranque": 3932,
       "desglose": {
-        "instrucciones": 2285,
+        "instrucciones": 3932,
         "mcp": null,
         "skills": null,
         "systemPrompt": null
       },
       "cambiosAplicados": [
-        "CLAUDE.md raiz: de 272 a 149 lineas (~4919 -> ~2285 tokens)",
-        "Creado web/CLAUDE.md (44 lineas): la seccion Interfaz web",
-        "Creada .claude/rules/atencion-whatsapp.md con paths sobre atencion/runtime/ingesta/conversacion/persistencia",
-        "Creada .claude/rules/calendario.md con paths sobre calendario.py y herramientas.py",
-        "Creada .claude/rules/despliegue.md con paths sobre desplegar.sh, Dockerfile y docker-compose.yml",
-        "CLAUDE.md gana el bloque 'No negociables': ocho lineas que tienen que sobrevivir a una compactacion",
-        ".claude/settings.json: anadido Read(./docs/agentes/plan-agentes.json) a las tres reglas deny que ya estaban",
-        ".gitignore: anadido .superpowers/ -- 43 archivos y 1,2 MB fuera del recorrido de busqueda"
+        "CLAUDE.md raiz: de 223 a 186 lineas (3962 -> 3174 tok est.)",
+        "Creada .claude/rules/scripts-entregables.md con paths: scripts/** (885 tok, ya no carga siempre)",
+        "El caso de la variable de entorno vacia baja a .claude/rules/despliegue.md",
+        "despliegue.md gana runtime.py y config.py en sus paths",
+        "El detalle de /clearstate sale de CLAUDE.md: ya estaba, mas completo, en atencion-whatsapp.md",
+        "permissions.deny sobre docs/superpowers/plans/**/* y docs/superpowers/specs/**/*",
+        "Corregido 'No hay remoto todavia': si hay origin, y main va muy por delante"
       ]
     }
   ]

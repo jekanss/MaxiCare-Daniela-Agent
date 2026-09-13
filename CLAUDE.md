@@ -18,26 +18,17 @@ llegue a la cita correcta.
 - Ver el diseño sin leerlo entero: `uv run python scripts/ver_plan.py <clave>`
   (`fases`, `herramientas`, `guardrails`, `agentes`, `contexto`, `fallos`…).
 - Cuánto historial gasta un turno: `uv run python scripts/medir_historial.py` (solo lee).
-  Es el único camino para cerrar el límite MEDIDO del historial: mientras no haya **20 turnos
-  en 5 conversaciones con filas en `public.agent_messages`** el script lo dice y esos cuatro
-  números siguen en `PENDIENTE`. Exige desplegar primero: hasta que corra en producción no
-  hay nada que medir. Ojo con no confundirlo con el otro número:
-  `config.LIMITE_HISTORIAL_SESION = 230` es un **tope de seguridad** derivado del techo de
-  tokens de la cuenta —impide que un historial crezca hasta reventar la petición y dejar al
-  paciente atascado en el mensaje seguro—, no la medición.
+  Es el único camino para cerrar el límite MEDIDO del historial, y exige **20 turnos en 5
+  conversaciones reales** antes de dar un número. No lo confundas con
+  `config.LIMITE_HISTORIAL_SESION = 230`, que es un tope de seguridad y no una medición.
 - Desplegar en el VPS: `bash scripts/desplegar.sh`
 - Usuarios del panel: `uv run python scripts/crear_usuario.py` (`--listar`, `--quitar-acceso`)
 - Revisar el grupo de Telegram: `uv run python scripts/obtener_chat_telegram.py`
-- Resetear a primer contacto: escribir `/clearstate`. **Por WhatsApp** solo funciona si el
-  número está en `MAXICARE_TELEFONOS_PRUEBA` (varios, separados por coma); con esa variable
-  vacía —su default— el comando no existe para nadie. Borra paciente, conversaciones,
-  mensajes, citas (y sus eventos de Calendar), **el historial del agente** (`agent_sessions`
-  y, por cascada, `agent_messages`: desde la fase 7 el diálogo vive en la base, no en la
-  memoria del proceso) y el tema de Telegram, en `public` y en `pruebas_web` —ese segundo
-  borrado exige que `pruebas_web` tenga las migraciones al día, y de eso se encarga el
-  despliegue (`inicializar_base.py`), no la primera persona que abra el chat web—. **En el chat web del panel** funciona sin lista: ahí el teléfono es
-  `web-<usuario>` y solo se toca `pruebas_web`. Es irreversible.
-  Ver `.claude/rules/atencion-whatsapp.md`.
+- Resetear a primer contacto: escribir `/clearstate`. **Es irreversible** y borra el rastro
+  entero, historial del agente incluido. **Por WhatsApp** solo funciona si el número está en
+  `MAXICARE_TELEFONOS_PRUEBA`; con esa variable vacía —su default— el comando no existe para
+  nadie. En el chat web del panel funciona sin lista y solo toca `pruebas_web`.
+  El detalle, en `.claude/rules/atencion-whatsapp.md`.
 
 Entregables por fase. **Los marcados gastan tokens**; los demás, ni uno:
 
@@ -53,33 +44,11 @@ Entregables por fase. **Los marcados gastan tokens**; los demás, ni uno:
 | `scripts/probar_calendario.py` | `CalendarioGoogle` contra el calendario real | no |
 | `scripts/probar_webhook.py <url>` | el webhook en producción | **sí** (despierta a Daniela) |
 
-- `probar_atencion.py` escribe en `pruebas_atencion` —lo crea y lo borra comprobando el
-  borrado— y su WhatsApp es falso: no le llega nada a ningún paciente. **Su `--chat` corre
-  bajo un `SelectorEventLoop`**, como el de la fase 7: desde que `atender` pide la sesión a
-  `SQLAlchemySession`, el `ProactorEventLoop` de Windows la rechaza en el propio `connect()`
-  y el script moría con «a `responder` no se le llamó ni una vez», que no nombra la causa.
-  Solo pasaba con `--chat` —el modo que gasta—, así que estuvo roto toda la fase 7 sin que
-  nadie lo viera. En Linux, donde corre el VPS, no aplica.
-- `probar_lectura.py` escribe en `pruebas_lectura` —mismo patrón de creación y borrado
-  comprobado—; su Telegram y su WhatsApp son falsos, y el lector va doblado salvo con
-  `--chat`, donde además corre una vez de verdad sobre un PDF generado en el momento (no
-  versionado) y el evaluador clínico corre sobre dos frases fijas.
-- `probar_persistencia.py` escribe en `pruebas_persistencia` —mismo patrón de creación y
-  borrado comprobado—; su `--chat` **no levanta uvicorn ni usa el chat web**: hace el
-  reinicio con DOS intérpretes de Python sobre el carril de WhatsApp, porque el chat web
-  pierde el reenganche al reiniciar por diseño (ver `runtime._conversaciones_de_prueba`) y
-  probaría lo contrario. Y comprueba que el nombre NO está en `pacientes`: si estuviera, el
-  segundo turno acertaría con el historial borrado.
-- `probar_panel.py` MITAD A cambia un precio por HTTP contra `public`, la base real de la
-  clínica, y **lo restaura en un `finally` comprobando la restauración con una aserción**.
-- `probar_calendario.py --diagnosticar` **solo lee**: es lo primero que hay que correr
-  cuando Calendar «no funciona».
-- **Estos scripts doblan funciones de `src/` con firmas escritas a mano, y `pytest -q` no
-  los corre.** Añadirle un parámetro a algo que un script dobla —`lectura.leer_archivo`,
-  `conversacion.responder`— los rompe en silencio: la suite entera sigue verde. Pasó en la
-  fase 7, y solo apareció al ejecutarlos (`TypeError: lector_doblado() got an unexpected
-  keyword argument 'group_id'`). Quien cambie una de esas firmas corre los cinco que no
-  gastan.
+**Estos scripts doblan funciones de `src/` con firmas escritas a mano, y `pytest -q` no los
+corre.** Cambiarle la firma a algo que un script dobla los rompe en silencio, con la suite
+entera en verde: quien toque una de esas firmas corre los cinco que no gastan. Lo demás de
+cada script —en qué esquema escribe, qué dobla, qué trampa tiene— está en
+`.claude/rules/scripts-entregables.md`.
 
 # No negociables
 
@@ -145,6 +114,7 @@ El detalle de cada área se carga solo cuando tocas sus archivos:
 | `.claude/rules/atencion-whatsapp.md` | el turno de WhatsApp: candado, búfer, idempotencia |
 | `.claude/rules/calendario.md` | Google Calendar y la cuenta de servicio |
 | `.claude/rules/despliegue.md` | `desplegar.sh`, el Dockerfile y el `.env` del VPS |
+| `.claude/rules/scripts-entregables.md` | qué dobla cada script de `scripts/` y su trampa |
 | `.claude/rules/pruebas.md` · `frontera-agentes.md` · `migraciones.md` · `base-conocimiento.md` · `contratos-diseno.md` | lo que ya había |
 
 # Trampas de este entorno
@@ -157,22 +127,15 @@ El detalle de cada área se carga solo cuando tocas sus archivos:
 - `uv run` avisa de que `VIRTUAL_ENV` no coincide. Es ruido, se ignora.
 - Es un repositorio git desde el commit `7e12d6b`, que congela las fases 1 a 5. Las
   búsquedas respetan `.gitignore`: `.venv/`, `web/node_modules/`, `web/dist/`, `.env` y
-  `.superpowers/` no aparecen. No hay remoto todavía.
+  `.superpowers/` no aparecen. El remoto es `origin`, y **`main` va muy por delante de
+  `origin/main`**: nadie ha empujado desde hace decenas de commits. No empujes sin pedirlo.
 - **El pooler de Neon rechaza `options` como parámetro de arranque** (`unsupported startup
   parameter in options: search_path`). Para fijar un `search_path` —o para una prueba de
   concurrencia de verdad— hay que usar la conexión directa: quitarle el `-pooler.` al host.
-- **Una variable de entorno vacía no es una variable ausente, y hay DOS puertas.** El
-  `.env` trae casi todas las claves presentes y sin valor. `cargar_dotenv` no exporta las
-  vacías y `_opcional` cae al default; eso cubre la puerta local. La otra es el `env_file`
-  de Docker, que **sí** exporta las vacías y ante el cual ese filtro no llega a correr,
-  porque dentro del contenedor no hay `.env` que leer. Ya pasó en producción: con
-  `OPENAI_BASE_URL=` vacía, el cliente de OpenAI la prefiere sobre su propio default, arma
-  `base_url=""` y **toda** llamada al modelo muere en `APIConnectionError: Connection
-  error.` Se lee como un problema de red y no lo es: las trazas subían a esa misma API sin
-  problema, `/salud` decía `configuracion: ok`, y el paciente recibía el mensaje seguro de
-  `atencion.py` como si Daniela hubiera decidido no saber. Lo cierran `runtime.py` con
-  `descartar_vacias_de_terceros()` al arrancar y `desplegar.sh`, que no manda ninguna clave
-  vacía al servidor.
+- **Una variable de entorno vacía no es una variable ausente.** Si TODA llamada al modelo
+  muere en `APIConnectionError: Connection error.` mientras `/salud` dice `configuracion:
+  ok`, no es la red: es una clave vacía que el `env_file` de Docker sí exporta. Ya pasó en
+  producción. El caso entero, en `.claude/rules/despliegue.md`.
 - **La herramienta `Write` interpreta las secuencias `\uXXXX` del contenido como caracteres
   de verdad.** A un implementador le dejó un byte NUL dentro de un `.tsx` y caracteres
   combinantes invisibles dentro de un regex. Se esquiva escribiendo esos archivos con

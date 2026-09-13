@@ -5,6 +5,8 @@ paths:
   - "docker-compose.yml"
   - ".dockerignore"
   - ".env.ejemplo"
+  - "src/maxicare_daniela/runtime.py"
+  - "src/maxicare_daniela/config.py"
 ---
 
 # El despliegue
@@ -22,7 +24,7 @@ despliegue fallido no deja a los doctores sin radiografías.
   lista del propio Dockerfile y aborta antes de subir nada si falta una ruta. Si alguien
   añade un `COPY`, esa comprobación es lo único que lo atrapa.
 - **El `.env` que viaja al VPS no es el local tal cual.** Se le quitan las claves vacías
-  —ver la trampa de las variables vacías en el `CLAUDE.md` raíz— y `MAXICARE_COOKIE_INSEGURA`
+  —ver «Una variable vacía no es una variable ausente», más abajo— y `MAXICARE_COOKIE_INSEGURA`
   se fija en `0`: en local vale `1` porque `http://localhost` rechaza una cookie `Secure`, y
   en el VPS ese mismo `1` publicaría la cookie de sesión del panel sin esa marca.
 - **`probar_webhook.py` ya gasta tokens.** Manda un mensaje firmado de verdad, y desde la
@@ -35,3 +37,19 @@ despliegue fallido no deja a los doctores sin radiografías.
   memoria del proceso (`runtime._tema_general` y `contratos._VOCABULARIO`, que el panel
   reescribe en caliente). Con dos workers, un tratamiento creado desde la pantalla lo
   conocería solo uno de ellos.
+
+## Una variable vacía no es una variable ausente, y hay DOS puertas
+
+El `.env` trae casi todas las claves presentes y **sin valor**. `cargar_dotenv` no exporta las
+vacías y `_opcional` cae al default; eso cubre la puerta local. La otra es el `env_file` de
+Docker, que **sí** exporta las vacías y ante el cual ese filtro no llega a correr, porque
+dentro del contenedor no hay `.env` que leer.
+
+Ya pasó en producción. Con `OPENAI_BASE_URL=` vacía, el cliente de OpenAI la prefiere sobre su
+propio default, arma `base_url=""` y **toda** llamada al modelo muere en `APIConnectionError:
+Connection error.` **Se lee como un problema de red y no lo es:** las trazas subían a esa misma
+API sin problema, `/salud` decía `configuracion: ok`, y el paciente recibía el mensaje seguro
+de `atencion.py` como si Daniela hubiera decidido no saber.
+
+Lo cierran dos sitios, y hay que tocar los dos: `runtime.py` con `descartar_vacias_de_terceros()`
+al arrancar, y `desplegar.sh`, que no manda ninguna clave vacía al servidor.
