@@ -34,7 +34,7 @@ from maxicare_daniela import atencion, conversacion, ingesta, persistencia
 from maxicare_daniela.calendario import CalendarioCaido, CalendarioDoble, ErrorDeCalendario
 from maxicare_daniela.canales import ErrorDeCanal
 from maxicare_daniela.config import Config
-from maxicare_daniela.contratos import RespuestaDaniela
+from maxicare_daniela.contratos import LecturaNoClinica, RespuestaDaniela
 
 TELEFONO = "573001112233"
 OTRO_TELEFONO = "573009998877"
@@ -1550,3 +1550,245 @@ def test_una_cancelacion_no_deja_el_bufer_atascado(monkeypatch):
     asyncio.run(escena())
 
     assert atencion._buferes == {}, "el búfer quedó registrado tras cancelarse el turno"
+
+
+def test_dos_mensajes_a_la_vez_no_abren_dos_grupos(monkeypatch):
+    """El bloque del búfer no tiene un solo `await`, y eso es lo único que lo hace atómico.
+
+    Las demás pruebas del búfer separan los dos mensajes con un `sleep`, así que el primero
+    ya registró su grupo cuando llega el segundo: ninguna vigila el hueco entre el `get` de
+    `_buferes` y el registro. Aquí los dos entran DE VERDAD a la vez. Con un `await` metido
+    en medio los dos leen `_buferes` vacío, los dos abren grupo, y el paciente recibe dos
+    respuestas a una sola idea -- el fallo que el búfer existe para quitar.
+    """
+    _, turnos = preparar(monkeypatch, BaseFalsa(viva=("conv-1", 4, True, 0)))
+    whatsapp = WhatsAppFalso()
+
+    async def escena():
+        return await asyncio.gather(
+            _atender(mensaje_texto("hola", wamid="w1"), whatsapp=whatsapp, **_en_grupo()),
+            _atender(
+                mensaje_texto("una pregunta", wamid="w2"), whatsapp=whatsapp, **_en_grupo()
+            ),
+        )
+
+    asyncio.run(escena())
+
+    assert len(turnos.llamadas) == 1, "los dos mensajes abrieron su propio turno"
+    assert len(whatsapp.enviados) == 1, (
+        "dos respuestas a una sola idea: es justo lo que el búfer existe para quitar"
+    )
+
+
+# ==========================================================================================
+# 14 · La lectura del archivo
+# ==========================================================================================
+
+CLINICO = "reabsorcion radicular en el 46, con lesion periapical de 4 mm"
+
+
+def _no_clinica(**cambios) -> LecturaNoClinica:
+    campos = dict(
+        tipo_documento="remision_externa",
+        tratamiento="ortodoncia",
+        origen="Clinica Dental Norte",
+        fecha_documento=None,
+        confianza="alta",
+    )
+    campos.update(cambios)
+    return LecturaNoClinica(**campos)
+
+
+def _tarea(valor, *, tarda: float = 0.0):
+    """Una `Task` ya corriendo, como la que devuelve `ingesta.procesar_mensaje`."""
+
+    async def cuerpo():
+        if tarda:
+            await asyncio.sleep(tarda)
+        return valor
+
+    return asyncio.ensure_future(cuerpo())
+
+
+def mensaje_imagen(**cambios) -> ingesta.MensajeEntrante:
+    campos = dict(
+        wamid="wamid-foto-1",
+        telefono=TELEFONO,
+        nombre_perfil="Ana",
+        tipo="image",
+        texto=None,
+        media_id="media-1",
+        mime="image/jpeg",
+    )
+    campos.update(cambios)
+    return ingesta.MensajeEntrante(**campos)
+
+
+def test_con_confianza_alta_daniela_sabe_que_documento_llego(monkeypatch):
+    """La entrada del modelo nombra el tratamiento y el origen, y NADA clinico."""
+    _, turnos = preparar(monkeypatch)
+
+    async def corrida():
+        return await _atender(mensaje_imagen(), lectura=_tarea(_no_clinica()))
+
+    asyncio.run(corrida())
+
+    entrada = turnos.llamadas[-1]["entrada"]
+    assert "ortodoncia" in entrada
+    assert "Clinica Dental Norte" in entrada
+    assert CLINICO not in entrada
+    assert "no puedes verlo" not in entrada, "se quedo con la entrada de antes de 6B"
+    assert turnos.llamadas[-1]["hubo_adjunto"] is True, (
+        "sin la marca, `sin_lectura_clinica` no vigila justo el turno donde importa"
+    )
+
+
+def test_por_debajo_de_alta_daniela_pregunta_en_vez_de_asumir(monkeypatch):
+    _, turnos = preparar(monkeypatch)
+
+    async def corrida():
+        return await _atender(
+            mensaje_imagen(),
+            lectura=_tarea(_no_clinica(tratamiento="no_identificado", confianza="baja")),
+        )
+
+    asyncio.run(corrida())
+
+    entrada = turnos.llamadas[-1]["entrada"]
+    assert "preguntaselo" in entrada.lower() or "pregúntaselo" in entrada.lower()
+    assert "ortodoncia" not in entrada
+
+
+def test_el_lector_caido_no_calla_a_daniela(monkeypatch):
+    """Con la tarea devolviendo None sale la entrada de siempre, y el paciente recibe
+    respuesta igual. Un lector caido no puede dejar mudo al sistema."""
+    wa = WhatsAppFalso()
+    _, turnos = preparar(monkeypatch)
+
+    async def corrida():
+        return await _atender(mensaje_imagen(), whatsapp=wa, lectura=_tarea(None))
+
+    atendido = asyncio.run(corrida())
+
+    assert atendido.respondido is True
+    assert len(wa.enviados) == 1
+    assert "no puedes verlo" in turnos.llamadas[-1]["entrada"]
+
+
+def test_sin_lectura_ninguna_el_camino_de_hoy_sigue_intacto(monkeypatch):
+    """`lectura=None` es lo que pasa con un audio o un sticker: ni se intento leer."""
+    _, turnos = preparar(monkeypatch)
+
+    atender(mensaje_imagen())
+
+    assert "no puedes verlo" in turnos.llamadas[-1]["entrada"]
+
+
+def test_el_lector_lento_no_se_suma_a_la_ventana(monkeypatch):
+    """El invariante que el CLAUDE.md lista: el retardo se descuenta, no se suma.
+
+    Con una ventana de 0.4 s y un lector que tarda mucho mas que el margen, el turno sale
+    SIN la lectura en vez de esperarla. Si alguien encadena el lector delante del bufer,
+    esta prueba cae -- y tambien cae si alguien sube `MARGEN_LECTURA_SEGUNDOS` pensando que
+    «asi da tiempo».
+    """
+    _, turnos = preparar(monkeypatch)
+    monkeypatch.setattr(atencion, "MARGEN_LECTURA_SEGUNDOS", 0.1)
+
+    async def corrida():
+        tarea = _tarea(_no_clinica(), tarda=5.0)
+        try:
+            arranque = time.monotonic()
+            atendido = await _atender(
+                mensaje_imagen(),
+                lectura=tarea,
+                ventana=VENTANA_CORTA,
+                tope=2.0,
+            )
+            return atendido, time.monotonic() - arranque
+        finally:
+            # El `shield` de `_recoger_lecturas` la deja viva a proposito: el lector sigue
+            # corriendo para el doctor. Aqui se cancela para que pytest no avise de una
+            # `Task` pendiente al cerrar el bucle.
+            tarea.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await tarea
+
+    atendido, tardo = asyncio.run(corrida())
+
+    assert atendido.respondido is True
+    assert tardo < 2.0, f"el turno espero al lector: tardo {tardo:.1f} s"
+    assert "no puedes verlo" in turnos.llamadas[-1]["entrada"]
+
+
+def test_la_ventana_le_sirve_de_plazo_al_lector(monkeypatch):
+    """La otra mitad del invariante: el lector corre EN PARALELO con la ventana.
+
+    Un lector que tarda 0.2 s cabe de sobra en una ventana de 0.4: cuando la ventana cierra
+    la lectura ya esta lista y el turno la recoge sin esperar un milisegundo mas. Si alguien
+    mueve la recogida DELANTE del bufer, el margen se gasta antes de que el lector arranque
+    --0.1 s contra 0.2-- y la lectura se pierde entera aunque hubiera llegado a tiempo. Con
+    los numeros de produccion es peor: 3 s de margen contra un lector de 4-8 y una ventana
+    de 20 que ya no le sirve de nada.
+
+    Esta prueba no esta en el plan. Se anadio porque la mutacion 1 de su paso 8 --mover la
+    recogida delante del bufer-- no hacia caer nada: `test_el_lector_lento_no_se_suma_a_la
+    _ventana` solo vigila que el turno no se ALARGUE, y adelantar la recogida no lo alarga,
+    solo tira la lectura.
+    """
+    _, turnos = preparar(monkeypatch)
+    monkeypatch.setattr(atencion, "MARGEN_LECTURA_SEGUNDOS", 0.1)
+
+    async def corrida():
+        return await _atender(
+            mensaje_imagen(),
+            lectura=_tarea(_no_clinica(), tarda=0.2),
+            ventana=VENTANA_CORTA,
+            tope=2.0,
+        )
+
+    asyncio.run(corrida())
+
+    entrada = turnos.llamadas[-1]["entrada"]
+    assert "ortodoncia" in entrada, (
+        "la lectura cabia en la ventana y se perdio: se esta recogiendo antes de abrirla"
+    )
+
+
+def test_la_lectura_se_ata_al_mensaje_que_traia_el_archivo(monkeypatch):
+    """Foto + «esto que es?» son DOS mensajes que el bufer agrupa en un turno.
+
+    La lectura pertenece al primero. Si se atara al ultimo, la entrada del modelo diria que
+    el mensaje de TEXTO trae una remision, que es falso y ademas confunde al modelo.
+    """
+    _, turnos = preparar(monkeypatch)
+
+    async def corrida():
+        foto = asyncio.ensure_future(
+            _atender(
+                mensaje_imagen(),
+                lectura=_tarea(_no_clinica()),
+                ventana=VENTANA_CORTA,
+                tope=2.0,
+            )
+        )
+        await asyncio.sleep(0.05)
+        texto = asyncio.ensure_future(
+            _atender(
+                mensaje_texto("¿esto qué es?", wamid="wamid-texto-2"),
+                ventana=VENTANA_CORTA,
+                tope=2.0,
+            )
+        )
+        return await asyncio.gather(foto, texto)
+
+    asyncio.run(corrida())
+
+    entrada = turnos.llamadas[-1]["entrada"]
+    assert entrada.count("ortodoncia") == 1, (
+        "la lectura se pego a los dos mensajes del grupo, o a ninguno"
+    )
+    # La linea de la remision va con la foto, no con el texto.
+    posicion_lectura = entrada.index("ortodoncia")
+    posicion_texto = entrada.index("¿esto qué es?")
+    assert posicion_lectura < posicion_texto

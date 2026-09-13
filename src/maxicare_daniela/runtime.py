@@ -535,6 +535,7 @@ async def _entregar(m: ingesta.MensajeEntrante) -> None:
             config=config,
             calendario=_calendario,
             al_escalar=_avisar_a_doctores,
+            lectura=entrega.lectura if entrega is not None else None,
         )
     except Exception:  # noqa: BLE001 -- `atender` promete no propagar; esto lo hace cierto
         # Aquí ya no hay nada que salvar para el paciente, pero el archivo YA llegó al

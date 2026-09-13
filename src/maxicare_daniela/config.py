@@ -81,6 +81,10 @@ VENTANA_SILENCIO_SEGUNDOS = 20
 #: turno tarda del orden de seis segundos. 45 + 6 deja margen; 55 no lo dejaría.
 TOPE_BUFER_SEGUNDOS = 45
 
+#: Lo que se le concede al lector DESPUÉS de que la ventana del búfer cerró. Corto a
+#: propósito: la ventana ya le dio sus 20 segundos, esto es la cola.
+MARGEN_LECTURA_SEGUNDOS = 3.0
+
 
 # ==========================================================================================
 # Configuración de despliegue
