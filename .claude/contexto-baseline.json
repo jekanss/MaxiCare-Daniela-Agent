@@ -2,68 +2,38 @@
   "version": 1,
   "mediciones": [
     {
-      "fecha": "2026-09-12T18:17:03.852Z",
+      "fecha": "2026-09-13T02:52:00.000Z",
       "fuente": "estimacion",
-      "momento": "antes",
-      "tokensArranque": 0,
+      "nota": "Antes de la optimizacion. Inventario del repo, ~4 bytes por token.",
+      "tokensArranque": 4919,
       "desglose": {
-        "instrucciones": 0,
+        "instrucciones": 4919,
         "mcp": null,
         "skills": null,
         "systemPrompt": null
       },
-      "nota": "El proyecto no tenia ninguna instruccion cargada: cero CLAUDE.md, cero reglas. El costo no estaba en el arranque sino en las relecturas — docs/agentes pesa ~37.000 tokens estimados y src/ ~8.400.",
       "cambiosAplicados": []
     },
     {
-      "fecha": "2026-09-12T18:40:00.000Z",
+      "fecha": "2026-09-13T03:05:00.000Z",
       "fuente": "estimacion",
-      "momento": "despues",
-      "tokensArranque": 750,
+      "nota": "Despues de partir CLAUDE.md. Solo cuenta la raiz: web/CLAUDE.md (758 tok) y las ocho reglas con paths cargan bajo demanda. El script del inventario etiqueta web/CLAUDE.md como carga-siempre, y no lo es.",
+      "tokensArranque": 2285,
       "desglose": {
-        "instrucciones": 750,
+        "instrucciones": 2285,
         "mcp": null,
         "skills": null,
         "systemPrompt": null
       },
-      "nota": "Solo CLAUDE.md (2.991 bytes) carga siempre. Las cuatro reglas suman 7.181 bytes mas pero llevan paths: y solo entran al tocar su zona. Cifra pendiente de reemplazar por /context en sesion nueva.",
       "cambiosAplicados": [
-        "Creado CLAUDE.md raiz (60 lineas, 2.991 bytes)",
-        "Creada .claude/rules/frontera-agentes.md (paths: src/maxicare_daniela/**/*.py)",
-        "Creada .claude/rules/migraciones.md (paths: migraciones/*.sql)",
-        "Creada .claude/rules/contratos-diseno.md (paths: docs/agentes/*.json)",
-        "Creada .claude/rules/base-conocimiento.md (paths: datos/base_conocimiento.json)",
-        "Creado .claude/settings.json con deny de lectura sobre .venv, .pytest_cache y __pycache__"
-      ]
-    },
-    {
-      "fecha": "2026-09-12T19:50:00.000Z",
-      "fuente": "estimacion",
-      "momento": "despues",
-      "tokensArranque": 1073,
-      "desglose": {
-        "instrucciones": 1073,
-        "mcp": null,
-        "skills": null,
-        "systemPrompt": null
-      },
-      "nota": "Segunda auditoria, tras cerrar las fases 2, 3 y 4. El arranque SUBIO 49 tokens estimados (1.024 -> 1.073) y esta bien: lo que crecio fue la seccion de comandos con los entregables nuevos, y una linea que cambio un dato falso por uno cierto. CLAUDE.md sigue en 77 de las 200 lineas del objetivo; no habia nada que recortar. El ahorro real de esta pasada NO esta en el arranque sino en las relecturas: plan-agentes.json habia crecido de ~17.000 a ~20.400 tokens (se le incrustan los hallazgos de cada fase) y consultarlo costaba leerlo entero; con scripts/ver_plan.py una consulta tipica baja a 258-4.170 tokens. Las cinco reglas suman 2.489 tokens pero llevan paths: y no cuentan al arrancar. Las tres mediciones son estimaciones del script a ~4 bytes por token: NO son comparables con una cifra de /context, que sigue pendiente de una sesion nueva.",
-      "cambiosAplicados": [
-        "Corregida la cifra de plan-agentes.json en CLAUDE.md: decia ~17.000 tokens, son ~20.400 y crecen cada fase",
-        "Creado scripts/ver_plan.py: imprime una clave o un elemento del plan en vez del archivo entero",
-        "Creada .claude/rules/pruebas.md (paths: tests/**/*.py) con las convenciones de las dos suites",
-        "Creada .claude/skills/cerrar-fase/SKILL.md: el procedimiento de cierre de fase, que se habia reescrito a mano tres veces"
-      ],
-      "noAplicado": [
-        "Recortar CLAUDE.md: 77 de 200 lineas y ninguna linea deducible del codigo. Recortar seria inventarse trabajo",
-        "Mover la trampa de la consola cp1252 a una regla con paths: no sobrevive a una compactacion y tiene que valer siempre",
-        "claudeMdExcludes y worktree.sparsePaths: no hay monorepo ni worktrees",
-        "Nuevas reglas permissions.deny: candidatosDeny vino vacio"
-      ],
-      "pendiente": [
-        "/plugin install python-lsp@claude-plugins-official (26 archivos de Python; no se instala por el usuario)",
-        "git init: esGit sigue en false, asi que las busquedas no respetan ningun .gitignore y no hay historial recuperable de cuatro fases de trabajo",
-        "Reemplazar las tres mediciones estimadas por una real de /context en sesion nueva"
+        "CLAUDE.md raiz: de 272 a 149 lineas (~4919 -> ~2285 tokens)",
+        "Creado web/CLAUDE.md (44 lineas): la seccion Interfaz web",
+        "Creada .claude/rules/atencion-whatsapp.md con paths sobre atencion/runtime/ingesta/conversacion/persistencia",
+        "Creada .claude/rules/calendario.md con paths sobre calendario.py y herramientas.py",
+        "Creada .claude/rules/despliegue.md con paths sobre desplegar.sh, Dockerfile y docker-compose.yml",
+        "CLAUDE.md gana el bloque 'No negociables': ocho lineas que tienen que sobrevivir a una compactacion",
+        ".claude/settings.json: anadido Read(./docs/agentes/plan-agentes.json) a las tres reglas deny que ya estaban",
+        ".gitignore: anadido .superpowers/ -- 43 archivos y 1,2 MB fuera del recorrido de busqueda"
       ]
     }
   ]

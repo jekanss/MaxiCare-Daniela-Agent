@@ -11,198 +11,72 @@ llegue a la cita correcta.
 # Comandos
 
 - Pruebas: `uv run pytest -q`
-- Base de datos (idempotente, aplica migraciones + carga + verifica):
-  `uv run python scripts/inicializar_base.py`
-- Solo verificar, sin escribir: `uv run python scripts/inicializar_base.py --solo-verificar`
-- Revisar el grupo de Telegram: `uv run python scripts/obtener_chat_telegram.py`
-- Las nueve tools contra Neon y un calendario de pruebas (entregable fase 3):
-  `uv run python scripts/probar_tools.py`
-- Las pruebas que tocan la base: `MAXICARE_PRUEBAS_NEON=1 uv run pytest -q -m neon`
-  Escriben en el esquema `pruebas`, nunca en `public`, y lo borran al terminar.
-- Los dos agentes contra la API real (entregable fase 4, **gasta tokens**):
-  `uv run python scripts/probar_agentes.py`
-- El webhook en producción: `uv run python scripts/probar_webhook.py https://daniela.maxicarecol.com`
-- El turno de WhatsApp de punta a punta (entregable fase 6A):
-  `uv run python scripts/probar_atencion.py`
-  Escribe en el esquema `pruebas_atencion` —lo crea y lo borra, comprobando el borrado—, y el
-  WhatsApp es falso: no le llega nada a ningún paciente. Sin `--chat` no gasta un token; con
-  `--chat` los turnos corren contra el modelo de verdad y **gasta tokens**.
-- El cascarón web (entregable fase 5): `uv run python scripts/probar_web.py`
-  Con `--chat` habla de verdad con Daniela y **gasta tokens**.
-- El panel de tratamientos (entregable fase 8, primera mitad):
-  `uv run python scripts/probar_panel.py`
-  Dos mitades: la MITAD A cambia un precio por HTTP contra `public` —la base real de la
-  clínica— y sin gastar un token, y **restaura ese precio en un `finally`, comprobando la
-  restauración con una aserción** (nunca se la da por hecha). Con `--chat`, la MITAD B
-  además escribe un precio y crea un tratamiento en `pruebas_web` y comprueba que Daniela lo
-  cotiza de verdad; **gasta tokens**.
+- Las que tocan la base: `MAXICARE_PRUEBAS_NEON=1 uv run pytest -q -m neon`
+  — escriben en el esquema `pruebas`, nunca en `public`, y lo borran al terminar.
+- Base de datos (idempotente: migraciones + carga + verificación):
+  `uv run python scripts/inicializar_base.py` · `--solo-verificar` no escribe.
+- Ver el diseño sin leerlo entero: `uv run python scripts/ver_plan.py <clave>`
+  (`fases`, `herramientas`, `guardrails`, `agentes`, `contexto`, `fallos`…).
 - Desplegar en el VPS: `bash scripts/desplegar.sh`
-  Empaqueta, copia, construye la imagen, **aplica las migraciones antes de levantar** y
-  espera a que el contenedor esté sano. Traefik sigue mandando los webhooks de Meta al
-  contenedor viejo hasta que el nuevo responde `/salud`, así que un despliegue fallido no
-  deja a los doctores sin radiografías. Comprueba después desde fuera con
-  `scripts/probar_webhook.py`.
 - Usuarios del panel: `uv run python scripts/crear_usuario.py` (`--listar`, `--quitar-acceso`)
-- `CalendarioGoogle` contra el calendario real (no gasta tokens):
-  `uv run python scripts/probar_calendario.py`
-  Crea un evento en **2029 a las 3 a.m.**, lo mueve, comprueba que **no vuelve como
-  bloqueo**, y lo borra en un `finally` **verificando** que desapareció. Con
-  `--diagnosticar` solo lee: comprueba el acceso y lista los bloqueos de los próximos
-  14 días. Es lo primero que hay que correr cuando Calendar «no funciona».
+- Revisar el grupo de Telegram: `uv run python scripts/obtener_chat_telegram.py`
 
-# Interfaz web
+Entregables por fase. **Los marcados gastan tokens**; los demás, ni uno:
 
-El frontend es React + Vite + Tailwind y vive en `web/`, aparte del paquete de Python. Sale
-de un archivo de Figma Make; `web/src/marca/` y los tokens `--color-sp-*` de `index.css`
-vienen de allí y no se renombran, o la siguiente pantalla que llegue de Figma deja de encajar.
+| Comando | Qué prueba | ¿Gasta? |
+|---|---|---|
+| `scripts/probar_tools.py` | las nueve tools contra Neon (fase 3) | no |
+| `scripts/probar_agentes.py` | los dos agentes contra la API real (fase 4) | **sí** |
+| `scripts/probar_web.py` | el cascarón web (fase 5) | solo con `--chat` |
+| `scripts/probar_atencion.py` | el turno de WhatsApp de punta a punta (fase 6A) | solo con `--chat` |
+| `scripts/probar_panel.py` | el panel de tratamientos (fase 8) | solo con `--chat` |
+| `scripts/probar_calendario.py` | `CalendarioGoogle` contra el calendario real | no |
+| `scripts/probar_webhook.py <url>` | el webhook en producción | **sí** (despierta a Daniela) |
 
-```
-cd web && npm install && npm run build     # deja web/dist, que es lo que sirve runtime.py
-cd web && npm run dev                      # :5173 con proxy a :8080 — hacen falta LOS DOS
-uv run uvicorn maxicare_daniela.runtime:app --port 8080
-```
+- `probar_atencion.py` escribe en `pruebas_atencion` —lo crea y lo borra comprobando el
+  borrado— y su WhatsApp es falso: no le llega nada a ningún paciente.
+- `probar_panel.py` MITAD A cambia un precio por HTTP contra `public`, la base real de la
+  clínica, y **lo restaura en un `finally` comprobando la restauración con una aserción**.
+- `probar_calendario.py --diagnosticar` **solo lee**: es lo primero que hay que correr
+  cuando Calendar «no funciona».
 
-- **El chat de pruebas escribe en el esquema `pruebas_web`, nunca en `public`.** No es
-  `pruebas`: ese lo BORRAN `probar_tools.py` y `probar_agentes.py` al terminar.
-- Sin `MAXICARE_SECRETO_SESION` el panel se apaga con un 503 y **el webhook sigue vivo**.
-  Es deliberado: WhatsApp está en producción y no puede caerse por una variable del panel.
-- La ruta comodín que sirve `index.html` va **al final** de `runtime.py`. Antes se tragaría
-  `/api`, `/salud` y el webhook.
-- **El `Literal` de tratamientos está partido en dos.** `LecturaArchivo` conserva los 14
-  escritos a mano —es el muro, y tiene su prueba `test_tratamiento_no_admite_una_frase_clinica`—;
-  el vocabulario de negocio vive en la tabla `tratamientos` y lo carga `runtime.py` al
-  arrancar. Crear un tratamiento desde la pantalla **no** lo mete en el muro: una
-  radiografía suya se clasifica `no_identificado`. Verificado por `probar_panel.py`.
-- **LA TRAMPA QUE MÁS VA A COSTAR: el panel escribe en `public`, el chat de pruebas lee de
-  `pruebas_web`.** Son dos bases distintas. Editar un precio en la pantalla y preguntarle a
-  Daniela en la pestaña Pruebas **no** sirve para comprobar el cambio: ella cita el valor de
-  la semilla y parece un fallo. Ya hizo que el entregable de esta fase se escribiera mal la
-  primera vez. Para comprobar el camino completo: `probar_panel.py --chat`, que prueba cada
-  mitad por su lado.
-- **Dos personas editando la misma ficha: la segunda pisa a la primera.** No hay bloqueo
-  optimista, es deliberado. Lo que lo hace aceptable no es que sea improbable, sino que
-  `cambios_configuracion` guarda el valor anterior: una edición pisada es recuperable, no
-  perdida. Eso vale para el contenido **y para `aprobado`**, que se registra en su propia
-  fila. Si algún día se añade un campo editable a la ficha, tiene que anotarse también, o
-  esta frase vuelve a ser mentira para ese campo y el límite deja de ser aceptable.
-- **En `web/src/pantallas/Tratamientos.tsx`, el `useCallback` de `recargar` tiene
-  dependencias vacías a propósito, y `alCaducarSesion` se consume por una `ref`.** Meter esa
-  prop en las dependencias —lo que pediría cualquier regla de hooks— deja la pantalla
-  releyendo Neon en bucle, porque `App.tsx` la pasa como una flecha nueva en cada render. No
-  hay `eslint-plugin-react-hooks` ni arnés de pruebas de frontend que lo atrape: se vería
-  como una pantalla lenta y una factura rara.
+# No negociables
 
-# Google Calendar
+Cada una es una línea porque tiene que sobrevivir a una compactación. El porqué de cada
+una —qué se midió, qué costó— está en la regla que cubre ese archivo.
 
-- **Una cita de Daniela NO es un bloqueo del doctor.** Es la trampa central de
-  `CalendarioGoogle` y con `CalendarioDoble` era invisible: el doble guarda eventos y
-  bloqueos en listas separadas, Google los devuelve juntos. Sin filtrarlos, la primera cita
-  de una hora taparía el bloque y la clínica atendería **uno** por hora en vez de dos. Cada
-  evento que crea Daniela lleva `extendedProperties.private.origen = "daniela"` y
-  `bloqueos()` lo descarta. Un evento sin marca es de los doctores y sí tapa.
-- **La credencial es `MAXICARE_GOOGLE_SA_B64`, no una ruta a un archivo.** `config.py`
-  decía `MAXICARE_GOOGLE_CREDENTIALS_PATH`, que no existía en ningún `.env`; nadie lo notó
-  porque ningún módulo leía ese campo. El nombre correcto es el que documenta `.env.ejemplo`.
-- **El 404 casi nunca es el código: es el permiso.** La cuenta de servicio se autentica
-  perfectamente aunque no tenga acceso a nada. Hay que compartir el calendario con su
-  `client_email` dándole «Hacer cambios en los eventos». `CalendarioGoogle` lo comprueba
-  **al construirse**, con una lectura real, y el mensaje nombra el correo.
-- **El calendario de la clínica es una cuenta personal de Gmail, y es una decisión tomada
-  a conciencia** (MaxiCare, 12/09/2026: «sí va a ser ese correo, no pasa nada»). Lo que
-  cuesta: las citas de los pacientes conviven con la agenda personal de esa persona —ya
-  hubo un evento suyo borrado a mano durante una prueba— y el día que esa cuenta no esté,
-  el calendario se va con ella. La salida, si algún día deja de ser aceptable, es barata:
-  crear un calendario secundario, compartirlo con la misma cuenta de servicio y cambiar
-  `MAXICARE_GOOGLE_CALENDAR_ID`. Ni una línea de código cambia.
-- **`calendario_desde_config` todavía no la llama nadie.** El chat web sigue con
-  `CalendarioDoble` a propósito: probar en la pestaña Pruebas crearía eventos falsos en el
-  calendario donde los doctores miran su día —el mismo error de categoría que `public` vs
-  `pruebas_web`—. El cableado real es de la fase 6, en el camino de WhatsApp.
-- `ZONA_BOGOTA` vive en `calendario.py` y `herramientas.py` la reexporta. Una sola
-  definición: dos copias de un desfase horario son dos cosas que un día divergen.
+1. **Si el calendario no arranca, Daniela queda con `CalendarioCaido`, NUNCA con
+   `CalendarioDoble`.** El doble dice que sí a todo y le confirma al paciente una cita que
+   no existe: llega a una clínica donde nadie lo espera.
+2. **Ninguna clave de idempotencia la escribe el modelo.** Las cuatro las arma el código con
+   `ctx.clave(...)`. Con la del modelo, dos pacientes salían confirmados sobre un solo cupo.
+3. **El candado de `atencion.py` va por TELÉFONO y `_leer_estado` va DENTRO.** Sacar la
+   lectura fuera devuelve dos carreras medidas: conversaciones duplicadas y escalamientos
+   que el doctor no ve.
+4. **Meta reintenta los webhooks y hay DOS deduplicaciones, no una**: `ON CONFLICT (wamid)`
+   protege el reenvío al doctor, `Resultado.nuevo` protege el turno de Daniela.
+5. **`asegurar_conversacion` SIEMPRE inserta**, pese al nombre. En WhatsApp se usa
+   `conversacion_viva`.
+6. **El búfer de mensajes: la ventana va antes del candado, el retardo se descuenta (no se
+   suma) y el búfer se saca en un `finally`.** Mover cualquiera de las tres rompe algo en
+   silencio.
+7. **Una cita de Daniela NO es un bloqueo del doctor.** La marca
+   `extendedProperties.private.origen = "daniela"` es lo que impide que la clínica atienda
+   a uno por hora en vez de a dos.
+8. **`uv run pytest -q` a secas NO caza una regresión en `tocar_conversacion`.** Quien toque
+   esa función corre además las de Neon y `scripts/probar_atencion.py`.
 
-# Daniela en WhatsApp
+# Dónde está el resto
 
-- **`asegurar_conversacion` SIEMPRE inserta una fila nueva**, pese al nombre: no es un
-  get-or-create. En el camino de WhatsApp se usa `conversacion_viva`, que reutiliza la de las
-  últimas 24 h. Usar la primera aquí abriría una conversación por mensaje: Daniela no
-  recordaría ni la frase anterior, `turno_actual` sería siempre 1 y las claves de
-  idempotencia (`id_conversacion + turno`) no colisionarían nunca, con lo que dejarían de
-  proteger.
-- **Los mensajes se agrupan antes de contestar, y el orden de las piezas es el arreglo.**
-  En WhatsApp nadie escribe párrafos: el saludo va en un mensaje, la pregunta en otro y lo
-  que se le ocurrió después en un tercero. Sin agrupar, cada trozo abría su turno y su
-  respuesta — medido con el primer paciente real de la clínica: tres mensajes en 48 s, tres
-  respuestas, y siete segundos entre las dos últimas. `atencion` acumula en `_buferes` los
-  mensajes de un número y espera `VENTANA_SILENCIO_SEGUNDOS` (20) sin mensajes nuevos, con
-  tope de `TOPE_BUFER_SEGUNDOS` (45) contado desde el primero. Tres cosas no se pueden mover:
-  - **La ventana va ANTES del candado del turno.** Si el segundo mensaje tuviera que esperar
-    ese candado, no podría sumarse al grupo hasta que terminara el turno del primero — es
-    decir, hasta después de la respuesta que se quería evitar.
-  - **El bloque que mete el mensaje en el búfer no tiene un solo `await`, y por eso no lleva
-    candado**: en un único bucle de eventos eso lo vuelve atómico. Añadir un `await` ahí
-    reintroduce la carrera y nada lo delataría.
-  - **El retardo se descuenta, no se suma.** `momento_inicio` es la llegada del PRIMER
-    mensaje del grupo. Reiniciarlo después del búfer saca la respuesta del minuto que fija
-    `limites.latencia_maxima`. Hay prueba, y cae al mutarlo.
-- **El búfer se saca SIEMPRE en un `finally`.** Uno que sobreviviera a su turno se tragaría
-  todos los mensajes siguientes de ese número: cada uno se sumaría a un grupo que ya no
-  espera a nadie. En silencio, y solo para ese teléfono.
-- **El candado de `atencion.py` va por TELÉFONO, no por conversación, y la lectura de la
-  base va DENTRO.** No es un detalle: el teléfono se conoce desde el mensaje y la
-  conversación no, así que un candado por conversación obliga a leer la base antes de
-  cerrarlo. Con esa lectura fuera se medió lo siguiente: dos mensajes simultáneos de un
-  número nuevo abren **dos conversaciones** —Daniela contesta dos veces sin saber de la otra
-  mitad, y del tercer mensaje en adelante una de las dos se pierde—, y dos de una
-  conversación existente leen el **mismo `turno_actual`**, así que arman la misma clave de
-  escalamiento y el doctor se entera de uno solo. Si alguien mueve `_leer_estado` fuera del
-  candado «para que el candado dure menos», vuelven los dos.
-- **El candado es de proceso.** Con más de un worker o más de una réplica deja de proteger y
-  haría falta un `pg_advisory_lock`; la clave natural ya es el teléfono, que se conoce sin
-  tocar la base. El contenedor corre con un solo worker, y por eso hoy alcanza.
-- **Meta reintenta los webhooks, y hay DOS deduplicaciones, no una.** `procesar_mensaje`
-  protege el reenvío al doctor con `ON CONFLICT (wamid)`; el turno de Daniela lo protege
-  `_entregar` mirando `Resultado.nuevo`. Sin lo segundo, el mismo POST tres veces daba **un
-  reenvío y tres turnos**: el paciente recibía la misma pregunta contestada tres veces con
-  tres textos distintos. Si `procesar_mensaje` revienta antes de devolver nada, se atiende
-  igual — un fallo de Telegram no puede dejar al paciente sin respuesta.
-- **Ninguna clave de idempotencia la escribe el modelo.** Las cuatro (`cita`, `reprogramar`,
-  `seguimiento`, `escalamiento`) las arma el código con `ctx.clave(...)`. `crear_cita` fue
-  la última en caer: con la clave del modelo, dos pacientes distintos pidiendo el mismo
-  bloque generaban la misma cadena y **ambos salían confirmados sobre un solo cupo**.
-- **El historial vive en memoria** (`_sesiones`). Un reinicio borra el hilo del diálogo, no
-  los datos: paciente, citas y estado de oportunidad están en Neon. Lo arregla la fase 7 con
-  `SQLAlchemySession`.
-- **Si el calendario no arranca, Daniela queda con `CalendarioCaido`, nunca con
-  `CalendarioDoble`**, y la diferencia es la razón de ser del proyecto. El doble dice que sí a
-  todo: `crear_cita` tomaría el cupo, «crearía» el evento en un diccionario y le confirmaría
-  la cita al paciente, que llegaría a una clínica donde nadie lo espera. El caído lanza
-  `ErrorDeCalendario`, y las tools ya saben qué hacer con eso: liberar el cupo, no confirmar
-  nada y escalar. `/salud` publica qué clase acabó ahí.
-- **`MAXICARE_DANIELA_RESPONDE`**: por defecto activa (cualquier valor que no sea `0`). Con
-  `0`, el webhook sigue registrando el mensaje y reenviando el archivo a Telegram exactamente
-  como antes, y lo único que se apaga es la respuesta al paciente. Existe para poder callarla
-  en diez segundos sin desplegar código.
-- **`uv run pytest -q` a secas NO caza una regresión en el SQL de `tocar_conversacion`.** Está
-  comprobado: mutando el `UPDATE` para que ignore `turno_actual`, la suite offline queda
-  entera en verde y solo falla la de Neon. Quien toque esa función tiene que correr las dos
-  —`MAXICARE_PRUEBAS_NEON=1 uv run pytest -q -m neon` y `scripts/probar_atencion.py`—.
+El detalle de cada área se carga solo cuando tocas sus archivos:
 
-## El despliegue
-
-- **`desplegar.sh` empaqueta a mano lo que el Dockerfile copia, y ya se desincronizó una
-  vez.** El script es de la fase 2; el Dockerfile creció su etapa de Node en la fase 5 y el
-  tar nunca creció con él, así que **todo lo construido entre la fase 2 y la 8 se quedó sin
-  desplegar** sin que nadie lo supiera: el primer intento moría en `COPY web/ ./` con un
-  error sobre checksums que no nombra el script por ninguna parte. Ahora el script deriva la
-  lista del propio Dockerfile y aborta antes de subir nada si falta una ruta. Si alguien
-  añade un `COPY`, esa comprobación es lo único que lo atrapa.
-- **`probar_webhook.py` ya gasta tokens.** Manda un mensaje firmado de verdad, y desde la
-  fase 6A eso despierta a Daniela: un turno completo contra el modelo por cada corrida. No
-  le escribe a ningún paciente —el número de prueba no existe— pero no es gratis.
-- **El `/salud` desplegado es la forma barata de saber qué versión corre.** Publica la fase,
-  la clase de calendario y si Daniela responde. Si dice `CalendarioCaido`, Google no arrancó
-  y Daniela no puede agendar aunque todo lo demás funcione.
+| Archivo | Cubre |
+|---|---|
+| `web/CLAUDE.md` | la interfaz del panel, y la trampa `public` vs `pruebas_web` |
+| `.claude/rules/atencion-whatsapp.md` | el turno de WhatsApp: candado, búfer, idempotencia |
+| `.claude/rules/calendario.md` | Google Calendar y la cuenta de servicio |
+| `.claude/rules/despliegue.md` | `desplegar.sh`, el Dockerfile y el `.env` del VPS |
+| `.claude/rules/pruebas.md` · `frontera-agentes.md` · `migraciones.md` · `base-conocimiento.md` · `contratos-diseno.md` | lo que ya había |
 
 # Trampas de este entorno
 
@@ -213,8 +87,8 @@ uv run uvicorn maxicare_daniela.runtime:app --port 8080
   y usa marcadores ASCII (`OK` / `FALLA` / `->`). El mismo script corre en el VPS.
 - `uv run` avisa de que `VIRTUAL_ENV` no coincide. Es ruido, se ignora.
 - Es un repositorio git desde el commit `7e12d6b`, que congela las fases 1 a 5. Las
-  búsquedas respetan `.gitignore`: `.venv/`, `web/node_modules/`, `web/dist/` y `.env`
-  no aparecen. No hay remoto todavía.
+  búsquedas respetan `.gitignore`: `.venv/`, `web/node_modules/`, `web/dist/`, `.env` y
+  `.superpowers/` no aparecen. No hay remoto todavía.
 - **El pooler de Neon rechaza `options` como parámetro de arranque** (`unsupported startup
   parameter in options: search_path`). Para fijar un `search_path` —o para una prueba de
   concurrencia de verdad— hay que usar la conexión directa: quitarle el `-pooler.` al host.
@@ -222,7 +96,7 @@ uv run uvicorn maxicare_daniela.runtime:app --port 8080
   `.env` trae casi todas las claves presentes y sin valor. `cargar_dotenv` no exporta las
   vacías y `_opcional` cae al default; eso cubre la puerta local. La otra es el `env_file`
   de Docker, que **sí** exporta las vacías y ante el cual ese filtro no llega a correr,
-  porque dentro del contenedor no hay `.env` que leer. Ya paso en producción: con
+  porque dentro del contenedor no hay `.env` que leer. Ya pasó en producción: con
   `OPENAI_BASE_URL=` vacía, el cliente de OpenAI la prefiere sobre su propio default, arma
   `base_url=""` y **toda** llamada al modelo muere en `APIConnectionError: Connection
   error.` Se lee como un problema de red y no lo es: las trazas subían a esa misma API sin
@@ -235,6 +109,10 @@ uv run uvicorn maxicare_daniela.runtime:app --port 8080
   combinantes invisibles dentro de un regex. Se esquiva escribiendo esos archivos con
   here-strings de PowerShell, y conviene comprobar el resultado (contar bytes NUL y
   caracteres de categoría `Cc`/`Cf`/`Mn`) cuando el contenido lleve `\u`.
+- **Tres documentos de diseño son enormes y están versionados.** `plan-agentes.json`
+  (~22.000 tokens) está bloqueado por `.claude/settings.json`: léelo con `ver_plan.py`.
+  `plan-agentes.md` (~12.000) y `brief-agentes.json` (~7.000) no están bloqueados porque no
+  tienen alternativa — léelos por rangos, nunca enteros.
 
 # Reglas duras
 
@@ -258,13 +136,12 @@ uv run uvicorn maxicare_daniela.runtime:app --port 8080
 # Contexto
 
 - Delega la exploración a subagentes: que vuelva el resumen, no los archivos.
-- **Nunca leas `docs/agentes/plan-agentes.json` entero.** Pasa de 21.000 tokens y crece
-  cada fase, porque ahí se van incrustando los hallazgos verificados. Usa:
-  `uv run python scripts/ver_plan.py <clave>` — con `fases`, `herramientas`, `guardrails`,
-  `agentes`, `contexto`, `fallos`... Sin argumentos lista las claves y lo que pesa cada una.
+- Lee rangos concretos, no archivos enteros, cuando sepas dónde está lo que buscas.
 - Al cambiar a una tarea sin relación con la anterior, `/clear`.
 - Tras dos correcciones fallidas sobre lo mismo, `/clear` y reformula.
-- Para cambios que tocan varios archivos, plan mode antes de editar.
+- Para cambios que tocan varios archivos, plan mode antes de editar: el plan se escribe a
+  archivo y se re-inyecta tras cada compactación.
+- `/compact céntrate en X` conserva lo que tú eliges, no lo que el resumen adivine.
 
 # Compact instructions
 

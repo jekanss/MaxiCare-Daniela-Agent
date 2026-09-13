@@ -10,3 +10,8 @@ __pycache__/
 # conflictos de fusion en archivos que nadie lee.
 web/node_modules/
 web/dist/
+
+# El taller de las skills de superpowers: bitacoras, briefs y paquetes de revision de
+# fases ya cerradas. 1,2 MB en 47 archivos -- mas que todo `src/` -- que no aportan nada
+# a una busqueda y la ensucian entera. La propia skill que los genera los da por ignorados.
+.superpowers/
