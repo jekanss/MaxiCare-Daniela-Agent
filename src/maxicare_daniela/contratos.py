@@ -39,7 +39,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import Any, Iterable, Literal, get_args
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 # ---------------------------------------------------------------------------------------
 # Vocabularios cerrados
@@ -260,6 +260,26 @@ class LecturaArchivo(BaseModel):
     @classmethod
     def _origen_sin_documento(cls, v: str | None) -> str | None:
         return _rechazar_documento_de_identidad(v, "origen") if v else v
+
+
+class LecturaNoClinica(BaseModel):
+    """La mitad de `LecturaArchivo` que SÍ puede cruzar hacia el paciente.
+
+    No tiene `contexto_clinico`, y esa ausencia es el muro. No es que el código se acuerde
+    de no copiarlo: es que no hay dónde ponerlo. Si alguien añade el campo aquí, las
+    pruebas de `tests/test_muro.py` caen.
+
+    `extra="forbid"` es parte de la garantía: sin él, `LecturaNoClinica(**lectura.model_dump())`
+    se tragaría el campo clínico en silencio como atributo extra.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    tipo_documento: TipoDocumento
+    tratamiento: Tratamiento
+    origen: str | None = Field(default=None, max_length=200)
+    fecha_documento: date | None = None
+    confianza: Confianza
 
 
 class RespuestaDaniela(BaseModel):
