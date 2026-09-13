@@ -129,6 +129,25 @@ uv run uvicorn maxicare_daniela.runtime:app --port 8080
   recordaría ni la frase anterior, `turno_actual` sería siempre 1 y las claves de
   idempotencia (`id_conversacion + turno`) no colisionarían nunca, con lo que dejarían de
   proteger.
+- **Los mensajes se agrupan antes de contestar, y el orden de las piezas es el arreglo.**
+  En WhatsApp nadie escribe párrafos: el saludo va en un mensaje, la pregunta en otro y lo
+  que se le ocurrió después en un tercero. Sin agrupar, cada trozo abría su turno y su
+  respuesta — medido con el primer paciente real de la clínica: tres mensajes en 48 s, tres
+  respuestas, y siete segundos entre las dos últimas. `atencion` acumula en `_buferes` los
+  mensajes de un número y espera `VENTANA_SILENCIO_SEGUNDOS` (20) sin mensajes nuevos, con
+  tope de `TOPE_BUFER_SEGUNDOS` (45) contado desde el primero. Tres cosas no se pueden mover:
+  - **La ventana va ANTES del candado del turno.** Si el segundo mensaje tuviera que esperar
+    ese candado, no podría sumarse al grupo hasta que terminara el turno del primero — es
+    decir, hasta después de la respuesta que se quería evitar.
+  - **El bloque que mete el mensaje en el búfer no tiene un solo `await`, y por eso no lleva
+    candado**: en un único bucle de eventos eso lo vuelve atómico. Añadir un `await` ahí
+    reintroduce la carrera y nada lo delataría.
+  - **El retardo se descuenta, no se suma.** `momento_inicio` es la llegada del PRIMER
+    mensaje del grupo. Reiniciarlo después del búfer saca la respuesta del minuto que fija
+    `limites.latencia_maxima`. Hay prueba, y cae al mutarlo.
+- **El búfer se saca SIEMPRE en un `finally`.** Uno que sobreviviera a su turno se tragaría
+  todos los mensajes siguientes de ese número: cada uno se sumaría a un grupo que ya no
+  espera a nadie. En silencio, y solo para ese teléfono.
 - **El candado de `atencion.py` va por TELÉFONO, no por conversación, y la lectura de la
   base va DENTRO.** No es un detalle: el teléfono se conoce desde el mensaje y la
   conversación no, así que un candado por conversación obliga a leer la base antes de

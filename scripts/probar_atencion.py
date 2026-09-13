@@ -37,6 +37,10 @@ carriles distintos que no se pisan.
 `information_schema` si el esquema sigue ahi. Un `DROP SCHEMA` que no se verifica es una
 promesa, no un hecho.
 
+La novena comprobacion es la del bufer, y es la unica que corre con una ventana de
+silencio real: sin ella, dos mensajes seguidos del mismo numero reciben dos respuestas
+--que fue exactamente lo que le paso al primer paciente que le escribio a Daniela--.
+
 Por que cada comprobacion esta partida en dos mitades
 ------------------------------------------------------------------------------------------
 Una comprobacion que pasaria igual si la funcion devolviera siempre lo mismo no comprueba
@@ -100,6 +104,7 @@ TEL_RETARDO = "573009900007"
 TEL_RASTRO = "573009900008"
 TEL_APAGADO = "573009900009"
 TEL_ADJUNTO = "573009900010"
+TEL_BUFER = "573009900011"
 
 NOMBRE_REGISTRADO = "Laura Prueba Atencion"
 
@@ -387,7 +392,13 @@ def configuracion(url: str, *, responde: bool = True) -> Config:
     )
 
 
-async def atender(m, *, cfg, wa, dormir):
+async def atender(m, *, cfg, wa, dormir, ventana=0, tope=0):
+    """`ventana=0` por defecto: el bufer no agrupa y el turno corre solo.
+
+    Lo que miden las ocho primeras comprobaciones es el turno, no el bufer, y con la ventana
+    real de produccion cada una esperaria veinte segundos. La novena si pasa una ventana de
+    verdad, porque sin ella no estaria comprobando nada.
+    """
     return await atencion.atender(
         m,
         whatsapp=wa,
@@ -395,6 +406,8 @@ async def atender(m, *, cfg, wa, dormir):
         config=cfg,
         calendario=CalendarioDoble(),
         dormir=dormir,
+        ventana=ventana,
+        tope=tope,
     )
 
 
@@ -803,6 +816,62 @@ async def ocho(url: str, cfg: Config, chat: bool) -> None:
     revisar("y NO llega marcado con adjunto", solo_texto["hubo_adjunto"] is False)
 
 
+async def nueve(url: str, cfg: Config, chat: bool) -> None:
+    print("\n9. Dos mensajes seguidos se contestan UNA sola vez -- comprobado POR SQL")
+
+    espia = usar(Turnos(real=chat))
+    wa, dormir = WhatsAppFalso(), DormirFalso()
+    m1 = mensaje(TEL_BUFER, texto="Buenas noches")
+    m2 = mensaje(TEL_BUFER, texto="Ofrecen disenos de sonrisa?")
+    registrar(url, m1)
+    registrar(url, m2)
+
+    # Con ventana de verdad. Es la unica comprobacion que la necesita: con ventana=0 el
+    # primer mensaje cerraria su grupo antes de que llegara el segundo, y esto pasaria en
+    # verde sin haber agrupado nada.
+    lider_tarea = asyncio.create_task(
+        atender(m1, cfg=cfg, wa=wa, dormir=dormir, ventana=0.4, tope=5.0)
+    )
+    await asyncio.sleep(0.05)
+    sumado = await atender(m2, cfg=cfg, wa=wa, dormir=dormir, ventana=0.4, tope=5.0)
+    lider = await lider_tarea
+
+    revisar("un solo turno para los dos mensajes", len(espia.llamadas) == 1,
+            f"{len(espia.llamadas)} turnos")
+    revisar("un solo mensaje al paciente", len(wa.enviados) == 1, f"{len(wa.enviados)} envios")
+    revisar("el segundo mensaje se marco agrupado y no abrio turno", sumado.agrupado is True)
+    revisar("la respuesta dice que contesto a dos", lider.mensajes_agrupados == 2,
+            str(lider.mensajes_agrupados))
+    if espia.llamadas:
+        entrada = espia.llamadas[0]["entrada"]
+        revisar("el modelo vio los DOS textos en una sola entrada",
+                "Buenas noches" in entrada and "sonrisa" in entrada, entrada[:140])
+
+    # Por SQL, y esta es la mitad que importa: los DOS mensajes tienen que quedar respondidos
+    # y apuntando al MISMO wamid. Marcar solo uno dejaria al otro pendiente para siempre, y
+    # la barrida que busca a quien no le contestamos lo recogeria en cada pasada.
+    filas = [
+        una_fila(
+            url,
+            "SELECT respondido_en, wamid_respuesta, conversacion_id::text "
+            "  FROM mensajes_entrantes WHERE wamid = %s",
+            (m.wamid,),
+        )
+        for m in (m1, m2)
+    ]
+    revisar("los dos mensajes existen en Neon", all(len(f) == 3 for f in filas))
+    if not all(len(f) == 3 for f in filas):
+        return
+    revisar("los dos quedaron respondidos", all(f[0] is not None for f in filas),
+            str([f[0] for f in filas]))
+    respuestas = {f[1] for f in filas}
+    revisar("los dos apuntan al MISMO wamid de respuesta",
+            len(respuestas) == 1 and None not in respuestas, str(respuestas))
+    conversaciones = {f[2] for f in filas}
+    revisar("los dos quedaron en la MISMA conversacion",
+            len(conversaciones) == 1 and None not in conversaciones, str(conversaciones))
+
+
 # ==========================================================================================
 # main
 # ==========================================================================================
@@ -817,6 +886,7 @@ async def corridas(url: str, chat: bool) -> None:
     await seis(url, cfg, chat)
     await siete(url, cfg)
     await ocho(url, cfg, chat)
+    await nueve(url, cfg, chat)
 
 
 def main() -> int:

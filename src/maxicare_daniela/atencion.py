@@ -73,7 +73,12 @@ from typing import Any, Awaitable, Callable
 from . import conversacion, guardrails, ingesta, persistencia
 from .calendario import CalendarioCaido, CalendarioDoble, calendario_desde_config
 from .canales import Telegram, WhatsApp
-from .config import RETARDO_RESPUESTA_SEGUNDOS, Config
+from .config import (
+    RETARDO_RESPUESTA_SEGUNDOS,
+    TOPE_BUFER_SEGUNDOS,
+    VENTANA_SILENCIO_SEGUNDOS,
+    Config,
+)
 from .contratos import ContextoDaniela, DatosDelTurno
 from .ingesta import MensajeEntrante
 
@@ -120,6 +125,25 @@ VENTANA_CONVERSACION_HORAS = 24
 #: marca de tiempo propia no se podría tirar nunca.
 _candados: dict[str, tuple[asyncio.Lock, float]] = {}
 _sesiones: dict[str, tuple[conversacion.SesionEnMemoria, float]] = {}
+
+
+@dataclass
+class _Bufer:
+    """Los mensajes de un número que todavía no han abierto turno. Ver `atender`."""
+
+    mensajes: list[MensajeEntrante]
+    #: `time.monotonic()` del primero y del último. El primero manda el tope; el último, la
+    #: ventana de silencio.
+    primero: float
+    ultimo: float
+    #: Despierta al que espera cuando llega un mensaje nuevo, para que la cuenta vuelva a
+    #: empezar sin tener que sondear.
+    despierta: asyncio.Event
+
+
+#: El búfer por teléfono. A diferencia de los otros dos diccionarios, este NO necesita poda:
+#: un búfer vive como mucho `TOPE_BUFER_SEGUNDOS` y siempre se saca en un `finally`.
+_buferes: dict[str, _Bufer] = {}
 
 
 @dataclass
@@ -181,6 +205,12 @@ class Atendido:
     motivo: str | None = None
     turno: int = 0
     escalado_por: str | None = None
+    #: Este mensaje se sumó a un grupo que ya estaba esperando y NO abrió turno propio.
+    #: No va en `motivo` a propósito: `runtime.py` registra cualquier motivo como warning, y
+    #: agrupar no es una incidencia -- es lo que pasa cuando alguien escribe dos veces.
+    agrupado: bool = False
+    #: A cuántos mensajes contestó esta respuesta. 1 en el caso normal.
+    mensajes_agrupados: int = 1
 
 
 @dataclass(frozen=True)
@@ -204,7 +234,7 @@ class _Estado:
 # ==========================================================================================
 
 
-def _leer_estado(database_url: str, telefono: str, wamid: str) -> _Estado:
+def _leer_estado(database_url: str, telefono: str, wamids: list[str]) -> _Estado:
     """Las seis lecturas del turno en una sola conexión, que se cierra al volver.
 
     Cerrarla antes de llamar al modelo no es higiene: es el ruling 5 de la revisión de la
@@ -246,7 +276,12 @@ def _leer_estado(database_url: str, telefono: str, wamid: str) -> _Estado:
             operativa = None
 
         tomada_por = persistencia.conversacion_tomada(conn, id_conversacion)
-        persistencia.ligar_mensaje_a_conversacion(conn, wamid, id_conversacion)
+        # Todos los del grupo, no solo el que abrió el turno: si se ligara solo ese, los
+        # demás quedarían en `mensajes_entrantes` sin conversación, y «¿de qué charla
+        # salió este mensaje?» dejaría de tener respuesta justo para los mensajes que
+        # más se parten -- los que alguien escribe de corrido.
+        for uno in wamids:
+            persistencia.ligar_mensaje_a_conversacion(conn, uno, id_conversacion)
 
     return _Estado(
         id_conversacion=id_conversacion,
@@ -269,7 +304,7 @@ def _leer_estado(database_url: str, telefono: str, wamid: str) -> _Estado:
 def _anotar_resultado(
     database_url: str,
     id_conversacion: str,
-    wamid: str,
+    wamids: list[str],
     *,
     wamid_respuesta: str | None,
     motivo: str | None,
@@ -282,25 +317,30 @@ def _anotar_resultado(
     """
     try:
         with persistencia.conectar(database_url) as conn:
-            if wamid_respuesta is not None:
-                persistencia.marcar_respondido(conn, wamid, wamid_respuesta=wamid_respuesta)
-                if motivo:
-                    # Respondido Y con fallo interno: son compatibles, y perder el segundo
-                    # dato era un agujero real. Un turno que reventó --dos tripwires
-                    # seguidos, `MaxTurnsExceeded`, una excepción del SDK-- sale con
-                    # `MENSAJE_SEGURO`, que ES una respuesta, así que entraba por la rama de
-                    # arriba y `marcar_respondido` ponía `fallo_respuesta = NULL`. En
-                    # `mensajes_entrantes` quedaba EXACTAMENTE IGUAL que un turno que fue
-                    # bien: la pregunta «¿a cuántos pacientes les contestamos con el mensaje
-                    # de emergencia?» no se podía responder.
-                    #
-                    # El orden importa y es este a propósito: `marcar_respondido` limpia el
-                    # motivo --y tiene razón en hacerlo, porque un reintento que sí sale
-                    # tiene que borrar el fallo del intento anterior-- así que el motivo se
-                    # escribe DESPUÉS.
+            # Una sola respuesta puede contestar a varios mensajes. Los tres quedan
+            # marcados con el MISMO `wamid_respuesta`, que es la verdad: hubo un solo
+            # globo. Marcar solo uno dejaría a los otros «sin responder» para siempre, y
+            # la barrida que busca a quién no le contestamos los recogería sin fin.
+            for wamid in wamids:
+                if wamid_respuesta is not None:
+                    persistencia.marcar_respondido(conn, wamid, wamid_respuesta=wamid_respuesta)
+                    if motivo:
+                        # Respondido Y con fallo interno: son compatibles, y perder el segundo
+                        # dato era un agujero real. Un turno que reventó --dos tripwires
+                        # seguidos, `MaxTurnsExceeded`, una excepción del SDK-- sale con
+                        # `MENSAJE_SEGURO`, que ES una respuesta, así que entraba por la rama de
+                        # arriba y `marcar_respondido` ponía `fallo_respuesta = NULL`. En
+                        # `mensajes_entrantes` quedaba EXACTAMENTE IGUAL que un turno que fue
+                        # bien: la pregunta «¿a cuántos pacientes les contestamos con el mensaje
+                        # de emergencia?» no se podía responder.
+                        #
+                        # El orden importa y es este a propósito: `marcar_respondido` limpia el
+                        # motivo --y tiene razón en hacerlo, porque un reintento que sí sale
+                        # tiene que borrar el fallo del intento anterior-- así que el motivo se
+                        # escribe DESPUÉS.
+                        persistencia.marcar_fallo_respuesta(conn, wamid, motivo=motivo)
+                elif motivo:
                     persistencia.marcar_fallo_respuesta(conn, wamid, motivo=motivo)
-            elif motivo:
-                persistencia.marcar_fallo_respuesta(conn, wamid, motivo=motivo)
             # Siempre, incluso si el envío falló: el turno ocurrió, y la conversación tiene
             # que seguir viva o `conversacion_viva` la declararía vieja a mitad de la charla.
             #
@@ -311,7 +351,7 @@ def _anotar_resultado(
             # reintento del anterior -- el doctor solo se enteraba del primero.
             persistencia.tocar_conversacion(conn, id_conversacion, turno_actual=turno)
     except Exception:  # noqa: BLE001 -- ver docstring
-        log.exception("no se pudo anotar el resultado de %s", wamid)
+        log.exception("no se pudo anotar el resultado de %s", ", ".join(wamids))
 
 
 # ==========================================================================================
@@ -470,6 +510,49 @@ def _entrada_para_el_modelo(mensaje: MensajeEntrante) -> str:
     return f"[El paciente envió {que}. No trae texto.]"
 
 
+def _entrada_del_grupo(mensajes: list[MensajeEntrante]) -> str:
+    """Los mensajes del grupo como UNA sola entrada para el modelo.
+
+    El aviso de la cabecera no es decorativo. Sin él, el modelo recibe tres frases sueltas y
+    las contesta una por una dentro del mismo globo --«1) ¡Hola! 2) Ofrecemos... 3) Sí,
+    hacemos...»--, que es exactamente la sensación que el búfer existe para quitar, solo que
+    concentrada en un mensaje en vez de repartida en tres.
+    """
+    if len(mensajes) == 1:
+        return _entrada_para_el_modelo(mensajes[0])
+    partes = [_entrada_para_el_modelo(m) for m in mensajes]
+    return (
+        "[El paciente escribió esto en varios mensajes seguidos, como se escribe en "
+        "WhatsApp. Es una sola idea partida en trozos: léela entera y contéstale UNA vez, "
+        "sin ir mensaje por mensaje ni numerar las respuestas.]\n" + "\n".join(partes)
+    )
+
+
+async def _esperar_el_silencio(bufer: _Bufer, ventana: float, tope: float) -> None:
+    """Espera a que el paciente deje de escribir, o a que se agote el tope.
+
+    Cada mensaje nuevo reinicia la cuenta de `ventana`. Por eso hay un `Event` y no un
+    `sleep` a secas: quien escribe tres veces seguidas no tiene que esperar tres ventanas, y
+    el que espera se entera en el acto en vez de sondeando. El tope, en cambio, se cuenta
+    desde el primer mensaje y no se reinicia nunca -- es lo único que impide que alguien
+    escribiendo sin parar deje la ventana abierta para siempre.
+
+    El `clear()` va ANTES de mirar el reloj, y ese orden es deliberado. Al revés, un mensaje
+    que llegara entre la mirada y el `clear()` perdería su aviso, y su texto no entraría en
+    el grupo hasta una vuelta siguiente que podría no llegar nunca.
+    """
+    while True:
+        bufer.despierta.clear()
+        ahora = time.monotonic()
+        espera = min(ventana - (ahora - bufer.ultimo), tope - (ahora - bufer.primero))
+        if espera <= 0:
+            return
+        try:
+            await asyncio.wait_for(bufer.despierta.wait(), timeout=espera)
+        except TimeoutError:
+            return
+
+
 # ==========================================================================================
 # El turno
 # ==========================================================================================
@@ -484,8 +567,14 @@ async def atender(
     calendario: Any | None = None,
     al_escalar: Callable[..., Awaitable[None]] | None = None,
     dormir: Callable[[float], Awaitable[None]] | None = None,
+    ventana: float | None = None,
+    tope: float | None = None,
 ) -> Atendido:
     """Atiende un mensaje de WhatsApp de principio a fin y deja constancia de qué pasó.
+
+    `calendario`, `dormir`, `ventana` y `tope` existen **solo para que esto se pueda
+    probar**. Los dos últimos son el búfer: con `ventana=0` no se agrupa nada y el turno
+    corre como antes, que es lo que quiere casi toda la suite.
 
     `calendario` y `dormir` existen **solo para que esto se pueda probar**. Por omisión son
     `calendario_desde_config(config)` y `asyncio.sleep`, que es lo que corre en producción;
@@ -527,7 +616,58 @@ async def atender(
     except Exception:  # noqa: BLE001 -- ver arriba
         log.warning("no se pudo marcar leído %s; se sigue igual", mensaje.wamid, exc_info=True)
 
-    texto = _entrada_para_el_modelo(mensaje)
+    # ------------------------------------------------------------------------------------
+    # El búfer: juntar lo que el paciente escribió de corrido
+    # ------------------------------------------------------------------------------------
+    #
+    # Antes, cada mensaje abría su turno y su respuesta. Tres mensajes en menos de un minuto
+    # --el saludo, la pregunta, y lo que se le ocurrió después-- daban tres globos de Daniela
+    # contestando a una sola idea, con siete segundos entre los dos últimos. Está medido en
+    # la primera conversación real de la clínica, y se lee como lo que es: una máquina.
+    #
+    # Aquí NO hace falta candado, y conviene decirlo porque parece que sí. Este bloque no
+    # tiene un solo `await`: en un único bucle de eventos eso lo vuelve atómico por
+    # construcción. Un candado no lo haría más seguro, solo escondería que la seguridad
+    # depende de que nadie meta un `await` en medio.
+    #
+    # Y va ANTES del candado del turno, que es lo que lo hace funcionar. Si el segundo
+    # mensaje tuviera que esperar ese candado, no podría sumarse al grupo hasta que el turno
+    # del primero terminara: es decir, hasta después de la respuesta que se quería evitar.
+    ahora = time.monotonic()
+    esperando = _buferes.get(mensaje.telefono)
+    if esperando is not None:
+        esperando.mensajes.append(mensaje)
+        esperando.ultimo = ahora
+        esperando.despierta.set()
+        log.info(
+            "%s se suma al grupo de %s (van %d); no abre turno propio",
+            mensaje.wamid,
+            mensaje.telefono,
+            len(esperando.mensajes),
+        )
+        return Atendido(
+            wamid=mensaje.wamid, id_conversacion=None, respondido=False, agrupado=True
+        )
+
+    bufer = _Bufer([mensaje], primero=ahora, ultimo=ahora, despierta=asyncio.Event())
+    _buferes[mensaje.telefono] = bufer
+    try:
+        await _esperar_el_silencio(
+            bufer,
+            VENTANA_SILENCIO_SEGUNDOS if ventana is None else ventana,
+            TOPE_BUFER_SEGUNDOS if tope is None else tope,
+        )
+    finally:
+        # En un `finally`, siempre. Un búfer que quedara registrado tras una cancelación se
+        # tragaría todos los mensajes siguientes de ese número: cada uno se sumaría a un
+        # grupo que ya no espera a nadie, y ese teléfono no volvería a recibir respuesta.
+        _buferes.pop(mensaje.telefono, None)
+
+    mensajes = bufer.mensajes
+    wamids = [m.wamid for m in mensajes]
+    if len(mensajes) > 1:
+        log.info("%s: %d mensajes en un solo turno", mensaje.telefono, len(mensajes))
+    texto = _entrada_del_grupo(mensajes)
 
     # El candado se coge ANTES de leer la base, y ese orden es el arreglo entero.
     #
@@ -548,7 +688,7 @@ async def atender(
             # a la vez. Dentro del candado sigue siendo cierto: `to_thread` cede el control,
             # y lo único que espera es otro mensaje DEL MISMO número.
             estado = await asyncio.to_thread(
-                _leer_estado, config.database_url, mensaje.telefono, mensaje.wamid
+                _leer_estado, config.database_url, mensaje.telefono, wamids
             )
         except Exception as e:  # noqa: BLE001
             # Sin base no hay contexto, y sin contexto no hay turno. Pero la regla de
@@ -562,13 +702,20 @@ async def atender(
                 await whatsapp.enviar_texto(mensaje.telefono, conversacion.MENSAJE_SEGURO)
             except Exception:  # noqa: BLE001 -- mismo motivo que en el envío de abajo
                 log.exception("tampoco se pudo responder a %s", mensaje.telefono)
-                return Atendido(mensaje.wamid, None, False, motivo=f"sin base y sin envío: {e}")
+                return Atendido(
+                    mensaje.wamid,
+                    None,
+                    False,
+                    motivo=f"sin base y sin envío: {e}",
+                    mensajes_agrupados=len(mensajes),
+                )
             return Atendido(
                 mensaje.wamid,
                 None,
                 True,
                 texto_enviado=conversacion.MENSAJE_SEGURO,
                 motivo=f"sin base: {e}",
+                mensajes_agrupados=len(mensajes),
             )
 
         operativa = estado.operativa or {}
@@ -599,8 +746,14 @@ async def atender(
             telegram_bot_token=config.telegram_bot_token,
             telegram_chat_doctores=config.telegram_chat_doctores,
             turno=_DatosDelMensaje(
-                adjunto_del_mensaje=mensaje.trae_archivo,
-                sintomas_del_mensaje=guardrails.menciona_sintomas(mensaje.texto or ""),
+                # Del GRUPO entero, no del último mensaje. Mandar la radiografía y escribir
+                # «¿esto qué es?» justo después son dos mensajes: leyendo solo el segundo,
+                # `sin_lectura_clinica` se quedaría sin nada que vigilar precisamente en el
+                # turno que sí habla de la imagen.
+                adjunto_del_mensaje=any(m.trae_archivo for m in mensajes),
+                sintomas_del_mensaje=any(
+                    guardrails.menciona_sintomas(m.texto or "") for m in mensajes
+                ),
             ),
         )
 
@@ -643,7 +796,7 @@ async def atender(
                 _anotar_resultado,
                 config.database_url,
                 estado.id_conversacion,
-                mensaje.wamid,
+                wamids,
                 wamid_respuesta=None,
                 motivo=f"{type(e).__name__}: {e}",
                 turno=turno,
@@ -655,13 +808,14 @@ async def atender(
                 motivo=f"{type(e).__name__}: {e}",
                 turno=turno,
                 escalado_por=escalado_por,
+                mensajes_agrupados=len(mensajes),
             )
 
         await asyncio.to_thread(
             _anotar_resultado,
             config.database_url,
             estado.id_conversacion,
-            mensaje.wamid,
+            wamids,
             wamid_respuesta=wamid_respuesta,
             motivo=fallo,
             turno=turno,
@@ -674,6 +828,7 @@ async def atender(
             motivo=fallo,
             turno=turno,
             escalado_por=escalado_por,
+            mensajes_agrupados=len(mensajes),
         )
 
 

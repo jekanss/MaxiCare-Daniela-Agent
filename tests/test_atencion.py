@@ -345,6 +345,7 @@ def limpiar_estado() -> None:
     """
     atencion._candados.clear()
     atencion._sesiones.clear()
+    atencion._buferes.clear()
 
 
 def preparar(monkeypatch, base: BaseFalsa | None = None, turnos: Turnos | None = None):
@@ -374,6 +375,10 @@ async def _atender(mensaje, **cambios):
         config=config_falso(),
         calendario=CalendarioDoble(),
         dormir=DormirFalso(),
+        # Sin ventana: el bufer no agrupa nada y el turno corre como antes. Lo que mide casi
+        # toda esta suite es el turno, no el bufer; las pruebas del bufer pasan su ventana.
+        ventana=0,
+        tope=0,
     )
     argumentos.update(cambios)
     return await atencion.atender(mensaje, **argumentos)
@@ -1256,3 +1261,292 @@ def test_marcar_leido_no_puede_tumbar_el_turno(monkeypatch):
 
     assert resultado.respondido is True
     assert whatsapp.textos
+
+
+# ==========================================================================================
+# 13 · El búfer -- lo que se escribió de corrido se contesta una vez
+# ==========================================================================================
+#
+# Estas usan tiempo REAL, con ventanas de décimas. Es deliberado: lo que se prueba aquí es
+# justamente la carrera entre un mensaje que llega y un temporizador que corre, y un reloj de
+# mentira la borraría. La suite entera sigue por debajo de los diez segundos.
+
+VENTANA_CORTA = 0.4
+TOPE_CORTO = 2.0
+
+
+def _en_grupo(**extra):
+    """Los argumentos del búfer, para no repetirlos en cada prueba."""
+    return dict(ventana=VENTANA_CORTA, tope=TOPE_CORTO, **extra)
+
+
+def test_dos_mensajes_seguidos_reciben_UNA_sola_respuesta(monkeypatch):
+    """El fallo que trajo el búfer, tal como lo vivió la clínica.
+
+    Tres mensajes en 48 segundos y tres respuestas, las dos últimas con siete segundos entre
+    ellas. En WhatsApp nadie escribe párrafos: el saludo va aparte de la pregunta.
+    """
+    base, turnos = preparar(monkeypatch, BaseFalsa(viva=("conv-1", 4, True, 0)))
+    whatsapp = WhatsAppFalso()
+
+    async def escena():
+        lider = asyncio.create_task(
+            _atender(
+                mensaje_texto("Quisiera saber qué servicios ofrecen?", wamid="w1"),
+                whatsapp=whatsapp,
+                **_en_grupo(),
+            )
+        )
+        await asyncio.sleep(0.02)
+        assert atencion._buferes, "el líder no llegó a abrir el grupo; la prueba no prueba nada"
+        sumado = await _atender(
+            mensaje_texto("Ofrecen diseños de sonrisa?", wamid="w2"),
+            whatsapp=whatsapp,
+            **_en_grupo(),
+        )
+        return await lider, sumado
+
+    lider, sumado = asyncio.run(escena())
+
+    assert len(turnos.llamadas) == 1, "se corrió más de un turno para una sola idea"
+    assert len(whatsapp.enviados) == 1, f"el paciente recibió {len(whatsapp.enviados)} globos"
+    assert sumado.agrupado is True
+    assert sumado.respondido is False
+    # `motivo` vacío a propósito: `runtime.py` registra cualquier motivo como warning, y
+    # agrupar no es una incidencia.
+    assert sumado.motivo is None
+    assert lider.mensajes_agrupados == 2
+
+    entrada = turnos.llamadas[0]["entrada"]
+    assert "servicios ofrecen" in entrada
+    assert "diseños de sonrisa" in entrada
+
+
+def test_dos_mensajes_separados_por_una_pausa_reciben_dos_respuestas(monkeypatch):
+    """La otra mitad, y sin ella la de arriba no prueba nada.
+
+    Un búfer que se tragara TODO --que agrupara también lo que llega media hora después--
+    pasaría la prueba anterior con nota. Lo que hace útil al búfer es que se cierre.
+    """
+    base, turnos = preparar(monkeypatch, BaseFalsa(viva=("conv-1", 4, True, 0)))
+    whatsapp = WhatsAppFalso()
+
+    atender(mensaje_texto("Hola buenas noches", wamid="w1"), whatsapp=whatsapp, **_en_grupo())
+    atender(mensaje_texto("¿Cuánto vale una limpieza?", wamid="w2"), whatsapp=whatsapp,
+            **_en_grupo())
+
+    assert len(turnos.llamadas) == 2
+    assert len(whatsapp.enviados) == 2
+    assert atencion._buferes == {}, "quedó un búfer registrado después de contestar"
+
+
+def test_cada_mensaje_nuevo_reinicia_la_ventana(monkeypatch):
+    """Quien escribe tres veces seguidas no espera tres ventanas, pero tampoco se le corta.
+
+    Sin el reinicio, el tercer mensaje llegaría cuando el turno del primero ya arrancó y se
+    quedaría fuera del grupo -- que es medio arreglo, y medio arreglo aquí se nota igual.
+    """
+    base, turnos = preparar(monkeypatch, BaseFalsa(viva=("conv-1", 4, True, 0)))
+    whatsapp = WhatsAppFalso()
+
+    async def escena():
+        lider = asyncio.create_task(
+            _atender(mensaje_texto("uno", wamid="w1"), whatsapp=whatsapp, **_en_grupo())
+        )
+        await asyncio.sleep(0.02)
+        for i in range(2, 8):
+            # Huecos cortos, tramo largo: seis mensajes cada 0.1 s abarcan 0.6 s, mas que la
+            # ventana de 0.4, pero NINGUN hueco la alcanza. Sin el reinicio, el grupo cerraria
+            # a los 0.4 s y los ultimos se quedarian fuera.
+            #
+            # Los numeros no son estetica: con solo tres mensajes, el hueco tendria que pasar
+            # de media ventana y bastaria que un `sleep` de 0.24 s se fuera a 0.4 para romper
+            # la prueba. Paso sola y fallo dentro de la suite en el primer intento.
+            await asyncio.sleep(0.1)
+            await _atender(
+                mensaje_texto(f"mas {i}", wamid=f"w{i}"), whatsapp=whatsapp, **_en_grupo()
+            )
+        return await lider
+
+    lider = asyncio.run(escena())
+
+    assert lider.mensajes_agrupados == 7
+    assert len(turnos.llamadas) == 1
+    assert len(whatsapp.enviados) == 1
+
+
+def test_el_tope_corta_a_quien_escribe_sin_parar(monkeypatch):
+    """El tope es lo único que impide que la ventana quede abierta para siempre.
+
+    Con la ventana más larga que las pausas del paciente, el silencio no llega nunca: si el
+    tope no cerrara el grupo, este turno no saldría jamás y el paciente se quedaría mirando
+    el doble check azul.
+    """
+    base, turnos = preparar(monkeypatch, BaseFalsa(viva=("conv-1", 4, True, 0)))
+    whatsapp = WhatsAppFalso()
+
+    async def escena():
+        lider = asyncio.create_task(
+            _atender(mensaje_texto("uno", wamid="w1"), whatsapp=whatsapp, ventana=5.0, tope=0.3)
+        )
+        await asyncio.sleep(0.02)
+        for i in range(2, 10):
+            await asyncio.sleep(0.05)
+            await _atender(
+                mensaje_texto(f"mas {i}", wamid=f"w{i}"),
+                whatsapp=whatsapp,
+                ventana=5.0,
+                tope=0.3,
+            )
+        return await lider
+
+    lider = asyncio.run(escena())
+
+    # Con ventana=5 y un mensaje cada 0.05 s, el silencio NUNCA llega. Que este turno haya
+    # terminado ya es la prueba, y que no se llevara los nueve mensajes dice que fue el tope.
+    assert lider.respondido is True
+    assert lider.mensajes_agrupados < 9, "el tope no cortó: el grupo se llevó todo el chorro"
+
+
+def test_los_dos_mensajes_quedan_marcados_con_la_misma_respuesta(monkeypatch):
+    """Una respuesta, dos mensajes contestados, un solo `wamid_respuesta`.
+
+    Marcar solo uno dejaría al otro «sin responder» para siempre, y la barrida que busca a
+    quién no le contestamos lo recogería en cada pasada, sin fin.
+    """
+    base, turnos = preparar(monkeypatch, BaseFalsa(viva=("conv-1", 4, True, 0)))
+    whatsapp = WhatsAppFalso()
+
+    async def escena():
+        lider = asyncio.create_task(
+            _atender(mensaje_texto("uno", wamid="w1"), whatsapp=whatsapp, **_en_grupo())
+        )
+        await asyncio.sleep(0.02)
+        await _atender(mensaje_texto("dos", wamid="w2"), whatsapp=whatsapp, **_en_grupo())
+        return await lider
+
+    asyncio.run(escena())
+
+    marcados = [(l[1], l[2]) for l in base.llamadas if l[0] == "marcar_respondido"]
+    assert sorted(w for w, _ in marcados) == ["w1", "w2"]
+    assert len({respuesta for _, respuesta in marcados}) == 1, "cada uno apunta a otra respuesta"
+
+    ligados = sorted(l[1] for l in base.llamadas if l[0] == "ligar_mensaje_a_conversacion")
+    assert ligados == ["w1", "w2"], "un mensaje del grupo se quedó sin conversación"
+
+
+def test_un_adjunto_en_cualquier_mensaje_del_grupo_marca_el_turno(monkeypatch):
+    """Mandar la radiografía y escribir «¿esto qué es?» justo después es UN solo turno.
+
+    Si el adjunto se leyera solo del último mensaje, `sin_lectura_clinica` se quedaría sin
+    nada que vigilar precisamente en el turno que sí habla de la imagen.
+    """
+    base, turnos = preparar(monkeypatch, BaseFalsa(viva=("conv-1", 4, True, 0)))
+    whatsapp = WhatsAppFalso()
+
+    imagen = dict(tipo="image", media_id="media-1")
+
+    async def escena(primero, segundo):
+        lider = asyncio.create_task(
+            _atender(primero, whatsapp=whatsapp, **_en_grupo())
+        )
+        await asyncio.sleep(0.02)
+        await _atender(segundo, whatsapp=whatsapp, **_en_grupo())
+        return await lider
+
+    # Los DOS órdenes, y no es por completismo: con la imagen solo en el mensaje que abre el
+    # grupo, leer `mensaje.trae_archivo` --el líder-- daría `True` y la prueba pasaría con la
+    # lectura rota. Con la imagen solo en el último, la rota sería `mensajes[-1]`. Ninguna
+    # lectura de un único mensaje del grupo sobrevive a los dos casos a la vez.
+    asyncio.run(escena(
+        mensaje_texto(None, wamid="w1", **imagen),
+        mensaje_texto("¿esto qué es?", wamid="w2"),
+    ))
+    asyncio.run(escena(
+        mensaje_texto("le mando una foto", wamid="w3"),
+        mensaje_texto(None, wamid="w4", **imagen),
+    ))
+
+    assert len(turnos.llamadas) == 2, "cada orden tenía que dar exactamente un turno"
+    assert [l["hubo_adjunto"] for l in turnos.llamadas] == [True, True]
+
+
+def test_dos_telefonos_distintos_no_se_agrupan(monkeypatch):
+    """El búfer es por número. Juntar a dos pacientes en un turno sería mucho peor que
+    contestarle dos veces a uno."""
+    base, turnos = preparar(
+        monkeypatch, BaseFalsa(viva=None, nueva=lambda tel: f"conv-{tel}")
+    )
+    whatsapp = WhatsAppFalso()
+
+    async def escena():
+        return await asyncio.gather(
+            _atender(mensaje_texto("uno", wamid="w1"), whatsapp=whatsapp, **_en_grupo()),
+            _atender(
+                mensaje_texto("dos", wamid="w2", telefono=OTRO_TELEFONO),
+                whatsapp=whatsapp,
+                **_en_grupo(),
+            ),
+        )
+
+    resultados = asyncio.run(escena())
+
+    assert [r.mensajes_agrupados for r in resultados] == [1, 1]
+    assert len(turnos.llamadas) == 2
+    assert len(whatsapp.enviados) == 2
+
+
+def test_lo_que_espera_el_bufer_se_descuenta_del_retardo(monkeypatch):
+    """El búfer no se suma al retardo: se lo come.
+
+    Encadenarlos sacaría la respuesta del minuto que fija `limites.latencia_maxima`. El
+    reloj se cuenta desde el PRIMER mensaje del grupo, así que los segundos que pasó
+    esperando ya están pagados.
+    """
+    base, turnos = preparar(monkeypatch, BaseFalsa(viva=("conv-1", 4, True, 0)))
+    monkeypatch.setattr(random, "uniform", lambda a, b: 10.0)
+    dormir = DormirFalso()
+
+    async def escena():
+        lider = asyncio.create_task(
+            _atender(
+                mensaje_texto("uno", wamid="w1"), dormir=dormir, ventana=0.3, tope=TOPE_CORTO
+            )
+        )
+        await asyncio.sleep(0.02)
+        await _atender(
+            mensaje_texto("dos", wamid="w2"), dormir=dormir, ventana=0.3, tope=TOPE_CORTO
+        )
+        return await lider
+
+    asyncio.run(escena())
+
+    assert len(dormir.dormidas) == 1
+    # Esperó al menos 0.3 s de ventana (más lo que tardó el segundo mensaje en llegar), y
+    # todo eso tiene que haber salido de los 10 s del retardo.
+    assert dormir.dormidas[0] <= 10.0 - 0.3, (
+        f"se pidió dormir {dormir.dormidas[0]:.2f} s sobre un objetivo de 10: la espera del "
+        "búfer se está sumando al retardo en vez de descontarse"
+    )
+
+
+def test_una_cancelacion_no_deja_el_bufer_atascado(monkeypatch):
+    """El `finally` que saca el búfer, y por qué no es una precaución de más.
+
+    Un búfer que sobreviviera a su turno se tragaría todos los mensajes siguientes de ese
+    número: cada uno se sumaría a un grupo que ya no espera a nadie, y ese teléfono no
+    volvería a recibir respuesta -- en silencio, y solo ese teléfono.
+    """
+    preparar(monkeypatch, BaseFalsa(viva=("conv-1", 4, True, 0)))
+
+    async def escena():
+        tarea = asyncio.create_task(_atender(mensaje_texto(), ventana=5.0, tope=5.0))
+        await asyncio.sleep(0.05)
+        assert atencion._buferes, "el búfer no llegó a registrarse; la prueba no prueba nada"
+        tarea.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await tarea
+
+    asyncio.run(escena())
+
+    assert atencion._buferes == {}, "el búfer quedó registrado tras cancelarse el turno"

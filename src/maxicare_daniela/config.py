@@ -60,6 +60,27 @@ LIMITE_HISTORIAL_SESION = 40
 #: minuto". El retardo se sortea dentro de este rango antes de responder.
 RETARDO_RESPUESTA_SEGUNDOS = (4, 55)
 
+#: El búfer de mensajes: cuánto silencio espera Daniela antes de dar por cerrado lo que el
+#: paciente quería decir.
+#:
+#: En WhatsApp nadie escribe párrafos. El saludo va en un mensaje, la pregunta en otro, y lo
+#: que se le ocurrió después en un tercero. Sin esto cada trozo abre su propio turno y el
+#: paciente recibe tres globos seguidos contestando a una sola idea. Medido en la primera
+#: conversación real de la clínica: tres mensajes en 48 segundos, dos de ellos separados por
+#: cinco, y sus respuestas le llegaron con siete segundos de diferencia.
+#:
+#: El caso que más va a doler no es ese, sino mandar la radiografía y escribir «¿esto qué
+#: es?» justo después: sin agrupar, Daniela contesta la foto por un lado y la pregunta por
+#: otro, y ninguna de las dos respuestas sabe de la otra mitad.
+VENTANA_SILENCIO_SEGUNDOS = 20
+
+#: Y el tope, porque quien escriba sin parar no puede mantener la ventana abierta para
+#: siempre. Se cuenta desde el PRIMER mensaje del grupo, no desde el último.
+#:
+#: El número sale del presupuesto, no del gusto: `limites.latencia_maxima` es un minuto y un
+#: turno tarda del orden de seis segundos. 45 + 6 deja margen; 55 no lo dejaría.
+TOPE_BUFER_SEGUNDOS = 45
+
 
 # ==========================================================================================
 # Configuración de despliegue
