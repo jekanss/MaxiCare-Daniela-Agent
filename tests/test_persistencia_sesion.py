@@ -66,3 +66,68 @@ def test_url_malformada_no_filtra_credenciales():
     assert "clave-secreta" not in str(exc_info.value)
     # Sí debe mencionar el problema real
     assert "://" in str(exc_info.value)
+
+
+# ==========================================================================================
+# `sesion_de_agente` -- la fábrica de sesiones persistidas (Tarea 3)
+# ==========================================================================================
+
+
+def test_la_sesion_no_crea_sus_tablas():
+    """`create_tables=False` es un no negociable de la fase: las tablas las crea la
+    migración 010. Con `True`, el proceso web ejecutaría DDL al arrancar y el esquema del
+    proyecto dejaría de leerse entero en `migraciones/`."""
+    sesion = persistencia.sesion_de_agente("conv-1", database_url=URL_NEON)
+
+    assert sesion._create_tables is False
+
+
+def test_la_sesion_guarda_los_acentos_sin_escapar():
+    """El default del SDK es `ensure_ascii=True` y deja «informacio\\u00f3n» en la base. El
+    ida y vuelta sería correcto igual, pero el texto no se lee a ojo, y eso son horas
+    perdidas depurando el día que haya que mirar un historial a mano."""
+    sesion = persistencia.sesion_de_agente("conv-1", database_url=URL_NEON)
+
+    assert sesion._ensure_ascii is False
+
+
+def test_la_sesion_lleva_el_id_de_la_conversacion():
+    sesion = persistencia.sesion_de_agente("conv-abc", database_url=URL_NEON)
+
+    assert sesion.session_id == "conv-abc"
+
+
+def test_sin_esquema_no_se_traduce_nada():
+    """En producción las tablas están en `public`, que es donde apunta la conexión."""
+    sesion = persistencia.sesion_de_agente("conv-1", database_url=URL_NEON)
+    opciones = sesion._engine.sync_engine.get_execution_options()
+
+    assert "schema_translate_map" not in opciones
+
+
+def test_con_esquema_las_sentencias_se_cualifican_al_compilarlas():
+    """`schema_translate_map` y NO `options=-csearch_path=`: el pooler de Neon rechaza
+    `options` como parámetro de arranque («unsupported startup parameter in options:
+    search_path»). SQLAlchemy cualifica al compilar, no al abrir la conexión, así que el
+    pooler no tiene nada que rechazar."""
+    sesion = persistencia.sesion_de_agente(
+        "conv-1", database_url=URL_NEON, esquema="pruebas_web"
+    )
+    opciones = sesion._engine.sync_engine.get_execution_options()
+
+    assert opciones["schema_translate_map"] == {None: "pruebas_web"}
+
+
+def test_el_engine_usa_el_dialecto_asincrono():
+    sesion = persistencia.sesion_de_agente("conv-1", database_url=URL_NEON)
+
+    assert sesion._engine.dialect.name == "postgresql"
+    assert sesion._engine.dialect.is_async is True
+
+
+def test_sin_limite_el_historial_va_entero():
+    """Paso 1 de los tres del spec: persistir SIN límite. Medir viene después, y fijar el
+    número viene después de medir. Un límite puesto ahora sería otra suposición."""
+    sesion = persistencia.sesion_de_agente("conv-1", database_url=URL_NEON)
+
+    assert sesion.session_settings.limit is None

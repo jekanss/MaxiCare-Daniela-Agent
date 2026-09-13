@@ -175,6 +175,60 @@ def url_asincrona(url: str) -> str:
     return f"{DIALECTO_ASINCRONO}{separador}{resto}"
 
 
+def _engine_de(database_url: str, esquema: str | None):
+    """El `AsyncEngine` que respalda una sesión. Provisional y sin caché a propósito: la
+    caché por `(url, esquema)` es la Tarea 4. Construir un engine no abre ninguna conexión
+    -- el pool es perezoso -- así que crear uno por llamada no toca la red todavía, aunque
+    sí desperdicia el pool cuando el llamador pide muchas sesiones seguidas.
+
+    `esquema` va por `schema_translate_map` en las opciones de EJECUCIÓN, no por `options=
+    -csearch_path=` en la URL: el pooler de Neon rechaza `options` como parámetro de
+    arranque, y SQLAlchemy cualifica las sentencias al compilarlas, no al abrir la conexión.
+    """
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    opciones = {"schema_translate_map": {None: esquema}} if esquema else {}
+    return create_async_engine(url_asincrona(database_url), execution_options=opciones)
+
+
+def sesion_de_agente(
+    id_conversacion: str,
+    *,
+    database_url: str,
+    esquema: str | None = None,
+    limite: int | None = None,
+):
+    """El historial de una conversación, guardado en Neon y no en la memoria del proceso.
+
+    `session_id = id_conversacion` a propósito: es la unidad que sobrevive a un reinicio y
+    la que `/clearstate` borra. Un `session_id` por teléfono ataría para siempre a una
+    persona con todo lo que dijo alguna vez, y resetear a primer contacto dejaría de ser
+    posible sin perder el historial entero.
+
+    `esquema` existe para los carriles de prueba (`pruebas`, `pruebas_web`,
+    `pruebas_sesion`). Va por `schema_translate_map` y NO por `search_path`: el pooler de
+    Neon rechaza `options` como parámetro de arranque, y eso ya costó una tarde en la fase 3.
+    SQLAlchemy cualifica las sentencias al COMPILARLAS, así que el pooler no ve nada raro.
+
+    `limite` recorta el historial que se le manda al modelo, contando ITEMS y no mensajes
+    -- una llamada a tool y su resultado son dos. Mientras valga `None` el historial va
+    entero: es el paso 1 de los tres de la fase (persistir, medir, fijar).
+    """
+    from agents.extensions.memory import SQLAlchemySession
+    from agents.memory.session_settings import SessionSettings
+
+    return SQLAlchemySession(
+        id_conversacion,
+        engine=_engine_de(database_url, esquema),
+        create_tables=False,
+        session_settings=SessionSettings(limit=limite),
+        # Sin esto los acentos quedan escapados (`ó`) en `message_data`. El ida y vuelta
+        # es correcto igual; lo que se pierde es poder leer un historial a ojo el día que
+        # haga falta mirarlo, y ese día no se avisa con antelación.
+        ensure_ascii=False,
+    )
+
+
 def aplicar_esquema(conn, ruta: Path | None = None) -> list[str]:
     """Aplica todas las migraciones en orden de nombre. Idempotente: el SQL usa
     `CREATE TABLE IF NOT EXISTS` y `ON CONFLICT DO NOTHING`."""
