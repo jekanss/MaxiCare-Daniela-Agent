@@ -408,3 +408,279 @@ def test_un_tema_que_telegram_rechaza_no_pasa_por_bueno():
             asyncio.run(Telegram("t", "-100123").crear_tema("Ana"))
     finally:
         httpx.AsyncClient = original
+
+
+# ==========================================================================================
+# El destino del archivo (fase 6B)
+# ==========================================================================================
+
+TEMA_GENERAL = 0
+TEMA_DE_ANA = 901
+
+
+class TelegramConTemas:
+    """Registra a qué tema fue cada cosa. Es lo único que estas pruebas miden."""
+
+    def __init__(self) -> None:
+        self.archivos: list[tuple[str, int | None]] = []
+        self.mensajes: list[tuple[str, int | None]] = []
+
+    async def enviar_archivo(self, archivo, *, tipo_whatsapp, pie, tema_id=None) -> int:
+        self.archivos.append((archivo.nombre, tema_id))
+        return 10 + len(self.archivos)
+
+    async def enviar_mensaje(self, texto, *, tema_id=None, teclado=None) -> int:
+        self.mensajes.append((texto, tema_id))
+        return 20 + len(self.mensajes)
+
+
+class WhatsAppConArchivo:
+    def __init__(self, *, tamano: int = 2048) -> None:
+        self.tamano = tamano
+
+    async def descargar_media(self, media_id, *, nombre_original=None):
+        from maxicare_daniela.canales import ArchivoDescargado
+
+        return ArchivoDescargado(
+            contenido=b"x" * self.tamano, mime="image/jpeg", nombre="radio.jpg"
+        )
+
+
+def _devuelve_async(valor):
+    async def _fn(*a, **kw):
+        return valor
+
+    return _fn
+
+
+async def _revienta_si_se_llama(*a, **kw):
+    raise AssertionError("se arranco el lector cuando no debia: eso es dinero tirado")
+
+
+def _sin_base(monkeypatch):
+    """`procesar_mensaje` registra en Neon; aquí eso no es lo que se mide."""
+    from maxicare_daniela import ingesta as mod
+
+    monkeypatch.setattr(mod, "_registrar", lambda url, m: True)
+    monkeypatch.setattr(mod, "_marcar_reenviado", lambda url, w, t, s: None)
+    monkeypatch.setattr(mod, "_marcar_fallo", lambda url, w, e: None)
+
+
+def _mensaje_con_foto(**cambios):
+    from maxicare_daniela.ingesta import MensajeEntrante
+
+    campos = dict(
+        wamid="wamid-foto-1",
+        telefono="573001112233",
+        nombre_perfil="Ana Perez",
+        tipo="image",
+        media_id="media-1",
+        mime="image/jpeg",
+    )
+    campos.update(cambios)
+    return MensajeEntrante(**campos)
+
+
+def test_el_archivo_va_al_tema_del_paciente_y_el_aviso_al_general(monkeypatch):
+    """El cambio visible de 6B: el archivo deja de caer en el General.
+
+    Al General va un aviso, porque es donde los doctores miran; el archivo se deposita en
+    el hilo de esa persona, que es el que conserva su historial.
+    """
+    import asyncio
+
+    from maxicare_daniela import ingesta, lectura
+
+    _sin_base(monkeypatch)
+    monkeypatch.setattr(
+        lectura, "asegurar_tema", _devuelve_async(TEMA_DE_ANA)
+    )
+    monkeypatch.setattr(lectura, "leer_y_repartir", _devuelve_async(None))
+    tg = TelegramConTemas()
+
+    asyncio.run(
+        ingesta.procesar_mensaje(
+            _mensaje_con_foto(),
+            whatsapp=WhatsAppConArchivo(),
+            telegram=tg,
+            database_url="postgresql://x",
+            tema_general=TEMA_GENERAL,
+        )
+    )
+
+    assert tg.archivos == [("radio.jpg", TEMA_DE_ANA)]
+    assert len(tg.mensajes) == 1
+    texto, tema = tg.mensajes[0]
+    assert tema == TEMA_GENERAL
+    assert "Ana Perez" in texto
+
+
+def test_un_texto_suelto_sigue_yendo_al_general(monkeypatch):
+    """Lo único que se muda al tema del paciente es el ARCHIVO."""
+    import asyncio
+
+    from maxicare_daniela import ingesta
+    from maxicare_daniela.ingesta import MensajeEntrante
+
+    _sin_base(monkeypatch)
+    tg = TelegramConTemas()
+
+    asyncio.run(
+        ingesta.procesar_mensaje(
+            MensajeEntrante(
+                wamid="w-1", telefono="573001112233", nombre_perfil="Ana",
+                tipo="text", texto="Hola",
+            ),
+            whatsapp=WhatsAppConArchivo(),
+            telegram=tg,
+            database_url="postgresql://x",
+            tema_general=TEMA_GENERAL,
+        )
+    )
+
+    assert tg.archivos == []
+    assert tg.mensajes[0][1] == TEMA_GENERAL
+
+
+def test_el_lector_no_retrasa_la_entrega_del_archivo(monkeypatch):
+    """La garantía de la fase 2, como aserción y no como comentario.
+
+    Con un lector que tarda un segundo, `procesar_mensaje` tiene que haber vuelto --y el
+    archivo estar ya en Telegram-- mucho antes de que el lector termine. Si alguien pone un
+    `await` delante de la entrega, esta prueba cae.
+    """
+    import asyncio
+    import time
+
+    from maxicare_daniela import ingesta, lectura
+
+    _sin_base(monkeypatch)
+    monkeypatch.setattr(lectura, "asegurar_tema", _devuelve_async(TEMA_DE_ANA))
+
+    async def lector_lento(*a, **kw):
+        await asyncio.sleep(1.0)
+        return None
+
+    monkeypatch.setattr(lectura, "leer_y_repartir", lector_lento)
+    tg = TelegramConTemas()
+
+    async def corrida():
+        arranque = time.monotonic()
+        resultado = await ingesta.procesar_mensaje(
+            _mensaje_con_foto(),
+            whatsapp=WhatsAppConArchivo(),
+            telegram=tg,
+            database_url="postgresql://x",
+            tema_general=TEMA_GENERAL,
+        )
+        tardo = time.monotonic() - arranque
+        if resultado.lectura is not None:
+            resultado.lectura.cancel()
+        return resultado, tardo
+
+    resultado, tardo = asyncio.run(corrida())
+
+    assert resultado.reenviado is True
+    assert tg.archivos, "el archivo no llego a Telegram"
+    assert tardo < 0.3, f"la entrega del archivo espero al lector: tardo {tardo:.2f} s"
+    assert resultado.lectura is not None, "no se arranco el lector"
+
+
+def test_si_no_hay_tema_el_archivo_cae_al_general(monkeypatch):
+    """Degradar, no perder. Un fallo de Telegram al crear el tema no puede dejar al doctor
+    sin la radiografia."""
+    import asyncio
+
+    from maxicare_daniela import ingesta, lectura
+
+    _sin_base(monkeypatch)
+    monkeypatch.setattr(lectura, "asegurar_tema", _devuelve_async(None))
+    monkeypatch.setattr(lectura, "leer_y_repartir", _devuelve_async(None))
+    tg = TelegramConTemas()
+
+    asyncio.run(
+        ingesta.procesar_mensaje(
+            _mensaje_con_foto(),
+            whatsapp=WhatsAppConArchivo(),
+            telegram=tg,
+            database_url="postgresql://x",
+            tema_general=TEMA_GENERAL,
+        )
+    )
+
+    assert tg.archivos == [("radio.jpg", TEMA_GENERAL)]
+    assert tg.mensajes == [], "sin tema propio no hay nada que avisar: el archivo YA esta ahi"
+
+
+@pytest.mark.parametrize("tipo,mime", [("audio", "audio/ogg"), ("sticker", "image/webp")])
+def test_lo_que_no_se_lee_no_arranca_el_lector(monkeypatch, tipo, mime):
+    """`sol` es el modelo caro y no se paga por un sticker."""
+    import asyncio
+
+    from maxicare_daniela import ingesta, lectura
+
+    _sin_base(monkeypatch)
+    monkeypatch.setattr(lectura, "asegurar_tema", _devuelve_async(TEMA_DE_ANA))
+    monkeypatch.setattr(lectura, "leer_y_repartir", _revienta_si_se_llama)
+
+    resultado = asyncio.run(
+        ingesta.procesar_mensaje(
+            _mensaje_con_foto(tipo=tipo, mime=mime),
+            whatsapp=WhatsAppConArchivo(),
+            telegram=TelegramConTemas(),
+            database_url="postgresql://x",
+            tema_general=TEMA_GENERAL,
+        )
+    )
+
+    assert resultado.lectura is None
+
+
+def test_un_archivo_enorme_no_arranca_el_lector(monkeypatch):
+    """Llega al doctor igual; lo unico que no ocurre es la lectura."""
+    import asyncio
+
+    from maxicare_daniela import ingesta, lectura
+
+    _sin_base(monkeypatch)
+    monkeypatch.setattr(lectura, "asegurar_tema", _devuelve_async(TEMA_DE_ANA))
+    monkeypatch.setattr(lectura, "leer_y_repartir", _revienta_si_se_llama)
+    tg = TelegramConTemas()
+
+    resultado = asyncio.run(
+        ingesta.procesar_mensaje(
+            _mensaje_con_foto(),
+            whatsapp=WhatsAppConArchivo(tamano=lectura.TOPE_BYTES_LECTOR + 1),
+            telegram=tg,
+            database_url="postgresql://x",
+            tema_general=TEMA_GENERAL,
+        )
+    )
+
+    assert resultado.lectura is None
+    assert tg.archivos, "el archivo grande tiene que llegar al doctor igual"
+    """Sin esto, un `ok: false` devolveria un KeyError sin nombre y el archivo se perderia
+    buscando un tema que no existe."""
+    import asyncio
+    import httpx
+
+    from maxicare_daniela.canales import ErrorDeCanal, Telegram
+
+    transporte = httpx.MockTransport(
+        lambda r: httpx.Response(
+            200, json={"ok": False, "description": "not enough rights to manage topics"}
+        )
+    )
+    original = httpx.AsyncClient
+
+    class ClienteFalso(original):
+        def __init__(self, *a, **kw):
+            kw["transport"] = transporte
+            super().__init__(*a, **kw)
+
+    httpx.AsyncClient = ClienteFalso
+    try:
+        with pytest.raises(ErrorDeCanal, match="not enough rights"):
+            asyncio.run(Telegram("t", "-100123").crear_tema("Ana"))
+    finally:
+        httpx.AsyncClient = original

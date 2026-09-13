@@ -22,8 +22,10 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
+from . import lectura as lectura_mod
 from . import persistencia
 from .canales import ErrorDeCanal, Telegram, WhatsApp
+from .lectura import vale_la_pena_leer
 
 log = logging.getLogger("maxicare.ingesta")
 
@@ -200,6 +202,10 @@ class Resultado:
     nuevo: bool
     reenviado: bool
     fallo: str | None = None
+    #: La tarea del lector, si se arrancó. `atencion.atender` la recoge cuando cierra la
+    #: ventana del búfer. Es una `Task` y no un valor a propósito: esperarla aquí pondría
+    #: una llamada al modelo delante de la entrega del archivo al doctor.
+    lectura: asyncio.Task | None = None
 
 
 async def procesar_mensaje(
@@ -224,16 +230,38 @@ async def procesar_mensaje(
         log.info("wamid %s ya estaba registrado: es un reintento de Meta, se ignora", m.wamid)
         return Resultado(m.wamid, nuevo=False, reenviado=False)
 
+    tarea: asyncio.Task | None = None
     try:
         if m.trae_archivo:
             # Primero los bytes. Todo lo demás puede esperar; esto no.
             archivo = await whatsapp.descargar_media(
                 m.media_id, nombre_original=m.nombre_archivo
             )
+            tema = await lectura_mod.asegurar_tema(
+                telefono=m.telefono,
+                nombre_perfil=m.nombre_perfil,
+                database_url=database_url,
+                telegram=telegram,
+            )
+            destino = tema or tema_general
             pie = componer_aviso(m, tamano=archivo.tamano)
             telegram_id = await telegram.enviar_archivo(
-                archivo, tipo_whatsapp=m.tipo, pie=pie, tema_id=tema_general
+                archivo, tipo_whatsapp=m.tipo, pie=pie, tema_id=destino
             )
+            if tema:
+                # El archivo ya no cae en el General, así que el General tiene que enterarse
+                # igual: es donde los doctores miran.
+                await telegram.enviar_mensaje(
+                    f"📎 Llegó un archivo de {_escapar(m.nombre_perfil or m.telefono)}"
+                    f" — está en su tema.",
+                    tema_id=tema_general,
+                )
+            if vale_la_pena_leer(m.tipo, archivo.tamano):
+                tarea = asyncio.create_task(
+                    lectura_mod.leer_y_repartir(
+                        archivo, tipo=m.tipo, telegram=telegram, tema_id=destino
+                    )
+                )
             tamano = archivo.tamano
         else:
             telegram_id = await telegram.enviar_mensaje(
@@ -248,7 +276,7 @@ async def procesar_mensaje(
 
     await asyncio.to_thread(_marcar_reenviado, database_url, m.wamid, telegram_id, tamano)
     log.info("%s entregado a los doctores (telegram message_id=%s)", m.wamid, telegram_id)
-    return Resultado(m.wamid, nuevo=True, reenviado=True)
+    return Resultado(m.wamid, nuevo=True, reenviado=True, lectura=tarea)
 
 
 # ── Acceso a la base ──────────────────────────────────────────────────────────────────────

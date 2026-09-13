@@ -209,3 +209,30 @@ async def leer_archivo(
         log.exception("el lector no pudo con %s", archivo.nombre)
         return None
     return corrida.final_output
+
+
+async def leer_y_repartir(
+    archivo: ArchivoDescargado, *, tipo: str, telegram, tema_id: int | None, correr=None
+) -> LecturaNoClinica | None:
+    """Lee, manda lo clínico al tema del paciente y devuelve SOLO la mitad no clínica.
+
+    Aquí es donde el muro se ejerce: `repartir` devuelve dos cosas, una sale por Telegram y
+    la otra es el valor de retorno. La clínica no se guarda en ninguna variable que
+    sobreviva a esta función.
+    """
+    leida = await leer_archivo(archivo, tipo=tipo, correr=correr)
+    if leida is None:
+        try:
+            await telegram.enviar_mensaje(
+                "⚠️ No se pudo leer este archivo automáticamente.", tema_id=tema_id
+            )
+        except Exception:  # noqa: BLE001
+            log.exception("no se pudo avisar de la lectura fallida")
+        return None
+
+    clinico, no_clinica = repartir(leida)
+    try:
+        await telegram.enviar_mensaje(f"📄 <b>Lectura</b>\n{clinico}", tema_id=tema_id)
+    except Exception:  # noqa: BLE001
+        log.exception("la lectura no llegó a Telegram; el archivo sí está")
+    return no_clinica
