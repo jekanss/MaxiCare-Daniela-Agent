@@ -142,6 +142,37 @@ def conectar(database_url: str):
     return psycopg.connect(database_url)
 
 
+#: El dialecto asíncrono de este proyecto. `SQLAlchemySession.from_url` llama a
+#: `create_async_engine`, que exige un driver async: `postgresql://` a secas falla EN EL
+#: CONSTRUCTOR, antes de tocar la red, con `ModuleNotFoundError: No module named 'psycopg2'`
+#: -- un paquete que este proyecto no usa, así que el rastro apunta al sitio equivocado.
+#:
+#: `psycopg` y no `asyncpg`, aunque los dos están instalados y los dos funcionan: la URL de
+#: Neon lleva `sslmode=require` y `channel_binding=require` como parámetros de consulta.
+#: psycopg 3 los entiende porque son suyos; asyncpg usa otro vocabulario (`ssl=`) y habría
+#: que traducirlos a mano. Además psycopg 3 ya es el driver del proyecto: entra un dialecto
+#: nuevo, no una librería nueva.
+DIALECTO_ASINCRONO = "postgresql+psycopg"
+
+
+def url_asincrona(url: str) -> str:
+    """La misma URL, con el dialecto que `create_async_engine` acepta.
+
+    Idempotente: una URL que ya trae `+driver` se devuelve tal cual, incluso si el driver
+    es otro. Quien fije `asyncpg` a propósito en el entorno no se lo encuentra pisado.
+    """
+    if not url.strip():
+        raise ValueError(
+            "MAXICARE_DATABASE_URL está vacía: no hay base a la que persistir el historial"
+        )
+    esquema, separador, resto = url.partition("://")
+    if not separador:
+        raise ValueError(f"no parece una URL de base de datos: {url[:20]}...")
+    if "+" in esquema:
+        return url
+    return f"{DIALECTO_ASINCRONO}{separador}{resto}"
+
+
 def aplicar_esquema(conn, ruta: Path | None = None) -> list[str]:
     """Aplica todas las migraciones en orden de nombre. Idempotente: el SQL usa
     `CREATE TABLE IF NOT EXISTS` y `ON CONFLICT DO NOTHING`."""
