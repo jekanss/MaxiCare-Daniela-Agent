@@ -239,3 +239,42 @@ def cargar_dotenv(ruta: str = ".env") -> None:
         clave, valor = clave.strip(), valor.strip()
         if clave and valor and clave not in os.environ:
             os.environ[clave] = valor
+
+
+#: Las variables que una biblioteca de terceros lee directamente de `os.environ`, sin pasar
+#: nunca por `Config`. Las nuestras no hacen falta aquí: `_opcional` ya trata la cadena vacía
+#: como ausente, y ese es su trabajo.
+VARIABLES_DE_TERCEROS = (
+    "OPENAI_BASE_URL",
+    "OPENAI_ORG_ID",
+    "OPENAI_PROJECT_ID",
+    "OPENAI_WEBSOCKET_BASE_URL",
+)
+
+
+def descartar_vacias_de_terceros() -> list[str]:
+    """Saca del entorno las variables de terceros que están presentes y vacías.
+
+    `cargar_dotenv` ya se niega a exportar una clave sin valor, y por eso en local esto no
+    hace nada. Pero el `.env` no es la única puerta: en el VPS las variables las pone el
+    `env_file` de Docker, que **sí** exporta las vacías, una por cada línea `CLAVE=` del
+    archivo. El filtro de `cargar_dotenv` ni siquiera llega a correr allí, porque dentro del
+    contenedor no hay ningún `.env` que leer.
+
+    Lo que costó descubrirlo, y por qué esto existe: con `OPENAI_BASE_URL=` presente y
+    vacía, el cliente de OpenAI la prefiere sobre su propio default y arma `base_url=""`.
+    Toda llamada al modelo muere en `APIConnectionError: Connection error.` --un error de
+    red, que manda a revisar cortafuegos y DNS-- mientras el resto del sistema funciona
+    perfectamente: `/salud` dice `configuracion: ok`, las trazas suben a esa misma API sin
+    problema porque no usan ese cliente, y el paciente recibe el mensaje seguro de
+    `atencion.py` como si Daniela hubiera decidido no saber la respuesta.
+
+    Devuelve los nombres que quitó, para que quien llame pueda dejarlo en el log: una
+    variable que desaparece del entorno sin que nadie lo diga es su propio misterio futuro.
+    """
+    quitadas = []
+    for nombre in VARIABLES_DE_TERCEROS:
+        if nombre in os.environ and not os.environ[nombre].strip():
+            del os.environ[nombre]
+            quitadas.append(nombre)
+    return quitadas

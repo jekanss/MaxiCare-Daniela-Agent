@@ -53,7 +53,7 @@ from starlette.exceptions import HTTPException as HTTPExceptionStarlette
 from . import atencion, autenticacion, contratos, conversacion, ingesta, panel, persistencia
 from .calendario import CalendarioCaido, CalendarioDoble, calendario_desde_config
 from .canales import Telegram, WhatsApp
-from .config import Config, cargar_dotenv
+from .config import Config, cargar_dotenv, descartar_vacias_de_terceros
 from .contratos import ContextoDaniela
 
 logging.basicConfig(
@@ -71,6 +71,17 @@ logging.getLogger("httpcore").setLevel(logging.WARNING)
 log = logging.getLogger("maxicare.runtime")
 
 cargar_dotenv()
+
+# Antes de construir nada que hable con OpenAI. En el contenedor las variables las pone
+# el `env_file` de Docker, que exporta las vacías, y una `OPENAI_BASE_URL=` vacía rompe
+# toda llamada al modelo con un error que parece de red. Ver la función para el detalle.
+_vacias = descartar_vacias_de_terceros()
+if _vacias:
+    log.warning(
+        "descartadas del entorno por venir vacías: %s -- una cadena vacía no es un valor, y el cliente de OpenAI la prefiere sobre su propio default",
+        ", ".join(_vacias),
+    )
+
 config = Config.desde_entorno()
 
 app = FastAPI(title="MaxiCare · Daniela", version="0.5.0", docs_url=None, redoc_url=None)

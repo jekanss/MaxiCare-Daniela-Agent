@@ -36,6 +36,12 @@ llegue a la cita correcta.
   restauración con una aserción** (nunca se la da por hecha). Con `--chat`, la MITAD B
   además escribe un precio y crea un tratamiento en `pruebas_web` y comprueba que Daniela lo
   cotiza de verdad; **gasta tokens**.
+- Desplegar en el VPS: `bash scripts/desplegar.sh`
+  Empaqueta, copia, construye la imagen, **aplica las migraciones antes de levantar** y
+  espera a que el contenedor esté sano. Traefik sigue mandando los webhooks de Meta al
+  contenedor viejo hasta que el nuevo responde `/salud`, así que un despliegue fallido no
+  deja a los doctores sin radiografías. Comprueba después desde fuera con
+  `scripts/probar_webhook.py`.
 - Usuarios del panel: `uv run python scripts/crear_usuario.py` (`--listar`, `--quitar-acceso`)
 - `CalendarioGoogle` contra el calendario real (no gasta tokens):
   `uv run python scripts/probar_calendario.py`
@@ -163,6 +169,22 @@ uv run uvicorn maxicare_daniela.runtime:app --port 8080
   entera en verde y solo falla la de Neon. Quien toque esa función tiene que correr las dos
   —`MAXICARE_PRUEBAS_NEON=1 uv run pytest -q -m neon` y `scripts/probar_atencion.py`—.
 
+## El despliegue
+
+- **`desplegar.sh` empaqueta a mano lo que el Dockerfile copia, y ya se desincronizó una
+  vez.** El script es de la fase 2; el Dockerfile creció su etapa de Node en la fase 5 y el
+  tar nunca creció con él, así que **todo lo construido entre la fase 2 y la 8 se quedó sin
+  desplegar** sin que nadie lo supiera: el primer intento moría en `COPY web/ ./` con un
+  error sobre checksums que no nombra el script por ninguna parte. Ahora el script deriva la
+  lista del propio Dockerfile y aborta antes de subir nada si falta una ruta. Si alguien
+  añade un `COPY`, esa comprobación es lo único que lo atrapa.
+- **`probar_webhook.py` ya gasta tokens.** Manda un mensaje firmado de verdad, y desde la
+  fase 6A eso despierta a Daniela: un turno completo contra el modelo por cada corrida. No
+  le escribe a ningún paciente —el número de prueba no existe— pero no es gratis.
+- **El `/salud` desplegado es la forma barata de saber qué versión corre.** Publica la fase,
+  la clase de calendario y si Daniela responde. Si dice `CalendarioCaido`, Google no arrancó
+  y Daniela no puede agendar aunque todo lo demás funcione.
+
 # Trampas de este entorno
 
 - **Los heredoc de Bash fallan** aquí (`unexpected EOF looking for matching`).
@@ -177,10 +199,18 @@ uv run uvicorn maxicare_daniela.runtime:app --port 8080
 - **El pooler de Neon rechaza `options` como parámetro de arranque** (`unsupported startup
   parameter in options: search_path`). Para fijar un `search_path` —o para una prueba de
   concurrencia de verdad— hay que usar la conexión directa: quitarle el `-pooler.` al host.
-- **Una variable de entorno vacía no es una variable ausente.** El `.env` trae casi todas
-  las claves presentes y sin valor. `cargar_dotenv` ya no exporta las vacías y `_opcional`
-  cae al default: sin eso, `OPENAI_BASE_URL=` rompía toda llamada al modelo con un error
-  que no menciona el `.env` por ninguna parte.
+- **Una variable de entorno vacía no es una variable ausente, y hay DOS puertas.** El
+  `.env` trae casi todas las claves presentes y sin valor. `cargar_dotenv` no exporta las
+  vacías y `_opcional` cae al default; eso cubre la puerta local. La otra es el `env_file`
+  de Docker, que **sí** exporta las vacías y ante el cual ese filtro no llega a correr,
+  porque dentro del contenedor no hay `.env` que leer. Ya paso en producción: con
+  `OPENAI_BASE_URL=` vacía, el cliente de OpenAI la prefiere sobre su propio default, arma
+  `base_url=""` y **toda** llamada al modelo muere en `APIConnectionError: Connection
+  error.` Se lee como un problema de red y no lo es: las trazas subían a esa misma API sin
+  problema, `/salud` decía `configuracion: ok`, y el paciente recibía el mensaje seguro de
+  `atencion.py` como si Daniela hubiera decidido no saber. Lo cierran `runtime.py` con
+  `descartar_vacias_de_terceros()` al arrancar y `desplegar.sh`, que no manda ninguna clave
+  vacía al servidor.
 - **La herramienta `Write` interpreta las secuencias `\uXXXX` del contenido como caracteres
   de verdad.** A un implementador le dejó un byte NUL dentro de un `.tsx` y caracteres
   combinantes invisibles dentro de un regex. Se esquiva escribiendo esos archivos con

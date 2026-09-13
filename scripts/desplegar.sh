@@ -74,7 +74,18 @@ rm -f "$TAR"
 # no tiene que acordarse de nada antes de desplegar.
 ENV_REMOTO="$(mktemp -t daniela-env-XXXXXX)"
 chmod 600 "$ENV_REMOTO"
-grep -v '^[[:space:]]*MAXICARE_COOKIE_INSEGURA=' .env > "$ENV_REMOTO"
+# Las claves presentes y SIN VALOR tampoco viajan, y esto costo un despliegue en falso.
+# `cargar_dotenv` ya se niega a exportarlas, pero ese filtro no corre en el contenedor:
+# alli las variables las pone el `env_file` de Docker --que exporta las vacias, una por
+# cada linea CLAVE= del archivo-- y dentro de la imagen no hay ningun .env que leer. Con
+# OPENAI_BASE_URL= vacia, el cliente de OpenAI la prefiere sobre su propio default, arma
+# base_url="" y toda llamada al modelo muere en APIConnectionError: un error de red, que
+# manda a revisar cortafuegos, mientras /salud sigue diciendo que todo esta bien.
+#
+# `runtime.py` tambien las descarta al arrancar, asi que esto es el cinturon y aquello
+# los tirantes. Ninguno de los dos sobra: el de alla cubre las variables que no vienen de
+# este archivo, y el de aca deja el .env del servidor legible para quien lo abra.
+grep -vE '^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*=[[:space:]]*$' .env | grep -v '^[[:space:]]*MAXICARE_COOKIE_INSEGURA=' > "$ENV_REMOTO"
 echo 'MAXICARE_COOKIE_INSEGURA=0' >> "$ENV_REMOTO"
 scp -q "$ENV_REMOTO" "$VPS:$DESTINO/.env"
 rm -f "$ENV_REMOTO"
