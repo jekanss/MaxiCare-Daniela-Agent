@@ -150,10 +150,19 @@ def _lo_que_leyo_el_lector() -> LecturaArchivo:
 # ==========================================================================================
 
 
-def _montar(monkeypatch, modelo: ModeloGuionizado) -> None:
-    """Deja el proceso sin red y sin base, y a `daniela` hablando con el modelo guionizado."""
+def _montar(monkeypatch, modelo: ModeloGuionizado) -> BaseFalsa:
+    """Deja el proceso sin red y sin base, y a `daniela` hablando con el modelo guionizado.
+
+    Devuelve la `BaseFalsa` porque su `.llamadas` es la otra mitad del muro: ahí queda
+    anotada, con sus argumentos, cada llamada que el turno le hace a `persistencia`.
+    """
     limpiar_estado()
-    BaseFalsa().instalar(monkeypatch)
+    # `limpiar_estado` solo vacía el estado de `atencion`. Este candado es de `lectura` y no
+    # lo limpia nadie: un `asyncio.Lock` que sobrevive a su bucle de eventos es una bomba de
+    # relojería entre pruebas --el día que dos archivos del mismo número entren a la vez,
+    # sale un `RuntimeError: is bound to a different event loop` que no se lee como lo que es.
+    lectura_mod._candados_de_tema.clear()
+    base = BaseFalsa().instalar(monkeypatch)
 
     # --- Neon, por los dos lados -----------------------------------------------------
     # La ingesta registra el wamid y marca el reenvío; `asegurar_tema` consulta y guarda el
@@ -200,6 +209,7 @@ def _montar(monkeypatch, modelo: ModeloGuionizado) -> None:
         return await responder_de_verdad(entrada, **kw)
 
     monkeypatch.setattr(conversacion, "responder", responder_sin_trazas)
+    return base
 
 
 async def _el_camino_completo(whatsapp, telegram) -> tuple[atencion.Atendido, asyncio.Task]:
@@ -253,7 +263,7 @@ def test_el_contenido_clinico_de_una_remision_no_entra_al_contexto_de_daniela(mo
     Lo que se afirma abajo es que esas dos flechas existen Y que van cada una a su sitio.
     """
     modelo = ModeloGuionizado(responde(respuesta_daniela(RESPUESTA)))
-    _montar(monkeypatch, modelo)
+    base = _montar(monkeypatch, modelo)
 
     whatsapp = WhatsAppConRemision()
     tg = TelegramDeDoctores()
@@ -321,6 +331,21 @@ def test_el_contenido_clinico_de_una_remision_no_entra_al_contexto_de_daniela(mo
     assert CENTINELA not in json.dumps(
         entregado_a_daniela.model_dump(), ensure_ascii=False, default=str
     ), "EL MURO SE CAYO: la mitad que cruza hacia el paciente trae contenido clinico."
+
+    # ----------------------------------------------------------------------------------
+    # La tercera salida: Neon
+    # ----------------------------------------------------------------------------------
+    #
+    # La restricción global de la fase dice «`contexto_clinico` no se persiste en ninguna
+    # tabla, NUNCA: vive en memoria el tiempo que tarda en salir hacia Telegram». Un
+    # `INSERT` no se ve en el prompt ni en el mensaje a Telegram, así que ninguna de las
+    # aserciones de arriba lo detectaría. `BaseFalsa.llamadas` guarda cada llamada a
+    # `persistencia` CON SUS ARGUMENTOS, y el `repr` alcanza también a un objeto que se
+    # pasara entero -- que es como la fuga ocurriría de verdad.
+    assert CENTINELA not in str(base.llamadas), (
+        "EL MURO SE CAYO: el contenido clinico entro a una escritura en Neon. Lo clinico "
+        "vive en memoria el tiempo que tarda en salir hacia Telegram, y ni un segundo mas."
+    )
 
 
 def test_el_archivo_y_su_lectura_van_al_tema_del_paciente(monkeypatch):
