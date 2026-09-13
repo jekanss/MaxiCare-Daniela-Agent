@@ -23,8 +23,9 @@ llegue a la cita correcta.
 - Resetear a primer contacto: escribir `/clearstate`. **Por WhatsApp** solo funciona si el
   número está en `MAXICARE_TELEFONOS_PRUEBA` (varios, separados por coma); con esa variable
   vacía —su default— el comando no existe para nadie. Borra paciente, conversaciones,
-  mensajes, citas (y sus eventos de Calendar) y el tema de Telegram, en `public` y en
-  `pruebas_web`. **En el chat web del panel** funciona sin lista: ahí el teléfono es
+  mensajes, citas (y sus eventos de Calendar), **el historial del agente** (`agent_sessions`
+  y, por cascada, `agent_messages`: desde la fase 7 el diálogo vive en la base, no en la
+  memoria del proceso) y el tema de Telegram, en `public` y en `pruebas_web`. **En el chat web del panel** funciona sin lista: ahí el teléfono es
   `web-<usuario>` y solo se toca `pruebas_web`. Es irreversible.
   Ver `.claude/rules/atencion-whatsapp.md`.
 

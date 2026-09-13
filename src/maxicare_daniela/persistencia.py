@@ -283,6 +283,86 @@ async def cerrar_engines() -> None:
             log.exception("cerrar_engines: no se pudo disponer un engine")
 
 
+def sin_salidas_huerfanas(items: list[Any]) -> list[Any]:
+    """Los mismos items, sin ningún `function_call_output` que se haya quedado sin su
+    `function_call` delante.
+
+    ------------------------------------------------------------------------------------
+    Qué rompe esto, y por qué en ESTA dirección y no en la contraria
+    ------------------------------------------------------------------------------------
+
+    `SQLAlchemySession.get_items(limit=n)` de la 0.22.2 --leído en el SDK instalado-- es
+    `ORDER BY created_at DESC, id DESC LIMIT n`, invertido después, más `items[-n:]`. No
+    mira los `call_id` en ninguna parte; su propio docstring promete solo «the latest N
+    items in chronological order». Es un «últimos N» puro.
+
+    Un «últimos N» no puede dejar una LLAMADA huérfana: si el `function_call` entra en la
+    ventana, su `function_call_output` --escrito después, con `id` mayor-- entra siempre.
+    Lo que sí deja es lo contrario, y se midió:
+
+        [ user | assistant | LLAMADA | SALIDA ]
+                                     ^-- limit=1 devuelve SOLO la salida
+
+    Un `function_call_output` sin su llamada es una petición que la API de OpenAI rechaza,
+    igual que la contraria. Y no pasaría en desarrollo: pasaría en la conversación número
+    siete de un paciente real, el día que la Tarea 13 fije el límite.
+
+    Se descarta la salida y NADA MÁS: lo demás de la ventana es contexto que sí cabía. Un
+    `function_call` sin salida no se filtra porque el recorte no lo produce; si algún día
+    aparece uno, será porque la corrida se cortó entre la llamada y su resultado, que es
+    otro fallo y merece verse en vez de taparse aquí.
+    """
+    vistas: set[Any] = set()
+    limpios: list[Any] = []
+    for item in items:
+        tipo = item.get("type") if isinstance(item, dict) else None
+        if tipo == "function_call":
+            vistas.add(item.get("call_id"))
+        elif tipo == "function_call_output" and item.get("call_id") not in vistas:
+            log.debug(
+                "recorte del historial: se descarta la salida huérfana de %s",
+                item.get("call_id"),
+            )
+            continue
+        limpios.append(item)
+    return limpios
+
+
+#: La subclase de `SQLAlchemySession` con el recorte seguro, construida una sola vez. Ver
+#: `_clase_con_corte_seguro`.
+_clase_sesion: Any = None
+
+
+def _clase_con_corte_seguro():
+    """`SQLAlchemySession` + `sin_salidas_huerfanas` en su `get_items`.
+
+    Se define aquí dentro y no a nivel de módulo porque heredar de `SQLAlchemySession`
+    obliga a importarla, y ese import arrastra el SDK entero -- `persistencia` se importa
+    también desde sitios que no lo necesitan, que es la misma razón por la que el import de
+    `sesion_de_agente` es perezoso. Y se cachea porque definir la clase en cada turno
+    crearía un tipo nuevo por turno.
+    """
+    global _clase_sesion
+    if _clase_sesion is not None:
+        return _clase_sesion
+
+    from agents.extensions.memory import SQLAlchemySession
+
+    class _SesionConCorteSeguro(SQLAlchemySession):  # type: ignore[misc]
+        """El historial de Neon, garantizando que lo que sale es aceptable para la API.
+
+        El recorte por cantidad de items del SDK no sabe de pares `call_id`: puede dejar un
+        `function_call_output` cuya llamada se cayó por delante de la ventana. Ver
+        `sin_salidas_huerfanas`.
+        """
+
+        async def get_items(self, limit: int | None = None) -> list[Any]:
+            return sin_salidas_huerfanas(await super().get_items(limit))
+
+    _clase_sesion = _SesionConCorteSeguro
+    return _clase_sesion
+
+
 def sesion_de_agente(
     id_conversacion: str,
     *,
@@ -305,11 +385,14 @@ def sesion_de_agente(
     `limite` recorta el historial que se le manda al modelo, contando ITEMS y no mensajes
     -- una llamada a tool y su resultado son dos. Mientras valga `None` el historial va
     entero: es el paso 1 de los tres de la fase (persistir, medir, fijar).
+
+    Lo que vuelve NO es una `SQLAlchemySession` pelada: es la subclase que filtra la salida
+    de tool cuya llamada se cayó por delante de la ventana, porque el recorte del SDK no
+    sabe de pares `call_id` y esa petición la rechaza la API. Ver `sin_salidas_huerfanas`.
     """
-    from agents.extensions.memory import SQLAlchemySession
     from agents.memory.session_settings import SessionSettings
 
-    return SQLAlchemySession(
+    return _clase_con_corte_seguro()(
         id_conversacion,
         engine=_engine_de(database_url, esquema),
         create_tables=False,

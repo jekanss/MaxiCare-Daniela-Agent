@@ -109,11 +109,28 @@ def _sin_options(url: str) -> str:
     return urlunsplit(partes._replace(query=urlencode(query)))
 
 
+class _UrlOculta(str):
+    """Una cadena de conexión que no se imprime entera. Es un `str` y funciona como uno.
+
+    Cuando una prueba de este archivo falla, pytest encabeza el informe con los valores de
+    sus argumentos -- y el argumento `esquema` ES la URL de Neon, con la contraseña de la
+    base de la clínica en claro. No hace falta ninguna aserción torcida para filtrarla:
+    basta con que la prueba caiga. Ya pasó una vez en esta fase por otro camino (Tarea 6);
+    esto cierra el que queda.
+
+    `repr` y no `str`: pytest usa `saferepr` para ese encabezado, y `persistencia.conectar`
+    y `urlsplit` siguen recibiendo la cadena entera, que es lo que necesitan.
+    """
+
+    def __repr__(self) -> str:
+        return "'***@neon (oculta: ver _UrlOculta)'"
+
+
 @pytest.fixture(scope="module")
 def url() -> str:
     if os.environ.get("MAXICARE_PRUEBAS_NEON") != "1":
         pytest.skip("pruebas contra Neon desactivadas (MAXICARE_PRUEBAS_NEON != 1)")
-    return _url_directa()
+    return _UrlOculta(_url_directa())
 
 
 @pytest.fixture(scope="module")
@@ -131,7 +148,7 @@ def esquema(url: str):
     with persistencia.conectar(con_esquema) as conn:
         persistencia.aplicar_esquema(conn)
 
-    yield con_esquema
+    yield _UrlOculta(con_esquema)
 
     with persistencia.conectar(url) as conn:
         with conn.cursor() as cur:
@@ -380,7 +397,25 @@ def test_la_sesion_funciona_contra_el_pooler(esquema):
 
 
 # ==========================================================================================
-# El recorte no puede partir una llamada a tool de su salida (Tarea 7)
+# El recorte no puede partir un par tool/salida (Tarea 7)
+#
+# QUÉ BORDE ES, exactamente, y por qué la primera versión de estas dos pruebas miraba el
+# otro lado.
+#
+# `SQLAlchemySession.get_items(limit=n)` de la 0.22.2 es, leído en el SDK instalado,
+# `ORDER BY created_at DESC, id DESC LIMIT n`, invertido después, más `items[-n:]`. Ni una
+# línea sobre `call_id`. Es un «últimos N» puro, y un «últimos N» tiene una asimetría:
+#
+#     [ user | assistant | LLAMADA | SALIDA ]
+#                                  ^-- limit=1 se lleva SOLO la salida
+#
+# Si la LLAMADA entra en la ventana, su SALIDA --escrita después, con `id` mayor-- entra
+# siempre. Así que `llamadas <= salidas` es una TAUTOLOGÍA bajo esta semántica: no hay
+# recorte que pueda romperla, y una prueba que la afirma no prueba nada. El huérfano que
+# este recorte sí produce es el INVERSO: un `function_call_output` cuya llamada se cayó por
+# delante de la ventana. La API de OpenAI rechaza los dos por igual.
+#
+# De ahí la aserción de estas dos pruebas: `salidas <= llamadas`.
 # ==========================================================================================
 
 #: Un turno con una tool, en items del SDK. La llamada y su salida son DOS items: es la
@@ -398,18 +433,27 @@ _SALIDA = {
 }
 
 
-def test_el_recorte_no_deja_una_llamada_a_tool_sin_su_salida(esquema):
+def _pares(items) -> tuple[set, set]:
+    """Los `call_id` de las llamadas y los de las salidas que hay en lo que volvió."""
+    llamadas = {i.get("call_id") for i in items if i.get("type") == "function_call"}
+    salidas = {i.get("call_id") for i in items if i.get("type") == "function_call_output"}
+    return llamadas, salidas
+
+
+def test_el_recorte_no_deja_una_salida_de_tool_sin_su_llamada(esquema):
     """El borde que más va a doler, y que no aparecería en desarrollo: aparecería en la
     conversación número siete de un paciente real.
 
-    Se construye un historial cuyo `limit` cae EXACTAMENTE entre `function_call` y su
-    `function_call_output`, y se exige que lo que vuelve no tenga una llamada huérfana. Una
-    petición con una llamada sin salida la rechaza la API de OpenAI.
+    `limit=1` sobre `[user, assistant, LLAMADA, SALIDA]` devuelve, sin recorte propio,
+    exactamente `[function_call_output]`: la salida sola, sin la llamada que la explica. La
+    API de OpenAI rechaza esa petición igual que rechaza la contraria.
 
-    Comprobado contra la 0.22.2: el SDK lo maneja. Esta prueba es la que avisará si deja de
-    hacerlo.
+    `_sin_options` y no `split("?options=")`: la URL de Neon ya trae query, así que el
+    parámetro entró con `&` y ese corte no cortaba nada -- la sesión viajaba con
+    `search_path`, y el aislamiento dejaba de sostenerlo `schema_translate_map` solo. Ver el
+    docstring de `_sin_options`.
     """
-    base = esquema.split("?options=")[0]
+    base = _sin_options(esquema)
     sesion = persistencia.sesion_de_agente(
         "conv-borde", database_url=base, esquema=ESQUEMA
     )
@@ -423,28 +467,31 @@ def test_el_recorte_no_deja_una_llamada_a_tool_sin_su_salida(esquema):
                 _SALIDA,
             ]
         )
-        # limit=2 deja fuera los dos primeros y corta justo por el borde de la tool.
-        return await sesion.get_items(limit=2)
+        # limit=1 se lleva SOLO la salida: la llamada queda por delante de la ventana.
+        return await sesion.get_items(limit=1)
 
-    items = _correr(correr())
-    _correr(persistencia.cerrar_engines())
+    try:
+        items = _correr(correr())
+    finally:
+        _correr(persistencia.cerrar_engines())
 
-    llamadas = {i.get("call_id") for i in items if i.get("type") == "function_call"}
-    salidas = {i.get("call_id") for i in items if i.get("type") == "function_call_output"}
+    llamadas, salidas = _pares(items)
 
-    assert llamadas <= salidas, (
-        f"el recorte dejó una llamada a tool sin su salida: {llamadas - salidas}. "
+    assert salidas <= llamadas, (
+        f"el recorte dejó una salida de tool sin su llamada: {salidas - llamadas}. "
         "La API de OpenAI rechaza esa petición."
     )
 
 
-def test_un_corte_impar_tampoco_deja_la_llamada_huerfana(esquema):
-    """El caso de verdad: `limit=3` corta entre la llamada y su salida, no entre turnos.
+def test_un_corte_impar_tampoco_deja_la_salida_huerfana(esquema):
+    """El mismo borde con el par en medio y no al final: `limit=2` sobre
+    `[user, LLAMADA, SALIDA, assistant]` devuelve `[function_call_output, assistant]`.
 
-    Comprobado contra la 0.22.2: el SDK lo maneja. Esta prueba es la que avisará si deja de
-    hacerlo.
+    La segunda aserción es la otra mitad del encargo: el recorte tiene que quitar la salida
+    huérfana y NADA MÁS. Descartar el turno entero por arrastre sería tirar contexto que sí
+    cabía, y el paciente lo notaría como una Daniela que se olvida de lo que acaba de decir.
     """
-    base = esquema.split("?options=")[0]
+    base = _sin_options(esquema)
     sesion = persistencia.sesion_de_agente(
         "conv-borde-impar", database_url=base, esquema=ESQUEMA
     )
@@ -458,14 +505,79 @@ def test_un_corte_impar_tampoco_deja_la_llamada_huerfana(esquema):
                 {"role": "assistant", "content": "tengo las 10, 11 y 2"},
             ]
         )
-        return await sesion.get_items(limit=3)
+        return await sesion.get_items(limit=2)
 
-    items = _correr(correr())
-    _correr(persistencia.cerrar_engines())
+    try:
+        items = _correr(correr())
+    finally:
+        _correr(persistencia.cerrar_engines())
 
-    llamadas = {i.get("call_id") for i in items if i.get("type") == "function_call"}
-    salidas = {i.get("call_id") for i in items if i.get("type") == "function_call_output"}
+    llamadas, salidas = _pares(items)
 
-    assert llamadas <= salidas, (
-        f"el recorte dejó una llamada a tool sin su salida: {llamadas - salidas}"
+    assert salidas <= llamadas, (
+        f"el recorte dejó una salida de tool sin su llamada: {salidas - llamadas}"
     )
+    assert [i.get("content") for i in items if i.get("role") == "assistant"] == [
+        "tengo las 10, 11 y 2"
+    ], "el recorte se llevó por delante contexto que sí cabía en la ventana"
+
+
+def test_con_dos_tools_en_paralelo_solo_cae_la_salida_que_perdio_su_llamada(esquema):
+    """La única forma de que la salida huérfana NO sea el primer item de la ventana.
+
+    Con llamadas en paralelo el modelo emite `[LLAMADA_A, LLAMADA_B, SALIDA_A, SALIDA_B]`,
+    y un «últimos N» puede partir por el medio: con `limit=4` la ventana empieza en
+    `LLAMADA_B`, así que `SALIDA_A` queda huérfana con algo DELANTE que sí hay que conservar.
+
+    En los otros dos escenarios la huérfana es el primer item, y ahí un recorte que además
+    tirase todo lo ya acumulado pasaría inadvertido -- se comprobó rompiéndolo a propósito.
+    Esta prueba es la que lo caza, y a la vez es el caso real: Daniela consulta
+    disponibilidad y precio en el mismo turno.
+    """
+    llamada_b = {
+        "type": "function_call",
+        "call_id": "call_def",
+        "name": "consultar_precio",
+        "arguments": '{"tratamiento":"valoracion"}',
+    }
+    salida_b = {
+        "type": "function_call_output",
+        "call_id": "call_def",
+        "output": "SIN DATO DOCUMENTADO",
+    }
+
+    base = _sin_options(esquema)
+    sesion = persistencia.sesion_de_agente(
+        "conv-borde-paralelo", database_url=base, esquema=ESQUEMA
+    )
+
+    async def correr():
+        await sesion.add_items(
+            [
+                {"role": "user", "content": "hola"},
+                _LLAMADA,
+                llamada_b,
+                _SALIDA,
+                salida_b,
+                {"role": "assistant", "content": "tengo las 10, 11 y 2"},
+            ]
+        )
+        # La ventana empieza en LLAMADA_B: `_SALIDA` pierde la suya, `salida_b` conserva la
+        # suya, y delante de la huérfana queda una llamada que NO se puede tirar.
+        return await sesion.get_items(limit=4)
+
+    try:
+        items = _correr(correr())
+    finally:
+        _correr(persistencia.cerrar_engines())
+
+    llamadas, salidas = _pares(items)
+
+    assert salidas <= llamadas, (
+        f"el recorte dejó una salida de tool sin su llamada: {salidas - llamadas}"
+    )
+    assert [i.get("type") or i.get("role") for i in items] == [
+        "function_call",
+        "function_call_output",
+        "assistant",
+    ], "el recorte tenía que quitar la salida huérfana y nada más"

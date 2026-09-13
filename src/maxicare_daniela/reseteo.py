@@ -219,6 +219,34 @@ def _borrar(database_url: str, telefono: str, conservar_wamid: str | None) -> di
         return persistencia.borrar_rastro(conn, telefono, conservar_wamid=conservar_wamid)
 
 
+#: Cómo se llama cada tabla cuando el conteo sale a un chat de WhatsApp: (singular, plural).
+#:
+#: Existe porque `confirmacion` componía el texto con las CLAVES del diccionario, que son
+#: nombres de tabla. Mientras fueron `citas` o `conversaciones` se leía como español y nadie
+#: lo miró; en la fase 7 entró `agent_sessions` --que no es ni español ni nuestro, sino del
+#: SDK-- y quien probara por WhatsApp recibía «1 en agent_sessions». Un nombre interno en un
+#: chat no es solo feo: invita a creer que el mensaje es un error del sistema.
+#:
+#: Las claves son EXACTAMENTE las que devuelve `persistencia.borrar_rastro`, y
+#: `tests/test_reseteo.py` lo comprueba contra la función de verdad para que una tabla nueva
+#: no pueda entrar aquí por la puerta de atrás.
+ETIQUETAS_DE_TABLA: dict[str, tuple[str, str]] = {
+    "mensajes_entrantes": ("mensaje", "mensajes"),
+    "citas": ("cita", "citas"),
+    "reservas": ("reserva", "reservas"),
+    "agent_sessions": ("historial de conversación", "historiales de conversación"),
+    "conversaciones": ("conversación", "conversaciones"),
+    "pacientes": ("ficha tuya", "fichas tuyas"),
+}
+
+
+def _en_palabras(tabla: str, cuantas: int) -> str:
+    """«12 mensajes», «1 ficha tuya». Una tabla sin etiqueta cae en algo legible y genérico
+    en vez de filtrar su nombre: el texto va a un chat, no a un log."""
+    singular, plural = ETIQUETAS_DE_TABLA.get(tabla, ("registro", "registros"))
+    return f"{cuantas} {singular if cuantas == 1 else plural}"
+
+
 def confirmacion(borrado: Borrado) -> str:
     """El texto que recibe por WhatsApp quien pidió el reseteo.
 
@@ -226,11 +254,13 @@ def confirmacion(borrado: Borrado) -> str:
     en que la siguiente conversación empieza de cero, y esa confianza se apoya en ver el
     conteo. Un reseteo que no borró nada --porque el número ya estaba limpio-- también tiene
     que decirlo, o parecería que falló.
+
+    Lo dice en español, no en nombres de tabla: ver `ETIQUETAS_DE_TABLA`.
     """
     if borrado.total_filas == 0 and borrado.eventos == 0 and not borrado.tema_borrado:
         texto = "Ya no había nada que borrar de este número. Empiezas de cero igual."
     else:
-        partes = [f"{n} en {tabla}" for tabla, n in borrado.filas.items() if n]
+        partes = [_en_palabras(tabla, n) for tabla, n in borrado.filas.items() if n]
         texto = "Listo, borré todo lo tuyo: " + ", ".join(partes) + "."
         if borrado.eventos:
             texto += f" Y {borrado.eventos} cita(s) del calendario."
@@ -243,6 +273,7 @@ def confirmacion(borrado: Borrado) -> str:
 
 __all__ = [
     "COMANDO",
+    "ETIQUETAS_DE_TABLA",
     "Borrado",
     "ErrorDeReseteo",
     "autorizado",
