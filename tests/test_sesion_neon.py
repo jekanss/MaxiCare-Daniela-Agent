@@ -5,9 +5,18 @@
 Escribe en el esquema `pruebas_sesion`, que se crea y se borra aquí. NUNCA en `public`:
 allí hay pacientes reales de una clínica.
 
-El aislamiento NO va por `search_path` --el pooler de Neon rechaza `options` como parámetro
-de arranque-- sino por `schema_translate_map`, que cualifica las sentencias al compilarlas.
-Que eso valga también para el DDL es parte de lo que estas pruebas comprueban.
+Hoy el aislamiento va por `search_path`: este archivo habla `psycopg` crudo, sin SQLAlchemy
+de por medio, así que el DDL (crear y borrar el esquema) y las comprobaciones contra
+`information_schema` viajan por la conexión directa --sin `-pooler.`-- con
+`options=-csearch_path={ESQUEMA}`. La conexión directa no es un capricho: el pooler de Neon
+rechaza `options` como parámetro de arranque, así que sin quitarle el `-pooler.` al host no
+hay forma de fijar el `search_path` de la sesión.
+
+Cuando las Tareas 3, 7 y 13 amplíen este archivo con `SQLAlchemySession`, ese segundo
+mecanismo va a convivir con este: las sesiones del SDK se aislarán por
+`schema_translate_map`, que cualifica las sentencias al compilarlas porque ahí sí hay
+SQLAlchemy por debajo. Los dos conviven, cada uno con lo suyo: `search_path` para el
+`psycopg` crudo de este archivo, `schema_translate_map` para lo que el SDK escriba encima.
 """
 
 from __future__ import annotations
