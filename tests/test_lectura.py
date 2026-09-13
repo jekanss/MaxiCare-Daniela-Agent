@@ -9,7 +9,7 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from maxicare_daniela import lectura
+from maxicare_daniela import agentes, lectura
 from maxicare_daniela.canales import ArchivoDescargado
 from maxicare_daniela.contratos import LecturaArchivo, LecturaNoClinica
 
@@ -484,6 +484,73 @@ def test_el_lector_no_sube_el_contenido_clinico_a_los_traces(monkeypatch):
     # Y los spans se siguen creando: apagar el tracing entero costaria la latencia, el coste
     # y los errores del lector, que es justo lo que se quiere seguir viendo.
     assert run_config.tracing_disabled is False
+    # Desde la fase 7: sin que nadie le pase un group_id, el lector no se inventa uno.
+    assert run_config.group_id is None
+
+
+def test_el_lector_corre_bajo_el_group_id_que_le_dan():
+    """Sin esto el trace agrupado tiene un agujero justo en los turnos con archivo, que son
+    los más interesantes de leer."""
+    corrida = lectura._config_de_corrida("conv-con-radiografia")
+
+    assert corrida.group_id == "conv-con-radiografia"
+    assert corrida.trace_metadata["version_prompt"] == agentes.VERSION_PROMPT_LECTOR
+    assert corrida.trace_include_sensitive_data is False
+
+
+def test_sin_conversacion_viva_el_lector_no_se_inventa_un_grupo():
+    """El primer mensaje de un paciente nuevo PUEDE traer un archivo, y en ese instante la
+    conversación todavía no existe: la crea `atencion._leer_estado`, después de que el lector
+    ya arrancó. Ese trace queda fuera del grupo, y queda fuera A PROPÓSITO: inventarle un
+    `group_id` que no corresponde a ninguna conversación es peor que no tenerlo.
+    """
+    corrida = lectura._config_de_corrida(None)
+
+    assert corrida.group_id is None
+    assert corrida.trace_include_sensitive_data is False
+
+
+def test_leer_y_repartir_reenvia_el_group_id_hasta_el_runner(monkeypatch):
+    """El cable completo, no solo `_config_de_corrida` en aislamiento.
+
+    `test_el_lector_corre_bajo_el_group_id_que_le_dan` llama a `_config_de_corrida` directo:
+    prueba la función, no el cableado. `test_el_lector_no_sube_el_contenido_clinico_a_los_
+    traces` sí atraviesa `leer_archivo` de verdad, pero SIN `group_id` (queda `None` porque
+    nadie se lo pasa). Ninguna de las dos nota si alguien borra el `group_id=group_id` del
+    lambda de `leer_archivo`, el reenvío de `group_id` en `leer_y_repartir`, o si dejan de
+    pasarle `correr=None` explícitamente -- las tres formas de romper este cable dejaban
+    (antes de esta prueba) la suite entera en verde.
+
+    Por eso aquí NO se pasa `correr`: se dobla `Runner` entero, igual que en
+    `test_el_lector_no_sube_el_contenido_clinico_a_los_traces`, para que el lambda por
+    defecto de `leer_archivo` sea el que de verdad corra y construya el `run_config`.
+    """
+    import asyncio
+    from types import SimpleNamespace
+
+    capturado: dict = {}
+
+    class RunnerFalso:
+        @staticmethod
+        async def run(agente, entrada, **kw):
+            capturado.update(kw)
+            return SimpleNamespace(final_output=_lectura())
+
+    monkeypatch.setattr(lectura, "Runner", RunnerFalso)
+    tg = TelegramQueCaptura()
+
+    no_clinica = asyncio.run(
+        lectura.leer_y_repartir(
+            _archivo(), tipo="image", telegram=tg, tema_id=777, group_id="conv-x",
+        )
+    )
+
+    assert no_clinica is not None, "el doble del Runner no llego a correr"
+    assert "run_config" in capturado
+    assert capturado["run_config"].group_id == "conv-x", (
+        "el group_id no llego hasta el Runner: se rompio el cable entre leer_y_repartir, "
+        "leer_archivo y _config_de_corrida"
+    )
 
 
 def test_si_el_lector_revienta_devuelve_none_y_no_propaga():

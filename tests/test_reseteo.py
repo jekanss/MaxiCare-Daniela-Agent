@@ -3,17 +3,18 @@
 Sin red y sin base. La prueba que demuestra la garantía --que tras el reset Daniela se
 comporta como en un primer contacto-- vive aquí abajo, con dobles; la que comprueba que el
 orden de los DELETE es el que las claves foraneas permiten vive en `test_reseteo_neon.py`,
-porque esa solo la puede contestar la base.
+porque esa solo la puede contestar la base. La posición RELATIVA de `agent_sessions` frente
+a `conversaciones` --que los `session_id` SON esos ids, y por eso tiene que borrarse antes--
+se fija aquí abajo con una conexión de mentira que solo anota el SQL, sin tocar Postgres.
 """
 
 from __future__ import annotations
 
 import asyncio
-import time
 
 import pytest
 
-from maxicare_daniela import atencion, config, lectura, reseteo
+from maxicare_daniela import atencion, config, lectura, persistencia, reseteo
 from maxicare_daniela.canales import ErrorDeCanal
 
 TEL = "573001234567"
@@ -112,29 +113,77 @@ def test_la_lista_se_compara_por_digitos():
 
 
 # ==========================================================================================
-# Los dos eslabones de la garantia que no necesitan base
+# El orden del borrado y el olvido de la memoria del proceso -- lo que no necesita base
 #
-# El primero --que `_leer_estado` devuelve lo mismo que para un numero virgen-- solo lo
-# puede contestar Postgres y vive en `test_reseteo_neon.py`. Estos dos cierran la cadena:
-# con el estado igual, la sesion vacia y el bufer limpio, lo que recibe el modelo en el
-# turno siguiente es lo mismo que recibiria en un primer contacto.
+# Que `_leer_estado` devuelve lo mismo que para un numero virgen, y que el historial del
+# dialogo (en `agent_messages` desde la fase 7) queda de verdad borrado, solo lo puede
+# contestar Postgres: eso vive en `test_reseteo_neon.py`. Lo que SÍ se puede fijar sin base
+# es la POSICIÓN de las sentencias -- con una conexión que solo anota lo que se ejecuta -- y
+# que el búfer en memoria se olvida. Las dos cierran la cadena junto con la prueba de Neon.
 # ==========================================================================================
 
 
-def test_una_conversacion_nueva_nace_con_la_sesion_vacia():
-    """Por esto el reseteo no tiene que limpiar el historial del dialogo.
+class _CursorQueRegistra:
+    """Un cursor de mentira: anota el SQL que recibe y no toca ninguna base."""
 
-    `_sesiones` se indexa por `id_conversacion`. Borrada la conversacion, la siguiente nace
-    con un UUID nuevo, y `_sesion_de` de un id que nunca se ha visto construye una sesion
-    vacia. La vieja queda inalcanzable y se poda sola a las 24 h.
-    """
-    de_antes = atencion._sesion_de("conversacion-vieja", time.monotonic())
-    asyncio.run(de_antes.add_items([{"role": "user", "content": "me llamo Ana"}]))
-    assert asyncio.run(de_antes.get_items()) != []
+    def __init__(self, ejecutadas: list[str]) -> None:
+        self._ejecutadas = ejecutadas
+        self.rowcount = 0
 
-    nueva = atencion._sesion_de("conversacion-nueva", time.monotonic())
+    def execute(self, sql, parametros=None) -> None:
+        self._ejecutadas.append(sql)
 
-    assert asyncio.run(nueva.get_items()) == []
+    def fetchone(self):
+        return None
+
+    def fetchall(self):
+        return []
+
+    def __enter__(self) -> "_CursorQueRegistra":
+        return self
+
+    def __exit__(self, *exc) -> bool:
+        return False
+
+
+class _ConexionQueRegistra:
+    """Una conexión de mentira que solo anota el SQL que `borrar_rastro` ejecuta, sin
+    tocar ninguna base. Sirve para fijar el ORDEN de las sentencias, no su resultado --
+    eso último solo lo puede contestar Postgres, en `test_reseteo_neon.py`."""
+
+    def __init__(self) -> None:
+        self.ejecutadas: list[str] = []
+
+    def cursor(self) -> _CursorQueRegistra:
+        return _CursorQueRegistra(self.ejecutadas)
+
+    def commit(self) -> None:
+        pass
+
+    def rollback(self) -> None:
+        pass
+
+
+def test_el_historial_se_borra_antes_que_las_conversaciones():
+    """El orden no es estilo: los `session_id` SON los ids de las conversaciones. Al revés,
+    el DELETE de `agent_sessions` no encontraría a qué apuntar y el historial se quedaría
+    vivo, invisible, ligado a un número que el sistema dice no conocer."""
+    conn = _ConexionQueRegistra()
+
+    persistencia.borrar_rastro(conn, "573001112233")
+
+    sentencias = [s.lower() for s in conn.ejecutadas]
+    # El DELETE, no la mención: con un `"agent_sessions" in s` a secas, una sentencia futura
+    # que solo nombrara la tabla --un `SELECT count(*)` antes de borrar, por ejemplo--
+    # emparejaría primero y esta prueba dejaría de vigilar el orden que dice vigilar.
+    posicion_historial = next(
+        i for i, s in enumerate(sentencias) if "delete from agent_sessions" in s
+    )
+    posicion_conversaciones = next(
+        i for i, s in enumerate(sentencias) if "delete from conversaciones" in s
+    )
+
+    assert posicion_historial < posicion_conversaciones
 
 
 def test_olvidar_saca_el_bufer_del_numero():
@@ -336,6 +385,33 @@ def test_la_confirmacion_dice_que_se_borro():
 
     texto = reseteo.confirmacion(borrado)
 
-    assert "12 en mensajes_entrantes" in texto
+    assert "12 mensajes" in texto
+    assert "1 ficha tuya" in texto, "el singular no puede salir como «1 fichas tuyas»"
     assert "2 cita(s)" in texto
     assert "Telegram" in texto
+
+
+def test_la_confirmacion_no_saca_nombres_de_tabla_a_un_chat():
+    """El texto va por WhatsApp a una persona. Componerlo con las claves del diccionario --
+    que son nombres de tabla-- se leyó casi como español mientras fueron `pacientes` o
+    `citas`; en la fase 7 entró `agent_sessions` y el mensaje pasó a decir «1 en
+    agent_sessions».
+
+    La segunda mitad es la que impide que vuelva a pasar: las tablas se sacan de
+    `borrar_rastro` DE VERDAD --con la conexión que solo anota-- y no de una lista copiada a
+    mano, así que una tabla nueva sin etiqueta cae aquí y no en el chat de quien prueba.
+    """
+    conn = _ConexionQueRegistra()
+    tablas = set(persistencia.borrar_rastro(conn, TEL))
+
+    texto = reseteo.confirmacion(reseteo.Borrado(filas=dict.fromkeys(tablas, 3)))
+
+    # El guion bajo es el delator: `citas`, `reservas` y `conversaciones` SON la palabra en
+    # español y su etiqueta coincide con la tabla, pero ninguna tabla de dos palabras
+    # --`agent_sessions`, `mensajes_entrantes`-- se lee como español en un chat.
+    assert "_" not in texto, f"un nombre de tabla salió al chat: {texto}"
+    assert "sessions" not in texto
+    assert tablas <= set(reseteo.ETIQUETAS_DE_TABLA), (
+        "borrar_rastro devuelve tablas que confirmacion no sabe nombrar: "
+        f"{tablas - set(reseteo.ETIQUETAS_DE_TABLA)}"
+    )

@@ -263,13 +263,16 @@ _evaluador_uso = Agent(
 )
 
 
-async def _preguntar(evaluador: Agent, texto: str) -> Veredicto:
+async def _preguntar(evaluador: Agent, texto: str, *, ctx=None) -> Veredicto:
     """Corre un evaluador y nunca deja que su fallo bloquee la conversación.
 
     Un evaluador caído devuelve «no dispara». Es deliberado: la alternativa --bloquear ante
     la duda-- deja al paciente sin respuesta cada vez que el proveedor tenga un mal minuto,
     y un sistema mudo no protege a nadie. Los fallos se registran para que se vean en el
     trace.
+
+    `ctx` es el `ContextoDaniela` del turno, y solo se usa para el `group_id`: sin él, el
+    trace de un mensaje bloqueado aparece suelto, sin la conversación que lo explica.
     """
     try:
         # `run_config` y no los defaults del SDK: lo que recibe un evaluador es el mensaje
@@ -278,7 +281,15 @@ async def _preguntar(evaluador: Agent, texto: str) -> Veredicto:
         # olvidar: nadie piensa en un freno como en algo que habla con OpenAI. Estuvo abierta
         # mientras `lectura.py` ya tenía la suya cerrada. Ver `config.config_de_corrida`.
         resultado = await Runner.run(
-            evaluador, texto, max_turns=1, run_config=config_de_corrida()
+            evaluador,
+            texto,
+            max_turns=1,
+            run_config=config_de_corrida(
+                group_id=getattr(ctx, "id_conversacion", None),
+                canal=getattr(ctx, "canal", "whatsapp"),
+                # Sin `version_prompt`: el prompt de un evaluador no es el de Daniela, y
+                # poner el de Daniela aquí sería un dato plausible y falso.
+            ),
         )
         veredicto: VeredictoEvaluador = resultado.final_output
         return Veredicto(veredicto.dispara, veredicto.razon)
@@ -341,7 +352,7 @@ async def sin_lectura_clinica(
     if not vale_la_pena_revisar_lo_clinico(wrapper.context):
         return GuardrailFunctionOutput(output_info="prefiltro: no aplica", tripwire_triggered=False)
 
-    veredicto = await _preguntar(_evaluador_clinico, salida.mensaje_al_paciente)
+    veredicto = await _preguntar(_evaluador_clinico, salida.mensaje_al_paciente, ctx=wrapper.context)
     if veredicto.dispara:
         log.warning("sin_lectura_clinica disparó: %s", veredicto.motivo)
     return GuardrailFunctionOutput(
@@ -360,7 +371,7 @@ async def uso_indebido(
     """Corre en paralelo con el agente: no debe añadir latencia al caso normal, que es el
     99% de los mensajes."""
     texto = entrada if isinstance(entrada, str) else str(entrada)
-    veredicto = await _preguntar(_evaluador_uso, texto)
+    veredicto = await _preguntar(_evaluador_uso, texto, ctx=wrapper.context)
     if veredicto.dispara:
         log.warning("uso_indebido disparó en %s: %s", wrapper.context.id_conversacion, veredicto.motivo)
     return GuardrailFunctionOutput(

@@ -281,10 +281,15 @@ class EspiaResponder:
 
 
 def usar(espia: EspiaResponder) -> EspiaResponder:
-    """Igual que en `probar_atencion.py`: `_candados` y `_sesiones` son estado de modulo y
-    sobreviven entre comprobaciones."""
+    """Igual que en `probar_atencion.py`: `_candados` es estado de modulo y sobrevive entre
+    comprobaciones. El historial ya no vive en memoria (desde la fase 7): `atender` sigue
+    pidiendole la sesion a `persistencia.sesion_de_agente`, contra Neon, en su propio esquema
+    (`pruebas_lectura`). Pero a diferencia de `probar_atencion.py`, aqui esa sesion NUNCA se
+    ejercita: `EspiaResponder` no delega en el `responder` real ni con `--chat` (ver su
+    docstring), asi que la sesion se construye y no llega a leerse ni a escribirse -- no cae
+    una sola fila en `pruebas_lectura.agent_messages`. Este script prueba el muro, no el
+    historial de la conversacion."""
     atencion._candados.clear()
-    atencion._sesiones.clear()
     conversacion.responder = espia
     return espia
 
@@ -454,7 +459,7 @@ async def cuatro(url: str) -> None:
     tg = TelegramCaptura()
     m = mensaje_documento(TEL_ARCHIVO, nombre_archivo="remision-prueba.pdf", texto="Aqui esta mi remision")
 
-    async def lector_doblado(archivo, *, tipo, correr=None) -> LecturaArchivo:
+    async def lector_doblado(archivo, *, tipo, correr=None, group_id=None) -> LecturaArchivo:
         return _lectura_canonica()
 
     lectura.leer_archivo = lector_doblado
@@ -503,7 +508,7 @@ async def cinco(url: str, cfg: Config) -> None:
     tg = TelegramCaptura()
     m = mensaje_documento(TEL_MURO, nombre_archivo="remision-muro.pdf", texto="Hola, aqui esta mi remision")
 
-    async def lector_doblado(archivo, *, tipo, correr=None) -> LecturaArchivo:
+    async def lector_doblado(archivo, *, tipo, correr=None, group_id=None) -> LecturaArchivo:
         return _lectura_canonica()
 
     lectura.leer_archivo = lector_doblado
@@ -648,7 +653,7 @@ async def ocho(url: str) -> None:
     tg = TelegramCaptura()
     m = mensaje_documento(TEL_DESCONOCIDO, nombre_archivo="foto-desconocido.pdf")
 
-    async def lector_doblado(archivo, *, tipo, correr=None) -> LecturaArchivo:
+    async def lector_doblado(archivo, *, tipo, correr=None, group_id=None) -> LecturaArchivo:
         return _lectura_canonica()
 
     lectura.leer_archivo = lector_doblado

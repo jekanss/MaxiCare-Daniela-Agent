@@ -382,6 +382,45 @@ def test_borrar_un_numero_que_no_existe_no_falla(esquema):
 
 
 @pytest.mark.neon
+def test_clearstate_borra_el_historial_del_agente(esquema):
+    """Sin esto, `/clearstate` deja de cumplir lo que promete y nadie se entera: el paciente
+    vuelve a primer contacto con Daniela recordando lo de antes.
+
+    Es la clase de fallo que solo se ve probándolo, porque la garantía del módulo --que
+    `_leer_estado` devuelva los mismos ocho campos-- se sigue cumpliendo igual.
+    """
+    telefono = "573001112233"
+
+    with persistencia.conectar(esquema) as conn:
+        id_paciente = persistencia.asegurar_paciente(
+            conn, nombre_completo="Ana Prueba", telefono=telefono
+        )
+        id_conversacion = persistencia.asegurar_conversacion(
+            conn, telefono=telefono, paciente_id=id_paciente
+        )
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO agent_sessions (session_id) VALUES (%s)", (id_conversacion,)
+            )
+            cur.execute(
+                "INSERT INTO agent_messages (session_id, message_data) VALUES (%s, %s)",
+                (id_conversacion, '{"role":"user","content":"me llamo Ana"}'),
+            )
+        conn.commit()
+
+    with persistencia.conectar(esquema) as conn:
+        borradas = persistencia.borrar_rastro(conn, telefono)
+
+    assert borradas["agent_sessions"] == 1
+
+    with persistencia.conectar(esquema) as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT count(*) FROM agent_messages WHERE session_id = %s", (id_conversacion,)
+        )
+        assert cur.fetchone()[0] == 0, "quedó historial de un número que se reseteó"
+
+
+@pytest.mark.neon
 def test_el_rastro_dice_que_hay_que_borrar_afuera(esquema):
     """Antes de tocar las filas hay que saber qué eliminar en Calendar y en Telegram: una vez
     borrada la fila, el `evento_calendar_id` ya no existe y el evento queda huérfano."""

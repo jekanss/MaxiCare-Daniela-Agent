@@ -52,7 +52,28 @@ LIMITE_TURNOS = 15
 #: En True, el contenido clínico quedaría en los traces, que se exportan fuera.
 TRACE_INCLUDE_SENSITIVE_DATA = False
 
-def config_de_corrida():
+def version_de_prompt(texto: str) -> str:
+    """Un identificador corto y estable del texto de un prompt, para el `trace_metadata`.
+
+    Un hash y no un número que alguien suba a mano: se mueve solo cuando el prompt cambia de
+    verdad y nadie tiene que acordarse. Doce caracteres porque va en cada trace y nadie lee
+    un sha256 entero; es un identificador, no una defensa criptográfica.
+
+    `hashlib` y no el `hash()` de Python, que está aleatorizado por `PYTHONHASHSEED`: daría
+    una versión distinta en cada arranque del contenedor y el campo dejaría de servir para
+    lo único que sirve, que es agrupar trazas del mismo prompt.
+    """
+    import hashlib
+
+    return hashlib.sha256(texto.encode("utf-8")).hexdigest()[:12]
+
+
+def config_de_corrida(
+    *,
+    group_id: str | None = None,
+    canal: str = "whatsapp",
+    version_prompt: str | None = None,
+):
     """El `RunConfig` que lleva TODA llamada al modelo de este proyecto.
 
     Hay tres consumidores de modelo --Daniela en `conversacion.py`, el lector en `lectura.py`
@@ -74,18 +95,119 @@ def config_de_corrida():
     El import va dentro y no arriba por la trampa de las variables vacías: `runtime.py` llama
     a `descartar_vacias_de_terceros()` ANTES de construir nada que hable con OpenAI, y este
     módulo se importa mucho antes que eso.
+
+    `group_id` agrupa las trazas de un mismo EPISODIO. Es el UUID de la conversación, no el
+    teléfono: un teléfono agrupa a una persona para siempre; una conversación agrupa lo que
+    alguien va a querer leer entero cuando llegue un reclamo. Los TRES consumidores de modelo
+    tienen que pasar el mismo, o el trace agrupado tendrá un agujero justo en los turnos con
+    archivo, que son los más interesantes de leer.
+
+    `version_prompt` se omite a propósito cuando quien llama no es Daniela ni el lector: los
+    evaluadores de guardrail tienen su propio prompt, y poner el de Daniela ahí sería un dato
+    plausible y falso.
     """
     from agents import RunConfig
+
+    metadata: dict[str, str] = {"canal": canal}
+    if version_prompt is not None:
+        metadata["version_prompt"] = version_prompt
 
     return RunConfig(
         workflow_name=WORKFLOW_NAME,
         trace_include_sensitive_data=TRACE_INCLUDE_SENSITIVE_DATA,
+        group_id=group_id,
+        trace_metadata=metadata,
     )
 
 
 #: `persistencia.compactacion`: recorte del historial por cantidad, cero llamadas de modelo.
 #: La memoria larga no vive aquí: vive en el estado estructurado de Neon, que no se degrada.
-LIMITE_HISTORIAL_SESION = 40
+#:
+#: EL SDK CUENTA ITEMS, NO MENSAJES. Una llamada a tool y su resultado son dos items, y un
+#: turno en que Daniela consulte el conocimiento, mire la agenda y registre el estado gasta
+#: seis o siete él solo. Por eso el 40 del plan --justificado como «5 conversaciones
+#: completas»-- era falso: podían ser cinco o seis TURNOS.
+#:
+#: ==========================================================================================
+#: ESTE NÚMERO SON DOS NÚMEROS DISTINTOS, Y HOY SOLO HAY UNO
+#: ==========================================================================================
+#:
+#: 1. **El TOPE DE SEGURIDAD** (lo que vale hoy): existe para que el historial no pueda
+#:    crecer hasta reventar la petición. No optimiza nada; solo acota.
+#: 2. **El LÍMITE MEDIDO** (la tarea 13b, `PENDIENTE`): sale de `scripts/medir_historial.py`
+#:    sobre conversaciones reales y será MÁS PEQUEÑO, porque optimiza coste, no seguridad.
+#:
+#: Poner el tope no cierra la 13b. Los cuatro números de abajo siguen sin medirse.
+#:
+#: ------------------------------------------------------------------------------------------
+#: Por qué dejó de ser `None`: no era caro, era un paciente atascado para siempre
+#: ------------------------------------------------------------------------------------------
+#: La ventana de conversación de 24 h es DESLIZANTE --`tocar_conversacion` la renueva en cada
+#: turno, incluido el que falla (`atencion.py`)--, así que un paciente que escriba una vez al
+#: día conserva el mismo `session_id` indefinidamente y su historial no tiene tope. Cuando esa
+#: petición cruza el techo, la API devuelve un `openai.BadRequestError` con
+#: `code: context_length_exceeded` -- **comprobado contra la API real, no supuesto**. Y ese
+#: error NO es una `AgentsException`: `conversacion.responder` no lo traduce, sube hasta el
+#: `except Exception` de `atencion.atender` y el paciente recibe el MENSAJE_SEGURO. En el turno
+#: siguiente, otra vez, sin caducidad --el turno fallido también renueva las 24 h-- y sin
+#: `/clearstate` si su número no está en `MAXICARE_TELEFONOS_PRUEBA`, que nace vacía.
+#:
+#: ------------------------------------------------------------------------------------------
+#: La aritmética del tope, con lo que se midió el 13/09/2026 (todo verificable)
+#: ------------------------------------------------------------------------------------------
+#: **Techo por petición: 500.000 tokens.** No es la ventana del modelo, es el límite de la
+#: cuenta, y es el que manda porque es el más bajo: la API lo dijo con estas palabras al
+#: mandarle una petición de ~600k tokens --«Request too large for gpt-5.6-terra ... on tokens
+#: per min (TPM): Limit 500000, Requested 600289»--. La ventana del modelo es MAYOR: a ~600k
+#: la validación de contexto no saltó (saltó la de TPM) y a ~1,2M sí
+#: (`code: context_length_exceeded`), así que está entre los dos. Se usa el 500.000 porque
+#: usar el número grande sería dimensionar contra un techo que esta cuenta no alcanza.
+#:
+#: **Fracción segura: 10 %.** El TPM es por MINUTO y para TODA la clínica, así que varios
+#: pacientes del mismo minuto se lo reparten; y la petición lleva además las instrucciones,
+#: los esquemas de las nueve tools, el mensaje del turno y la salida. Con el 10 %, diez turnos
+#: simultáneos del mismo minuto siguen cabiendo.
+#:
+#: **Peor caso por item: 213 tokens.** Medido con el tokenizador del propio `gpt-5.6-terra`
+#: (`usage.input_tokens`, no caracteres partidos por cuatro) sobre los 24 items REALES que
+#: dejaron dos turnos con tools --incluida una regeneración por guardrail--: 2.229 tokens en
+#: total, 92,9 de media, 213 el más grande (un item de `reasoning`).
+#:
+#:     500.000 tokens de techo  x  0,10 de fracción segura  =  50.000 tokens para historial
+#:     50.000 tokens  /  213 tokens por item (peor caso)    =  234 items
+#:                                                          -> 230, redondeando a la baja
+#:
+#: **Contraste, para ver que no recorta nada vivo:** esos mismos dos turnos dejaron 24 items,
+#: o sea ~12 por turno. Una conversación de agendamiento completa --seis turnos-- son unos 72
+#: items: el tope está 3 veces por encima. Y sin tope harían falta ~5.400 items (~450 turnos
+#: en una sola conversación) para cruzar el techo; con él, ese camino no existe.
+#:
+#: `sin_salidas_huerfanas` es lo que hace que el recorte sea seguro cuando por fin ocurra: el
+#: «últimos N» del SDK no sabe de pares `call_id` y puede dejar una salida de tool sin su
+#: llamada, que la API rechaza.
+#:
+#: ------------------------------------------------------------------------------------------
+#: EL SDK CUENTA ITEMS, NO MENSAJES
+#: ------------------------------------------------------------------------------------------
+#: Una llamada a tool y su resultado son dos items, y el `reasoning` es otro. Por eso el 40 del
+#: plan --justificado como «5 conversaciones completas»-- era falso: con 12 items por turno
+#: medidos, eran tres turnos y medio.
+#:
+#: ------------------------------------------------------------------------------------------
+#: Lo que sigue PENDIENTE: los cuatro números de la 13b
+#: ------------------------------------------------------------------------------------------
+#: Por medir con `scripts/medir_historial.py`. Los 24 items de arriba son de DOS turnos
+#: fabricados para medir tokens, no una muestra de conversaciones reales:
+#:   fecha de la medición: PENDIENTE   conversaciones medidas: PENDIENTE
+#:   items por turno, media: PENDIENTE   peor caso: PENDIENTE
+#:   items por conversación, p95: PENDIENTE   máximo: PENDIENTE
+#: El límite medido será <peor caso> x 6 turnos, que es una conversación de agendamiento
+#: completa --saludo, tratamiento, fecha, disponibilidad, nombre y consentimiento,
+#: confirmación--, y sustituirá a este tope cuando `medir_historial.py` tenga al menos VEINTE
+#: turnos repartidos en cinco conversaciones QUE TENGAN FILAS en `public.agent_messages` --no
+#: turnos de `conversaciones`, que los hay desde antes de esta fase y no traen un solo item que
+#: contar--, lo que exige desplegar primero.
+LIMITE_HISTORIAL_SESION: int | None = 230
 
 #: `limites.latencia_maxima`: "nunca instantánea... retardo variable... tope máximo de un
 #: minuto". El retardo se sortea dentro de este rango antes de responder.

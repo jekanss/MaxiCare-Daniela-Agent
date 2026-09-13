@@ -28,9 +28,17 @@ en producción o por mutación, no razonado.
   recordaría ni la frase anterior, `turno_actual` sería siempre 1 y las claves de
   idempotencia (`id_conversacion + turno`) no colisionarían nunca, con lo que dejarían de
   proteger.
-- **El historial vive en memoria** (`_sesiones`). Un reinicio borra el hilo del diálogo, no
-  los datos: paciente, citas y estado de oportunidad están en Neon. Lo arregla la fase 7 con
-  `SQLAlchemySession`.
+- **El historial YA NO vive en memoria, en ningún carril.** Desde la fase 7,
+  `atencion.atender` le pide la sesión a `persistencia.sesion_de_agente`
+  (`SQLAlchemySession`, sobre `agent_messages` en Neon) por omisión, así que un reinicio del
+  proceso ya no borra el hilo del diálogo de un paciente de WhatsApp -- igual que ya no
+  borraba los datos: paciente, citas y estado de oportunidad. Desde la Tarea 6, el chat web
+  del panel usa la misma fábrica (`runtime._contexto_de_prueba`), apuntada con
+  `esquema="pruebas_web"` -- `config.database_url` sin el `options=-csearch_path=` que sí
+  lleva la conexión síncrona del carril, para que el aislamiento lo dé
+  `schema_translate_map` y no el `search_path`, igual que en el resto de esta fase (ver
+  `tests/test_sesion_neon.py::_sin_options`). `conversacion.SesionEnMemoria` queda como el
+  doble de las pruebas offline, y ya no corre en ningún carril real.
 
 ## El candado
 
@@ -184,9 +192,16 @@ estrenar una línea de teléfono. Vive en `reseteo.py`, y `runtime._entregar` lo
   `id_conversacion`, que es un UUID nuevo por definición. Lo sostiene
   `test_reseteo_neon.py::test_tras_el_reset_daniela_ve_lo_mismo_que_en_un_primer_contacto`,
   con su control: antes del borrado, esa misma prueba comprueba que Daniela SÍ lo conocía.
-  El historial del diálogo no hay que borrarlo porque `_sesiones` se indexa por
-  `id_conversacion`: conversación borrada, id nuevo, sesión vacía. Lo único de memoria que sí
-  hay que sacar es el búfer, y de eso se encarga `atencion.olvidar`.
+  El historial del diálogo **también se borra, desde la Tarea 8.** Desde la fase 7 vive en
+  `agent_messages`/`agent_sessions`, en Neon, y `persistencia.borrar_rastro` lo borra dentro
+  de la MISMA transacción que el resto del rastro -- el `DELETE FROM agent_sessions` va
+  ANTES que `DELETE FROM conversaciones`, porque `session_id` ES el `id` de esas
+  conversaciones (la migración 010 lo declara sin clave foránea a propósito, así que no hay
+  CASCADE que salve el orden contrario): al revés, la subconsulta no encontraría a qué
+  apuntar y el historial quedaría huérfano e inalcanzable, con la agravante de que el
+  borrado parecería haber funcionado. `agent_messages` no se borra a mano: se va sola por su
+  propio `ON DELETE CASCADE`. Lo único de memoria del proceso que hay que sacar aparte es el
+  búfer, y de eso se encarga `atencion.olvidar`.
 - **La lista vacía apaga el comando para todo el mundo, y ese es el default.** Sin números
   listados, `/clearstate` llega a Daniela como cualquier otro texto. Dos pruebas lo vigilan
   (`test_reseteo_cable.py`), y las dos caen al mutar la condición de `_entregar`: sin ellas,
@@ -210,8 +225,17 @@ estrenar una línea de teléfono. Vive en `reseteo.py`, y `runtime._entregar` lo
 - **Se conserva la fila de `mensajes_entrantes` del propio comando**, con `conversacion_id`
   en NULL. Si se borrara, el reintento de Meta ejecutaría el comando otra vez. No vuelve
   conocido a nadie: `_leer_estado` no mira esa tabla.
-- **También se limpia `pruebas_web`**, que tiene las mismas doce tablas y no se purga nunca.
-  Sin eso, un número probado desde el chat del panel seguiría conocido por esa mitad.
+- **También se limpia `pruebas_web`**, que tiene las mismas tablas que `public` y no se purga
+  nunca. Sin eso, un número probado desde el chat del panel seguiría conocido por esa mitad.
+  **Ese borrado secundario exige que `pruebas_web` esté al día, y hasta el 13/09/2026 no lo
+  estaba:** su única puesta al día era `runtime._preparar_esquema_de_pruebas`, que es
+  perezosa —corre cuando alguien abre el chat web— y nadie lo había abierto desde las
+  migraciones 009 y 010. Medido contra la base real: le faltaban `agent_sessions`,
+  `agent_messages` y cuatro columnas de `mensajes_entrantes`, y `borrar_rastro` reventaba ahí
+  con `UndefinedColumn` mientras este documento afirmaba que funcionaba. Ahora lo pone al día
+  `scripts/inicializar_base.py`, que es lo que corre `desplegar.sh` en cada despliegue, y su
+  verificación comprueba las dos tablas del historial **en los dos esquemas**. Comprobado
+  después del arreglo: `borrar_rastro` sobre `pruebas_web` devuelve ceros en vez de reventar.
 - **Lo que NO borra, y está dicho en el código:** las trazas que ya se subieron a OpenAI
   entre la fase 6A y el 13/09/2026 —la fuga está cerrada desde entonces, pero lo que salió
   vive en el dashboard de otra empresa, no en la base— y los logs del contenedor. Ninguna de
@@ -263,8 +287,12 @@ de entorno se olvida en el siguiente servidor. Tres pruebas lo sostienen —una 
 y las tres caen al quitar el campo.
 
 **Lo que esto NO arregla:** lo ya subido sigue en el dashboard de OpenAI. Cerrar la fuga
-detiene la hemorragia; no borra lo que salió entre la fase 6A y hoy. Y falta la otra mitad
-del entregable de la fase 7: agrupar las trazas por `group_id`, que sigue sin hacerse.
+detiene la hemorragia; no borra lo que salió entre la fase 6A y hoy.
+
+**La otra mitad del entregable de la fase 7 —agrupar las trazas por `group_id`— YA ESTÁ
+HECHA** (`1dd75bd`, integrada en `a0e922d`). El `group_id` es el UUID de la conversación en
+los dos carriles, nunca el teléfono, y lo pasan los tres consumidores de modelo. Hay prueba
+por consumidor y caen las tres desde la única puerta.
 
 ## Lo que la suite offline NO caza
 

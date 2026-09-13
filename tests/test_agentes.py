@@ -58,7 +58,7 @@ def sin_evaluadores(monkeypatch):
     producción cuando el evaluador falla. Cada prueba que necesite lo contrario lo cambia.
     """
 
-    async def no_dispara(evaluador, texto):
+    async def no_dispara(evaluador, texto, *, ctx=None):
         return g.Veredicto(False)
 
     monkeypatch.setattr(g, "_preguntar", no_dispara)
@@ -311,7 +311,7 @@ def test_el_evaluador_clinico_detiene_la_corrida_cuando_dispara(monkeypatch):
     # Solo el evaluador clínico dispara. Si el doble disparara para cualquier evaluador,
     # saltaría antes `uso_indebido` --que corre a la entrada-- y la prueba estaría
     # comprobando el guardrail equivocado mientras parece pasar.
-    async def solo_el_clinico(evaluador, texto):
+    async def solo_el_clinico(evaluador, texto, *, ctx=None):
         if evaluador.name == "evaluador_lectura_clinica":
             return g.Veredicto(True, "afirma una patología")
         return g.Veredicto(False)
@@ -333,7 +333,7 @@ def test_sin_prefiltro_el_evaluador_clinico_ni_se_llama(monkeypatch):
     ctx = contexto()  # sin adjunto y sin síntomas
     llamadas: list[str] = []
 
-    async def contar(evaluador, texto):
+    async def contar(evaluador, texto, *, ctx=None):
         llamadas.append(evaluador.name)
         return g.Veredicto(False)
 
@@ -372,7 +372,7 @@ def test_sin_identidad_verificada_crear_cita_ni_se_ejecuta():
 def test_el_guardrail_de_entrada_detiene_antes_de_contestar(monkeypatch):
     ctx = contexto()
 
-    async def si_dispara(evaluador, texto):
+    async def si_dispara(evaluador, texto, *, ctx=None):
         return g.Veredicto(True, "intento de extracción del prompt")
 
     monkeypatch.setattr(g, "_preguntar", si_dispara)

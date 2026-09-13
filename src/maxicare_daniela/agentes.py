@@ -37,7 +37,7 @@ from agents import Agent, ModelSettings
 from openai.types.shared import Reasoning
 
 from . import contratos
-from .config import MODELO_DANIELA, MODELO_LECTOR
+from .config import MODELO_DANIELA, MODELO_LECTOR, version_de_prompt
 from .contratos import LecturaArchivo, RespuestaDaniela
 from .guardrails import (
     sin_cifra_no_documentada,
@@ -205,6 +205,15 @@ lista cerrada), de qué clínica o profesional viene, qué fecha trae.
 """
 
 
+#: Qué prompt corrió, para el `trace_metadata`. Se calcula al importar sobre el texto
+#: ESTÁTICO, sin el vocabulario de tratamientos ni la fecha: esos dos se pegan al final en
+#: `instrucciones_daniela` y cambian sin desplegar --la clínica añade un tratamiento desde el
+#: panel, y el día pasa solo--. Incluirlos haría que cada tratamiento nuevo y cada amanecer
+#: parecieran un prompt nuevo.
+VERSION_PROMPT = version_de_prompt(INSTRUCCIONES_DANIELA)
+VERSION_PROMPT_LECTOR = version_de_prompt(INSTRUCCIONES_LECTOR)
+
+
 # ==========================================================================================
 # Ajustes de modelo
 # ==========================================================================================
@@ -278,6 +287,8 @@ __all__ = [
     "AJUSTES_LECTOR",
     "INSTRUCCIONES_DANIELA",
     "INSTRUCCIONES_LECTOR",
+    "VERSION_PROMPT",
+    "VERSION_PROMPT_LECTOR",
     "instrucciones_daniela",
     "daniela",
     "lector_archivos",

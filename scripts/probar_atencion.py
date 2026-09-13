@@ -325,10 +325,17 @@ class Turnos:
 
 
 def usar(espia: Turnos) -> Turnos:
-    """`_candados` y `_sesiones` son estado de MODULO y sobreviven entre comprobaciones. Sin
-    limpiarlos, una comprobacion pasa sola y falla dentro del script, o al reves."""
+    """`_candados` es estado de MODULO y sobrevive entre comprobaciones. Sin limpiarlo, una
+    comprobacion pasa sola y falla dentro del script, o al reves.
+
+    El historial ya no vive en memoria (desde la fase 7): `atender` sigue pidiendole la
+    sesion a `persistencia.sesion_de_agente`, contra Neon, en su propio esquema
+    (`pruebas_atencion`). Pero esa sesion solo se EJERCITA -- se lee y se escribe -- cuando
+    `espia` delega en el `responder` real (`Turnos(real=True)`, que activa `--chat`). Sin
+    `--chat`, `espia` fabrica la respuesta sin llamar a `Runner.run`: la sesion se construye
+    y no llega a leerse ni a escribirse, y no cae una sola fila en
+    `pruebas_atencion.agent_messages`."""
     atencion._candados.clear()
-    atencion._sesiones.clear()
     conversacion.responder = espia
     return espia
 

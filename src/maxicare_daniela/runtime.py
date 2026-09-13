@@ -263,6 +263,17 @@ def _construir_el_calendario() -> None:
     log.info("calendario listo · %s", type(_calendario).__name__)
 
 
+@app.on_event("shutdown")
+async def _cerrar_engines_de_persistencia() -> None:
+    """Cierra los pools de `SQLAlchemySession` (fase 7) al apagar el servidor.
+
+    Sin esto, el proceso termina con conexiones de Neon abiertas en el pool de sesiones --
+    hasta `TAMANO_POOL_SESIONES + DESBORDO_POOL_SESIONES` por cada `(base, esquema)` que se
+    haya usado-- que Neon solo libera por su cuenta cuando la TCP muere, no al instante.
+    """
+    await persistencia.cerrar_engines()
+
+
 # ==========================================================================================
 # Verificación del webhook — Meta la hace una sola vez, al conectar
 # ==========================================================================================
@@ -583,11 +594,16 @@ async def _entregar(m: ingesta.MensajeEntrante) -> None:
 def _bases_secundarias() -> tuple[str, ...]:
     """El carril de pruebas del panel, si su esquema existe ya.
 
-    Se comprueba en vez de intentarlo y fallar: el esquema se crea perezosamente la primera
-    vez que alguien abre el chat web, así que en un despliegue donde nadie lo ha abierto no
-    existe -- y eso no es un fallo del reseteo, es que no hay nada que borrar ahí. Sin esta
-    comprobación, la confirmación le diría al usuario «no pude con: base secundaria» en el
-    caso más normal de todos.
+    Se comprueba en vez de intentarlo y fallar: en una base recién creada el esquema puede no
+    existir todavía -- y eso no es un fallo del reseteo, es que no hay nada que borrar ahí.
+    Sin esta comprobación, la confirmación le diría al usuario «no pude con: base secundaria»
+    en el caso más normal de todos.
+
+    Que el esquema EXISTA no bastaba, y eso costó un hallazgo: existía desde hacía meses pero
+    con dos migraciones de retraso, porque su única puesta al día era
+    `_preparar_esquema_de_pruebas`, que es perezosa. `borrar_rastro` reventaba ahí con
+    `UndefinedColumn`. Desde el 13/09/2026 lo pone al día `scripts/inicializar_base.py`, que
+    corre en cada despliegue y verifica las tablas del historial en los dos esquemas.
     """
     try:
         with persistencia.conectar(config.database_url) as conn, conn.cursor() as cur:
@@ -728,14 +744,31 @@ COOKIE = "maxicare_sesion"
 #: El esquema del carril de pruebas. NO es `pruebas`, que usan `probar_tools.py` y
 #: `probar_agentes.py` -- y que ambos BORRAN al terminar. Si compartieran nombre, correr una
 #: prueba desde la terminal le vaciaría la conversación a quien estuviera usando el chat web.
-ESQUEMA_PRUEBAS_WEB = "pruebas_web"
+#: Reexportada de `persistencia`, que es donde vive: no es transporte, es un esquema de
+#: esta base, y quien lo pone al día son DOS -- este chat, perezosamente, y
+#: `scripts/inicializar_base.py`, que es la puerta del despliegue.
+ESQUEMA_PRUEBAS_WEB = persistencia.ESQUEMA_PRUEBAS_WEB
 
 _secreto_sesion = config.secreto_sesion
 
-#: Las conversaciones vivas del chat de pruebas, en memoria del proceso. Se pierden al
-#: reiniciar, y está bien: es un carril de pruebas. El contenedor corre con un solo worker
-#: (ver el `CMD` del Dockerfile), así que no hay dos procesos que puedan discrepar.
-_conversaciones_de_prueba: dict[str, tuple[ContextoDaniela, conversacion.SesionEnMemoria]] = {}
+#: El contexto vivo de cada conversación del chat de pruebas. El HISTORIAL ya no está aquí:
+#: desde la fase 7 cada turno queda escrito en `agent_messages` del esquema `pruebas_web`,
+#: igual que el de WhatsApp en el de `public` (`persistencia.sesion_de_agente`). Lo que queda
+#: en memoria es el contexto --calendario doble, credenciales vacías de Telegram,
+#: configuración operativa--, barato de reconstruir.
+#:
+#: Se pierde al reiniciar el proceso, y con él se pierde el REENGANCHE con esas filas -- no
+#: las filas en sí. Este diccionario es lo único que traduce un `id_conversacion` conocido a
+#: su contexto; vacío tras un reinicio, el id que el navegador todavía recuerda deja de
+#: reconocerse, `_contexto_de_prueba` lo trata como conversación nueva y
+#: `persistencia.asegurar_conversacion` -- que SIEMPRE inserta -- abre una fila distinta. Las
+#: filas del `id_conversacion` viejo quedan huérfanas en `pruebas_web`, sin que nada las
+#: vuelva a leer. Es la decisión correcta para este carril, no un descuido: el chat de
+#: pruebas es la pantalla donde la clínica prueba a Daniela desde cero, y tiene que poder
+#: abrir un primer contacto sin pedir un `/clearstate` antes. El contenedor corre además con
+#: un solo worker (ver el `CMD` del Dockerfile), así que no hay dos procesos que puedan
+#: discrepar sobre este diccionario.
+_conversaciones_de_prueba: dict[str, ContextoDaniela] = {}
 
 #: Se prepara una sola vez, la primera vez que alguien abre el chat. Hacerlo al arrancar
 #: costaría segundos de despliegue por una pantalla que puede que nadie abra ese día.
@@ -752,9 +785,7 @@ def _url_de_pruebas() -> str:
     2. El aislamiento es FÍSICO, no una convención: con `search_path=pruebas_web`, una
        consulta que diga `INSERT INTO citas` no puede tocar `public.citas` ni queriendo.
     """
-    directa = config.database_url.replace("-pooler.", ".")
-    sep = "&" if "?" in directa else "?"
-    return f"{directa}{sep}options=-csearch_path%3D{ESQUEMA_PRUEBAS_WEB}"
+    return persistencia.url_con_search_path(config.database_url, ESQUEMA_PRUEBAS_WEB)
 
 
 def _preparar_esquema_de_pruebas() -> str:
@@ -769,7 +800,7 @@ def _preparar_esquema_de_pruebas() -> str:
     if _esquema_de_pruebas_listo:
         return url
 
-    directa = config.database_url.replace("-pooler.", ".")
+    directa = persistencia.url_directa(config.database_url)
     with persistencia.conectar(directa) as conn:
         with conn.cursor() as cur:
             cur.execute(f"CREATE SCHEMA IF NOT EXISTS {ESQUEMA_PRUEBAS_WEB}")
@@ -900,12 +931,37 @@ class MensajeDePrueba(BaseModel):
     conversacion: str | None = None
 
 
-def _contexto_de_prueba(
-    quien: dict, id_conversacion: str | None
-) -> tuple[ContextoDaniela, conversacion.SesionEnMemoria]:
-    """Recupera la conversación viva, o abre una nueva en el carril de pruebas."""
+def _contexto_de_prueba(quien: dict, id_conversacion: str | None) -> tuple[ContextoDaniela, Any]:
+    """Recupera la conversación viva, o abre una nueva en el carril de pruebas.
+
+    El historial ya no viaja con el contexto: se reconstruye en cada llamada con
+    `persistencia.sesion_de_agente`, igual que en WhatsApp. Ver el docstring de
+    `_conversaciones_de_prueba` sobre por qué el contexto sí se queda en memoria y el
+    historial no.
+
+    ------------------------------------------------------------------------------------
+    Por qué la sesión va con `config.database_url` (SIN `options=`) y `esquema=` explícito
+    ------------------------------------------------------------------------------------
+
+    `_preparar_esquema_de_pruebas()` devuelve una URL con `options=-csearch_path=pruebas_web`
+    colgada -- la necesita para que la conexión síncrona de más abajo (`asegurar_conversacion`,
+    `leer_configuracion`) aterrice en el esquema correcto sin pasar por SQLAlchemy. Pasarle
+    ESA MISMA url a `sesion_de_agente` funcionaría igual -- las filas caerían en `pruebas_web`
+    igual -- pero el aislamiento lo estaría dando el `search_path` de la conexión, no
+    `schema_translate_map`. Eso ya pasó una vez en esta fase: con `options` colado en la URL,
+    `test_las_tablas_de_sesion_no_se_crean_en_public` pasaba con `schema_translate_map` BORRADO
+    de `persistencia._engine_de` (ver `tests/test_sesion_neon.py::_sin_options`). El mismo
+    riesgo existe aquí, así que se evita de la misma forma: `config.database_url` es la URL de
+    producción tal cual (pooler, sin `options`), y `esquema="pruebas_web"` es lo único que
+    desvía la escritura de `agent_sessions`/`agent_messages` fuera de `public`. Es el mismo
+    patrón que la Tarea 5 fijó para WhatsApp (`atencion._sesion_de`, sin `esquema=` porque ahí
+    el destino ES `public`).
+    """
     if id_conversacion and id_conversacion in _conversaciones_de_prueba:
-        return _conversaciones_de_prueba[id_conversacion]
+        ctx = _conversaciones_de_prueba[id_conversacion]
+        return ctx, persistencia.sesion_de_agente(
+            id_conversacion, database_url=config.database_url, esquema=ESQUEMA_PRUEBAS_WEB
+        )
 
     url = _preparar_esquema_de_pruebas()
     # El «teléfono» lleva el usuario dentro. No colisiona con ningún número real, deja claro
@@ -926,6 +982,9 @@ def _contexto_de_prueba(
         # el flujo de identificación, que es donde más se equivoca un prompt.
         identidad_verificada=False,
         tema_general=_tema_general or 0,
+        # El chat de pruebas del panel, no WhatsApp: separa en el dashboard de trazas las
+        # conversaciones reales de las pruebas de la clínica.
+        canal="web",
         # Sin credenciales de Telegram: `escalar_a_doctores` no puede avisar a nadie desde
         # aquí. Una prueba no le hace sonar el teléfono a un doctor.
         telegram_bot_token="",
@@ -940,9 +999,11 @@ def _contexto_de_prueba(
     except Exception:  # noqa: BLE001 -- los defaults del dataclass son los mismos
         log.warning("chat de pruebas sin configuración operativa; se usan los defaults")
 
-    par = (ctx, conversacion.SesionEnMemoria(nuevo))
-    _conversaciones_de_prueba[nuevo] = par
-    return par
+    _conversaciones_de_prueba[nuevo] = ctx
+    sesion = persistencia.sesion_de_agente(
+        nuevo, database_url=config.database_url, esquema=ESQUEMA_PRUEBAS_WEB
+    )
+    return ctx, sesion
 
 
 async def _resetear_chat_de_prueba(quien: dict) -> dict:
@@ -966,8 +1027,11 @@ async def _resetear_chat_de_prueba(quien: dict) -> dict:
     )
 
     # Las conversaciones vivas de ESTE usuario, no todas: dos personas de la clínica pueden
-    # estar probando a la vez, y reiniciar la tuya no puede cortarle el hilo a la otra.
-    for id_conversacion, (ctx, _sesion) in list(_conversaciones_de_prueba.items()):
+    # estar probando a la vez, y reiniciar la tuya no puede cortarle el hilo a la otra. Solo
+    # hace falta olvidar el CONTEXTO -- el historial en `agent_messages`/`agent_sessions` ya
+    # lo borró `reseteo.resetear` más arriba, dentro de `persistencia.borrar_rastro` (desde
+    # la Tarea 8), así que no queda una fila huérfana que limpiar aquí.
+    for id_conversacion, ctx in list(_conversaciones_de_prueba.items()):
         if ctx.telefono_completo == telefono:
             del _conversaciones_de_prueba[id_conversacion]
 
@@ -1032,8 +1096,12 @@ class ReinicioDePrueba(BaseModel):
 
 @app.post("/api/pruebas/reiniciar")
 async def reiniciar_prueba(entrada: ReinicioDePrueba, quien: dict = Depends(usuario_actual)) -> dict:
-    """Olvida la conversación. La fila en `pruebas_web` se queda: no estorba y deja rastro de
-    qué se probó."""
+    """Olvida el CONTEXTO en memoria. Las filas en `pruebas_web` se quedan -- incluido el
+    historial en `agent_messages`, desde la fase 7 -- porque no estorban y dejan rastro de
+    qué se probó. No es lo mismo que `/clearstate`: como `_contexto_de_prueba` no reconoce
+    ya ese `id_conversacion`, el turno siguiente abre una fila nueva en `conversaciones`
+    (`asegurar_conversacion` SIEMPRE inserta) y el historial viejo queda huérfano, con la
+    misma fila del paciente por debajo."""
     if entrada.conversacion:
         _conversaciones_de_prueba.pop(entrada.conversacion, None)
     return {"ok": True}

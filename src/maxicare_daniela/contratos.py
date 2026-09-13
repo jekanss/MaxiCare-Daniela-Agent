@@ -566,6 +566,11 @@ class ContextoDaniela:
     #: message_thread_id» -- ver la migración 005 y el comentario de `canales.py`.
     tema_general: int = 0
 
+    #: Por dónde llegó este mensaje: `whatsapp` (producción) o `web` (el chat del panel).
+    #: Va al `trace_metadata` para poder separar en el dashboard las conversaciones reales de
+    #: las pruebas de la clínica, que corren contra el MISMO agente a propósito.
+    canal: str = "whatsapp"
+
     #: Credenciales de Telegram, que `escalar_a_doctores` necesita para avisar. Viven en el
     #: contexto y no en un import de `config` dentro de la tool: así una prueba las
     #: sustituye por un doble sin tocar variables de entorno del proceso.

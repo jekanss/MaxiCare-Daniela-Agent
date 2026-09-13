@@ -17,14 +17,25 @@ llegue a la cita correcta.
   `uv run python scripts/inicializar_base.py` · `--solo-verificar` no escribe.
 - Ver el diseño sin leerlo entero: `uv run python scripts/ver_plan.py <clave>`
   (`fases`, `herramientas`, `guardrails`, `agentes`, `contexto`, `fallos`…).
+- Cuánto historial gasta un turno: `uv run python scripts/medir_historial.py` (solo lee).
+  Es el único camino para cerrar el límite MEDIDO del historial: mientras no haya **20 turnos
+  en 5 conversaciones con filas en `public.agent_messages`** el script lo dice y esos cuatro
+  números siguen en `PENDIENTE`. Exige desplegar primero: hasta que corra en producción no
+  hay nada que medir. Ojo con no confundirlo con el otro número:
+  `config.LIMITE_HISTORIAL_SESION = 230` es un **tope de seguridad** derivado del techo de
+  tokens de la cuenta —impide que un historial crezca hasta reventar la petición y dejar al
+  paciente atascado en el mensaje seguro—, no la medición.
 - Desplegar en el VPS: `bash scripts/desplegar.sh`
 - Usuarios del panel: `uv run python scripts/crear_usuario.py` (`--listar`, `--quitar-acceso`)
 - Revisar el grupo de Telegram: `uv run python scripts/obtener_chat_telegram.py`
 - Resetear a primer contacto: escribir `/clearstate`. **Por WhatsApp** solo funciona si el
   número está en `MAXICARE_TELEFONOS_PRUEBA` (varios, separados por coma); con esa variable
   vacía —su default— el comando no existe para nadie. Borra paciente, conversaciones,
-  mensajes, citas (y sus eventos de Calendar) y el tema de Telegram, en `public` y en
-  `pruebas_web`. **En el chat web del panel** funciona sin lista: ahí el teléfono es
+  mensajes, citas (y sus eventos de Calendar), **el historial del agente** (`agent_sessions`
+  y, por cascada, `agent_messages`: desde la fase 7 el diálogo vive en la base, no en la
+  memoria del proceso) y el tema de Telegram, en `public` y en `pruebas_web` —ese segundo
+  borrado exige que `pruebas_web` tenga las migraciones al día, y de eso se encarga el
+  despliegue (`inicializar_base.py`), no la primera persona que abra el chat web—. **En el chat web del panel** funciona sin lista: ahí el teléfono es
   `web-<usuario>` y solo se toca `pruebas_web`. Es irreversible.
   Ver `.claude/rules/atencion-whatsapp.md`.
 
@@ -37,6 +48,7 @@ Entregables por fase. **Los marcados gastan tokens**; los demás, ni uno:
 | `scripts/probar_web.py` | el cascarón web (fase 5) | solo con `--chat` |
 | `scripts/probar_atencion.py` | el turno de WhatsApp de punta a punta (fase 6A) | solo con `--chat` |
 | `scripts/probar_lectura.py` | el muro y el tema del paciente (fase 6B) | solo con `--chat` |
+| `scripts/probar_persistencia.py` | que una conversación sobrevive a reiniciar (fase 7) | solo con `--chat` |
 | `scripts/probar_panel.py` | el panel de tratamientos (fase 8) | solo con `--chat` |
 | `scripts/probar_calendario.py` | `CalendarioGoogle` contra el calendario real | no |
 | `scripts/probar_webhook.py <url>` | el webhook en producción | **sí** (despierta a Daniela) |
@@ -47,10 +59,22 @@ Entregables por fase. **Los marcados gastan tokens**; los demás, ni uno:
   comprobado—; su Telegram y su WhatsApp son falsos, y el lector va doblado salvo con
   `--chat`, donde además corre una vez de verdad sobre un PDF generado en el momento (no
   versionado) y el evaluador clínico corre sobre dos frases fijas.
+- `probar_persistencia.py` escribe en `pruebas_persistencia` —mismo patrón de creación y
+  borrado comprobado—; su `--chat` **no levanta uvicorn ni usa el chat web**: hace el
+  reinicio con DOS intérpretes de Python sobre el carril de WhatsApp, porque el chat web
+  pierde el reenganche al reiniciar por diseño (ver `runtime._conversaciones_de_prueba`) y
+  probaría lo contrario. Y comprueba que el nombre NO está en `pacientes`: si estuviera, el
+  segundo turno acertaría con el historial borrado.
 - `probar_panel.py` MITAD A cambia un precio por HTTP contra `public`, la base real de la
   clínica, y **lo restaura en un `finally` comprobando la restauración con una aserción**.
 - `probar_calendario.py --diagnosticar` **solo lee**: es lo primero que hay que correr
   cuando Calendar «no funciona».
+- **Estos scripts doblan funciones de `src/` con firmas escritas a mano, y `pytest -q` no
+  los corre.** Añadirle un parámetro a algo que un script dobla —`lectura.leer_archivo`,
+  `conversacion.responder`— los rompe en silencio: la suite entera sigue verde. Pasó en la
+  fase 7, y solo apareció al ejecutarlos (`TypeError: lector_doblado() got an unexpected
+  keyword argument 'group_id'`). Quien cambie una de esas firmas corre los cinco que no
+  gastan.
 
 # No negociables
 
@@ -77,6 +101,14 @@ una —qué se midió, qué costó— está en la regla que cubre ese archivo.
    a uno por hora en vez de a dos.
 8. **`uv run pytest -q` a secas NO caza una regresión en `tocar_conversacion`.** Quien toque
    esa función corre además las de Neon y `scripts/probar_atencion.py`.
+9. **El historial del diálogo YA está en Postgres** (`agent_sessions` / `agent_messages`,
+   `session_id = id_conversacion`). Quien toque `/clearstate` tiene que borrarlo, y va
+   ANTES del `DELETE FROM conversaciones`: los `session_id` SON esos ids.
+10. **Las columnas de la 010 las fija el SDK, no nosotros.** `SQLAlchemySession` corre con
+   `create_tables=False`, así que `agent_sessions` y `agent_messages` tienen que coincidir
+   con lo que el SDK espera —incluido el `TIMESTAMP` **sin zona**, al revés que el resto del
+   esquema—. Quien suba la versión del SDK compara columna por columna; lo que caza el
+   desajuste es `tests/test_sesion_neon.py`, y solo corre con `-m neon`.
 
 # Dónde está el resto
 
@@ -121,6 +153,11 @@ El detalle de cada área se carga solo cuando tocas sus archivos:
   combinantes invisibles dentro de un regex. Se esquiva escribiendo esos archivos con
   here-strings de PowerShell, y conviene comprobar el resultado (contar bytes NUL y
   caracteres de categoría `Cc`/`Cf`/`Mn`) cuando el contenido lleve `\u`.
+- **Pero PowerShell no vale para EDITAR un archivo que ya existe.** El here-string de arriba
+  sirve para crear uno nuevo; el ciclo leer-modificar-escribir con `Get-Content -Raw` /
+  `Set-Content` **destroza el encoding de este repo** y deja mojibake en todos los acentos
+  (`configuración` → `configuraciÃ³n`). Pasó en la fase 7 y hubo que restaurar con
+  `git checkout`. Para modificar un archivo del proyecto, la herramienta `Edit`.
 - **Tres documentos de diseño son enormes y están versionados.** `plan-agentes.json`
   (~22.000 tokens) está bloqueado por `.claude/settings.json`: léelo con `ver_plan.py`.
   `plan-agentes.md` (~12.000) y `brief-agentes.json` (~7.000) no están bloqueados porque no

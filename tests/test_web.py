@@ -16,6 +16,7 @@ pacientes abierto a cualquiera que sepa la URL.
 
 from __future__ import annotations
 
+import dataclasses
 import os
 
 import pytest
@@ -38,7 +39,7 @@ os.environ.setdefault("MAXICARE_DATABASE_URL", "postgresql://prueba:prueba@local
 
 from fastapi.testclient import TestClient  # noqa: E402
 
-from maxicare_daniela import autenticacion, conversacion, persistencia, runtime  # noqa: E402
+from maxicare_daniela import autenticacion, contratos, conversacion, persistencia, runtime  # noqa: E402
 
 SECRETO = "s" * autenticacion.MINIMO_SECRETO
 CLAVE = "una contrasena larga"
@@ -265,6 +266,16 @@ def test_el_chat_usa_el_agente_de_produccion_y_el_carril_de_pruebas(cliente, mon
     monkeypatch.setattr(runtime, "_preparar_esquema_de_pruebas", lambda: "postgresql://x/y?options=-csearch_path%3Dpruebas_web")
     monkeypatch.setattr(persistencia, "asegurar_conversacion", lambda conn, **kw: "conv-web-1")
     monkeypatch.setattr(persistencia, "leer_configuracion", lambda conn: persistencia.CONFIGURACION_POR_DEFECTO)
+    # Desde la Tarea 6, `_contexto_de_prueba` también pide una sesión persistida a
+    # `persistencia.sesion_de_agente`. Sin este doble, la llamada es real: construye un
+    # `AsyncEngine` de SQLAlchemy con la URL de Neon de `config.database_url` (perezoso, no
+    # abre conexión, pero queda vivo y sin disponer en `persistencia._engines`) y contradice
+    # la promesa de la cabecera del archivo de que ninguna prueba de aquí abre una conexión
+    # de verdad.
+    monkeypatch.setattr(
+        persistencia, "sesion_de_agente",
+        lambda id_conversacion, *, database_url, esquema=None, limite=None: conversacion.SesionEnMemoria(id_conversacion),
+    )
     monkeypatch.setattr(conversacion, "responder", falso_responder)
     cliente.cookies.set(runtime.COOKIE, autenticacion.firmar_token("ana.rodriguez", secreto=SECRETO))
 
@@ -277,6 +288,154 @@ def test_el_chat_usa_el_agente_de_produccion_y_el_carril_de_pruebas(cliente, mon
     assert "public" not in visto["url"]
     assert visto["identidad"] is False, "un paciente nuevo llega sin identificar, también aquí"
     assert visto["telegram"] == "", "una prueba no le hace sonar el teléfono a un doctor"
+
+
+# ==========================================================================================
+# Tarea 6 -- el chat de pruebas persiste en Neon, con el mismo mecanismo que WhatsApp
+# ==========================================================================================
+
+
+class _ConexionDeMentira:
+    """El mismo doble que `ConexionFalsa`, con nombre propio para las pruebas de esta
+    sección: sirve para el `with persistencia.conectar(...)` de `_contexto_de_prueba` sin
+    abrir nada de verdad."""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+
+def _conexion_de_mentira(url):
+    return _ConexionDeMentira()
+
+
+def test_el_chat_de_pruebas_persiste_en_su_propio_esquema(monkeypatch):
+    """El chat del panel usa la MISMA sesión persistida que WhatsApp, apuntada a
+    `pruebas_web`. Con un diccionario en memoria dejaría de probar lo que existe para
+    probar, y el esquema de pruebas es lo único que impide que una cita de mentira ocupe un
+    cupo real de la clínica."""
+    pedidas: list[dict] = []
+
+    def fabrica(id_conversacion, *, database_url, esquema=None, limite=None):
+        pedidas.append({"id": id_conversacion, "esquema": esquema, "database_url": database_url})
+        return conversacion.SesionEnMemoria(id_conversacion)
+
+    monkeypatch.setattr(runtime.persistencia, "sesion_de_agente", fabrica)
+    monkeypatch.setattr(runtime, "_preparar_esquema_de_pruebas", lambda: "postgresql://x/y")
+    monkeypatch.setattr(
+        runtime.persistencia, "asegurar_conversacion", lambda *a, **k: "conv-web-1"
+    )
+    monkeypatch.setattr(runtime.persistencia, "conectar", _conexion_de_mentira)
+    monkeypatch.setattr(runtime.persistencia, "leer_configuracion", lambda conn: {
+        "capacidad_por_hora": 2, "duracion_cita_minutos": 60, "cierre_relevo_minutos": 180
+    })
+    runtime._conversaciones_de_prueba.clear()
+
+    try:
+        runtime._contexto_de_prueba({"usuario": "ana"}, None)
+
+        assert [{"id": p["id"], "esquema": p["esquema"]} for p in pedidas] == [
+            {"id": "conv-web-1", "esquema": runtime.ESQUEMA_PRUEBAS_WEB}
+        ]
+    finally:
+        runtime._conversaciones_de_prueba.clear()
+
+
+def test_la_llamada_a_sesion_de_agente_usa_config_database_url_no_la_url_de_pruebas(monkeypatch):
+    """El aviso de la revisión de las Tareas 3 y 4: una URL con `options=-csearch_path=`
+    colada aquí haría que el aislamiento lo diera el `search_path` de la conexión y no
+    `schema_translate_map`, igual que le pasó a `test_las_tablas_de_sesion_no_se_crean_en_public`
+    en `tests/test_sesion_neon.py` antes de `_sin_options`. `_preparar_esquema_de_pruebas()`
+    SÍ trae ese `options=` -- lo necesita la conexión síncrona de `asegurar_conversacion` y
+    `leer_configuracion`, que no pasan por SQLAlchemy --, así que la prueba existe para que
+    nadie reemplace `config.database_url` por esa URL en la llamada a `sesion_de_agente`.
+
+    Lo que esto comprueba es el CONTRATO de esa llamada -- qué argumentos recibe
+    `sesion_de_agente` --, no el mecanismo de `schema_translate_map` en sí: con
+    `sesion_de_agente` doblada, ese mecanismo nunca se ejercita aquí, y la prueba pasaría
+    igual si `schema_translate_map` desapareciera de `persistencia._engine_de`. Ese nivel
+    de aserción es el correcto para este diff -- ver `test_sesion_neon.py` para la prueba
+    que sí ejercita el mecanismo contra Neon.
+
+    Las dos URLs comparadas son inventadas y distinguibles entre sí a propósito: si esta
+    prueba comparara contra `runtime.config.database_url` de verdad, en cualquier máquina
+    con el `.env` de la clínica cargado esa aserción fallida volcaría la contraseña real de
+    Neon a la salida de pytest -- pasó una vez, durante la verificación por mutación de esta
+    misma prueba en la Tarea 6. `dataclasses.replace` sustituye `runtime.config` por uno con
+    una URL de mentira antes de comparar, así que ninguna caída puede ya imprimir la cadena
+    real."""
+    pedidas: list[dict] = []
+
+    def fabrica(id_conversacion, *, database_url, esquema=None, limite=None):
+        pedidas.append({"database_url": database_url, "esquema": esquema})
+        return conversacion.SesionEnMemoria(id_conversacion)
+
+    config_de_mentira = dataclasses.replace(
+        runtime.config, database_url="postgresql://u:c@prod-falsa/db"
+    )
+    monkeypatch.setattr(runtime, "config", config_de_mentira)
+    monkeypatch.setattr(runtime.persistencia, "sesion_de_agente", fabrica)
+    # La URL "de pruebas" lleva el `options` a propósito, para poder distinguirla de
+    # `config.database_url` en la aserción de abajo. Ninguna de las dos es una URL real.
+    monkeypatch.setattr(
+        runtime,
+        "_preparar_esquema_de_pruebas",
+        lambda: "postgresql://x/y?options=-csearch_path%3Dpruebas_web",
+    )
+    monkeypatch.setattr(
+        runtime.persistencia, "asegurar_conversacion", lambda *a, **k: "conv-web-2"
+    )
+    monkeypatch.setattr(runtime.persistencia, "conectar", _conexion_de_mentira)
+    monkeypatch.setattr(runtime.persistencia, "leer_configuracion", lambda conn: {
+        "capacidad_por_hora": 2, "duracion_cita_minutos": 60, "cierre_relevo_minutos": 180
+    })
+    runtime._conversaciones_de_prueba.clear()
+
+    try:
+        runtime._contexto_de_prueba({"usuario": "ana"}, None)
+
+        assert len(pedidas) == 1
+        assert pedidas[0]["database_url"] == config_de_mentira.database_url
+        assert "options" not in pedidas[0]["database_url"], (
+            "la sesion del chat web no puede llevar search_path: el aislamiento tiene que "
+            "quedar solo a cargo de schema_translate_map, vía esquema="
+        )
+        assert pedidas[0]["esquema"] == runtime.ESQUEMA_PRUEBAS_WEB
+    finally:
+        runtime._conversaciones_de_prueba.clear()
+
+
+def test_recuperar_una_conversacion_viva_reconstruye_la_sesion(monkeypatch):
+    """El contexto se queda en memoria (barato, se reconstruye si el proceso se reinicia),
+    pero la sesión NO: se le vuelve a pedir a `persistencia.sesion_de_agente` en cada turno,
+    igual que en WhatsApp -- ahí no hay caché de sesión desde la Tarea 5. Si alguien
+    reintrodujera una tupla `(ctx, sesion)` cacheada, esta prueba deja de ver una segunda
+    llamada a la fábrica."""
+    pedidas: list[dict] = []
+
+    def fabrica(id_conversacion, *, database_url, esquema=None, limite=None):
+        pedidas.append({"id": id_conversacion, "esquema": esquema})
+        return conversacion.SesionEnMemoria(id_conversacion)
+
+    monkeypatch.setattr(runtime.persistencia, "sesion_de_agente", fabrica)
+    runtime._conversaciones_de_prueba.clear()
+    ctx_previo = contratos.ContextoDaniela(
+        id_conversacion="conv-web-viva",
+        telefono_completo="web-ana",
+        database_url="postgresql://x/y",
+        calendario=runtime.CalendarioDoble(),
+    )
+    runtime._conversaciones_de_prueba["conv-web-viva"] = ctx_previo
+
+    try:
+        ctx, _sesion = runtime._contexto_de_prueba({"usuario": "ana"}, "conv-web-viva")
+
+        assert ctx is ctx_previo, "el contexto vivo no se reconstruye si ya existe"
+        assert pedidas == [{"id": "conv-web-viva", "esquema": runtime.ESQUEMA_PRUEBAS_WEB}]
+    finally:
+        runtime._conversaciones_de_prueba.clear()
 
 
 def test_el_esquema_del_chat_no_es_el_de_los_scripts_de_prueba():

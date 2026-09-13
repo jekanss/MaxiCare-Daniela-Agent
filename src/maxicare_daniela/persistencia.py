@@ -72,6 +72,34 @@ RAIZ_PROYECTO = Path(__file__).resolve().parents[2]
 RUTA_MIGRACIONES = RAIZ_PROYECTO / "migraciones"
 RUTA_SEMILLA_CONOCIMIENTO = RAIZ_PROYECTO / "datos" / "base_conocimiento.json"
 
+#: El carril de pruebas del panel. Vive AQUÍ y no en `runtime.py` porque no es transporte:
+#: es un esquema de esta base, y hay dos sitios que lo tienen que poner al día -- el chat web
+#: (perezosamente, la primera vez que alguien lo abre) y `scripts/inicializar_base.py`, que
+#: es la puerta del despliegue. Con la constante duplicada, un renombre dejaría al segundo
+#: actualizando un esquema que ya no existe, en silencio. `runtime` la reexporta.
+ESQUEMA_PRUEBAS_WEB = "pruebas_web"
+
+
+def url_directa(database_url: str) -> str:
+    """La misma URL sin el `-pooler.` del host.
+
+    PgBouncer rechaza `options` como parámetro de arranque (`unsupported startup parameter
+    in options: search_path`), así que todo lo que necesite fijar un `search_path` --que es
+    como se aísla el carril de pruebas del panel-- tiene que ir por el host directo.
+    """
+    return database_url.replace("-pooler.", ".")
+
+
+def url_con_search_path(database_url: str, esquema: str) -> str:
+    """La conexión DIRECTA con el `search_path` fijado a `esquema`.
+
+    El aislamiento que da es FÍSICO, no una convención: con `search_path=pruebas_web`, una
+    consulta que diga `INSERT INTO citas` no puede tocar `public.citas` ni queriendo.
+    """
+    directa = url_directa(database_url)
+    separador = "&" if "?" in directa else "?"
+    return f"{directa}{separador}options=-csearch_path%3D{esquema}"
+
 
 # ==========================================================================================
 # Lógica pura -- se prueba sin base de datos
@@ -140,6 +168,287 @@ def conectar(database_url: str):
     import psycopg
 
     return psycopg.connect(database_url)
+
+
+#: El dialecto asíncrono de este proyecto. `SQLAlchemySession.from_url` llama a
+#: `create_async_engine`, que exige un driver async: `postgresql://` a secas falla EN EL
+#: CONSTRUCTOR, antes de tocar la red, con `ModuleNotFoundError: No module named 'psycopg2'`
+#: -- un paquete que este proyecto no usa, así que el rastro apunta al sitio equivocado.
+#:
+#: `psycopg` y no `asyncpg`, aunque los dos están instalados y los dos funcionan: la URL de
+#: Neon lleva `sslmode=require` y `channel_binding=require` como parámetros de consulta.
+#: psycopg 3 los entiende porque son suyos; asyncpg usa otro vocabulario (`ssl=`) y habría
+#: que traducirlos a mano. Además psycopg 3 ya es el driver del proyecto: entra un dialecto
+#: nuevo, no una librería nueva.
+DIALECTO_ASINCRONO = "postgresql+psycopg"
+
+
+def url_asincrona(url: str) -> str:
+    """La misma URL, con el dialecto que `create_async_engine` acepta.
+
+    Idempotente: una URL que ya trae `+driver` se devuelve tal cual, incluso si el driver
+    es otro. Quien fije `asyncpg` a propósito en el entorno no se lo encuentra pisado.
+    """
+    if not url.strip():
+        raise ValueError(
+            "MAXICARE_DATABASE_URL está vacía: no hay base a la que persistir el historial"
+        )
+    esquema, separador, resto = url.partition("://")
+    if not separador:
+        raise ValueError(
+            "MAXICARE_DATABASE_URL no parece una URL de base de datos: le falta el «://»"
+        )
+    if "+" in esquema:
+        return url
+    return f"{DIALECTO_ASINCRONO}{separador}{resto}"
+
+
+#: Conexiones que el pool de sesiones mantiene abiertas contra Neon, más las de desbordo.
+#:
+#: Dimensionado a mano y no heredado del default de SQLAlchemy (5 + 10), que nadie eligió
+#: para este proyecto. Los dos datos que lo justifican, medidos el 13/09/2026 contra la Neon
+#: de la clínica: 901 (`SHOW max_connections`) y 2 en uso. El otro consumidor,
+#: `persistencia.conectar`, NO tiene pool: abre una conexión por llamada y la cierra, así
+#: que su pico es el número de turnos concurrentes -- un dígito con un solo worker.
+#:
+#: La suma tiene que caber debajo del techo CONTANDO EL DOBLE, porque un despliegue solapa
+#: brevemente el contenedor viejo y el nuevo. Con 901 de techo y 2 en uso, (3 + 2) * 2 = 10
+#: deja un margen enorme; no hizo falta ajustar los valores del brief.
+TAMANO_POOL_SESIONES = 3
+DESBORDO_POOL_SESIONES = 2
+
+#: Un engine por (base, esquema). Se comparte entre todas las conversaciones: lo caro es el
+#: pool, no la `SQLAlchemySession`, que es un objeto con dos tablas y un factory.
+_engines: dict[tuple[str, str | None], Any] = {}
+
+
+def _engine_de(database_url: str, esquema: str | None):
+    """El `AsyncEngine` que respalda una sesión, uno por `(database_url, esquema)`.
+
+    Construir un `AsyncEngine` por turno abriría un pool de conexiones por turno, y Neon
+    tiene un techo. Se cachea aquí y `cerrar_engines` es lo único que lo vacía -- ni esta
+    función ni `sesion_de_agente` disponen nada por su cuenta.
+
+    `esquema` va por `schema_translate_map` en las opciones de EJECUCIÓN, no por `options=
+    -csearch_path=` en la URL: el pooler de Neon rechaza `options` como parámetro de
+    arranque, y SQLAlchemy cualifica las sentencias al compilarlas, no al abrir la conexión.
+    Por eso la clave de caché lleva el esquema: `public` y `pruebas_web` no pueden compartir
+    engine, o compartirían pool y las filas de una prueba podrían acabar mezcladas con las
+    de la clínica real bajo carga.
+
+    ------------------------------------------------------------------------------------
+    Por qué NO lleva `connect_args={"prepare_threshold": None}`
+    ------------------------------------------------------------------------------------
+
+    Este es el primer sitio del proyecto donde una conexión a Neon se REUSA --`conectar`
+    abre y cierra una por llamada-- y con el reuso aparece un riesgo que hasta ahora no
+    podía darse: psycopg 3 auto-prepara una sentencia tras 5 ejecuciones en la misma
+    conexión (`prepare_threshold=5`, comprobado en el driver), y un pooler en modo
+    transacción es históricamente hostil a las prepared statements. Si el de Neon no las
+    soportara, el historial reventaría en producción y no en las pruebas, que hasta hoy
+    iban todas por el host directo.
+
+    Se midió el 13/09/2026 contra el pooler real antes de tocar nada, y lo soporta: sobre
+    una conexión del pool se creó una prepared statement (`pg_prepared_statements` = 1) y
+    se reusó sin error. Desactivar el auto-prepare habría sido pagar un coste por un
+    problema que esta base no tiene. Lo vigila
+    `test_sesion_neon.py::test_la_sesion_funciona_contra_el_pooler`, que es el único sitio
+    del repositorio que ejercita el camino de producción.
+    """
+    clave = (database_url, esquema)
+    engine = _engines.get(clave)
+    if engine is not None:
+        return engine
+
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    opciones = {"schema_translate_map": {None: esquema}} if esquema else {}
+    engine = create_async_engine(
+        url_asincrona(database_url),
+        execution_options=opciones,
+        pool_size=TAMANO_POOL_SESIONES,
+        max_overflow=DESBORDO_POOL_SESIONES,
+        # Neon cierra las conexiones ociosas por su cuenta. Sin `pre_ping`, la primera
+        # consulta después de un rato tranquilo revienta con una conexión muerta -- y sería
+        # el primer paciente de la mañana quien se lo encontrara.
+        pool_pre_ping=True,
+        pool_recycle=300,
+    )
+    _engines[clave] = engine
+    return engine
+
+
+async def cerrar_engines() -> None:
+    """Cierra y olvida todos los pools. Lo llaman el apagado del servidor y las pruebas.
+
+    En las pruebas hace falta de verdad: un `AsyncEngine` queda atado al bucle de eventos
+    en el que se usó por primera vez, y reusarlo desde otro `asyncio.run` da un
+    `got Future attached to a different loop` que no se lee como lo que es.
+
+    ------------------------------------------------------------------------------------
+    Por qué se vacía la caché ANTES de disponer, y por qué cada `dispose` va en su `try`
+    ------------------------------------------------------------------------------------
+
+    Con el bucle delante y el `clear()` detrás, un `dispose()` que lanzara dejaba el peor
+    estado posible: los engines siguientes sin cerrar Y el diccionario lleno de engines a
+    medio disponer -- exactamente lo que esta función existe para impedir. La siguiente
+    `sesion_de_agente` los encontraría en la caché y escribiría contra ellos.
+
+    Vaciar primero cierra además una segunda rendija: un engine creado por otra corrutina
+    durante uno de los `await` ya no se pierde del diccionario sin disponerse, porque lo que
+    se dispone es la lista copiada y lo que quede en `_engines` después es de quien lo puso.
+
+    El `try` por engine es lo que hace que un pool roto no se lleve por delante a los demás.
+    """
+    engines = list(_engines.values())
+    _engines.clear()
+    for engine in engines:
+        try:
+            await engine.dispose()
+        except Exception:
+            # Cerrar el resto importa más que este fallo, y el apagado del servidor no
+            # puede reventar por un pool que ya estaba roto.
+            log.exception("cerrar_engines: no se pudo disponer un engine")
+
+
+def sin_salidas_huerfanas(items: list[Any]) -> list[Any]:
+    """Los mismos items, sin ningún `function_call_output` que se haya quedado sin su
+    `function_call` delante.
+
+    ------------------------------------------------------------------------------------
+    Qué rompe esto, y por qué en ESTA dirección y no en la contraria
+    ------------------------------------------------------------------------------------
+
+    `SQLAlchemySession.get_items(limit=n)` de la 0.22.2 --leído en el SDK instalado-- es
+    `ORDER BY created_at DESC, id DESC LIMIT n`, invertido después, más `items[-n:]`. No
+    mira los `call_id` en ninguna parte; su propio docstring promete solo «the latest N
+    items in chronological order». Es un «últimos N» puro.
+
+    Un «últimos N» no puede dejar una LLAMADA huérfana: si el `function_call` entra en la
+    ventana, su `function_call_output` --escrito después, con `id` mayor-- entra siempre.
+    Lo que sí deja es lo contrario, y se midió:
+
+        [ user | assistant | LLAMADA | SALIDA ]
+                                     ^-- limit=1 devuelve SOLO la salida
+
+    Un `function_call_output` sin su llamada es una petición que la API de OpenAI rechaza,
+    igual que la contraria. Y no pasaría en desarrollo: pasaría en la conversación número
+    siete de un paciente real, el día que la Tarea 13 fije el límite.
+
+    Se descarta la salida y NADA MÁS: lo demás de la ventana es contexto que sí cabía. Un
+    `function_call` sin salida no se filtra porque el recorte no lo produce; si algún día
+    aparece uno, será porque la corrida se cortó entre la llamada y su resultado, que es
+    otro fallo y merece verse en vez de taparse aquí.
+    """
+    vistas: set[Any] = set()
+    limpios: list[Any] = []
+    for item in items:
+        tipo = item.get("type") if isinstance(item, dict) else None
+        if tipo == "function_call":
+            vistas.add(item.get("call_id"))
+        elif tipo == "function_call_output" and item.get("call_id") not in vistas:
+            log.debug(
+                "recorte del historial: se descarta la salida huérfana de %s",
+                item.get("call_id"),
+            )
+            continue
+        limpios.append(item)
+    return limpios
+
+
+#: La subclase de `SQLAlchemySession` con el recorte seguro, construida una sola vez. Ver
+#: `_clase_con_corte_seguro`.
+_clase_sesion: Any = None
+
+
+def _clase_con_corte_seguro():
+    """`SQLAlchemySession` + `sin_salidas_huerfanas` en su `get_items`.
+
+    Se define aquí dentro y no a nivel de módulo porque heredar de `SQLAlchemySession`
+    obliga a importarla, y ese import arrastra el SDK entero -- `persistencia` se importa
+    también desde sitios que no lo necesitan, que es la misma razón por la que el import de
+    `sesion_de_agente` es perezoso. Y se cachea porque definir la clase en cada turno
+    crearía un tipo nuevo por turno.
+    """
+    global _clase_sesion
+    if _clase_sesion is not None:
+        return _clase_sesion
+
+    from agents.extensions.memory import SQLAlchemySession
+
+    class _SesionConCorteSeguro(SQLAlchemySession):  # type: ignore[misc]
+        """El historial de Neon, garantizando que lo que sale es aceptable para la API.
+
+        El recorte por cantidad de items del SDK no sabe de pares `call_id`: puede dejar un
+        `function_call_output` cuya llamada se cayó por delante de la ventana. Ver
+        `sin_salidas_huerfanas`.
+        """
+
+        async def get_items(self, limit: int | None = None) -> list[Any]:
+            return sin_salidas_huerfanas(await super().get_items(limit))
+
+    _clase_sesion = _SesionConCorteSeguro
+    return _clase_sesion
+
+
+def sesion_de_agente(
+    id_conversacion: str,
+    *,
+    database_url: str,
+    esquema: str | None = None,
+    limite: int | None = -1,
+):
+    """El historial de una conversación, guardado en Neon y no en la memoria del proceso.
+
+    `session_id = id_conversacion` a propósito: es la unidad que sobrevive a un reinicio y
+    la que `/clearstate` borra. Un `session_id` por teléfono ataría para siempre a una
+    persona con todo lo que dijo alguna vez, y resetear a primer contacto dejaría de ser
+    posible sin perder el historial entero.
+
+    `esquema` existe para los carriles de prueba (`pruebas`, `pruebas_web`, `pruebas_sesion`
+    y `pruebas_persistencia`, que estrenó el entregable de la fase 7). Va por
+    `schema_translate_map` y NO por `search_path`: el pooler de
+    Neon rechaza `options` como parámetro de arranque, y eso ya costó una tarde en la fase 3.
+    SQLAlchemy cualifica las sentencias al COMPILARLAS, así que el pooler no ve nada raro.
+
+    `limite` recorta el historial que se le manda al modelo, contando ITEMS y no mensajes
+    -- una llamada a tool y su resultado son dos. Por omisión sale de
+    `config.LIMITE_HISTORIAL_SESION`, que hoy es un TOPE DE SEGURIDAD derivado del techo de
+    tokens de la cuenta: acota el crecimiento para que una conversación larga no acabe en un
+    `context_length_exceeded` del que el paciente no sale. NO es todavía el límite medido de
+    la 13b, que será más pequeño porque optimiza coste y no seguridad. La aritmética de los
+    dos está junto a la constante.
+
+    El centinela del parámetro es `-1` y NO `None`, aunque `None` sea lo que parecería
+    natural: `None` es un valor legítimo --«sin límite»-- y las pruebas del borde necesitan
+    poder pedirlo aunque `config` traiga un número. Con `None` como centinela, «no recortes»
+    y «usa el default» serían la misma llamada.
+
+    El import va DENTRO por la misma razón que el del SDK: `config` se lee en el momento de
+    construir la sesión y no al importar el módulo, así que una prueba puede sustituir la
+    constante y el cambio llega hasta aquí. Con el import arriba, el valor quedaría pegado
+    al primer import del proceso y el cableado dejaría de ser cableado.
+
+    Lo que vuelve NO es una `SQLAlchemySession` pelada: es la subclase que filtra la salida
+    de tool cuya llamada se cayó por delante de la ventana, porque el recorte del SDK no
+    sabe de pares `call_id` y esa petición la rechaza la API. Ver `sin_salidas_huerfanas`.
+    """
+    from agents.memory.session_settings import SessionSettings
+
+    from .config import LIMITE_HISTORIAL_SESION
+
+    efectivo = LIMITE_HISTORIAL_SESION if limite == -1 else limite
+
+    return _clase_con_corte_seguro()(
+        id_conversacion,
+        engine=_engine_de(database_url, esquema),
+        create_tables=False,
+        session_settings=SessionSettings(limit=efectivo),
+        # Sin esto los acentos quedan escapados (`ó`) en `message_data`. El ida y vuelta
+        # es correcto igual; lo que se pierde es poder leer un historial a ojo el día que
+        # haga falta mirarlo, y ese día no se avisa con antelación.
+        ensure_ascii=False,
+    )
 
 
 def aplicar_esquema(conn, ruta: Path | None = None) -> list[str]:
@@ -1068,6 +1377,13 @@ def borrar_rastro(conn, telefono: str, *, conservar_wamid: str | None = None) ->
     nada. De la hoja a la raíz, y las cuatro tablas con CASCADE (`estado_oportunidad`,
     `notas_archivo`, `seguimientos`, `escalamientos`) se van solas al caer la conversación.
 
+    `agent_sessions` va justo ANTES que `conversaciones`, y por una razón que no tiene
+    marcha atrás: `session_id` ES el `id` de esas conversaciones (la migración 010 lo declara
+    sin clave foránea a propósito, así que no hay CASCADE que lo salve). Borrar primero
+    `conversaciones` deja a la subconsulta sin nada que encontrar, y el historial del diálogo
+    -- `agent_sessions` y, por su `ON DELETE CASCADE`, `agent_messages` -- sobrevive huérfano
+    e inalcanzable, con la agravante de que el borrado parece haber funcionado.
+
     `conservar_wamid` deja en pie la fila de `mensajes_entrantes` del propio mensaje que pidió
     el borrado, con su `conversacion_id` en NULL. Sin eso, un reintento del webhook de Meta
     --que reintenta, y por eso existe la deduplicación por `wamid`-- ejecutaría el comando una
@@ -1122,6 +1438,24 @@ def borrar_rastro(conn, telefono: str, *, conservar_wamid: str | None = None) ->
                 parametros,
             )
             borradas["reservas"] = cur.rowcount
+
+            # El historial del diálogo, desde la fase 7. Va ANTES de borrar `conversaciones`
+            # porque los `session_id` SON los ids de esas conversaciones: después del DELETE
+            # no habría forma de saber cuáles eran, y el historial quedaría huérfano y vivo.
+            #
+            # `agent_messages` no se borra a mano: se va sola por el `ON DELETE CASCADE` de
+            # la migración 010. Un segundo DELETE aquí sería un sitio más que mantener.
+            cur.execute(
+                f"""
+                DELETE FROM agent_sessions
+                 WHERE session_id IN (
+                        SELECT id::text FROM conversaciones
+                         WHERE id IN ({_CONVERSACIONES_DEL_TELEFONO})
+                 )
+                """,
+                parametros,
+            )
+            borradas["agent_sessions"] = cur.rowcount
 
             cur.execute(
                 f"DELETE FROM conversaciones WHERE id IN ({_CONVERSACIONES_DEL_TELEFONO})",

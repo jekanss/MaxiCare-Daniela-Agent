@@ -188,7 +188,7 @@ def _montar(monkeypatch, modelo: ModeloGuionizado) -> BaseFalsa:
     monkeypatch.setattr(conversacion, "_guardar_estado", lambda ctx, resultado: None)
 
     # --- El lector: lo único que se dobla del camino de la lectura --------------------
-    async def lector_doblado(archivo, *, tipo, correr=None) -> LecturaArchivo:
+    async def lector_doblado(archivo, *, tipo, correr=None, group_id=None) -> LecturaArchivo:
         return _lo_que_leyo_el_lector()
 
     monkeypatch.setattr(lectura_mod, "leer_archivo", lector_doblado)
@@ -197,7 +197,7 @@ def _montar(monkeypatch, modelo: ModeloGuionizado) -> BaseFalsa:
     # «No dispara» es lo que hacen en producción cuando el evaluador falla, así que el
     # camino que queda es el mismo. Que el clínico se comporte bien o mal lo prueba
     # `tests/test_guardrails.py`; aquí estorbaría.
-    async def no_dispara(evaluador, texto):
+    async def no_dispara(evaluador, texto, *, ctx=None):
         return g.Veredicto(False)
 
     monkeypatch.setattr(g, "_preguntar", no_dispara)
@@ -254,6 +254,7 @@ async def _el_camino_completo(whatsapp, telegram) -> tuple[atencion.Atendido, as
         ventana=0,
         tope=0,
         lectura=resultado.lectura,
+        sesion_de=lambda id_: conversacion.SesionEnMemoria(id_),
     )
     return atendido, resultado.lectura
 

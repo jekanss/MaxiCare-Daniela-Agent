@@ -14,11 +14,13 @@ contacto.
 
 Por que se puede garantizar: todo lo que Daniela sabe de alguien al empezar un turno sale de
 `_leer_estado`, que lee `pacientes`, `conversaciones` y `configuracion` --esta ultima es
-global, no del paciente--. El historial del dialogo NO esta en Postgres: vive en
-`conversacion.SesionEnMemoria`, indexada por `id_conversacion`. Borrada la conversacion, la
-siguiente nace con un id nuevo y una sesion vacia, asi que la memoria no hay que limpiarla:
-deja de ser alcanzable. Y el campo que manda, `identidad_verificada`, se calcula como
-`bool(paciente) or bool(verificada)`: sin fila en `pacientes` vuelve a `False`.
+global, no del paciente--. El historial del dialogo SI esta en Postgres desde la fase 7:
+vive en `agent_sessions` / `agent_messages`, con `session_id = id_conversacion`, y
+`persistencia.borrar_rastro` lo borra dentro de la MISMA transaccion que el resto del
+rastro. Va antes del `DELETE FROM conversaciones` porque los `session_id` son esos ids: al
+reves quedaria historial vivo de una conversacion que ya no existe. Y el campo que manda,
+`identidad_verificada`, se calcula como `bool(paciente) or bool(verificada)`: sin fila en
+`pacientes` vuelve a `False`.
 
 LO QUE NO BORRA, dicho aqui para que nadie lo descubra despues:
 
@@ -129,9 +131,19 @@ async def resetear(
     - **Si Telegram falla, se informa y se sigue.** Un tema huérfano en el grupo de los
       doctores es ruido, no daño: no bloquea a nadie ni le miente a ningún paciente.
 
-    `bases_extra` existe por `pruebas_web`, el esquema con las mismas doce tablas que alimenta
-    el chat del panel y que no se purga nunca. Sin él, un número que alguna vez se probó desde
-    la interfaz web seguiría siendo conocido por esa mitad del sistema.
+    `bases_extra` existe por `pruebas_web`, el esquema con las mismas tablas que `public` que
+    alimenta el chat del panel y que no se purga nunca. Sin él, un número que alguna vez se
+    probó desde la interfaz web seguiría siendo conocido por esa mitad del sistema.
+
+    Ese borrado secundario **exige que `pruebas_web` tenga las migraciones al día**, y esa
+    condición no se cumplía sola: hasta el 13/09/2026, el único sitio que lo actualizaba era
+    `runtime._preparar_esquema_de_pruebas`, que es perezoso, y el esquema llevaba dos
+    migraciones de retraso -- `borrar_rastro` reventaba ahí con `UndefinedColumn` y este
+    docstring afirmaba un borrado que no ocurría. Lo pone al día el despliegue
+    (`scripts/inicializar_base.py`), que además verifica las dos tablas del historial en los
+    dos esquemas. Si aun así fallara, no se pierde nada de `public`: `resetear` lo anota en
+    `Borrado.fallos` y sigue, que es la degradación correcta -- el carril de pruebas no puede
+    bloquear el reseteo del carril real.
     """
     # Aquí y no arriba: `atencion` arrastra los agentes y el SDK, y `reseteo` se importa
     # también desde sitios que no los necesitan.
@@ -217,6 +229,34 @@ def _borrar(database_url: str, telefono: str, conservar_wamid: str | None) -> di
         return persistencia.borrar_rastro(conn, telefono, conservar_wamid=conservar_wamid)
 
 
+#: Cómo se llama cada tabla cuando el conteo sale a un chat de WhatsApp: (singular, plural).
+#:
+#: Existe porque `confirmacion` componía el texto con las CLAVES del diccionario, que son
+#: nombres de tabla. Mientras fueron `citas` o `conversaciones` se leía como español y nadie
+#: lo miró; en la fase 7 entró `agent_sessions` --que no es ni español ni nuestro, sino del
+#: SDK-- y quien probara por WhatsApp recibía «1 en agent_sessions». Un nombre interno en un
+#: chat no es solo feo: invita a creer que el mensaje es un error del sistema.
+#:
+#: Las claves son EXACTAMENTE las que devuelve `persistencia.borrar_rastro`, y
+#: `tests/test_reseteo.py` lo comprueba contra la función de verdad para que una tabla nueva
+#: no pueda entrar aquí por la puerta de atrás.
+ETIQUETAS_DE_TABLA: dict[str, tuple[str, str]] = {
+    "mensajes_entrantes": ("mensaje", "mensajes"),
+    "citas": ("cita", "citas"),
+    "reservas": ("reserva", "reservas"),
+    "agent_sessions": ("historial de conversación", "historiales de conversación"),
+    "conversaciones": ("conversación", "conversaciones"),
+    "pacientes": ("ficha tuya", "fichas tuyas"),
+}
+
+
+def _en_palabras(tabla: str, cuantas: int) -> str:
+    """«12 mensajes», «1 ficha tuya». Una tabla sin etiqueta cae en algo legible y genérico
+    en vez de filtrar su nombre: el texto va a un chat, no a un log."""
+    singular, plural = ETIQUETAS_DE_TABLA.get(tabla, ("registro", "registros"))
+    return f"{cuantas} {singular if cuantas == 1 else plural}"
+
+
 def confirmacion(borrado: Borrado) -> str:
     """El texto que recibe por WhatsApp quien pidió el reseteo.
 
@@ -224,11 +264,13 @@ def confirmacion(borrado: Borrado) -> str:
     en que la siguiente conversación empieza de cero, y esa confianza se apoya en ver el
     conteo. Un reseteo que no borró nada --porque el número ya estaba limpio-- también tiene
     que decirlo, o parecería que falló.
+
+    Lo dice en español, no en nombres de tabla: ver `ETIQUETAS_DE_TABLA`.
     """
     if borrado.total_filas == 0 and borrado.eventos == 0 and not borrado.tema_borrado:
         texto = "Ya no había nada que borrar de este número. Empiezas de cero igual."
     else:
-        partes = [f"{n} en {tabla}" for tabla, n in borrado.filas.items() if n]
+        partes = [_en_palabras(tabla, n) for tabla, n in borrado.filas.items() if n]
         texto = "Listo, borré todo lo tuyo: " + ", ".join(partes) + "."
         if borrado.eventos:
             texto += f" Y {borrado.eventos} cita(s) del calendario."
@@ -241,6 +283,7 @@ def confirmacion(borrado: Borrado) -> str:
 
 __all__ = [
     "COMANDO",
+    "ETIQUETAS_DE_TABLA",
     "Borrado",
     "ErrorDeReseteo",
     "autorizado",
