@@ -69,7 +69,7 @@ un único archivo.
 | Módulo | Responsabilidad |
 |---|---|
 | `agentes.py` | Los dos `Agent`: `daniela` y `lector_archivos`. Sin `Runner.run`. |
-| `herramientas.py` | Las nueve tools. Lógica de negocio pura. |
+| `herramientas.py` | Las nueve tools del plan y `consultar_citas`. Lógica de negocio pura. |
 | `contratos.py` | Los modelos Pydantic que cruzan cada frontera. |
 | `guardrails.py` | Los frenos: de entrada, de salida y de tool. |
 | `conversacion.py` | **El turno**: guardrails, reintento, escalamiento. Sirve igual al chat web. |
@@ -188,7 +188,7 @@ gastan tokens de la API; los demás, ni uno.
 
 | Comando | Qué demuestra | ¿Gasta? |
 |---|---|---|
-| `scripts/probar_tools.py` | las nueve tools contra la base | no |
+| `scripts/probar_tools.py` | las diez tools contra la base | no |
 | `scripts/probar_agentes.py` | los dos agentes y sus guardrails, contra la API real | **sí** |
 | `scripts/probar_atencion.py` | el turno de WhatsApp de punta a punta | solo con `--chat` |
 | `scripts/probar_lectura.py` | **el muro** y el hilo de cada paciente | solo con `--chat` |

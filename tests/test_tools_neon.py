@@ -816,6 +816,71 @@ def test_el_tema_de_telegram_se_persiste_y_se_recupera_por_telefono(esquema):
             assert cur.fetchone() == (True,)
 
 
+def test_consultar_citas_solo_devuelve_las_vivas_futuras_y_de_ese_telefono(esquema, contexto_de):
+    """El filtro vive en el SQL, así que solo una base de verdad lo demuestra.
+
+    Las tres exclusiones importan por razones distintas: la cancelada mandaría al paciente a
+    una cita que ya no existe, la pasada le ofrecería mover algo imposible, y la de otro
+    número sería una fuga de datos de otra persona -- la que `identidad_antes_de_datos`
+    existe para evitar.
+    """
+    ctx = contexto_de("573001110020", "Sofia Buscada")
+    otro = contexto_de("573001110021", "Ajeno Total")
+    futura = _hora_libre(20)
+
+    def registrar(dueno, *, inicio, tratamiento="limpieza", nombre=None) -> str:
+        with persistencia.conectar(esquema) as conn:
+            return persistencia.registrar_cita(
+                conn,
+                reserva_id=None,
+                conversacion_id=dueno.id_conversacion,
+                paciente_id=dueno.id_paciente,
+                nombre_completo=nombre or dueno.nombre_paciente,
+                telefono=dueno.telefono_completo,
+                tratamiento=tratamiento,
+                inicio=inicio,
+                duracion_minutos=60,
+                evento_calendar_id=None,
+            )
+
+    id_futura = registrar(ctx, inicio=futura, tratamiento="ortodoncia")
+    id_pasada = registrar(ctx, inicio=datetime.now(h.ZONA_BOGOTA) - timedelta(days=2))
+    id_cancelada = registrar(ctx, inicio=futura + timedelta(hours=1))
+    id_ajena = registrar(otro, inicio=futura + timedelta(hours=2))
+
+    with persistencia.conectar(esquema) as conn:
+        persistencia.marcar_cita_cancelada(conn, id_cancelada, motivo="prueba")
+
+    texto = asyncio.run(h._consultar_citas(ctx))
+
+    assert id_futura in texto
+    assert "ortodoncia" in texto
+    assert id_pasada not in texto, "ofrecerle mover una cita que ya pasó"
+    assert id_cancelada not in texto, "una cita cancelada no es una cita"
+    assert id_ajena not in texto, "la cita de otro número"
+    assert "Ajeno Total" not in texto
+
+    # Y la hora queda autorizada: sin esto el guardrail bloquea la respuesta que la nombra.
+    assert f"{futura:%H:%M}" in ctx.turno.horas_autorizadas
+
+
+def test_el_indice_que_sostiene_esa_busqueda_existe(esquema):
+    """La 011 no cambia ningún comportamiento, así que nada más la echaría de menos.
+
+    Sin ella la consulta funciona igual y recorre la tabla entera: el día que duela, dolerá
+    en producción y sin síntoma que lo señale.
+    """
+    with persistencia.conectar(esquema) as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT indexdef FROM pg_indexes WHERE schemaname = %s AND indexname = %s",
+            (ESQUEMA, "ix_citas_telefono"),
+        )
+        fila = cur.fetchone()
+
+    assert fila is not None, "la migración 011 no se aplicó"
+    assert "telefono" in fila[0] and "inicio" in fila[0]
+
+
 def test_un_numero_sin_fila_no_tiene_tema_ni_lo_finge(esquema):
     """La otra mitad del CRÍTICO: un desconocido no tiene tema porque no tiene fila.
 

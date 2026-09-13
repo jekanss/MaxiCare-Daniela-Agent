@@ -1,4 +1,8 @@
-"""Las nueve tools de `herramientas[]`: lo que Daniela puede hacer, antes de que exista.
+"""Lo que Daniela puede hacer: las nueve tools de `herramientas[]` y una décima.
+
+La décima, `consultar_citas`, no está en el plan y va al final a propósito: el plan da por
+supuesto que el id de una cita viaja en la conversación, y las conversaciones de WhatsApp
+mueren a las 24 horas.
 
 Cada tool es una `@function_tool` (importada como `function_tool` desde `agents` --nunca
 `from agents import tool`, que importa un módulo y revienta al decorar) con su
@@ -199,6 +203,15 @@ def _fallo_disponibilidad(ctx: RunContextWrapper[Any], error: Exception) -> str:
         "No pudiste verificar disponibilidad. NO ofrezcas ningún horario, ni siquiera uno "
         "que recuerdes de antes. Escala a los doctores y dile al paciente que lo estás "
         "revisando."
+    )
+
+
+def _fallo_consultar_citas(ctx: RunContextWrapper[Any], error: Exception) -> str:
+    log.error("consultar_citas falló: %s", error)
+    return (
+        "No pudiste consultar las citas de este número. NO afirmes que tiene una cita ni "
+        "digas ninguna hora de memoria, y NO intentes moverla ni cancelarla a ciegas. "
+        "Escala a los doctores y dile al paciente que lo estás revisando."
     )
 
 
@@ -1122,10 +1135,69 @@ async def escalar_a_doctores(
 
 
 # ==========================================================================================
+# 10. consultar_citas -- la única que NO está en el plan
+# ==========================================================================================
+#
+# Las nueve del plan dan por supuesto que el id de la cita viaja en la conversación, y dentro
+# de una conversación es cierto. Pero las conversaciones de WhatsApp mueren a las 24 horas
+# (`conversacion_viva`), y `reprogramar_cita` y `cancelar_cita` no tienen otra entrada que ese
+# UUID: el paciente que agenda el lunes y escribe el miércoles pedía algo que Daniela no tenía
+# forma de encontrar. Se salvaba solo si subía en su chat y copiaba el código a mano.
+#
+# Es de LECTURA y va anclada al teléfono del contexto, así que no puede devolver la cita de
+# otra persona ni aunque el modelo lo intente: no hay ningún argumento que torcer.
+
+
+async def _consultar_citas(ctx: ContextoDaniela) -> str:
+    def buscar(conn) -> list[dict[str, Any]]:
+        return persistencia.citas_activas_de_telefono(
+            conn, ctx.telefono_completo, desde=ctx.ahora
+        )
+
+    citas = await _con_base(ctx, buscar)
+
+    if not citas:
+        # RESULTADO, no error, y sin una sola hora dentro: lo que el modelo lea aquí es lo
+        # único que tiene: cualquier hora que escriba después saldría de su memoria.
+        return (
+            "Este número no tiene ninguna cita futura registrada. NO afirmes que tiene una "
+            "ni menciones ninguna hora. Si quiere agendar, consulta la disponibilidad."
+        )
+
+    lineas = "\n".join(
+        f"- {_formatear_hora(cita['inicio'])}, {cita['tratamiento']}, a nombre de "
+        f"{cita['nombre_completo']}. Id de la cita: {cita['id']}."
+        for cita in citas
+    )
+    texto = f"Citas activas de este número:\n{lineas}"
+    # Igual que en `reprogramar` y `cancelar`: la hora que una tool acaba de leer de la base
+    # queda autorizada. Sin esto, «tu cita es el martes a las 9» dispara
+    # `sin_hora_no_verificada` y el paciente que solo preguntaba cuándo era su cita recibe
+    # «te escribe el doctor».
+    ctx.turno.horas_autorizadas |= horas_de(texto)
+    return texto
+
+
+@function_tool(
+    failure_error_function=_fallo_consultar_citas,
+    tool_input_guardrails=[identidad_antes_de_datos],
+)
+async def consultar_citas(wrapper: RunContextWrapper[ContextoDaniela]) -> str:
+    """Busca las citas que este paciente ya tiene, sin pedirle que recuerde ningún código.
+
+    Úsala SIEMPRE que quiera mover o cancelar una cita y no tengas el id a la vista en esta
+    misma conversación, y también cuando pregunte cuándo es su cita. Devuelve solo las citas
+    futuras que siguen en pie, con el id que `reprogramar_cita` y `cancelar_cita` necesitan.
+    """
+    return await _consultar_citas(wrapper.context)
+
+
+# ==========================================================================================
 # El conjunto -- lo que `agentes.py` importará en la fase 4
 # ==========================================================================================
 
-#: Las nueve, en el orden de `herramientas[]` del plan.
+#: Las nueve del plan, en el orden de `herramientas[]`, más `consultar_citas` al final, que
+#: no está en el plan y por eso no se cuela entre ellas.
 TODAS = (
     consultar_base_conocimiento,
     consultar_disponibilidad,
@@ -1136,6 +1208,7 @@ TODAS = (
     registrar_estado_oportunidad,
     programar_seguimiento,
     escalar_a_doctores,
+    consultar_citas,
 )
 
 __all__ = [
@@ -1145,6 +1218,7 @@ __all__ = [
     "ZONA_BOGOTA",
     "cancelar_cita",
     "consultar_base_conocimiento",
+    "consultar_citas",
     "consultar_disponibilidad",
     "crear_cita",
     "escalar_a_doctores",
