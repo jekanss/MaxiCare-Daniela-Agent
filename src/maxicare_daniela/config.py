@@ -52,6 +52,22 @@ LIMITE_TURNOS = 15
 #: En True, el contenido clínico quedaría en los traces, que se exportan fuera.
 TRACE_INCLUDE_SENSITIVE_DATA = False
 
+def version_de_prompt(texto: str) -> str:
+    """Un identificador corto y estable del texto de un prompt, para el `trace_metadata`.
+
+    Un hash y no un número que alguien suba a mano: se mueve solo cuando el prompt cambia de
+    verdad y nadie tiene que acordarse. Doce caracteres porque va en cada trace y nadie lee
+    un sha256 entero; es un identificador, no una defensa criptográfica.
+
+    `hashlib` y no el `hash()` de Python, que está aleatorizado por `PYTHONHASHSEED`: daría
+    una versión distinta en cada arranque del contenedor y el campo dejaría de servir para
+    lo único que sirve, que es agrupar trazas del mismo prompt.
+    """
+    import hashlib
+
+    return hashlib.sha256(texto.encode("utf-8")).hexdigest()[:12]
+
+
 def config_de_corrida():
     """El `RunConfig` que lleva TODA llamada al modelo de este proyecto.
 
