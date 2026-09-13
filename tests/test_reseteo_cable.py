@@ -210,8 +210,11 @@ def test_el_chat_web_no_le_corta_el_hilo_a_otra_persona(carril_web):
     """Dos personas de la clínica pueden estar probando a la vez."""
     mia = SimpleNamespace(telefono_completo="web-jean")
     suya = SimpleNamespace(telefono_completo="web-ana")
-    runtime._conversaciones_de_prueba["conv-mia"] = (mia, None)
-    runtime._conversaciones_de_prueba["conv-suya"] = (suya, None)
+    # Desde la Tarea 6, `_conversaciones_de_prueba` guarda el contexto solo -- ya NO una
+    # tupla `(ctx, sesion)`: el historial vive en Neon y se reconstruye en cada turno con
+    # `persistencia.sesion_de_agente`.
+    runtime._conversaciones_de_prueba["conv-mia"] = mia
+    runtime._conversaciones_de_prueba["conv-suya"] = suya
 
     asyncio.run(runtime._resetear_chat_de_prueba({"usuario": "jean"}))
 

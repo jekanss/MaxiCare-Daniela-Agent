@@ -743,10 +743,14 @@ ESQUEMA_PRUEBAS_WEB = "pruebas_web"
 
 _secreto_sesion = config.secreto_sesion
 
-#: Las conversaciones vivas del chat de pruebas, en memoria del proceso. Se pierden al
-#: reiniciar, y está bien: es un carril de pruebas. El contenedor corre con un solo worker
-#: (ver el `CMD` del Dockerfile), así que no hay dos procesos que puedan discrepar.
-_conversaciones_de_prueba: dict[str, tuple[ContextoDaniela, conversacion.SesionEnMemoria]] = {}
+#: El contexto vivo de cada conversación del chat de pruebas. El HISTORIAL ya no está aquí:
+#: desde la fase 7 vive en `agent_messages` del esquema `pruebas_web`, igual que el de
+#: WhatsApp vive en el de `public` (`persistencia.sesion_de_agente`). Lo que queda en memoria
+#: es el contexto --calendario doble, credenciales vacías de Telegram, configuración
+#: operativa-- que se reconstruye solo si el proceso se reinicia y no vale la pena persistir.
+#: Se pierde al reiniciar, y está bien: el contenedor corre con un solo worker (ver el `CMD`
+#: del Dockerfile), así que no hay dos procesos que puedan discrepar.
+_conversaciones_de_prueba: dict[str, ContextoDaniela] = {}
 
 #: Se prepara una sola vez, la primera vez que alguien abre el chat. Hacerlo al arrancar
 #: costaría segundos de despliegue por una pantalla que puede que nadie abra ese día.
@@ -911,12 +915,37 @@ class MensajeDePrueba(BaseModel):
     conversacion: str | None = None
 
 
-def _contexto_de_prueba(
-    quien: dict, id_conversacion: str | None
-) -> tuple[ContextoDaniela, conversacion.SesionEnMemoria]:
-    """Recupera la conversación viva, o abre una nueva en el carril de pruebas."""
+def _contexto_de_prueba(quien: dict, id_conversacion: str | None) -> tuple[ContextoDaniela, Any]:
+    """Recupera la conversación viva, o abre una nueva en el carril de pruebas.
+
+    El historial ya no viaja con el contexto: se reconstruye en cada llamada con
+    `persistencia.sesion_de_agente`, igual que en WhatsApp. Ver el docstring de
+    `_conversaciones_de_prueba` sobre por qué el contexto sí se queda en memoria y el
+    historial no.
+
+    ------------------------------------------------------------------------------------
+    Por qué la sesión va con `config.database_url` (SIN `options=`) y `esquema=` explícito
+    ------------------------------------------------------------------------------------
+
+    `_preparar_esquema_de_pruebas()` devuelve una URL con `options=-csearch_path=pruebas_web`
+    colgada -- la necesita para que la conexión síncrona de más abajo (`asegurar_conversacion`,
+    `leer_configuracion`) aterrice en el esquema correcto sin pasar por SQLAlchemy. Pasarle
+    ESA MISMA url a `sesion_de_agente` funcionaría igual -- las filas caerían en `pruebas_web`
+    igual -- pero el aislamiento lo estaría dando el `search_path` de la conexión, no
+    `schema_translate_map`. Eso ya pasó una vez en esta fase: con `options` colado en la URL,
+    `test_las_tablas_de_sesion_no_se_crean_en_public` pasaba con `schema_translate_map` BORRADO
+    de `persistencia._engine_de` (ver `tests/test_sesion_neon.py::_sin_options`). El mismo
+    riesgo existe aquí, así que se evita de la misma forma: `config.database_url` es la URL de
+    producción tal cual (pooler, sin `options`), y `esquema="pruebas_web"` es lo único que
+    desvía la escritura de `agent_sessions`/`agent_messages` fuera de `public`. Es el mismo
+    patrón que la Tarea 5 fijó para WhatsApp (`atencion._sesion_de`, sin `esquema=` porque ahí
+    el destino ES `public`).
+    """
     if id_conversacion and id_conversacion in _conversaciones_de_prueba:
-        return _conversaciones_de_prueba[id_conversacion]
+        ctx = _conversaciones_de_prueba[id_conversacion]
+        return ctx, persistencia.sesion_de_agente(
+            id_conversacion, database_url=config.database_url, esquema=ESQUEMA_PRUEBAS_WEB
+        )
 
     url = _preparar_esquema_de_pruebas()
     # El «teléfono» lleva el usuario dentro. No colisiona con ningún número real, deja claro
@@ -951,9 +980,11 @@ def _contexto_de_prueba(
     except Exception:  # noqa: BLE001 -- los defaults del dataclass son los mismos
         log.warning("chat de pruebas sin configuración operativa; se usan los defaults")
 
-    par = (ctx, conversacion.SesionEnMemoria(nuevo))
-    _conversaciones_de_prueba[nuevo] = par
-    return par
+    _conversaciones_de_prueba[nuevo] = ctx
+    sesion = persistencia.sesion_de_agente(
+        nuevo, database_url=config.database_url, esquema=ESQUEMA_PRUEBAS_WEB
+    )
+    return ctx, sesion
 
 
 async def _resetear_chat_de_prueba(quien: dict) -> dict:
@@ -977,8 +1008,9 @@ async def _resetear_chat_de_prueba(quien: dict) -> dict:
     )
 
     # Las conversaciones vivas de ESTE usuario, no todas: dos personas de la clínica pueden
-    # estar probando a la vez, y reiniciar la tuya no puede cortarle el hilo a la otra.
-    for id_conversacion, (ctx, _sesion) in list(_conversaciones_de_prueba.items()):
+    # estar probando a la vez, y reiniciar la tuya no puede cortarle el hilo a la otra. Solo
+    # se olvida el CONTEXTO -- el historial de Neon ya lo borró `reseteo.resetear` arriba.
+    for id_conversacion, ctx in list(_conversaciones_de_prueba.items()):
         if ctx.telefono_completo == telefono:
             del _conversaciones_de_prueba[id_conversacion]
 
@@ -1043,8 +1075,12 @@ class ReinicioDePrueba(BaseModel):
 
 @app.post("/api/pruebas/reiniciar")
 async def reiniciar_prueba(entrada: ReinicioDePrueba, quien: dict = Depends(usuario_actual)) -> dict:
-    """Olvida la conversación. La fila en `pruebas_web` se queda: no estorba y deja rastro de
-    qué se probó."""
+    """Olvida el CONTEXTO en memoria. Las filas en `pruebas_web` se quedan -- incluido el
+    historial en `agent_messages`, desde la fase 7 -- porque no estorban y dejan rastro de
+    qué se probó. No es lo mismo que `/clearstate`: como `_contexto_de_prueba` no reconoce
+    ya ese `id_conversacion`, el turno siguiente abre una fila nueva en `conversaciones`
+    (`asegurar_conversacion` SIEMPRE inserta) y el historial viejo queda huérfano, con la
+    misma fila del paciente por debajo."""
     if entrada.conversacion:
         _conversaciones_de_prueba.pop(entrada.conversacion, None)
     return {"ok": True}

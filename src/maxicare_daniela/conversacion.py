@@ -111,13 +111,13 @@ class SesionEnMemoria:
     `clear_session` -- sin heredar de `SessionABC`, que la documentación del propio SDK
     reserva para sus implementaciones internas.
 
-    **Es el doble de las pruebas offline, y de una parte de producción que todavía no se
-    cerró.** En el WhatsApp de pacientes reales corre `persistencia.sesion_de_agente`, sobre
-    Neon, desde la fase 7 (`atencion.atender`, con su default cableado a esa fábrica). El
-    chat web del panel, en cambio, **sigue construyendo esta misma clase** --
-    `runtime.py:749` y `runtime.py:954`, sin pasar por `persistencia`-- así que ahí el
-    historial todavía se pierde al reiniciar el proceso. Cerrar esa mitad es PENDIENTE de la
-    Tarea 6.
+    **Es el doble de las pruebas offline. Ya NO es lo que corre en ningún carril real.** En
+    el WhatsApp de pacientes reales corre `persistencia.sesion_de_agente`, sobre Neon, desde
+    la fase 7 (`atencion.atender`, con su default cableado a esa fábrica). Desde la Tarea 6,
+    el chat de pruebas del panel también: `runtime._contexto_de_prueba` pide su sesión a
+    `persistencia.sesion_de_agente(..., esquema=runtime.ESQUEMA_PRUEBAS_WEB)`, así que su
+    historial vive en `agent_messages` de `pruebas_web` y ya no se pierde al reiniciar el
+    proceso.
 
     Y sigue siendo, además, el doble de las pruebas offline: existe para que
     `uv run pytest -q` siga corriendo en dos segundos y sin señal -- una suite que exige

@@ -28,12 +28,17 @@ en producción o por mutación, no razonado.
   recordaría ni la frase anterior, `turno_actual` sería siempre 1 y las claves de
   idempotencia (`id_conversacion + turno`) no colisionarían nunca, con lo que dejarían de
   proteger.
-- **El historial YA NO vive en memoria.** Desde la fase 7, `atencion.atender` le pide la
-  sesión a `persistencia.sesion_de_agente` (`SQLAlchemySession`, sobre `agent_messages` en
-  Neon) por omisión, así que un reinicio del proceso ya no borra el hilo del diálogo de un
-  paciente de WhatsApp -- igual que ya no borraba los datos: paciente, citas y estado de
-  oportunidad. El chat web del panel es la excepción: sigue en `SesionEnMemoria`
-  (`runtime.py:749` y `runtime.py:954`), pendiente de la Tarea 6.
+- **El historial YA NO vive en memoria, en ningún carril.** Desde la fase 7,
+  `atencion.atender` le pide la sesión a `persistencia.sesion_de_agente`
+  (`SQLAlchemySession`, sobre `agent_messages` en Neon) por omisión, así que un reinicio del
+  proceso ya no borra el hilo del diálogo de un paciente de WhatsApp -- igual que ya no
+  borraba los datos: paciente, citas y estado de oportunidad. Desde la Tarea 6, el chat web
+  del panel usa la misma fábrica (`runtime._contexto_de_prueba`), apuntada con
+  `esquema="pruebas_web"` -- `config.database_url` sin el `options=-csearch_path=` que sí
+  lleva la conexión síncrona del carril, para que el aislamiento lo dé
+  `schema_translate_map` y no el `search_path`, igual que en el resto de esta fase (ver
+  `tests/test_sesion_neon.py::_sin_options`). `conversacion.SesionEnMemoria` queda como el
+  doble de las pruebas offline, y ya no corre en ningún carril real.
 
 ## El candado
 
