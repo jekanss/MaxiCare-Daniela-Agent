@@ -37,10 +37,10 @@ una pagina en el momento, con `generar_pdf_minimo`: mismo metodo que la sonda de
 (tabla `xref` CALCULADA objeto por objeto, no inventada -- ver
 `.superpowers/sdd/2026-09-12-fase-6b-el-muro/task-4-report.md`), y no se versiona.
 
-Las SIETE comprobaciones
+Las OCHO comprobaciones
 ------------------------------------------------------------------------------------------
-Las seis del plan de la fase, y una septima que no estaba pero es la que mas importa de las
-que faltaban:
+Las seis del plan de la fase, una septima que no estaba pero es la que mas importa de las que
+faltaban, y una octava que anadio la revision final:
 
   1-2-3. El tema del paciente: nace UNA vez, nace CERRADO, y el segundo archivo del mismo
      numero lo reusa -- las tres se comprueban tambien releyendo la fila de `pacientes` en
@@ -66,6 +66,14 @@ que faltaban:
      que existe para impedir que Daniela le diga a un paciente que tiene, con datos que un
      lector automatico -- no un doctor -- interpreto de una imagen. Si cualquiera de las dos
      sale al reves, el script dice FALLA con todas las letras: no se matiza.
+  8. LA DE LA REVISION FINAL: un numero que NO esta en `pacientes` manda un archivo. No se
+     le abre tema, no se le crea fila, y el archivo le llega al doctor igual (al General).
+     Esa fila es de donde `atencion._leer_estado` saca `identidad_verificada`: crearla desde
+     la ingesta convertia a cualquier desconocido en paciente verificado en el mismo turno.
+
+Por eso mismo este script SIEMBRA las filas de `pacientes` de los tres numeros que si son
+pacientes (`sembrar_pacientes`) antes de empezar: la ingesta ya no las crea. La de
+`TEL_DESCONOCIDO` no se siembra nunca -- esa ausencia es la comprobacion 8.
 """
 
 from __future__ import annotations
@@ -104,6 +112,9 @@ ESQUEMA = "pruebas_lectura"
 TEL_TEMA = "573009920001"
 TEL_ARCHIVO = "573009920002"
 TEL_MURO = "573009920003"
+
+#: El numero que NO esta en `pacientes`. Nunca se siembra: esa ausencia ES la comprobacion 8.
+TEL_DESCONOCIDO = "573009920099"
 
 #: `1` porque Telegram identifica asi el tema General por convencion (ver canales.py); aqui
 #: solo hace falta que sea distinto de cualquier tema de paciente, que `TelegramCaptura`
@@ -304,6 +315,24 @@ def mensaje_documento(
         mime="application/pdf",
         nombre_archivo=nombre_archivo,
     )
+
+
+def sembrar_pacientes(url: str) -> None:
+    """Crea las filas de `pacientes` de los tres numeros que SI son pacientes.
+
+    Hace falta desde la revision final de la fase: `lectura.asegurar_tema` ya NO crea filas
+    en `pacientes` -- un desconocido que manda una foto no puede quedar convertido en
+    paciente verificado, porque `atencion._leer_estado` deriva la identidad de la existencia
+    de esa fila. Sembrarlas aqui es legitimo y no se parece a la ingesta: en la clinica de
+    verdad la fila la escribe `identificar_paciente` o el panel, no un archivo entrante.
+
+    `TEL_DESCONOCIDO` se queda fuera a proposito: es la comprobacion 8.
+    """
+    with persistencia.conectar(url) as conn:
+        for telefono in (TEL_TEMA, TEL_ARCHIVO, TEL_MURO):
+            persistencia.asegurar_paciente(
+                conn, nombre_completo="Paciente De Prueba", telefono=telefono
+            )
 
 
 def configuracion(url: str) -> Config:
@@ -609,13 +638,58 @@ async def siete(chat: bool) -> None:
 # ==========================================================================================
 
 
+async def ocho(url: str) -> None:
+    print("\n8. Un DESCONOCIDO no abre tema, y su archivo llega al General igual")
+    wa = WhatsAppDescarga(
+        contenido=b"%PDF-1.4 un archivo de un numero que no es paciente",
+        mime="application/pdf",
+        nombre="foto-desconocido.pdf",
+    )
+    tg = TelegramCaptura()
+    m = mensaje_documento(TEL_DESCONOCIDO, nombre_archivo="foto-desconocido.pdf")
+
+    async def lector_doblado(archivo, *, tipo, correr=None) -> LecturaArchivo:
+        return _lectura_canonica()
+
+    lectura.leer_archivo = lector_doblado
+    try:
+        resultado = await ingesta.procesar_mensaje(
+            m, whatsapp=wa, telegram=tg, database_url=url, tema_general=TEMA_GENERAL
+        )
+        if resultado.lectura is not None:
+            await resultado.lectura
+    finally:
+        lectura.leer_archivo = _LEER_ARCHIVO_REAL
+
+    revisar("el archivo del desconocido se entrego igual", resultado.reenviado is True)
+    revisar(
+        "fue al General, no a un hilo propio",
+        bool(tg.archivos) and tg.archivos[0][1] == TEMA_GENERAL,
+        str(tg.archivos),
+    )
+    revisar(
+        "NO se creo ningun tema en Telegram (ni huerfano ni de nadie)",
+        tg.temas_creados == [],
+        str(tg.temas_creados),
+    )
+    fila = una_fila(url, "SELECT count(*) FROM pacientes WHERE telefono = %s", (TEL_DESCONOCIDO,))
+    revisar(
+        "y sobre todo: NO se creo la fila en `pacientes`. Esa fila ES la identidad "
+        "verificada -- mandar una foto no puede verificar a nadie",
+        fila == (0,),
+        str(fila),
+    )
+
+
 async def corridas(url: str, chat: bool) -> None:
     cfg = configuracion(url)
+    sembrar_pacientes(url)
     await uno_dos_tres(url)
     await cuatro(url)
     await cinco(url, cfg)
     await seis(chat)
     await siete(chat)
+    await ocho(url)
 
 
 def main() -> int:
