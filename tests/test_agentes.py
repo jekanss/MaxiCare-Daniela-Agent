@@ -123,6 +123,129 @@ def test_las_instrucciones_no_perdieron_las_prohibiciones_del_plan():
     assert "no venga de una tool en este mismo turno" in texto
 
 
+# ==========================================================================================
+# El límite clínico
+# ==========================================================================================
+#
+# Las cuatro pruebas de abajo fijan lo que MaxiCare pidió el 13/09/2026 tras leer una
+# conversación de prueba: Daniela puede vender, pero no puede hacer de odontóloga. Son
+# pruebas de TEXTO, y eso tiene un límite que conviene decir en voz alta -- comprueban que
+# la instrucción sigue ahí, no que el modelo la obedezca. Lo segundo solo lo puede ver
+# `scripts/probar_agentes.py`, que corre contra el modelo real y gasta tokens.
+#
+# Valen igual: el fallo que persiguen es que alguien reescriba el prompt «para que suene
+# mejor» y se lleve por delante una prohibición sin enterarse.
+
+
+def test_daniela_no_arbitra_entre_dos_odontologos():
+    """El caso que lo motivó: «uno me dijo periodontitis y otro que con una limpieza
+    quedaba bien, ¿quién tiene razón?».
+
+    Elegir uno de los dos es diagnosticar por WhatsApp con el diagnóstico de otro, y
+    contradecirlo es peor: el paciente sí fue examinado por esa persona y Daniela no.
+    """
+    texto = agentes.INSTRUCCIONES_DANIELA
+
+    assert "no decides cuál de dos profesionales tiene razón" in texto
+    assert "información que ÉL reporta, no un hecho de MaxiCare" in texto
+
+
+def test_daniela_no_decide_el_destino_de_un_diente_ni_promete_resultados():
+    """«¿Se podrá salvar?» y «¿toca sacarla?» son las dos preguntas que un paciente hace
+    con más angustia, y las dos exigen ver la boca."""
+    texto = agentes.INSTRUCCIONES_DANIELA
+
+    assert "si un diente se puede salvar" in texto
+    assert "Prometer un resultado antes de que lo examinen" in texto
+
+
+def test_el_limite_clinico_siempre_deja_un_siguiente_paso():
+    """Una negativa sin salida es la otra forma de fallarle al paciente.
+
+    «Eso lo determina el odontólogo» y punto deja a alguien preocupado exactamente donde
+    estaba, y de paso pierde la cita: el objetivo comercial y el clínico apuntan al mismo
+    sitio, que es que lo vea un profesional.
+    """
+    texto = agentes.INSTRUCCIONES_DANIELA
+
+    assert "no podemos determinar" in texto
+    assert "lo que sí podemos es" in texto
+    assert "deja al paciente sin siguiente paso" in texto
+
+
+def test_el_protocolo_de_alarma_sale_de_LA_BASE_y_no_del_prompt():
+    """La prueba más importante de este bloque, y la que hay que entender antes de tocarla.
+
+    Un protocolo de urgencias escrito en el prompt sería contenido clínico que MaxiCare no
+    aprobó, y el proyecto entero está construido sobre lo contrario: lo clínico se
+    transcribe del documento maestro o no existe (`.claude/rules/base-conocimiento.md`).
+
+    La fila `_general` / `urgencias` existe y está aprobada. El prompt manda a consultarla y
+    a aplicar lo que devuelva; NO enumera señales por su cuenta. Si alguien pega aquí la
+    lista de una conversación de ejemplo -- «fiebre, dificultad para respirar o tragar» --
+    habrá metido criterio clínico inventado por la puerta de atrás, y esta prueba cae.
+    """
+    texto = agentes.INSTRUCCIONES_DANIELA
+
+    assert "`_general`" in texto and "`urgencias`" in texto
+    assert "aplicas EXACTAMENTE lo que devuelva" in texto
+    assert "No inventas señales ni protocolos propios" in texto
+
+    # Lo que NO puede estar: una lista de señales de alarma escrita a mano.
+    for inventada in ("dificultad para respirar", "dificultad para tragar", "sangrado que no se detiene"):
+        assert inventada not in texto, (
+            f"«{inventada}» es criterio clínico que MaxiCare no ha aprobado. "
+            "Va en la base de conocimiento, no en el prompt."
+        )
+
+
+def test_la_senal_de_alarma_se_comprueba_una_vez_y_tiene_salida():
+    """El defecto que encontró la primera corrida contra el modelo real, 13/09/2026.
+
+    La primera redacción decía «mientras eso siga abierto sueltas el guion comercial» y no
+    decía nunca cómo se cierra. El paciente escribió «las encías me sangran bastante»,
+    Daniela activó el protocolo en el turno 1... y no salió de él: escaló en los cinco
+    turnos siguientes, contestó «lo estoy revisando con prioridad» cinco veces, y no ofreció
+    un solo horario. Ni siquiera cuando el paciente respondió «no, nada de eso».
+
+    Peor: contradecía el protocolo aprobado. La fila `_general`/`urgencias` dice «buscar el
+    cupo MÁS CERCANO y avisar al equipo» -- agendar es parte de la respuesta a una urgencia,
+    no lo que se suspende.
+
+    Un estado que se enciende y no se apaga no es un freno de seguridad: es una conversación
+    muerta, y el paciente con la urgencia de verdad es el que se queda sin cita.
+    """
+    texto = agentes.INSTRUCCIONES_DANIELA
+
+    assert "Lo compruebas UNA vez" in texto
+    assert "NO la repitas en el mensaje siguiente" in texto
+    assert "vuelves al hilo normal" in texto
+    assert "Escalas una vez por asunto, no una vez por mensaje" in texto
+
+
+def test_un_limite_clinico_no_es_un_escalamiento():
+    """Segundo hallazgo de la misma corrida: Daniela escalaba cada vez que topaba con el
+    límite, y el límite aparece en casi todos los turnos de una conversación como esta.
+
+    Tres alertas de Telegram por un solo paciente, y el doctor deja de mirarlas -- que es
+    como se pierde la que sí importaba. No poder decidir algo tú no significa que un doctor
+    deba contestarlo por WhatsApp: para eso existe la valoración, y esa respuesta ya la
+    tiene Daniela.
+    """
+    texto = agentes.INSTRUCCIONES_DANIELA
+
+    assert "Un límite clínico no es un escalamiento" in texto
+
+
+def test_daniela_atiende_el_motivo_nuevo_sin_perder_el_viejo():
+    """La muela partida pasa a ser la prioridad; el sangrado de encías no se borra, porque
+    el profesional necesita ver los dos."""
+    texto = agentes.INSTRUCCIONES_DANIELA
+
+    assert "dejas de insistir en lo anterior" in texto
+    assert "Lo anterior no se borra" in texto
+
+
 def test_daniela_sabe_que_dia_es_hoy():
     """Hasta hoy no lo sabía, y por eso preguntaba el año.
 

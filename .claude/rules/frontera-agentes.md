@@ -138,6 +138,64 @@ Filtra por teléfono y no por `paciente_id` —el criterio más estrecho de los 
 pasado con `ctx.ahora`: una cita de ayer no se puede mover, y ofrecerla solo sirve para que
 el modelo proponga algo imposible.
 
+# El límite clínico: qué va en el prompt y qué va en la base
+
+MaxiCare pidió el 13/09/2026 acotar hasta dónde llega Daniela en lo clínico, después de leer
+una conversación de prueba. El esqueleto del plan lo resolvía en una frase —«NUNCA le dices a
+un paciente qué tiene»— y esa frase no cubre las tres preguntas con las que la gente llega de
+verdad, porque **ninguna de las tres pide un diagnóstico**:
+
+- «Uno me dijo periodontitis y otro que con una limpieza quedaba bien, ¿quién tiene razón?»
+- «¿Ustedes creen que de pronto se puede salvar?»
+- «Si toca sacarla, ¿cuánto vale?»
+
+Pide arbitrar, pronosticar y ponerle precio a un tratamiento que nadie le ha indicado. Ningún
+guardrail las frena: no hay cifra sin respaldo, no hay hora sin verificar, y
+`sin_lectura_clinica` no dispara porque técnicamente no le está diciendo qué tiene.
+
+**El reparto, y es la línea que no hay que cruzar:**
+
+| | Dónde vive | Por qué |
+|---|---|---|
+| La conducta —qué reconoce, qué no decide, cómo responde— | el prompt | es política, no medicina |
+| El criterio clínico —qué síntoma es una alarma, qué se hace con él | la base de conocimiento | es medicina, y solo MaxiCare la firma |
+
+Por eso el prompt manda a consultar `_general` / `urgencias` y a aplicar **exactamente** lo
+que devuelva, y no enumera ni una señal por su cuenta. Copiar esa lista al prompt sería meter
+criterio clínico sin aprobar por la puerta de atrás, y quedaría fuera del alcance de la
+pantalla desde la que la clínica corrige lo que dice.
+`test_el_protocolo_de_alarma_sale_de_LA_BASE_y_no_del_prompt` lo sostiene.
+
+## Los dos defectos que solo se vieron contra el modelo real
+
+Las pruebas offline comprueban que la instrucción sigue escrita. No pueden ver esto, y
+`scripts/probar_agentes.py` bloque 11 existe para eso:
+
+- **Un estado de alarma que se enciende y no se apaga.** La primera redacción decía «mientras
+  eso siga abierto sueltas el guion comercial» y no decía cómo se cierra. El paciente escribió
+  «me sangran bastante las encías», Daniela activó el protocolo en el turno 1 y siguió en él
+  los cinco siguientes: cinco escalamientos, cinco «lo estoy revisando con prioridad», cero
+  horarios ofrecidos, incluso después de que el paciente dijera «no, nada de eso». Y encima
+  contradecía el protocolo aprobado, que dice **buscar el cupo más cercano** — agendar es
+  parte de la respuesta a una urgencia, no lo que se suspende.
+- **Un límite clínico no es un escalamiento.** Daniela escalaba cada vez que topaba con el
+  límite, y en una conversación así el límite aparece en casi todos los turnos. Tres alertas
+  de Telegram por un solo paciente es como se pierde la que sí importaba. La respuesta a un
+  límite clínico ya la tiene: es la valoración.
+
+Los dos se arreglaron en el prompt y los dos tienen prueba. Ninguno era visible en verde.
+
+## PENDIENTE de validación por MaxiCare
+
+La fila `_general` / `urgencias` está aprobada y cubre **dolor severo y sangrado activo**. La
+conversación de referencia del cliente también tamiza por **fiebre, inflamación facial y
+dificultad para respirar o tragar**, que esa fila no menciona.
+
+No se añadieron al prompt ni a la base: serían criterio clínico que el documento maestro no
+contiene, y `.claude/rules/base-conocimiento.md` lo prohíbe expresamente. Si MaxiCare las
+confirma, el cambio es de **una fila**, desde la pantalla de la clínica o ampliando esa fila —
+ni una línea de código, porque el prompt ya delega en lo que la fila devuelva.
+
 # Convenciones del paquete
 
 - `SolicitudCita` **no tiene campo de teléfono**: la tool lo lee del contexto local.
