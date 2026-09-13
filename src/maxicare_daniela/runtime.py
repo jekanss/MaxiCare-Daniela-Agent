@@ -263,6 +263,17 @@ def _construir_el_calendario() -> None:
     log.info("calendario listo · %s", type(_calendario).__name__)
 
 
+@app.on_event("shutdown")
+async def _cerrar_engines_de_persistencia() -> None:
+    """Cierra los pools de `SQLAlchemySession` (fase 7) al apagar el servidor.
+
+    Sin esto, el proceso termina con conexiones de Neon abiertas en el pool de sesiones --
+    hasta `TAMANO_POOL_SESIONES + DESBORDO_POOL_SESIONES` por cada `(base, esquema)` que se
+    haya usado-- que Neon solo libera por su cuenta cuando la TCP muere, no al instante.
+    """
+    await persistencia.cerrar_engines()
+
+
 # ==========================================================================================
 # Verificación del webhook — Meta la hace una sola vez, al conectar
 # ==========================================================================================

@@ -175,20 +175,72 @@ def url_asincrona(url: str) -> str:
     return f"{DIALECTO_ASINCRONO}{separador}{resto}"
 
 
+#: Conexiones que el pool de sesiones mantiene abiertas contra Neon, más las de desbordo.
+#:
+#: Dimensionado a mano y no heredado del default de SQLAlchemy (5 + 10), que nadie eligió
+#: para este proyecto. Los dos datos que lo justifican, medidos el 13/09/2026 contra la Neon
+#: de la clínica: 901 (`SHOW max_connections`) y 2 en uso. El otro consumidor,
+#: `persistencia.conectar`, NO tiene pool: abre una conexión por llamada y la cierra, así
+#: que su pico es el número de turnos concurrentes -- un dígito con un solo worker.
+#:
+#: La suma tiene que caber debajo del techo CONTANDO EL DOBLE, porque un despliegue solapa
+#: brevemente el contenedor viejo y el nuevo. Con 901 de techo y 2 en uso, (3 + 2) * 2 = 10
+#: deja un margen enorme; no hizo falta ajustar los valores del brief.
+TAMANO_POOL_SESIONES = 3
+DESBORDO_POOL_SESIONES = 2
+
+#: Un engine por (base, esquema). Se comparte entre todas las conversaciones: lo caro es el
+#: pool, no la `SQLAlchemySession`, que es un objeto con dos tablas y un factory.
+_engines: dict[tuple[str, str | None], Any] = {}
+
+
 def _engine_de(database_url: str, esquema: str | None):
-    """El `AsyncEngine` que respalda una sesión. Provisional y sin caché a propósito: la
-    caché por `(url, esquema)` es la Tarea 4. Construir un engine no abre ninguna conexión
-    -- el pool es perezoso -- así que crear uno por llamada no toca la red todavía, aunque
-    sí desperdicia el pool cuando el llamador pide muchas sesiones seguidas.
+    """El `AsyncEngine` que respalda una sesión, uno por `(database_url, esquema)`.
+
+    Construir un `AsyncEngine` por turno abriría un pool de conexiones por turno, y Neon
+    tiene un techo. Se cachea aquí y `cerrar_engines` es lo único que lo vacía -- ni esta
+    función ni `sesion_de_agente` disponen nada por su cuenta.
 
     `esquema` va por `schema_translate_map` en las opciones de EJECUCIÓN, no por `options=
     -csearch_path=` en la URL: el pooler de Neon rechaza `options` como parámetro de
     arranque, y SQLAlchemy cualifica las sentencias al compilarlas, no al abrir la conexión.
+    Por eso la clave de caché lleva el esquema: `public` y `pruebas_web` no pueden compartir
+    engine, o compartirían pool y las filas de una prueba podrían acabar mezcladas con las
+    de la clínica real bajo carga.
     """
+    clave = (database_url, esquema)
+    engine = _engines.get(clave)
+    if engine is not None:
+        return engine
+
     from sqlalchemy.ext.asyncio import create_async_engine
 
     opciones = {"schema_translate_map": {None: esquema}} if esquema else {}
-    return create_async_engine(url_asincrona(database_url), execution_options=opciones)
+    engine = create_async_engine(
+        url_asincrona(database_url),
+        execution_options=opciones,
+        pool_size=TAMANO_POOL_SESIONES,
+        max_overflow=DESBORDO_POOL_SESIONES,
+        # Neon cierra las conexiones ociosas por su cuenta. Sin `pre_ping`, la primera
+        # consulta después de un rato tranquilo revienta con una conexión muerta -- y sería
+        # el primer paciente de la mañana quien se lo encontrara.
+        pool_pre_ping=True,
+        pool_recycle=300,
+    )
+    _engines[clave] = engine
+    return engine
+
+
+async def cerrar_engines() -> None:
+    """Cierra y olvida todos los pools. Lo llaman el apagado del servidor y las pruebas.
+
+    En las pruebas hace falta de verdad: un `AsyncEngine` queda atado al bucle de eventos
+    en el que se usó por primera vez, y reusarlo desde otro `asyncio.run` da un
+    `got Future attached to a different loop` que no se lee como lo que es.
+    """
+    for engine in list(_engines.values()):
+        await engine.dispose()
+    _engines.clear()
 
 
 def sesion_de_agente(

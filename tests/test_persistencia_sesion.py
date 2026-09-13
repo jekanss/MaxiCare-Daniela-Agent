@@ -131,3 +131,50 @@ def test_sin_limite_el_historial_va_entero():
     sesion = persistencia.sesion_de_agente("conv-1", database_url=URL_NEON)
 
     assert sesion.session_settings.limit is None
+
+
+# ==========================================================================================
+# Un engine por base, no uno por turno (Tarea 4)
+# ==========================================================================================
+
+
+def test_dos_sesiones_de_la_misma_base_comparten_el_engine():
+    """Un `AsyncEngine` por turno es un pool de conexiones por turno, y Neon tiene techo.
+    El engine se comparte; lo que es barato de crear es la `SQLAlchemySession`."""
+    a = persistencia.sesion_de_agente("conv-1", database_url=URL_NEON)
+    b = persistencia.sesion_de_agente("conv-2", database_url=URL_NEON)
+
+    assert a._engine is b._engine
+
+
+def test_esquemas_distintos_no_comparten_engine():
+    """`schema_translate_map` va en el engine, así que `public` y `pruebas_web` no pueden
+    compartir uno: compartirlo mandaría las filas del chat de pruebas a la base real."""
+    produccion = persistencia.sesion_de_agente("conv-1", database_url=URL_NEON)
+    pruebas = persistencia.sesion_de_agente(
+        "conv-1", database_url=URL_NEON, esquema="pruebas_web"
+    )
+
+    assert produccion._engine is not pruebas._engine
+
+
+def test_el_pool_esta_dimensionado_a_mano():
+    """No el default de SQLAlchemy, que nadie eligió para este proyecto ni para el techo de
+    conexiones de este plan de Neon."""
+    sesion = persistencia.sesion_de_agente("conv-1", database_url=URL_NEON)
+    pool = sesion._engine.pool
+
+    assert pool.size() == persistencia.TAMANO_POOL_SESIONES
+
+
+def test_cerrar_engines_vacia_la_cache():
+    """Sin esto, una prueba deja un engine atado a su bucle de eventos y la siguiente se
+    encuentra un `got Future attached to a different loop`."""
+    import asyncio
+
+    persistencia.sesion_de_agente("conv-1", database_url=URL_NEON)
+    assert persistencia._engines
+
+    asyncio.run(persistencia.cerrar_engines())
+
+    assert not persistencia._engines
