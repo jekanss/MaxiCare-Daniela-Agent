@@ -374,12 +374,19 @@ async def despachar(
     protección real contra el envío duplicado no es el candado -que ya se soltó- sino que
     `marcar_seguimiento_enviado` solo marca si `enviado_en` seguía en NULL: si otra instancia
     ya se la llevó, aquí no se manda ni se cuenta.
+
+    Y abrirla y cerrarla también van por `to_thread`, como todo lo demás. `psycopg.connect`
+    contra Neon es un handshake TLS completo y el cierre hace commit o rollback antes de
+    soltar el socket: son cientos de milisegundos BLOQUEANTES cada uno, en el mismo bucle de
+    eventos que atiende los webhooks de pacientes reales, cada sesenta segundos. Era la única
+    llamada a base de esta función que no lo hacía.
     """
     momento_actual = ahora or datetime.now(jornada_zona())
     recuento = {"enviados": 0, "anulados": 0, "aplazados": 0, "fallidos": 0}
     numeros_de_esta_tanda: set[str] = set()
 
-    with persistencia.conectar(database_url) as conn:
+    conn = await asyncio.to_thread(persistencia.conectar, database_url)
+    try:
         configuracion = await asyncio.to_thread(persistencia.leer_configuracion, conn)
         # G5 calcula su ventana de envío hasta `max(cierre, hora_vispera + 1)` (ver `decidir`).
         # Esa hora la cambia la clínica desde el panel sin desplegar nada, así que pasarle la
@@ -511,5 +518,20 @@ async def despachar(
                 cuando=momento_actual,
             )
             recuento["enviados"] += 1
+    finally:
+        await asyncio.to_thread(_cerrar, conn)
 
     return recuento
+
+
+def _cerrar(conn: Any) -> None:
+    """Cierra la conexión del ciclo, y un fallo cerrándola no se lleva por delante el recuento.
+
+    `close()` deshace lo que quedara sin confirmar, y eso es justo lo correcto: las cinco
+    funciones de escritura confirman por su cuenta, así que lo único que puede quedar abierto
+    es el `SELECT ... FOR UPDATE` de la lectura -- cuyo candado, precisamente, hay que soltar.
+    """
+    try:
+        conn.close()
+    except Exception:  # noqa: BLE001 -- el ciclo ya hizo su trabajo; esto es limpieza
+        log.warning("no se pudo cerrar la conexión del ciclo de recordatorios", exc_info=True)

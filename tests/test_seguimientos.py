@@ -12,6 +12,8 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import datetime, timedelta
 
+import pytest
+
 from maxicare_daniela import seguimientos as s
 from maxicare_daniela.calendario import Jornada
 from maxicare_daniela.herramientas import ZONA_BOGOTA
@@ -20,7 +22,16 @@ JORNADA = Jornada()  # 8-17 entre semana, 15 el sábado, domingo cerrado
 
 
 class _ConexionFalsa:
-    """`persistencia.conectar` se usa como context manager. Esto es lo mínimo para doblarlo."""
+    """Lo mínimo para doblar la conexión del ciclo.
+
+    `despachar` ya no la usa como context manager: abrirla y cerrarla van por `to_thread`
+    como todo lo demás, porque `psycopg.connect` contra Neon es un handshake TLS completo y
+    bloqueaba el bucle de eventos que atiende los webhooks. `cerrada` deja comprobable que el
+    cierre ocurre incluso cuando el ciclo revienta a mitad.
+    """
+
+    def __init__(self):
+        self.cerrada = False
 
     def __enter__(self):
         return self
@@ -30,6 +41,9 @@ class _ConexionFalsa:
 
     def commit(self):
         pass
+
+    def close(self):
+        self.cerrada = True
 
 
 def momento(dia: int, hora: int, minuto: int = 0) -> datetime:
@@ -360,6 +374,59 @@ def test_la_plantilla_viaja_con_el_tipo_y_los_parametros_que_meta_espera(monkeyp
     assert cuerpo["template"]["language"] == {"code": "es"}
     valores = [p["text"] for p in cuerpo["template"]["components"][0]["parameters"]]
     assert valores == ["Ana", "miércoles 17/9", "09:00", "Limpieza"]
+
+
+def test_abrir_y_cerrar_la_conexion_no_corren_en_el_bucle_de_eventos(monkeypatch):
+    """`psycopg.connect` contra Neon es un handshake TLS completo y el cierre hace commit o
+    rollback antes de soltar el socket: cientos de milisegundos BLOQUEANTES cada uno, en el
+    mismo bucle que atiende los webhooks de pacientes reales, cada sesenta segundos. Todas las
+    demás llamadas a base de `despachar` ya iban por `to_thread`; estas dos no.
+
+    Se comprueba por el HILO, que es lo que importa: que corran en uno distinto del que tiene
+    el bucle. Y el cierre se comprueba en el camino de error, que es donde un `try/finally` mal
+    puesto deja una conexión de Neon colgada cada minuto hasta agotar el pooler.
+    """
+    import asyncio
+    import threading
+
+    from maxicare_daniela import persistencia, seguimientos as s
+
+    hilo_del_bucle = threading.get_ident()
+    hilos: dict[str, int] = {}
+    conexion = _ConexionFalsa()
+
+    def _conectar(url):
+        hilos["abrir"] = threading.get_ident()
+        return conexion
+
+    def _cerrar_espiado():
+        hilos["cerrar"] = threading.get_ident()
+        conexion.cerrada = True
+
+    conexion.close = _cerrar_espiado
+    monkeypatch.setattr(persistencia, "conectar", _conectar)
+    monkeypatch.setattr(persistencia, "leer_configuracion", lambda conn: {})
+
+    def _reventar(conn, **k):
+        raise RuntimeError("Neon no respondió")
+
+    monkeypatch.setattr(persistencia, "seguimientos_por_despachar", _reventar)
+
+    async def escenario():
+        with pytest.raises(RuntimeError):
+            await s.despachar(
+                database_url="postgresql://no-se-usa",
+                whatsapp=None,
+                jornada=JORNADA,
+                plantilla="",
+                ahora=momento(16, 18),
+            )
+
+    asyncio.run(escenario())
+
+    assert conexion.cerrada, "el ciclo reventó y dejó la conexión abierta"
+    assert hilos["abrir"] != hilo_del_bucle
+    assert hilos["cerrar"] != hilo_del_bucle
 
 
 def test_el_idioma_de_la_plantilla_llega_hasta_meta(monkeypatch):
