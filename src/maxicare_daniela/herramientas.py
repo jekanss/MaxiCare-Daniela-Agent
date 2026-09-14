@@ -818,6 +818,25 @@ async def _crear_cita(ctx: ContextoDaniela, solicitud: SolicitudCita) -> str:
             "liberó y la cita NO existe. No se le puede confirmar nada al paciente."
         ) from e
 
+    # CUÁNDO sale el recordatorio se decide AQUÍ, fuera de la transacción, y no dentro de
+    # `guardar`. Es una función pura de tres valores que ya se conocen --el horario pedido,
+    # `ctx.ahora` y `ctx.jornada`--: ninguno depende de que la cita se haya escrito. Dentro
+    # quedan solo las dos ESCRITURAS, y con eso ningún fallo del recordatorio puede tumbar la
+    # cita: un error de lógica al calcular el momento revienta antes de que exista nada que
+    # deshacer, y lo único que puede fallar del `INSERT` --que la base se caiga-- habría
+    # matado igual el `commit` de la propia cita. La seguridad clínica prevalece: perder una
+    # cita por un recordatorio es exactamente el intercambio que este proyecto prohíbe.
+    #
+    # `None` no es un fallo: es «esta cita no lleva recordatorio». La que se agenda para
+    # dentro de dos horas no lo lleva porque el paciente acaba de hablar con Daniela.
+    cuando_recordar = seguimientos.momento_del_recordatorio(
+        inicio_cita=inicio,
+        ahora=ctx.ahora,
+        jornada=ctx.jornada,
+        hora_vispera=ctx.hora_recordatorio_vispera,
+        horas_minimas=ctx.horas_minimas_para_recordar,
+    )
+
     def guardar(conn) -> tuple[str, int]:
         # Quien saca su primera cita deja de ser un desconocido, y aquí es donde deja de
         # serlo. Sin esta fila, `identificar_paciente` no tendría nunca contra qué
@@ -854,22 +873,14 @@ async def _crear_cita(ctx: ContextoDaniela, solicitud: SolicitudCita) -> str:
         #
         # Va en la MISMA transacción que la cita --de ahí el `commit=False` de las dos
         # escrituras y el `conn.commit()` de abajo--: separadas, una caída entre ellas deja
-        # una cita sin recordatorio y nadie se entera hasta que el paciente no llega.
-        cuando = seguimientos.momento_del_recordatorio(
-            inicio_cita=inicio,
-            ahora=ctx.ahora,
-            jornada=ctx.jornada,
-            hora_vispera=ctx.hora_recordatorio_vispera,
-            horas_minimas=ctx.horas_minimas_para_recordar,
-        )
-        # `None` no es un fallo: es «esta cita no lleva recordatorio». La que se agenda para
-        # dentro de dos horas no lo lleva porque el paciente acaba de hablar con Daniela.
-        if cuando is not None:
+        # una cita sin recordatorio y nadie se entera hasta que el paciente no llega. El
+        # CUÁNDO ya se calculó arriba, fuera de la transacción, a propósito.
+        if cuando_recordar is not None:
             persistencia.insertar_seguimiento(
                 conn,
                 id_conversacion=ctx.id_conversacion,
                 tipo="recordatorio_cita",
-                fecha_objetivo=cuando,
+                fecha_objetivo=cuando_recordar,
                 # La clave la arma `ctx.clave`, como las otras cuatro. Nunca el modelo.
                 clave_idempotencia=ctx.clave("recordatorio", id_cita),
                 cita_id=id_cita,
@@ -1039,6 +1050,18 @@ async def _reprogramar_cita(ctx: ContextoDaniela, id_cita: str, nuevo_inicio: st
         log.error("Calendar falló reprogramando %s; cupo nuevo liberado", id_cita)
         raise
 
+    # Fuera de la transacción, por lo mismo que en `crear_cita`: el CUÁNDO es una función
+    # pura del destino, de `ctx.ahora` y de la jornada, y nada de eso depende de que la cita
+    # se haya movido. Dentro de `aplicar` quedan solo escrituras, y así un error calculando
+    # el momento no puede deshacer un movimiento que en Google Calendar YA ocurrió.
+    cuando_recordar = seguimientos.momento_del_recordatorio(
+        inicio_cita=destino,
+        ahora=ctx.ahora,
+        jornada=ctx.jornada,
+        hora_vispera=ctx.hora_recordatorio_vispera,
+        horas_minimas=ctx.horas_minimas_para_recordar,
+    )
+
     def aplicar(conn) -> None:
         persistencia.mover_cita(
             conn, id_cita, reserva_id=reserva_nueva, inicio=destino, commit=False
@@ -1051,19 +1074,12 @@ async def _reprogramar_cita(ctx: ContextoDaniela, id_cita: str, nuevo_inicio: st
         persistencia.anular_seguimientos_de_cita(
             conn, id_cita, motivo="cita_reprogramada", commit=False
         )
-        cuando = seguimientos.momento_del_recordatorio(
-            inicio_cita=destino,
-            ahora=ctx.ahora,
-            jornada=ctx.jornada,
-            hora_vispera=ctx.hora_recordatorio_vispera,
-            horas_minimas=ctx.horas_minimas_para_recordar,
-        )
-        if cuando is not None:
+        if cuando_recordar is not None:
             persistencia.insertar_seguimiento(
                 conn,
                 id_conversacion=ctx.id_conversacion,
                 tipo="recordatorio_cita",
-                fecha_objetivo=cuando,
+                fecha_objetivo=cuando_recordar,
                 # El `destino` dentro de la clave es lo que permite que la MISMA cita tenga
                 # un recordatorio nuevo por cada hora a la que se mueva, sin chocar con el
                 # viejo. Sin él, la segunda reprogramación acertaría la clave de la primera
