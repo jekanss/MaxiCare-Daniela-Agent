@@ -182,6 +182,20 @@ una —qué se midió, qué costó— está en la regla que cubre ese archivo.
    se dispara cuando la ficha dice `PENDIENTE`: sin él la cita entraba en la agenda de la
    clínica como «PENDIENTE · Cordales», que es el caso normal de una cita salida de un relevo
    —el paciente nuevo es el que más escala—. Nunca pisa un nombre de verdad.
+20. **Para una cita que YA existe manda Google Calendar, no Neon.** Ahí es donde el doctor
+   mueve las cosas —arrastrándolas con el ratón, que es el gesto natural— y hasta el
+   14/09/2026 eso dejaba la fila mintiendo: el cliente movió su cita al día siguiente y
+   Daniela le siguió recitando la hora vieja. `herramientas._sincronizar_con_calendar` la
+   contrasta en cada `consultar_citas` y corrige Neon: movida → mueve la fila, suelta el cupo
+   viejo y toma el nuevo; borrada → la cancela y suelta el cupo. **Se contrasta ANTES de
+   cortar el pasado** —la cita arrastrada de ayer a mañana es pasado según Neon, y con el
+   corte delante es justo la que no se miraría—, **un `ErrorDeCalendario` no es «la borraron»**
+   —deja la fila como está: tratar un timeout como cancelación cancelaría citas buenas en
+   silencio, y por eso `CalendarioCaido.obtener_evento` lanza en vez de devolver `None`— y
+   **si la hora destino está llena la cita se mueve igual**, sin reserva y con un warning: el
+   doctor ya decidió meterla ahí. Lo mide el paso 5b de `scripts/probar_calendario.py`, que
+   es donde se comprueba lo único que un doble no puede: que un evento borrado devuelva
+   `None`.
 
 # Dónde está el resto
 

@@ -1368,6 +1368,12 @@ def _cita(**cambios) -> dict:
         "tratamiento": "limpieza",
         "inicio": INICIO,
         "estado": "confirmada",
+        # Las tres que hacen falta para contrastar contra Calendar. `evento_calendar_id` va
+        # en None a proposito: asi una cita sin evento --las hay-- no llama a Google, y las
+        # pruebas que no van de esto no tienen que doblar el calendario.
+        "evento_calendar_id": None,
+        "reserva_id": None,
+        "conversacion_id": "conv-1",
     }
     base.update(cambios)
     return base
@@ -1430,12 +1436,11 @@ def test_consultar_citas_autoriza_las_horas_que_nombra(monkeypatch):
     assert {"09:00", "14:00"} <= ctx.turno.horas_autorizadas
 
 
-def test_la_busqueda_va_anclada_al_TELEFONO_del_contexto_y_al_reloj(monkeypatch):
+def test_la_busqueda_va_anclada_al_TELEFONO_del_contexto(monkeypatch):
     """El modelo no escribe teléfonos. Nunca.
 
     Es lo que hace la consulta incapaz por construcción de devolver la cita de otra persona:
-    no hay ningún argumento que el modelo pueda torcer. Y el corte por `ctx.ahora` es lo que
-    impide ofrecerle mover una cita que ya pasó.
+    no hay ningún argumento que el modelo pueda torcer.
     """
     ctx = contexto(identidad_verificada=True, ahora=INICIO - timedelta(days=2))
     visto: dict = {}
@@ -1455,7 +1460,208 @@ def test_la_busqueda_va_anclada_al_TELEFONO_del_contexto_y_al_reloj(monkeypatch)
     asyncio.run(h._consultar_citas(ctx))
 
     assert visto["telefono"] == "573001112233"
-    assert visto["desde"] == ctx.ahora
+
+
+def test_la_consulta_mira_DOS_DIAS_hacia_atras_antes_de_contrastar(monkeypatch):
+    """La consulta cortaba el pasado con `ctx.ahora`, y eso dejaba fuera justo la cita que hay
+    que corregir: la que el doctor arrastro de ayer a manana en Google Calendar. Segun Neon
+    esta en el pasado; segun Calendar, en el futuro. Ahora el SQL mira dos dias hacia atras y
+    el pasado se corta DESPUES de contrastar."""
+    ctx = contexto(identidad_verificada=True, ahora=INICIO)
+    visto: dict = {}
+
+    def falsa(conn, telefono, *, desde):
+        visto["desde"] = desde
+        return []
+
+    monkeypatch.setattr(persistencia, "citas_activas_de_telefono", falsa)
+
+    async def base_falsa(_ctx, trabajo):
+        return trabajo(BaseFalsa())
+
+    monkeypatch.setattr(h, "_con_base", base_falsa)
+
+    asyncio.run(h._consultar_citas(ctx))
+
+    assert visto["desde"] == ctx.ahora - timedelta(days=h.DIAS_HACIA_ATRAS_AL_SINCRONIZAR)
+
+
+def test_una_cita_que_SIGUE_en_el_pasado_no_se_ofrece(monkeypatch):
+    """Mirar dos dias hacia atras no puede convertirse en ofrecer citas de ayer: una cita
+    pasada no se puede mover, y ofrecerla solo sirve para que el modelo proponga un imposible.
+    """
+    ctx = contexto(identidad_verificada=True, ahora=INICIO)
+    ayer = INICIO - timedelta(days=1)
+    ctx.calendario.eventos["ev-1"] = (ayer, 60, "limpieza")
+
+    async def base_falsa(_ctx, trabajo):
+        return [_cita(inicio=ayer, evento_calendar_id="ev-1")]
+
+    monkeypatch.setattr(h, "_con_base", base_falsa)
+
+    salida = asyncio.run(h._consultar_citas(ctx))
+
+    assert "no tiene ninguna cita futura" in salida
+
+
+# ==========================================================================================
+# Calendar manda: la cita que el doctor movio a mano
+#
+# «Movi manualmente una cita que estaba en Calendar, la pase para el dia siguiente, pero el
+# agente responde con la informacion de antes» -- 14/09/2026.
+#
+# El calendario de los doctores no es un espejo de Neon: es donde trabajan. Arrastrar una
+# cita con el raton es el gesto natural, y nadie va a abrir el panel despues para repetirlo.
+# ==========================================================================================
+
+
+def _sincronizando(monkeypatch, ctx, citas, escrituras):
+    """Dobla `_con_base` para que la lectura devuelva `citas` y apunte lo que se escriba."""
+    llamadas = {"n": 0}
+
+    async def base_falsa(_ctx, trabajo):
+        llamadas["n"] += 1
+        if llamadas["n"] == 1:
+            return citas
+        return trabajo(BaseFalsa())
+
+    monkeypatch.setattr(h, "_con_base", base_falsa)
+    monkeypatch.setattr(
+        persistencia,
+        "mover_cita",
+        lambda conn, id_cita, *, reserva_id, inicio: escrituras.append(
+            ("mover", id_cita, reserva_id, inicio)
+        ),
+    )
+    monkeypatch.setattr(
+        persistencia,
+        "marcar_cita_cancelada",
+        lambda conn, id_cita, *, motivo=None: escrituras.append(("cancelar", id_cita, motivo)),
+    )
+    monkeypatch.setattr(
+        persistencia,
+        "liberar_cupo",
+        lambda conn, reserva_id: escrituras.append(("liberar", reserva_id)),
+    )
+    monkeypatch.setattr(
+        persistencia,
+        "tomar_cupo",
+        lambda conn, **kw: (99, 1),
+    )
+
+
+def test_si_la_movieron_en_calendar_Daniela_dice_la_hora_NUEVA(monkeypatch):
+    """EL FALLO. Neon decia una hora, Calendar otra, y Daniela recitaba la de Neon: el
+    paciente se presenta cuando ya no le toca."""
+    ctx = contexto(identidad_verificada=True, ahora=INICIO - timedelta(hours=1))
+    manana = INICIO + timedelta(days=1)
+    ctx.calendario.eventos["ev-1"] = (manana, 60, "limpieza")
+    escrituras: list = []
+    _sincronizando(
+        monkeypatch,
+        ctx,
+        [_cita(inicio=INICIO, evento_calendar_id="ev-1", reserva_id=7)],
+        escrituras,
+    )
+
+    texto = asyncio.run(h._consultar_citas(ctx))
+
+    assert f"{manana.day}/{manana.month}" in texto, texto
+    assert f"{INICIO.day}/{INICIO.month} a las" not in texto, "recito la hora vieja"
+
+
+def test_al_moverla_se_corrige_Neon_y_se_cambia_el_CUPO(monkeypatch):
+    """La hora que Daniela dice y la hora que la clinica tiene apartada son el mismo hecho.
+    Sin mover el cupo, la hora vieja sigue contando como llena y la nueva como libre -- o sea
+    que Daniela podria darle a otro paciente una hora que ya esta ocupada."""
+    ctx = contexto(identidad_verificada=True, ahora=INICIO - timedelta(hours=1))
+    manana = INICIO + timedelta(days=1)
+    ctx.calendario.eventos["ev-1"] = (manana, 60, "limpieza")
+    escrituras: list = []
+    _sincronizando(
+        monkeypatch,
+        ctx,
+        [_cita(inicio=INICIO, evento_calendar_id="ev-1", reserva_id=7)],
+        escrituras,
+    )
+
+    asyncio.run(h._consultar_citas(ctx))
+
+    assert ("mover", "cita-1", 99, manana) in escrituras
+    assert ("liberar", 7) in escrituras
+
+
+def test_si_el_horario_destino_esta_lleno_la_cita_se_mueve_IGUAL(monkeypatch):
+    """El doctor ya la metio ahi, en el calendario que el mira. Negarle esa realidad a Neon
+    solo consigue que Daniela vuelva a decir la hora vieja. Queda sin cupo y con un warning:
+    es lo que un humano puede ver y corregir."""
+    ctx = contexto(identidad_verificada=True, ahora=INICIO - timedelta(hours=1))
+    manana = INICIO + timedelta(days=1)
+    ctx.calendario.eventos["ev-1"] = (manana, 60, "limpieza")
+    escrituras: list = []
+    _sincronizando(
+        monkeypatch,
+        ctx,
+        [_cita(inicio=INICIO, evento_calendar_id="ev-1", reserva_id=7)],
+        escrituras,
+    )
+    monkeypatch.setattr(persistencia, "tomar_cupo", lambda conn, **kw: None)
+
+    texto = asyncio.run(h._consultar_citas(ctx))
+
+    assert ("mover", "cita-1", None, manana) in escrituras
+    assert f"{manana.day}/{manana.month}" in texto
+
+
+def test_si_la_borraron_del_calendario_la_cita_se_cancela(monkeypatch):
+    """Borrar el evento es como la clinica cancela. Sin esto, Daniela le confirma al paciente
+    una cita que ya no existe en ninguna agenda."""
+    ctx = contexto(identidad_verificada=True, ahora=INICIO - timedelta(hours=1))
+    escrituras: list = []
+    _sincronizando(
+        monkeypatch,
+        ctx,
+        [_cita(inicio=INICIO, evento_calendar_id="ev-borrado", reserva_id=7)],
+        escrituras,
+    )
+
+    texto = asyncio.run(h._consultar_citas(ctx))
+
+    assert ("liberar", 7) in escrituras
+    assert any(e[0] == "cancelar" for e in escrituras)
+    assert "no tiene ninguna cita futura" in texto
+
+
+def test_si_Calendar_NO_RESPONDE_se_contesta_con_lo_que_dice_Neon(monkeypatch):
+    """La regla del no negociable 1 mirada desde el otro lado: ante la duda, nunca inventar.
+    Un timeout tratado como «la borraron» cancelaria citas buenas en silencio."""
+    ctx = contexto(identidad_verificada=True, ahora=INICIO - timedelta(hours=1))
+    ctx.calendario.fallar_en.add("obtener_evento")
+    escrituras: list = []
+    _sincronizando(
+        monkeypatch,
+        ctx,
+        [_cita(inicio=INICIO, evento_calendar_id="ev-1", reserva_id=7)],
+        escrituras,
+    )
+
+    texto = asyncio.run(h._consultar_citas(ctx))
+
+    assert escrituras == [], "un fallo de Calendar no puede escribir nada"
+    assert "09:00" in texto
+
+
+def test_una_cita_SIN_evento_no_le_pregunta_nada_a_Google(monkeypatch):
+    """Las hay: se crean asi cuando Calendar falla en mitad de un relevo. No hay con que
+    contrastarlas, y una llamada por cada una seria latencia a cambio de nada."""
+    ctx = contexto(identidad_verificada=True, ahora=INICIO - timedelta(hours=1))
+    ctx.calendario.fallar_en.add("obtener_evento")  # si preguntara, reventaria
+    escrituras: list = []
+    _sincronizando(monkeypatch, ctx, [_cita(inicio=INICIO)], escrituras)
+
+    texto = asyncio.run(h._consultar_citas(ctx))
+
+    assert "09:00" in texto and escrituras == []
 
 
 def test_consultar_citas_exige_identidad_como_las_tres_de_escritura():

@@ -53,12 +53,19 @@ import asyncio
 import html
 import logging
 from datetime import datetime, timedelta
+from functools import partial
 from typing import Any, Callable
 
 from agents import RunContextWrapper, function_tool
 
 from . import contratos, persistencia
-from .calendario import ZONA_BOGOTA, Bloqueo, ErrorDeCalendario, bloques_del_dia
+from .calendario import (
+    ZONA_BOGOTA,
+    Bloqueo,
+    ErrorDeCalendario,
+    EventoDelCalendario,
+    bloques_del_dia,
+)
 from .canales import Telegram
 from .guardrails import cifras_de, horas_de, identidad_antes_de_datos
 from .contratos import (
@@ -1395,13 +1402,146 @@ async def escalar_a_doctores(
 # otra persona ni aunque el modelo lo intente: no hay ningún argumento que torcer.
 
 
+#: Cuánto hacia atrás se miran las citas antes de contrastarlas con Calendar. No es un
+#: capricho: si el doctor arrastra la cita de ayer a mañana, la fila de Neon sigue diciendo
+#: «ayer» y el filtro `inicio >= ahora` la dejaría fuera -- justo la cita que hay que
+#: corregir. Dos días cubren un fin de semana y no traen medio historial.
+DIAS_HACIA_ATRAS_AL_SINCRONIZAR = 2
+
+
+async def _sincronizar_con_calendar(
+    ctx: ContextoDaniela, citas: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Devuelve esas citas como están HOY en Google Calendar, corrigiendo Neon si hace falta.
+
+    ------------------------------------------------------------------------------------
+    Por qué existe (14/09/2026)
+    ------------------------------------------------------------------------------------
+
+    El calendario de los doctores no es un espejo de Neon: es donde trabajan. Arrastrar una
+    cita con el ratón al día siguiente es el gesto natural, y nadie va a abrir el panel
+    después para repetirlo. Hasta hoy eso dejaba la fila de `citas` mintiendo, y Daniela le
+    repetía al paciente la hora vieja -- con el paciente presentándose cuando ya no le toca.
+
+    Entre los dos, **manda Calendar**. Es donde está el doctor que va a atender.
+
+    ------------------------------------------------------------------------------------
+    Las tres respuestas, y lo que hace cada una
+    ------------------------------------------------------------------------------------
+
+        sigue igual        no se toca nada
+        está en otra hora  se mueve la fila, se suelta el cupo viejo y se toma el nuevo
+        ya no está         se cancela la cita y se suelta el cupo
+
+    **Un fallo no es ninguna de las tres.** `ErrorDeCalendario` --Google caído, un timeout,
+    un evento sin bordes legibles-- deja la cita tal como está en Neon y sigue con la
+    siguiente. Es la misma regla del no negociable 1 mirada desde el otro lado: ante la duda,
+    nunca inventar. Tratar un timeout como «la borraron» cancelaría citas buenas en silencio.
+
+    Y el cupo nuevo puede estar lleno. Se mueve la cita igual: el doctor ya decidió meterla
+    ahí, en el calendario que él mira, y negarle la realidad a Neon solo consigue que Daniela
+    vuelva a mentir. Queda sin reserva --la columna lo admite-- y con un `log.warning`, que es
+    lo que un humano puede ver y corregir.
+    """
+    if not citas:
+        return citas
+
+    al_dia: list[dict[str, Any]] = []
+    for cita in citas:
+        evento_id = cita.get("evento_calendar_id")
+        if not evento_id or ctx.calendario is None:
+            # Una cita sin evento no tiene con qué contrastarse. Las hay: se crean así
+            # cuando Calendar falla en mitad de un relevo.
+            al_dia.append(cita)
+            continue
+
+        try:
+            evento = await asyncio.to_thread(ctx.calendario.obtener_evento, evento_id)
+        except ErrorDeCalendario as e:
+            log.warning("no se pudo contrastar la cita %s con Calendar: %s", cita["id"], e)
+            al_dia.append(cita)
+            continue
+        except Exception:  # noqa: BLE001 -- nada de esto puede tumbar una consulta de lectura
+            log.exception("fallo inesperado contrastando la cita %s", cita["id"])
+            al_dia.append(cita)
+            continue
+
+        if evento is None:
+            log.info("la cita %s ya no está en Calendar: se cancela", cita["id"])
+            await _con_base(ctx, partial(_cancelar_porque_ya_no_esta, cita))
+            continue
+
+        if evento.inicio == cita["inicio"]:
+            al_dia.append(cita)
+            continue
+
+        log.info(
+            "la cita %s se movió a mano en Calendar: %s -> %s",
+            cita["id"],
+            cita["inicio"],
+            evento.inicio,
+        )
+        al_dia.append(await _con_base(ctx, partial(_mover_porque_la_movieron, ctx, cita, evento)))
+
+    return al_dia
+
+
+def _cancelar_porque_ya_no_esta(cita: dict[str, Any], conn) -> None:
+    persistencia.marcar_cita_cancelada(
+        conn, cita["id"], motivo="borrada del calendario por la clínica"
+    )
+    if cita["reserva_id"]:
+        persistencia.liberar_cupo(conn, cita["reserva_id"])
+
+
+def _mover_porque_la_movieron(
+    ctx: ContextoDaniela, cita: dict[str, Any], evento: EventoDelCalendario, conn
+) -> dict[str, Any]:
+    """Pone la fila donde dice Calendar. Devuelve la cita ya corregida."""
+    cupo = persistencia.tomar_cupo(
+        conn,
+        inicio=evento.inicio,
+        capacidad=ctx.capacidad_por_hora,
+        # La arma el código, como las otras cuatro (no negociable 2). Lleva la hora destino
+        # dentro, así que sincronizar dos veces la misma cita no toma dos cupos.
+        clave_idempotencia=f"calendar:{cita['id']}:{evento.inicio.isoformat()}",
+        conversacion_id=cita["conversacion_id"],
+    )
+    if cupo is None:
+        log.warning(
+            "la cita %s se movió a %s, que ya está llena: queda registrada SIN cupo",
+            cita["id"],
+            evento.inicio,
+        )
+    persistencia.mover_cita(
+        conn,
+        cita["id"],
+        reserva_id=cupo[0] if cupo else None,
+        inicio=evento.inicio,
+    )
+    if cita["reserva_id"]:
+        persistencia.liberar_cupo(conn, cita["reserva_id"])
+
+    corregida = dict(cita)
+    corregida["inicio"] = evento.inicio
+    corregida["duracion_minutos"] = evento.duracion_minutos
+    corregida["reserva_id"] = cupo[0] if cupo else None
+    return corregida
+
+
 async def _consultar_citas(ctx: ContextoDaniela) -> str:
     def buscar(conn) -> list[dict[str, Any]]:
         return persistencia.citas_activas_de_telefono(
-            conn, ctx.telefono_completo, desde=ctx.ahora
+            conn,
+            ctx.telefono_completo,
+            desde=ctx.ahora - timedelta(days=DIAS_HACIA_ATRAS_AL_SINCRONIZAR),
         )
 
-    citas = await _con_base(ctx, buscar)
+    # Contrastar ANTES de filtrar el pasado, no después: la cita que el doctor arrastró de
+    # ayer a mañana está en el pasado según Neon y en el futuro según Calendar, y es
+    # exactamente la que el paciente va a preguntar.
+    citas = await _sincronizar_con_calendar(ctx, await _con_base(ctx, buscar))
+    citas = [c for c in citas if c["inicio"] >= ctx.ahora]
 
     if not citas:
         # RESULTADO, no error, y sin una sola hora dentro: lo que el modelo lea aquí es lo

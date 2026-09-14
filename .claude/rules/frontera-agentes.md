@@ -212,8 +212,14 @@ Tres decisiones que hay que respetar si alguien la toca:
   que solo pregunta cuándo es su cita recibe «te escribe el doctor».
 
 Filtra por teléfono y no por `paciente_id` —el criterio más estrecho de los dos— y corta el
-pasado con `ctx.ahora`: una cita de ayer no se puede mover, y ofrecerla solo sirve para que
-el modelo proponga algo imposible.
+pasado: una cita de ayer no se puede mover, y ofrecerla solo sirve para que el modelo proponga
+algo imposible.
+
+**El corte del pasado ya no lo hace el SQL, y eso es deliberado.** Desde el 14/09/2026 la
+consulta pide dos días hacia atrás y contrasta cada cita con Google Calendar antes de filtrar
+(`_sincronizar_con_calendar`, en `.claude/rules/calendario.md`). La cita que el doctor arrastró
+de ayer a mañana está en el pasado según Neon y en el futuro según Calendar: con el corte
+delante, la única cita que hay que corregir es justo la que no se miraba.
 
 # El límite clínico: qué va en el prompt y qué va en la base
 

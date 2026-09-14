@@ -103,6 +103,22 @@ class Bloqueo:
 
 
 @dataclass(frozen=True)
+class EventoDelCalendario:
+    """Dónde está HOY un evento que creó Daniela. Lo contrario de un `Bloqueo`.
+
+    `Bloqueo` describe lo que los doctores apartaron y Neon no conoce. Esto describe una cita
+    que Neon SÍ conoce, leída de vuelta desde Calendar para ver si sigue donde la dejamos.
+
+    Existe porque el calendario de los doctores no es un espejo: es donde trabajan. Mover una
+    cita arrastrándola con el ratón es el gesto natural, y hasta el 14/09/2026 eso dejaba la
+    fila de `citas` mintiendo -- Daniela le decía al paciente la hora vieja.
+    """
+
+    inicio: datetime
+    duracion_minutos: int
+
+
+@dataclass(frozen=True)
 class Jornada:
     """El horario en que la clínica atiende. Lo que impide ofrecer la madrugada.
 
@@ -183,6 +199,15 @@ class Calendario(Protocol):
 
     def eliminar_evento(self, evento_id: str) -> None: ...
 
+    def obtener_evento(self, evento_id: str) -> EventoDelCalendario | None:
+        """Dónde está HOY ese evento, o `None` si ya no existe.
+
+        `None` significa «lo borraron», y solo eso. Si no se pudo averiguar --Google caído,
+        un borde ilegible-- lanza `ErrorDeCalendario`: confundir las dos cosas haría que un
+        timeout cancelara la cita de alguien.
+        """
+        ...
+
     def bloqueos(self, desde: datetime, hasta: datetime) -> list[Bloqueo]:
         """Los rangos que los doctores bloquearon dentro de la ventana pedida."""
         ...
@@ -253,6 +278,14 @@ class CalendarioDoble:
         # reintento normal escalaría a los doctores sin que nada estuviera mal.
         self.eventos.pop(evento_id, None)
 
+    def obtener_evento(self, evento_id: str) -> EventoDelCalendario | None:
+        self._comprobar("obtener_evento")
+        guardado = self.eventos.get(evento_id)
+        if guardado is None:
+            return None
+        inicio, duracion, _ = guardado
+        return EventoDelCalendario(inicio=inicio, duracion_minutos=duracion)
+
     def bloqueos(self, desde: datetime, hasta: datetime) -> list[Bloqueo]:
         self._comprobar("bloqueos")
         return [b for b in self._bloqueos if b.solapa(desde, hasta)]
@@ -319,6 +352,12 @@ class CalendarioCaido:
         # y decir que se borró dejaría una cita viva en el calendario del doctor mientras
         # Neon la da por cancelada.
         raise self._caido("eliminar_evento")
+
+    def obtener_evento(self, evento_id: str) -> EventoDelCalendario | None:
+        # Lanza, y aquí importa más que en ningún otro: `None` significa «lo borraron», y
+        # quien pregunta cancela la cita al oírlo. Un calendario caído diciendo `None`
+        # cancelaría todas las citas de la clínica en cuanto alguien preguntara por la suya.
+        raise self._caido("obtener_evento")
 
     def bloqueos(self, desde: datetime, hasta: datetime) -> list[Bloqueo]:
         # Devolver `[]` sería peor que lanzar: significaría «los doctores no apartaron nada»
@@ -639,6 +678,46 @@ class CalendarioGoogle:
                 # Éxito, no error: lo que se quería es que no exista, y no existe.
                 return
             raise self._traducir(e, "eliminar el evento") from e
+
+    def obtener_evento(self, evento_id: str) -> EventoDelCalendario | None:
+        """Dónde está hoy ese evento. `None` SOLO si ya no existe.
+
+        La distinción entre «no existe» y «no se pudo leer» es todo lo que hay aquí, porque
+        quien pregunta cancela la cita al oír `None`. Un 404 o un 410 son el calendario
+        diciendo que el evento se borró; cualquier otro fallo --un 500, un timeout, una
+        credencial caducada-- lanza, y quien pregunta se queda con lo que dice Neon.
+
+        Un evento `cancelled` cuenta como borrado: Google conserva la fila un tiempo después
+        de que alguien la borre, y tratarla como viva devolvería una hora que ya no existe.
+
+        Un evento sin bordes legibles --de día completo, o con un `dateTime` que no parsea--
+        también lanza en vez de devolver `None`. No sabemos dónde está, y eso no es lo mismo
+        que saber que no está.
+        """
+        try:
+            evento = (
+                self._servicio.events()
+                .get(calendarId=self._calendario_id, eventId=evento_id)
+                .execute()
+            )
+        except Exception as e:
+            if getattr(e, "status_code", None) in YA_NO_EXISTE:
+                return None
+            raise self._traducir(e, "leer el evento") from e
+
+        if evento.get("status") == "cancelled":
+            return None
+
+        inicio = _a_instante(evento.get("start") or {})
+        fin = _a_instante(evento.get("end") or {})
+        if inicio is None or fin is None or fin <= inicio:
+            raise ErrorDeCalendario(
+                f"El evento {evento_id} no tiene un rango legible; no se puede saber "
+                "cuándo es."
+            )
+        return EventoDelCalendario(
+            inicio=inicio, duracion_minutos=int((fin - inicio).total_seconds() // 60)
+        )
 
     def bloqueos(self, desde: datetime, hasta: datetime) -> list[Bloqueo]:
         """Lo que los doctores apartaron a mano dentro de la ventana. Nada más.

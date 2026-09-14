@@ -218,6 +218,29 @@ def main() -> int:
                 str(nuevo_fin - nuevo_inicio))
 
         # -----------------------------------------------------------------------------
+        print("\n5b. `obtener_evento` dice donde esta AHORA, que es como se detecta")
+        # -----------------------------------------------------------------------------
+        # Esto sostiene el arreglo del 14/09/2026: el doctor mueve la cita arrastrandola en
+        # Calendar --el gesto natural-- y Neon se queda mintiendo, con Daniela recitandole
+        # al paciente la hora vieja. `_sincronizar_con_calendar` pregunta esto para
+        # enterarse, asi que si la sonda no distingue, no se entera nadie.
+        #
+        # Y va contra Google de verdad porque la mitad que importa NO se puede doblar: que
+        # un evento borrado devuelva `None` depende de que `HttpError` traiga `status_code`,
+        # que es una propiedad de la libreria de Google. Es la misma leccion que costo un
+        # dia entero con la sonda de Telegram: razonar sobre una API no es medirla.
+        leido = calendario.obtener_evento(evento_id)
+        revisar("un evento vivo devuelve su hora real", leido is not None
+                and leido.inicio == destino,
+                f"{leido.inicio:%Y-%m-%d %H:%M}" if leido else "None")
+        revisar("y su duracion", leido is not None and leido.duracion_minutos == 60,
+                str(leido.duracion_minutos) if leido else "")
+
+        fantasma = calendario.obtener_evento("esteidnoexisteenningunlado0")
+        revisar("un evento que NO existe devuelve None (no lanza)", fantasma is None,
+                repr(fantasma))
+
+        # -----------------------------------------------------------------------------
         print("\n6. Un bloqueo de verdad SÍ tapa (el otro control)")
         # -----------------------------------------------------------------------------
         # Un evento sin la marca: lo que escribiría un doctor a mano. Si esto no apareciera
@@ -281,6 +304,15 @@ def main() -> int:
             revisar("la segunda eliminación no lanza", True)
         except ErrorDeCalendario as e:
             revisar("la segunda eliminación no lanza", False, str(e))
+
+        # Y la otra mitad de 5b, que solo se puede comprobar aqui: un evento que existia y
+        # ACABA de borrarse. Es como la clinica cancela una cita, y si esto no dijera `None`,
+        # Daniela le seguiria confirmando al paciente una cita que ya no esta en ninguna
+        # agenda. Google conserva la fila un rato con `status: cancelled`, asi que las dos
+        # ramas --404 y `cancelled`-- llevan al mismo sitio.
+        borrado = calendario.obtener_evento(evento_id)
+        revisar("un evento recien borrado devuelve None", borrado is None, repr(borrado))
+
         evento_id = ""  # ya está borrado: el `finally` no tiene nada que limpiar
 
     finally:

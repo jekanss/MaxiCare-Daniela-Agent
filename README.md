@@ -418,3 +418,37 @@ salió de esa tarde, no del diseño:
   aunque tenga el grupo silenciado— y el enlace del canal general apunta al mensaje concreto
   dentro del hilo, no al hilo a secas: `t.me/c/<chat>/<n>` es ambiguo en un foro, ese `<n>`
   es un id de mensaje.
+
+### Y el calendario de los doctores no es un espejo, 14/09/2026
+
+La clínica movió una cita arrastrándola en Google Calendar al día siguiente —el gesto
+natural, y nadie va a abrir el panel después para repetirlo— y Daniela siguió recitándole al
+paciente la hora vieja. Medido contra producción esa misma tarde:
+
+```
+Neon   dice  16/09 16:00      ← lo que Daniela repetía
+Google dice  17/09 16:00      ← donde la dejó el doctor
+```
+
+Entre los dos manda Calendar, porque es donde está el doctor que va a atender. Cada
+`consultar_citas` contrasta ahora las citas del paciente contra Google y corrige Neon: si se
+movió, mueve la fila; si el evento ya no está, cancela la cita. **Y en los dos casos mueve el
+cupo**, que es la mitad invisible: sin eso, la hora vieja sigue contando como llena y la
+nueva como libre, y Daniela podría darle a otro paciente una hora ya ocupada.
+
+Tres decisiones que valen más que el mecanismo:
+
+- **Un fallo no es «la borraron».** Si Google no responde, la cita se queda como está en
+  Neon. Tratar un timeout como una cancelación cancelaría citas buenas en silencio — es el
+  mismo criterio que hace que un calendario caído se comporte como caído en vez de decir que
+  sí a todo.
+- **Se contrasta antes de descartar el pasado.** La cita que el doctor arrastró de ayer a
+  mañana está en el pasado según Neon y en el futuro según Calendar: con el filtro delante,
+  la única cita que había que corregir era justo la que no se miraba.
+- **Si la hora destino ya está llena, la cita se mueve igual**, sin reserva y con un aviso en
+  el log. El doctor ya decidió meterla ahí; negarle esa realidad a la base solo consigue que
+  Daniela vuelva a mentir.
+
+Lo que lo sostiene es el paso 5b de `scripts/probar_calendario.py`, contra Google de verdad,
+porque la mitad que importa no se puede simular: que un evento borrado se distinga de uno
+que no se pudo leer. Es la misma lección que la sonda de Telegram, aprendida el mismo día.

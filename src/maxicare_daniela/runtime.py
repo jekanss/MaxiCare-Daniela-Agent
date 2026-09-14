@@ -226,6 +226,17 @@ def _cargar_configuracion_operativa() -> None:
 #: contra Google, nunca agendar contra un doble.
 _calendario: Any | None = None
 
+#: Y el del chat de pruebas del panel, que es otro y es de mentira a propósito: probar
+#: «agéndame el martes» no puede crear un evento en el calendario donde los doctores miran su
+#: día. Es el mismo error de categoría que `public` vs `pruebas_web`.
+#:
+#: **Uno para todo el proceso**, igual que el de arriba. Se construía uno nuevo en cada
+#: conversación y eso dejó de ser inofensivo el 14/09/2026, cuando `consultar_citas` empezó a
+#: contrastar contra el calendario: un doble recién nacido no tiene ningún evento, así que
+#: toda cita del chat web se leería como «borrada de Calendar» y se cancelaría sola. Lo cazó
+#: `scripts/probar_tools.py`, que reproducía el mismo patrón.
+_CALENDARIO_WEB = CalendarioDoble()
+
 
 @app.on_event("startup")
 def _construir_el_calendario() -> None:
@@ -1378,7 +1389,11 @@ def _contexto_de_prueba(quien: dict, id_conversacion: str | None) -> tuple[Conte
         database_url=url,
         # Un calendario de mentira, y por la misma razón que el esquema aparte: probar
         # «agéndame el martes» no puede crear un evento en el Google Calendar de la clínica.
-        calendario=CalendarioDoble(),
+        # UNO SOLO para todo el proceso, no uno por conversación: una clínica tiene un
+        # calendario, y desde que `consultar_citas` contrasta contra él (no negociable 20) un
+        # doble nuevo por conversación significa «ninguna de tus citas existe ya», o sea que
+        # el chat del panel cancelaría cada cita en cuanto alguien preguntara por ella.
+        calendario=_CALENDARIO_WEB,
         # Sin identificar, igual que un paciente nuevo en WhatsApp. Es lo que permite probar
         # el flujo de identificación, que es donde más se equivoca un prompt.
         identidad_verificada=False,

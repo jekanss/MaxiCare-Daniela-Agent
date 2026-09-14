@@ -244,6 +244,21 @@ def test_sin_secreto_el_panel_da_503_pero_el_webhook_sigue_funcionando(monkeypat
 # ==========================================================================================
 
 
+def test_el_chat_web_comparte_UN_calendario_para_todo_el_proceso():
+    """Una clinica tiene un calendario, no uno por conversacion.
+
+    Construir un `CalendarioDoble` nuevo en cada `_contexto_de_prueba` era inofensivo hasta
+    que `consultar_citas` empezo a contrastar las citas contra el calendario (no negociable
+    20): un doble recien nacido no tiene NINGUN evento, asi que toda cita creada en el chat
+    del panel se leeria como «borrada de Calendar» y se cancelaria sola en cuanto alguien
+    preguntara por ella. Lo cazo `scripts/probar_tools.py`, que reproducia el mismo patron.
+    """
+    assert isinstance(runtime._CALENDARIO_WEB, runtime.CalendarioDoble)
+    # De mentira, que es la otra mitad: probar «agendame el martes» no puede crear un evento
+    # en el calendario donde los doctores miran su dia.
+    assert runtime._CALENDARIO_WEB is not runtime._calendario
+
+
 def test_el_chat_usa_el_agente_de_produccion_y_el_carril_de_pruebas(cliente, monkeypatch):
     """Las dos mitades del entregable de la fase 5, en una sola prueba.
 

@@ -81,6 +81,36 @@ El `CLAUDE.md` raíz lleva la regla en una línea. Aquí está el porqué.
 - **No hay caché de bloqueos, y es deliberado.** Cada consulta le pregunta a Google, que es
   lo que hace que borrar el evento libere la hora sin sincronizar nada. Los pasos 6b y 6c de
   `probar_calendario.py` existen para cazar a quien meta uno «para bajar la latencia».
+- **Para una cita que YA existe, manda Calendar.** Es donde está el doctor que va a atender,
+  y mover la cita arrastrándola con el ratón es el gesto natural — nadie va a abrir el panel
+  después para repetirlo. El cliente lo hizo el 14/09/2026, movió su cita al día siguiente, y
+  Daniela le siguió recitando la hora vieja: la de Neon. Medido entonces contra producción:
+
+  ```
+  Neon   dice  16/09 16:00      ← lo que Daniela repetía
+  Google dice  17/09 16:00      ← donde la dejó el doctor
+  ```
+
+  `herramientas._sincronizar_con_calendar` lo contrasta en cada `consultar_citas` y corrige
+  Neon: si se movió, mueve la fila, suelta el cupo viejo y toma el nuevo; si ya no está, la
+  cancela y suelta el cupo. **El cupo no es un adorno** — sin moverlo, la hora vieja sigue
+  contando como llena y la nueva como libre, y Daniela puede darle a otro paciente una hora
+  ya ocupada. Tres cosas que hay que respetar si alguien lo toca:
+
+  - **Un fallo NO es «la borraron».** `ErrorDeCalendario` deja la cita como está en Neon y
+    sigue. Tratar un timeout como una cancelación cancelaría citas buenas en silencio, y es
+    la razón de que `CalendarioCaido.obtener_evento` lance en vez de devolver `None`.
+  - **Se contrasta ANTES de cortar el pasado.** La cita que el doctor arrastró de ayer a
+    mañana está en el pasado según Neon; con el corte delante nunca se corregiría. Por eso la
+    consulta mira `DIAS_HACIA_ATRAS_AL_SINCRONIZAR` hacia atrás y filtra después, en Python.
+  - **Si la hora destino está llena, la cita se mueve igual**, sin reserva y con un
+    `log.warning`. El doctor ya decidió meterla ahí; negarle esa realidad a Neon solo
+    consigue que Daniela vuelva a mentir.
+
+  El paso 5b de `probar_calendario.py` lo sostiene contra Google de verdad, y la mitad que
+  importa no se puede doblar: que un evento borrado devuelva `None` depende de que
+  `HttpError` traiga `status_code`. Medido — vivo devuelve su hora, id inventado `None`, y
+  recién borrado `None`.
 - **La credencial es `MAXICARE_GOOGLE_SA_B64`, no una ruta a un archivo.** `config.py`
   decía `MAXICARE_GOOGLE_CREDENTIALS_PATH`, que no existía en ningún `.env`; nadie lo notó
   porque ningún módulo leía ese campo. El nombre correcto es el que documenta `.env.ejemplo`.

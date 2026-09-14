@@ -92,7 +92,17 @@ def hora(desplazamiento: int = 0) -> datetime:
         actual += timedelta(hours=1)
 
 
-def contexto(url: str, telefono: str, nombre: str) -> ContextoDaniela:
+def contexto(
+    url: str, telefono: str, nombre: str, calendario: CalendarioDoble | None = None
+) -> ContextoDaniela:
+    """Un contexto de paciente. `calendario` se comparte SOLO cuando hace falta.
+
+    Por defecto cada contexto trae el suyo, porque varios pasos rompen el calendario a
+    proposito (`fallar_en`) y un doble compartido propagaria ese fallo a los demas. El paso
+    10 si lo comparte, y ahi esta el motivo: simula al paciente que vuelve dos dias despues,
+    o sea DOS conversaciones sobre EL MISMO calendario de la clinica. Con uno nuevo, la cita
+    creada en la primera no existe en la segunda y `consultar_citas` la da por borrada.
+    """
     with persistencia.conectar(url) as conn:
         id_paciente = persistencia.asegurar_paciente(
             conn, nombre_completo=nombre, telefono=telefono
@@ -104,7 +114,7 @@ def contexto(url: str, telefono: str, nombre: str) -> ContextoDaniela:
         id_conversacion=id_conv,
         telefono_completo=telefono,
         database_url=url,
-        calendario=CalendarioDoble(),
+        calendario=calendario or CalendarioDoble(),
         id_paciente=id_paciente,
         nombre_paciente=nombre,
         identidad_verificada=True,
@@ -384,7 +394,10 @@ def corridas(url: str) -> int:
 
     # -- 10. encontrar la cita cuando la conversacion ya murio ---------------------------
     print("\n10. consultar_citas (la decima, la que no esta en el plan)")
-    ctx4 = contexto(url, "573009994004", "Marta Regresa")
+    # El calendario de la clinica es UNO, y las dos conversaciones de abajo son la misma
+    # clinica: ver el docstring de `contexto`.
+    agenda_de_la_clinica = CalendarioDoble()
+    ctx4 = contexto(url, "573009994004", "Marta Regresa", agenda_de_la_clinica)
     inicio4 = hora(40)
     asyncio.run(
         h._crear_cita(
@@ -400,7 +413,7 @@ def corridas(url: str) -> int:
 
     # Dos dias despues. Otra conversacion, sin historial y sin el id a la vista: es
     # exactamente lo que le pasa a un paciente real, porque `conversacion_viva` dura 24 h.
-    regreso = contexto(url, "573009994004", "Marta Regresa")
+    regreso = contexto(url, "573009994004", "Marta Regresa", agenda_de_la_clinica)
     encontrada = asyncio.run(h._consultar_citas(regreso))
     print(f"   conversacion nueva    -> {marca('blanqueamiento' in encontrada)} "
           f"la encuentra sin que el paciente dicte el id")
@@ -408,10 +421,35 @@ def corridas(url: str) -> int:
     print(f"   la hora que nombra    -> {marca(autorizada)} queda autorizada, asi que "
           f"puede decirsela al paciente")
 
-    ajeno = contexto(url, "573009995005", "Otro Numero")
+    ajeno = contexto(url, "573009995005", "Otro Numero", agenda_de_la_clinica)
     vacio = asyncio.run(h._consultar_citas(ajeno))
     ok_ajeno = "no tiene" in vacio and "blanqueamiento" not in vacio
     print(f"   otro numero           -> {marca(ok_ajeno)} no ve la cita de nadie mas")
+
+    # 10b. Lo que pidio el cliente el 14/09/2026: movio su cita a mano en Google Calendar y
+    # Daniela le siguio diciendo la hora vieja, la de Neon. Aqui se mueve el evento POR
+    # DETRAS --sin pasar por ninguna tool, que es justo lo que hace un doctor arrastrandolo
+    # con el raton-- y se comprueba que la siguiente consulta dice la hora nueva.
+    print("\n10b. una cita movida A MANO en el calendario")
+    (evento_id,) = [
+        e for e, (i, _, _) in agenda_de_la_clinica.eventos.items() if i == inicio4
+    ] or [None]
+    movida = inicio4 + timedelta(days=1)
+    agenda_de_la_clinica.eventos[evento_id] = (movida, 60, "blanqueamiento")
+
+    despues = contexto(url, "573009994004", "Marta Regresa", agenda_de_la_clinica)
+    texto_movida = asyncio.run(h._consultar_citas(despues))
+    dice_nueva = f"{movida.day}/{movida.month}" in texto_movida
+    print(f"   Daniela dice la nueva -> {marca(dice_nueva)} {texto_movida.splitlines()[-1][:70]}")
+
+    with persistencia.conectar(url) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT inicio FROM citas WHERE telefono = %s ORDER BY actualizada_en DESC",
+                ("573009994004",),
+            )
+            en_base = cur.fetchone()[0]
+    print(f"   y Neon queda corregido -> {marca(en_base == movida)} {en_base}")
 
     print()
     if fallos:
