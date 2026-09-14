@@ -251,6 +251,33 @@ _MESES = (
 )
 
 
+#: Cuánto sigue valiendo como ANTECEDENTE un recordatorio que ya salió.
+#:
+#: `conversaciones.ultimo_recordatorio_tipo` solo se escribe: nada la borra nunca. Sin este
+#: tope, desde el primer recordatorio que le salga a un paciente TODOS sus turnos --semanas
+#: después-- llevarían la instrucción de que un «sí» suyo se refiere a la cita de la que
+#: hablaba aquel mensaje. Un mes más tarde eso es un antecedente falso metido en el prompt
+#: como si fuera cierto, que es peor que no decir nada.
+#:
+#: 48 horas porque un recordatorio de víspera precede a su cita como mucho en un día (sale a
+#: las 18:00 del día anterior, o dos horas antes si la cita es de hoy): pasadas 48 horas la
+#: cita ya ocurrió, y un «sí» del paciente no puede estar contestándole.
+HORAS_QUE_UN_RECORDATORIO_SIGUE_SIENDO_ANTECEDENTE = 48
+
+
+def _recordatorio_caducado(cuando, ahora) -> bool:
+    """`True` solo si la distancia se puede MEDIR y supera el tope.
+
+    Lo que no se puede fechar no se declara caducado: sin fecha o sin `ahora` el bloque se
+    emite igual, sin fecha dentro, que es lo que hacía antes de existir este tope. Declararlo
+    caducado sería tirar un antecedente cierto por no poder situarlo.
+    """
+    if cuando is None or ahora is None or not cuando.tzinfo or not ahora.tzinfo:
+        return False
+    transcurrido = (ahora - cuando).total_seconds()
+    return transcurrido > HORAS_QUE_UN_RECORDATORIO_SIGUE_SIENDO_ANTECEDENTE * 3600
+
+
 def fecha_en_palabras(momento) -> str:
     """«domingo 13 de septiembre de 2026, hacia las 08:00».
 
@@ -348,13 +375,15 @@ def instrucciones_daniela(ctx, agente) -> str:
     # «sí, confirmo» del paciente le estaría diciendo que sí a algo que Daniela no sabe que
     # se dijo. Con la línea, el «sí» tiene antecedente.
     recordatorio = getattr(contexto, "ultimo_recordatorio_tipo", None)
-    if recordatorio:
+    cuando = getattr(contexto, "ultimo_recordatorio_en", None)
+    # El tope de las 48 horas no es cosmética: nada borra nunca esas dos columnas, así que sin
+    # él el bloque no caducaría jamás. Ver `HORAS_QUE_UN_RECORDATORIO_SIGUE_SIENDO_ANTECEDENTE`.
+    if recordatorio and not _recordatorio_caducado(cuando, ahora):
         # La columna es `TIMESTAMPTZ` y vuelve de Postgres en UTC: sin pasarla a la zona de
         # `ahora` --que siempre es la de Bogotá-- el prompt diría cinco horas de más, y «le
         # salió hacia las 23:00» sobre un recordatorio de las 18:00 es peor que no decir nada.
         # Se hace aquí y no con un import de `ZONA_BOGOTA` porque la zona correcta ya viaja
         # en el contexto, y dos fuentes para el mismo desfase horario acaban divergiendo.
-        cuando = getattr(contexto, "ultimo_recordatorio_en", None)
         if cuando is not None and cuando.tzinfo and ahora is not None and ahora.tzinfo:
             cuando = cuando.astimezone(ahora.tzinfo)
         texto = (

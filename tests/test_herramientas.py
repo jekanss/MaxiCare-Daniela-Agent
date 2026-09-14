@@ -2002,6 +2002,256 @@ def test_reprogramar_anula_el_recordatorio_viejo_y_deja_uno_nuevo(monkeypatch):
     assert destino.isoformat() in programados[0]["clave_idempotencia"]
 
 
+class ColaFalsa:
+    """La cola de `seguimientos` con la semántica que de verdad tiene Postgres.
+
+    Los dobles de una línea no sirven para lo que hay que probar aquí: el fallo vive en la
+    interacción entre `ON CONFLICT (clave_idempotencia) DO NOTHING` --que hace que una clave
+    repetida NO escriba y devuelva `False`-- y el `UPDATE ... WHERE anulado_en IS NULL` de la
+    cascada. Un doble que siempre devuelva `True` esconde justo eso.
+    """
+
+    def __init__(self) -> None:
+        self.filas: list[dict] = []
+
+    def insertar(self, _conn, **kw) -> bool:
+        if any(f["clave"] == kw["clave_idempotencia"] for f in self.filas):
+            return False  # ON CONFLICT (clave_idempotencia) DO NOTHING
+        self.filas.append(
+            {
+                "clave": kw["clave_idempotencia"],
+                "cita_id": kw["cita_id"],
+                "fecha_objetivo": kw["fecha_objetivo"],
+                "anulado": None,
+            }
+        )
+        return True
+
+    def anular(self, _conn, cita_id, *, motivo, excepto_clave=None, commit=True) -> int:
+        anulados = 0
+        for fila in self.filas:
+            if fila["cita_id"] != cita_id or fila["anulado"] is not None:
+                continue
+            if excepto_clave is not None and fila["clave"] == excepto_clave:
+                continue
+            fila["anulado"] = motivo
+            anulados += 1
+        return anulados
+
+    def vivos(self, cita_id: str) -> list[dict]:
+        return [f for f in self.filas if f["cita_id"] == cita_id and f["anulado"] is None]
+
+    def instalar(self, monkeypatch) -> ColaFalsa:
+        monkeypatch.setattr(persistencia, "insertar_seguimiento", self.insertar)
+        monkeypatch.setattr(persistencia, "anular_seguimientos_de_cita", self.anular)
+        return self
+
+
+def _reprogramando(monkeypatch, cita: dict):
+    """Dobla `_con_base` para una cadena de reprogramaciones sobre la MISMA cita.
+
+    `_con_base` se llama dos veces por reprogramación --`trabajo` y luego `aplicar`--, así que
+    el doble alterna. `mover_cita` actualiza la cita compartida, que es lo que hace realista un
+    A -> B -> A: el segundo movimiento lee la cita donde la dejó el primero.
+    """
+    pasos = {"n": 0}
+
+    async def base_falsa(_ctx, trabajo):
+        pasos["n"] += 1
+        if pasos["n"] % 2 == 1:
+            return ("ok", dict(cita), (cita["reserva_id"] + 1, 1), [])
+        return trabajo(BaseFalsa())
+
+    def mover(_conn, _id_cita, *, reserva_id, inicio, commit=True):
+        cita["reserva_id"] = reserva_id
+        cita["inicio"] = inicio
+        cita["estado"] = "reprogramada"
+
+    monkeypatch.setattr(h, "_con_base", base_falsa)
+    monkeypatch.setattr(persistencia, "mover_cita", mover)
+    monkeypatch.setattr(persistencia, "liberar_cupo", lambda conn, reserva_id: None)
+
+
+def _cita_viva() -> dict:
+    return {
+        "id": "cita-1",
+        "reserva_id": 5,
+        "paciente_id": None,
+        "telefono": "573001112233",
+        "estado": "confirmada",
+        "evento_calendar_id": None,
+        "inicio": datetime(2026, 9, 16, 9, 0, tzinfo=h.ZONA_BOGOTA),
+    }
+
+
+def test_reintentar_la_misma_reprogramacion_no_deja_la_cita_sin_recordatorio(monkeypatch):
+    """El fallo que la clave reintrodujo, y es el peor de los de esta tarea.
+
+    Con la cascada anulando ANTES de insertar, el segundo intento de la misma reprogramación
+    anulaba la fila que había creado el primero y después chocaba al reinsertarla
+    (`ON CONFLICT DO NOTHING`). La cita quedaba movida, correcta, y con CERO recordatorios
+    vivos -- «un recordatorio que a veces no existe, y nadie se entera de cuál faltó», que es
+    literalmente lo que esta tarea existe para eliminar.
+
+    Y no es hipotético: `_reprogramar_cita` no tiene el guardián de duplicado que sí tiene
+    `_crear_cita`, `tomar_cupo` es idempotente por clave, y el estado tras mover es
+    `reprogramada`, no `cancelada`: ninguno de los cuatro `return` tempranos frena un segundo
+    intento. El comentario de la clave promete que «repetirlo es inofensivo».
+    """
+    ctx = contexto(
+        ahora=datetime(2026, 9, 14, 9, 0, tzinfo=h.ZONA_BOGOTA), identidad_verificada=True
+    )
+    cita = _cita_viva()
+    cola = ColaFalsa().instalar(monkeypatch)
+    _reprogramando(monkeypatch, cita)
+    destino = datetime(2026, 9, 17, 9, 0, tzinfo=h.ZONA_BOGOTA)
+
+    # El recordatorio que dejó `crear_cita`, con su clave sin destino.
+    cola.insertar(None, clave_idempotencia="conv-1:recordatorio:cita-1",
+                  cita_id="cita-1", fecha_objetivo=cita["inicio"])
+
+    asyncio.run(h._reprogramar_cita(ctx, "cita-1", destino.isoformat()))
+    asyncio.run(h._reprogramar_cita(ctx, "cita-1", destino.isoformat()))
+
+    vivos = cola.vivos("cita-1")
+    assert len(vivos) == 1, "el reintento dejó la cita movida y sin recordatorio"
+    assert vivos[0]["fecha_objetivo"] == datetime(2026, 9, 16, 18, 0, tzinfo=h.ZONA_BOGOTA)
+    # El de `crear_cita` sí se anula: habla de la hora de la que el paciente acaba de salir.
+    assert [f["anulado"] for f in cola.filas if f["clave"].endswith("cita-1")] == [
+        "cita_reprogramada"
+    ]
+
+
+def test_mover_de_vuelta_a_una_hora_ya_usada_vuelve_a_dejar_recordatorio(monkeypatch):
+    """A -> B -> A, en turnos distintos, y sin ningún reintento de por medio.
+
+    Sin `ctx.ahora` dentro de la clave, el regreso a A acertaba la clave del primer movimiento
+    --misma cita, mismo destino-- y `ON CONFLICT DO NOTHING` descartaba la inserción en
+    silencio. La cita volvía a su hora original y se quedaba sin recordatorio.
+
+    `ctx.ahora` es fijo dentro de un turno, así que no rompe la idempotencia del reintento
+    (la prueba de arriba) y sí distingue dos movimientos de verdad.
+    """
+    cita = _cita_viva()
+    cola = ColaFalsa().instalar(monkeypatch)
+    _reprogramando(monkeypatch, cita)
+    hora_a = datetime(2026, 9, 17, 9, 0, tzinfo=h.ZONA_BOGOTA)
+    hora_b = datetime(2026, 9, 18, 9, 0, tzinfo=h.ZONA_BOGOTA)
+
+    def turno(minuto: int):
+        return contexto(
+            ahora=datetime(2026, 9, 14, 9, minuto, tzinfo=h.ZONA_BOGOTA),
+            identidad_verificada=True,
+        )
+
+    asyncio.run(h._reprogramar_cita(turno(0), "cita-1", hora_a.isoformat()))
+    asyncio.run(h._reprogramar_cita(turno(10), "cita-1", hora_b.isoformat()))
+    asyncio.run(h._reprogramar_cita(turno(20), "cita-1", hora_a.isoformat()))
+
+    vivos = cola.vivos("cita-1")
+    assert len(vivos) == 1, "al volver a la hora original se quedó sin recordatorio"
+    # La víspera de A, que es donde tiene que estar el único vivo.
+    assert vivos[0]["fecha_objetivo"] == datetime(2026, 9, 16, 18, 0, tzinfo=h.ZONA_BOGOTA)
+
+    # Y una vuelta más, para que la cadena completa A -> B -> A -> B quede cubierta.
+    asyncio.run(h._reprogramar_cita(turno(30), "cita-1", hora_b.isoformat()))
+    vivos = cola.vivos("cita-1")
+    assert len(vivos) == 1
+    assert vivos[0]["fecha_objetivo"] == datetime(2026, 9, 17, 18, 0, tzinfo=h.ZONA_BOGOTA)
+
+
+# ==========================================================================================
+# Ningún fallo del recordatorio puede tumbar la cita
+# ==========================================================================================
+#
+# La propiedad que compra calcular el momento FUERA de la transacción. Sin estas dos pruebas,
+# devolver la llamada dentro de `guardar` o de `aplicar` deja las cuatro pruebas de la cascada
+# en verde y hace desaparecer la propiedad sin ruido.
+
+
+def _que_reviente(monkeypatch):
+    def boom(**_kw):
+        raise RuntimeError("un bug calculando el momento del recordatorio")
+
+    monkeypatch.setattr(h.seguimientos, "momento_del_recordatorio", boom)
+
+
+def test_un_fallo_calculando_el_recordatorio_no_escribe_la_cita(monkeypatch):
+    """Si el cálculo revienta, tiene que reventar ANTES de que exista una cita que perder.
+
+    La seguridad clínica prevalece sobre cualquier objetivo comercial: un recordatorio que
+    falla es una oportunidad perdida; una cita que se pierde porque le añadimos un
+    recordatorio es un paciente que no se atiende. Que `registrar_cita` no llegue a llamarse
+    es la propiedad, y sobrevive a que alguien reescriba el cuerpo de `guardar`.
+    """
+    ctx = contexto(ahora=datetime(2026, 9, 14, 9, 0, tzinfo=h.ZONA_BOGOTA))
+    escrituras: list[dict] = []
+    pasos: list[int] = []
+
+    async def base_falsa(_ctx, trabajo):
+        pasos.append(1)
+        if len(pasos) == 1:
+            return ((77, 1), None, [])  # `tomar`: cupo libre y ninguna cita previa
+        return trabajo(BaseFalsa())
+
+    monkeypatch.setattr(h, "_con_base", base_falsa)
+    monkeypatch.setattr(
+        persistencia, "registrar_cita", lambda conn, **kw: escrituras.append(kw) or "cita-x"
+    )
+    monkeypatch.setattr(persistencia, "asegurar_paciente", lambda conn, **kw: 7)
+    _que_reviente(monkeypatch)
+
+    with pytest.raises(RuntimeError):
+        asyncio.run(
+            h._crear_cita(
+                ctx,
+                SolicitudCita(
+                    nombre_completo="Ana Gómez",
+                    inicio=datetime(2026, 9, 17, 9, 0, tzinfo=h.ZONA_BOGOTA),
+                    tratamiento="limpieza",
+                    clave_idempotencia="da-igual",
+                ),
+            )
+        )
+
+    assert escrituras == [], "el fallo del recordatorio se llevó la cita por delante"
+
+
+def test_un_fallo_calculando_el_recordatorio_no_mueve_la_cita(monkeypatch):
+    """La misma propiedad en `reprogramar`, y aquí el daño sería doble: la cita ya se movió en
+    Google Calendar, así que deshacer el movimiento en Neon deja a los dos sistemas diciendo
+    horas distintas sobre la misma cita."""
+    ctx = contexto(
+        ahora=datetime(2026, 9, 14, 9, 0, tzinfo=h.ZONA_BOGOTA), identidad_verificada=True
+    )
+    cita = _cita_viva()
+    movidas: list[str] = []
+    pasos: list[int] = []
+
+    async def base_falsa(_ctx, trabajo):
+        pasos.append(1)
+        if len(pasos) == 1:
+            return ("ok", cita, (6, 1), [])
+        return trabajo(BaseFalsa())
+
+    monkeypatch.setattr(h, "_con_base", base_falsa)
+    monkeypatch.setattr(
+        persistencia, "mover_cita", lambda conn, id_cita, **kw: movidas.append(id_cita)
+    )
+    # La cola entera doblada: así, si alguien devolviera el cálculo dentro de `aplicar`, esta
+    # prueba fallaría por la ASERCIÓN --la cita se movió-- y no por un doble que falta.
+    monkeypatch.setattr(persistencia, "anular_seguimientos_de_cita", lambda *a, **k: 0)
+    monkeypatch.setattr(persistencia, "insertar_seguimiento", lambda conn, **kw: True)
+    monkeypatch.setattr(persistencia, "liberar_cupo", lambda conn, reserva_id: None)
+    _que_reviente(monkeypatch)
+
+    destino = datetime(2026, 9, 17, 9, 0, tzinfo=h.ZONA_BOGOTA)
+    with pytest.raises(RuntimeError):
+        asyncio.run(h._reprogramar_cita(ctx, "cita-1", destino.isoformat()))
+
+    assert movidas == [], "el fallo del recordatorio deshizo un movimiento ya hecho en Google"
+
+
 # ==========================================================================================
 # programar_seguimiento
 # ==========================================================================================

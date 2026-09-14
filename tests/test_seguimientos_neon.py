@@ -146,6 +146,49 @@ def test_lo_que_se_anota_en_la_conversacion_se_vuelve_a_leer(conexion_pruebas, c
     assert leido[1] == cuando
 
 
+def test_la_anulacion_perdona_la_fila_que_acaba_de_programarse(conexion_pruebas, cita_de_prueba):
+    """`excepto_clave` contra Postgres de verdad, que es el único sitio donde se puede ver.
+
+    Las pruebas offline de la cascada doblan `anular_seguimientos_de_cita` con un diccionario,
+    así que el `WHERE ... AND clave_idempotencia IS DISTINCT FROM %s` --que se arma con un
+    f-string y cambia de forma según venga o no el parámetro-- no lo ejecuta nadie más. Un
+    error de sintaxis ahí no se vería hasta que un paciente reprogramara en producción.
+
+    Las dos mitades: la fila perdonada sigue viva, y TODAS las demás de esa cita se anulan.
+    """
+    id_cita, id_conversacion = cita_de_prueba
+    objetivo = datetime(2026, 9, 16, 18, 0, tzinfo=ZONA_BOGOTA)
+    perdonada = f"{id_conversacion}:recordatorio:perdonada"
+    vieja = f"{id_conversacion}:recordatorio:vieja"
+
+    for clave in (vieja, perdonada):
+        persistencia.insertar_seguimiento(
+            conexion_pruebas,
+            id_conversacion=id_conversacion,
+            tipo="recordatorio_cita",
+            fecha_objetivo=objetivo,
+            clave_idempotencia=clave,
+            cita_id=id_cita,
+        )
+
+    anulados = persistencia.anular_seguimientos_de_cita(
+        conexion_pruebas, id_cita, motivo="cita_reprogramada", excepto_clave=perdonada
+    )
+
+    assert anulados == 1, "o se anularon las dos, o no se anuló ninguna"
+    # Por SQL directo: `seguimientos_por_despachar` no devuelve `clave_idempotencia`, y lo que
+    # hay que distinguir aquí es exactamente CUÁL de las dos filas quedó viva.
+    with conexion_pruebas.cursor() as cur:
+        cur.execute(
+            "SELECT clave_idempotencia FROM seguimientos "
+            " WHERE cita_id = %s AND enviado_en IS NULL AND anulado_en IS NULL",
+            (id_cita,),
+        )
+        vivas = {fila[0] for fila in cur.fetchall()}
+
+    assert vivas == {perdonada}
+
+
 def test_la_cascada_anula_el_recordatorio_de_una_cita_que_se_movio(conexion_pruebas, cita_de_prueba):
     id_cita, id_conversacion = cita_de_prueba
     objetivo = datetime(2026, 9, 16, 18, 0, tzinfo=ZONA_BOGOTA)

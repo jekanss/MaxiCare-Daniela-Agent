@@ -15,7 +15,7 @@ tokens y corre bajo demanda.
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import get_args
 
 import pytest
@@ -491,6 +491,71 @@ def test_el_bloque_de_presentacion_va_entre_tratamientos_y_fecha():
         < texto.index("PRIMER CONTACTO")
         < texto.index("AHORA MISMO")
     )
+
+
+def test_un_recordatorio_reciente_le_dice_a_daniela_a_que_contesta_el_paciente():
+    """El mensaje lo mandó el despachador, no la conversación: el historial del agente no lo
+    contiene. Sin este bloque, un «sí, confirmo» llega sin antecedente ninguno."""
+    ctx = contexto(
+        ahora=datetime(2026, 9, 17, 9, 0, tzinfo=ZONA_BOGOTA),
+        ultimo_recordatorio_tipo="recordatorio_cita",
+        ultimo_recordatorio_en=datetime(2026, 9, 16, 18, 0, tzinfo=ZONA_BOGOTA),
+    )
+
+    texto = asyncio.run(agentes.daniela.get_system_prompt(RunContextWrapper(context=ctx)))
+
+    assert "YA LE ESCRIBIMOS NOSOTROS" in texto
+    assert "recordatorio_cita" in texto
+    # El último de todos: es el más volátil y el más raro. Delante de la fecha descachearía
+    # el prefijo de TODOS los pacientes de esa hora.
+    assert texto.index("AHORA MISMO") < texto.index("YA LE ESCRIBIMOS NOSOTROS")
+
+
+def test_un_recordatorio_viejo_deja_de_ser_antecedente():
+    """Nada borra nunca `ultimo_recordatorio_tipo`: solo se escribe.
+
+    Sin un tope, desde el primer recordatorio que le salga a un paciente TODOS sus turnos
+    --semanas después-- llevarían la instrucción de que un «sí» suyo se refiere a la cita de
+    la que hablaba aquel mensaje. Un recordatorio de víspera precede a su cita como mucho en
+    un día: pasadas 48 horas la cita ya ocurrió y el antecedente es falso.
+    """
+    ctx = contexto(
+        ahora=datetime(2026, 10, 20, 9, 0, tzinfo=ZONA_BOGOTA),
+        ultimo_recordatorio_tipo="recordatorio_cita",
+        ultimo_recordatorio_en=datetime(2026, 9, 16, 18, 0, tzinfo=ZONA_BOGOTA),
+    )
+
+    texto = asyncio.run(agentes.daniela.get_system_prompt(RunContextWrapper(context=ctx)))
+
+    assert "YA LE ESCRIBIMOS NOSOTROS" not in texto
+
+
+def test_el_recordatorio_caduca_justo_a_las_48_horas():
+    """La frontera, en las dos direcciones: una hora antes del tope sigue valiendo, una hora
+    después no. Sin las dos, un `>=` por un `>` pasaría desapercibido."""
+    salio = datetime(2026, 9, 16, 18, 0, tzinfo=ZONA_BOGOTA)
+    tope = agentes.HORAS_QUE_UN_RECORDATORIO_SIGUE_SIENDO_ANTECEDENTE
+
+    def prompt(horas: int) -> str:
+        ctx = contexto(
+            ahora=salio + timedelta(hours=horas),
+            ultimo_recordatorio_tipo="recordatorio_cita",
+            ultimo_recordatorio_en=salio,
+        )
+        return asyncio.run(agentes.daniela.get_system_prompt(RunContextWrapper(context=ctx)))
+
+    assert "YA LE ESCRIBIMOS NOSOTROS" in prompt(tope - 1)
+    assert "YA LE ESCRIBIMOS NOSOTROS" not in prompt(tope + 1)
+
+
+def test_sin_recordatorio_el_bloque_no_aparece():
+    """El caso normal: la inmensa mayoría de las conversaciones nunca recibe un recordatorio,
+    y el prompt no puede pagar un bloque por ellas."""
+    ctx = contexto(ahora=datetime(2026, 9, 17, 9, 0, tzinfo=ZONA_BOGOTA))
+
+    texto = asyncio.run(agentes.daniela.get_system_prompt(RunContextWrapper(context=ctx)))
+
+    assert "YA LE ESCRIBIMOS NOSOTROS" not in texto
 
 
 def test_el_bloque_de_presentacion_no_revienta_sin_contexto():

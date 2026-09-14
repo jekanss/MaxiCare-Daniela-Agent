@@ -876,7 +876,7 @@ async def _crear_cita(ctx: ContextoDaniela, solicitud: SolicitudCita) -> str:
         # una cita sin recordatorio y nadie se entera hasta que el paciente no llega. El
         # CUÁNDO ya se calculó arriba, fuera de la transacción, a propósito.
         if cuando_recordar is not None:
-            persistencia.insertar_seguimiento(
+            nuevo = persistencia.insertar_seguimiento(
                 conn,
                 id_conversacion=ctx.id_conversacion,
                 tipo="recordatorio_cita",
@@ -886,6 +886,16 @@ async def _crear_cita(ctx: ContextoDaniela, solicitud: SolicitudCita) -> str:
                 cita_id=id_cita,
                 commit=False,
             )
+            if not nuevo:
+                # Aquí `id_cita` es un UUID recién creado, así que esta clave no puede haber
+                # existido antes: si el booleano dice que sí, hay algo que no entendemos y
+                # tiene que dejar rastro. Se anota y no se interrumpe -- la cita está bien, y
+                # tumbarla por el recordatorio es el intercambio que este proyecto prohíbe.
+                log.info(
+                    "el recordatorio de la cita recién creada %s ya estaba programado; "
+                    "no se duplica",
+                    id_cita,
+                )
         conn.commit()
         return (id_cita, paciente_id)
 
@@ -1062,32 +1072,65 @@ async def _reprogramar_cita(ctx: ContextoDaniela, id_cita: str, nuevo_inicio: st
         horas_minimas=ctx.horas_minimas_para_recordar,
     )
 
+    # La clave del recordatorio nuevo lleva TRES componentes detrás del id de la cita, y cada
+    # uno tapa un caso que los otros dos no:
+    #
+    # - `id_cita`, para que la cascada sepa de qué cita cuelga.
+    # - `destino`, para que dos horas distintas no compartan fila.
+    # - `ctx.ahora`, que es lo que separa «el mismo intento» de «otro movimiento». Es fijo
+    #   dentro de un turno, así que un reintento de esta misma tool en este mismo turno vuelve
+    #   a dar ESTA clave --idempotente, que es justo lo que queremos-- pero un A -> B -> A en
+    #   turnos distintos da una clave nueva para el regreso a A. Sin él, al volver a A la
+    #   clave acertaría la del primer movimiento, `ON CONFLICT DO NOTHING` descartaría la
+    #   inserción, y la cita quedaría movida y sin ningún recordatorio vivo.
+    #
+    # La arma `ctx.clave`, como las otras cuatro. Nunca el modelo.
+    clave_recordatorio = ctx.clave(
+        "recordatorio", id_cita, destino.isoformat(), ctx.ahora.isoformat()
+    )
+
     def aplicar(conn) -> None:
         persistencia.mover_cita(
             conn, id_cita, reserva_id=reserva_nueva, inicio=destino, commit=False
         )
-        # La cascada. El recordatorio viejo habla de una hora de la que el paciente acaba de
-        # salir: mandarlo la víspera lo devuelve a la hora que él mismo pidió cambiar. Se
-        # anula --no se borra: el motivo es lo que permite responder «¿por qué este paciente
-        # no recibió recordatorio?»-- y se programa el de la hora nueva, todo dentro de la
-        # MISMA transacción que el movimiento de la cita.
-        persistencia.anular_seguimientos_de_cita(
-            conn, id_cita, motivo="cita_reprogramada", commit=False
-        )
+        # La cascada, y el ORDEN es parte de ella: primero se programa el nuevo, después se
+        # anulan los viejos perdonando el que se acaba de programar. Al revés --anular y
+        # luego insertar-- un reintento de la misma reprogramación anularía su propia fila y
+        # chocaría al reinsertarla, dejando la cita movida y SIN recordatorio: exactamente el
+        # fallo que esta tarea existe para eliminar, reintroducido por la clave.
+        #
+        # El recordatorio viejo habla de una hora de la que el paciente acaba de salir:
+        # mandarlo la víspera lo devuelve a la hora que él mismo pidió cambiar. Se anula, no
+        # se borra: el motivo es lo que permite responder «¿por qué este paciente no recibió
+        # recordatorio?». Todo dentro de la MISMA transacción que el movimiento de la cita.
         if cuando_recordar is not None:
-            persistencia.insertar_seguimiento(
+            nuevo = persistencia.insertar_seguimiento(
                 conn,
                 id_conversacion=ctx.id_conversacion,
                 tipo="recordatorio_cita",
                 fecha_objetivo=cuando_recordar,
-                # El `destino` dentro de la clave es lo que permite que la MISMA cita tenga
-                # un recordatorio nuevo por cada hora a la que se mueva, sin chocar con el
-                # viejo. Sin él, la segunda reprogramación acertaría la clave de la primera
-                # y `ON CONFLICT DO NOTHING` la descartaría en silencio.
-                clave_idempotencia=ctx.clave("recordatorio", id_cita, destino.isoformat()),
+                clave_idempotencia=clave_recordatorio,
                 cita_id=id_cita,
                 commit=False,
             )
+            if not nuevo:
+                # Con `ctx.ahora` dentro de la clave, esto solo puede ser un reintento de esta
+                # misma tool en este mismo turno: la fila ya está ahí y sigue viva, porque
+                # `excepto_clave` la perdona. Es benigno y esperado -- por eso `info` y no
+                # `error`-- pero descartar el booleano en silencio era lo que impedía verlo.
+                log.info(
+                    "el recordatorio de la cita %s para %s ya estaba programado en este "
+                    "turno; no se duplica",
+                    id_cita,
+                    destino.isoformat(),
+                )
+        persistencia.anular_seguimientos_de_cita(
+            conn,
+            id_cita,
+            motivo="cita_reprogramada",
+            excepto_clave=clave_recordatorio,
+            commit=False,
+        )
         conn.commit()
         # El cupo viejo va DESPUÉS del commit, en su propia transacción, que es donde
         # estaba antes de que esto tuviera cascada: `mover_cita` confirmaba y `liberar_cupo`

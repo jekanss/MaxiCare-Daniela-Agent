@@ -1766,7 +1766,7 @@ def insertar_seguimiento(
 
 
 def anular_seguimientos_de_cita(
-    conn, cita_id: str, *, motivo: str, commit: bool = True
+    conn, cita_id: str, *, motivo: str, excepto_clave: str | None = None, commit: bool = True
 ) -> int:
     """Anula los seguimientos vivos de esa cita y devuelve cuántos. Idempotente.
 
@@ -1777,14 +1777,31 @@ def anular_seguimientos_de_cita(
     `commit=False` para que la anulación viaje en la MISMA transacción que el cambio de la
     cita. Separadas, una caída entre las dos deja un recordatorio vivo apuntando a una cita
     muerta -- y el despachador lo mandaría, porque sus guardas solo miran lo que hay en la base.
+
+    `excepto_clave` perdona UNA fila: la que quien llama acaba de programar. Existe porque
+    `reprogramar_cita` inserta el recordatorio nuevo ANTES de anular los viejos, y sin este
+    parámetro la anulación se llevaría por delante el que acaba de crear. Y no basta con
+    anular primero e insertar después: un reintento de la misma reprogramación encontraría su
+    propia fila recién anulada, chocaría en `ON CONFLICT DO NOTHING` al reinsertarla, y la
+    cita quedaría movida y SIN ningún recordatorio vivo -- el fallo exacto que la cascada
+    existe para evitar.
+
+    El `IS DISTINCT FROM` y no un `<>`: con `NULL <> 'x'` el resultado es NULL, la fila no
+    entra en el `UPDATE`, y una fila con la clave sin poner se quedaría viva para siempre.
+    Hoy la columna es `NOT NULL`, pero apoyar la corrección en eso es apoyarla en otra tabla.
     """
+    condicion_clave = "" if excepto_clave is None else " AND clave_idempotencia IS DISTINCT FROM %s"
+    parametros: tuple[Any, ...] = (motivo, cita_id)
+    if excepto_clave is not None:
+        parametros = (*parametros, excepto_clave)
     with conn.cursor() as cur:
         cur.execute(
-            """
+            f"""
             UPDATE seguimientos SET anulado_en = now(), motivo_anulacion = %s
              WHERE cita_id = %s AND enviado_en IS NULL AND anulado_en IS NULL
+                   {condicion_clave}
             """,
-            (motivo, cita_id),
+            parametros,
         )
         anulados = cur.rowcount
     if commit:
