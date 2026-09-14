@@ -69,6 +69,38 @@ def conexion_pruebas(esquema):
         yield conn
 
 
+@pytest.fixture
+def cita_de_prueba(esquema):
+    """Una conversación y una cita ya creadas en el esquema de pruebas.
+
+    Copiado del montaje que ya usa `tests/test_tools_neon.py` para crear citas
+    (`asegurar_paciente` + `asegurar_conversacion` + `registrar_cita`, directos y sin pasar
+    por las tools) -- aquí no hace falta jornada ni disponibilidad, solo una fila de verdad
+    de la que colgar un seguimiento.
+    """
+    telefono = "573000000099"
+    with persistencia.conectar(esquema) as conn:
+        id_paciente = persistencia.asegurar_paciente(
+            conn, nombre_completo="Paciente De Seguimiento", telefono=telefono
+        )
+        id_conversacion = persistencia.asegurar_conversacion(
+            conn, telefono=telefono, paciente_id=id_paciente
+        )
+        id_cita = persistencia.registrar_cita(
+            conn,
+            reserva_id=None,
+            conversacion_id=id_conversacion,
+            paciente_id=id_paciente,
+            nombre_completo="Paciente De Seguimiento",
+            telefono=telefono,
+            tratamiento="limpieza",
+            inicio=datetime(2026, 9, 16, 10, 0, tzinfo=ZONA_BOGOTA),
+            duracion_minutos=60,
+            evento_calendar_id=None,
+        )
+    return id_cita, id_conversacion
+
+
 def test_la_017_deja_las_columnas_y_las_perillas(conexion_pruebas):
     with conexion_pruebas.cursor() as cur:
         cur.execute(
@@ -84,3 +116,74 @@ def test_la_017_deja_las_columnas_y_las_perillas(conexion_pruebas):
     operativa = persistencia.leer_configuracion(conexion_pruebas)
     assert operativa["hora_recordatorio_vispera"] == 18
     assert operativa["horas_minimas_para_recordar"] == 4
+
+
+def test_la_cascada_anula_el_recordatorio_de_una_cita_que_se_movio(conexion_pruebas, cita_de_prueba):
+    id_cita, id_conversacion = cita_de_prueba
+    objetivo = datetime(2026, 9, 16, 18, 0, tzinfo=ZONA_BOGOTA)
+
+    assert persistencia.insertar_seguimiento(
+        conexion_pruebas,
+        id_conversacion=id_conversacion,
+        tipo="recordatorio_cita",
+        fecha_objetivo=objetivo,
+        clave_idempotencia=f"{id_conversacion}:recordatorio:1",
+        cita_id=id_cita,
+    )
+
+    anulados = persistencia.anular_seguimientos_de_cita(
+        conexion_pruebas, id_cita, motivo="cita_reprogramada"
+    )
+    assert anulados == 1
+
+    pendientes = persistencia.seguimientos_por_despachar(
+        conexion_pruebas, ahora=objetivo + timedelta(hours=1)
+    )
+    assert [p for p in pendientes if p["cita_id"] == id_cita] == []
+
+
+def test_un_seguimiento_anulado_no_vuelve_a_la_cola(conexion_pruebas, cita_de_prueba):
+    id_cita, id_conversacion = cita_de_prueba
+    objetivo = datetime(2026, 9, 16, 18, 0, tzinfo=ZONA_BOGOTA)
+    persistencia.insertar_seguimiento(
+        conexion_pruebas,
+        id_conversacion=id_conversacion,
+        tipo="recordatorio_cita",
+        fecha_objetivo=objetivo,
+        clave_idempotencia=f"{id_conversacion}:recordatorio:2",
+        cita_id=id_cita,
+    )
+    pendiente = persistencia.seguimientos_por_despachar(
+        conexion_pruebas, ahora=objetivo + timedelta(hours=1)
+    )[0]
+
+    persistencia.anular_seguimiento(conexion_pruebas, pendiente["id"], motivo="contacto_reciente")
+
+    restantes = persistencia.seguimientos_por_despachar(
+        conexion_pruebas, ahora=objetivo + timedelta(hours=1)
+    )
+    assert pendiente["id"] not in {r["id"] for r in restantes}
+
+
+def test_la_cola_trae_lo_que_el_despachador_necesita_para_decidir(conexion_pruebas, cita_de_prueba):
+    id_cita, id_conversacion = cita_de_prueba
+    objetivo = datetime(2026, 9, 16, 18, 0, tzinfo=ZONA_BOGOTA)
+    persistencia.insertar_seguimiento(
+        conexion_pruebas,
+        id_conversacion=id_conversacion,
+        tipo="recordatorio_cita",
+        fecha_objetivo=objetivo,
+        clave_idempotencia=f"{id_conversacion}:recordatorio:3",
+        cita_id=id_cita,
+    )
+
+    fila = persistencia.seguimientos_por_despachar(
+        conexion_pruebas, ahora=objetivo + timedelta(hours=1)
+    )[0]
+
+    # Sin estas claves el despachador tendría que hacer una consulta por guarda.
+    assert set(fila) >= {
+        "id", "conversacion_id", "cita_id", "tipo", "fecha_objetivo", "intentos",
+        "telefono", "nombre_completo", "tratamiento", "cita_inicio", "cita_estado",
+        "tomada_por",
+    }

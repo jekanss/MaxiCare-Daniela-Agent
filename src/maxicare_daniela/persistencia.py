@@ -1527,8 +1527,14 @@ def registrar_cita(
     inicio: datetime,
     duracion_minutos: int,
     evento_calendar_id: str | None,
+    commit: bool = True,
 ) -> str:
-    """Escribe la cita ya confirmada en los dos lados y devuelve su id."""
+    """Escribe la cita ya confirmada en los dos lados y devuelve su id.
+
+    `commit=False` es lo que permite que la cita y su recordatorio de víspera nazcan en UNA
+    transacción: separadas, una caída entre las dos deja una cita sin recordatorio y nadie se
+    entera hasta que el paciente no llega.
+    """
     id_cita = str(uuid.uuid4())
     with conn.cursor() as cur:
         cur.execute(
@@ -1543,7 +1549,8 @@ def registrar_cita(
                 telefono, tratamiento, inicio, duracion_minutos, evento_calendar_id,
             ),
         )
-    conn.commit()
+    if commit:
+        conn.commit()
     return id_cita
 
 
@@ -1714,22 +1721,185 @@ def insertar_seguimiento(
     tipo: str,
     fecha_objetivo: datetime,
     clave_idempotencia: str,
+    cita_id: str | None = None,
+    commit: bool = True,
 ) -> bool:
-    """`True` si quedó programado ahora, `False` si ya existía. Nunca duplica."""
+    """`True` si quedó programado ahora, `False` si ya existía. Nunca duplica.
+
+    `cita_id` es NULLABLE a propósito: `programar_seguimiento` sigue pudiendo encolar algo que
+    no cuelga de ninguna cita («llámenme el lunes»). Un seguimiento sin cita se salta las tres
+    primeras guardas del despachador.
+
+    `commit=False` es lo que permite que la cita y su recordatorio nazcan en UNA transacción.
+    Quien lo use se queda a cargo del `commit`.
+    """
     with conn.cursor() as cur:
         cur.execute(
             """
             INSERT INTO seguimientos
-                (conversacion_id, tipo, fecha_objetivo, clave_idempotencia)
-            VALUES (%s, %s, %s, %s)
+                (conversacion_id, tipo, fecha_objetivo, clave_idempotencia, cita_id)
+            VALUES (%s, %s, %s, %s, %s)
             ON CONFLICT (clave_idempotencia) DO NOTHING
             RETURNING id
             """,
-            (id_conversacion, tipo, fecha_objetivo, clave_idempotencia),
+            (id_conversacion, tipo, fecha_objetivo, clave_idempotencia, cita_id),
         )
         nuevo = cur.fetchone() is not None
-    conn.commit()
+    if commit:
+        conn.commit()
     return nuevo
+
+
+def anular_seguimientos_de_cita(
+    conn, cita_id: str, *, motivo: str, commit: bool = True
+) -> int:
+    """Anula los seguimientos vivos de esa cita y devuelve cuántos. Idempotente.
+
+    No borra: un seguimiento anulado con su motivo es lo que permite responder «¿por qué este
+    paciente no recibió recordatorio?», que es la primera pregunta que hace la clínica cuando
+    alguien no llega.
+
+    `commit=False` para que la anulación viaje en la MISMA transacción que el cambio de la
+    cita. Separadas, una caída entre las dos deja un recordatorio vivo apuntando a una cita
+    muerta -- y el despachador lo mandaría, porque sus guardas solo miran lo que hay en la base.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE seguimientos SET anulado_en = now(), motivo_anulacion = %s
+             WHERE cita_id = %s AND enviado_en IS NULL AND anulado_en IS NULL
+            """,
+            (motivo, cita_id),
+        )
+        anulados = cur.rowcount
+    if commit:
+        conn.commit()
+    return anulados
+
+
+def seguimientos_por_despachar(
+    conn, *, ahora: datetime, limite: int = 50
+) -> list[dict[str, Any]]:
+    """Las filas vencidas, con TODO lo que el despachador necesita para decidir.
+
+    El `LEFT JOIN` a `citas` y a `conversaciones` no es una optimización: sin él, cada guarda
+    sería una consulta más por fila, y el barrido de las 6 p. m. --que es cuando salen todos
+    los recordatorios del día a la vez-- haría cientos de viajes a Neon.
+
+    `FOR UPDATE ... SKIP LOCKED` es lo que permite que dos instancias no manden el mismo
+    recordatorio dos veces. `OF s` porque el bloqueo va sobre la cola, no sobre las citas.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT s.id, s.conversacion_id, s.cita_id, s.tipo, s.fecha_objetivo, s.intentos,
+                   COALESCE(c.telefono, cv.telefono)      AS telefono,
+                   c.nombre_completo, c.tratamiento, c.inicio AS cita_inicio,
+                   c.estado AS cita_estado, cv.tomada_por
+              FROM seguimientos s
+              LEFT JOIN citas c          ON c.id  = s.cita_id
+              LEFT JOIN conversaciones cv ON cv.id = s.conversacion_id
+             WHERE s.enviado_en IS NULL
+               AND s.anulado_en IS NULL
+               AND s.fecha_objetivo <= %s
+             ORDER BY s.fecha_objetivo
+             LIMIT %s
+               FOR UPDATE OF s SKIP LOCKED
+            """,
+            (ahora, limite),
+        )
+        columnas = [d[0] for d in cur.description]
+        return [dict(zip(columnas, fila)) for fila in cur.fetchall()]
+
+
+def marcar_seguimiento_enviado(conn, id_seguimiento: int) -> None:
+    """Va ANTES del envío y con su propio commit, y el orden es deliberado.
+
+    No hay transacción que cubra una llamada HTTP a Meta. Si se enviara primero y el proceso
+    muriera antes del commit, la fila seguiría pendiente y el barrido de sesenta segundos
+    después mandaría el mismo recordatorio otra vez -- sin que ninguna de las siete guardas lo
+    detectara, porque todas seguirían diciendo que sí.
+
+    Antes marcar y no mandar, que mandar y no marcar.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE seguimientos SET enviado_en = now() WHERE id = %s", (id_seguimiento,)
+        )
+    conn.commit()
+
+
+def aplazar_seguimiento(conn, id_seguimiento: int, *, hasta: datetime) -> None:
+    """Lo mueve en el tiempo sin gastarlo. Es lo que hacen las guardas del relevo y del horario:
+    el motivo por el que no sale ahora deja de ser cierto más tarde."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE seguimientos SET fecha_objetivo = %s WHERE id = %s",
+            (hasta, id_seguimiento),
+        )
+    conn.commit()
+
+
+def anular_seguimiento(conn, id_seguimiento: int, *, motivo: str) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE seguimientos SET anulado_en = now(), motivo_anulacion = %s WHERE id = %s",
+            (motivo[:200], id_seguimiento),
+        )
+    conn.commit()
+
+
+def anotar_fallo_de_seguimiento(conn, id_seguimiento: int, *, fallo: str) -> None:
+    """`enviado_en` puesto Y `fallo` con contenido es la señal a vigilar: la fila dice «lo
+    intenté» y no «salió». Es el mismo par que `reenviado_en` NULL en `mensajes_entrantes`.
+
+    El motivo se trunca a 2000, igual que `marcar_fallo_respuesta`: un traceback entero no
+    tiene por qué ocupar la base de la clínica.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE seguimientos SET fallo = %s, intentos = intentos + 1 WHERE id = %s",
+            (fallo[:2000], id_seguimiento),
+        )
+    conn.commit()
+
+
+def ultimo_mensaje_del_paciente(conn, telefono: str) -> datetime | None:
+    """Cuándo escribió ese número por última vez, o `None` si nunca.
+
+    Es la fuente exacta de dos cosas distintas: la guarda de contacto reciente --si está
+    hablando con Daniela ahora, recordarle la cita la hace ver desmemoriada-- y la ventana de
+    24 h de Meta, que se cuenta desde aquí y no desde `conversaciones.actualizada_en`, que
+    también la toca Daniela al responder.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT max(recibido_en) FROM mensajes_entrantes WHERE telefono = %s",
+            (telefono,),
+        )
+        fila = cur.fetchone()
+    return fila[0] if fila else None
+
+
+def anotar_recordatorio_en_conversacion(
+    conn, id_conversacion: str, *, tipo: str, cuando: datetime
+) -> None:
+    """Para que Daniela sepa a qué dice «sí» el paciente que responde a un recordatorio.
+
+    El mensaje lo mandó un proceso, no una conversación: el historial del agente no lo
+    contiene. Se anota aquí y `atencion._leer_estado` lo carga en el contexto. NO se inyecta
+    un mensaje en `agent_messages`: esas tablas las fija el SDK.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE conversaciones
+               SET ultimo_recordatorio_tipo = %s, ultimo_recordatorio_en = %s
+             WHERE id = %s
+            """,
+            (tipo, cuando, id_conversacion),
+        )
+    conn.commit()
 
 
 def insertar_escalamiento(
