@@ -78,6 +78,10 @@ CONFIGURACION_POR_DEFECTO: dict[str, int] = {
     "hora_cierre": 17,
     "hora_cierre_sabado": 15,
     "atiende_domingo": 0,
+    # La cola de recordatorios (migración 017). Los defaults viven aquí por lo mismo que los
+    # de la jornada: `leer_configuracion` los usa cuando la tabla todavía no existe.
+    "hora_recordatorio_vispera": 18,
+    "horas_minimas_para_recordar": 4,
 }
 
 RAIZ_PROYECTO = Path(__file__).resolve().parents[2]
