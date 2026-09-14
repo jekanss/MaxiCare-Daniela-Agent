@@ -89,6 +89,26 @@ def crear_conversacion(conn) -> str:
     return persistencia.asegurar_conversacion(conn, telefono="573000000000")
 
 
+def bloque_habil(jornada: Jornada, desde: datetime, dias_habiles: int) -> datetime:
+    """El día número `dias_habiles` en que la clínica abre, contado hacia adelante desde
+    `desde` sin contar a `desde` mismo -- fines de semana y domingo cerrado se saltan solos.
+
+    Existe por la misma razón que `hora()` en `probar_tools.py:68-92`, y el precedente es el
+    mismo: `desde + timedelta(days=N)` cae en domingo según el día de la semana en que alguien
+    corra este script, y ESE día `dos_crear_cita_deja_su_recordatorio` devolvía `""` sin
+    ningún `FALLA` -- las comprobaciones 3 y 4 desaparecían de la salida en silencio en vez de
+    fallar, porque dependían de un `id_cita` que nunca llegó. Contando días HÁBILES en vez de
+    días de calendario, el resultado deja de depender de qué día sea hoy.
+    """
+    candidato = desde
+    habiles = 0
+    while habiles < dias_habiles:
+        candidato = candidato + timedelta(days=1)
+        if jornada.cierre_de(candidato) is not None:
+            habiles += 1
+    return candidato
+
+
 def uno_las_columnas_y_las_perillas(conn) -> None:
     with conn.cursor() as cur:
         cur.execute(
@@ -105,7 +125,9 @@ def uno_las_columnas_y_las_perillas(conn) -> None:
 
 
 def dos_crear_cita_deja_su_recordatorio(conn, ctx) -> str:
-    inicio = ctx.ahora + timedelta(days=3)
+    inicio = bloque_habil(ctx.jornada, ctx.ahora, 3).replace(
+        hour=9, minute=0, second=0, microsecond=0
+    )
     texto = asyncio.run(
         h._crear_cita(
             ctx,
@@ -131,7 +153,9 @@ def dos_crear_cita_deja_su_recordatorio(conn, ctx) -> str:
 
 
 def tres_reprogramar_mueve_el_recordatorio(conn, ctx, id_cita: str) -> None:
-    destino = (ctx.ahora + timedelta(days=4)).replace(hour=10, minute=0)
+    destino = bloque_habil(ctx.jornada, ctx.ahora, 4).replace(
+        hour=10, minute=0, second=0, microsecond=0
+    )
     asyncio.run(h._reprogramar_cita(ctx, id_cita, destino.isoformat()))
     with conn.cursor() as cur:
         cur.execute(
@@ -164,20 +188,90 @@ def cuatro_cancelar_anula_el_recordatorio(conn, ctx, id_cita: str) -> None:
     print(f"{marca(ok)} 4. cancelar dejo {vivos} recordatorios vivos (esperado 0)")
 
 
-def cinco_el_despachador_decide_sin_enviar(url: str, ctx) -> None:
+def cinco_el_despachador_decide_sin_enviar(conn, url: str, ctx) -> None:
     """Con `plantilla=""` el despachador corre entero y no manda nada. Es el modo con el que
-    se cuelga en produccion para ver que decide bien antes de arriesgar un WhatsApp."""
+    se cuelga en produccion para ver que decide bien antes de arriesgar un WhatsApp.
+
+    El RECUENTO por si solo no demuestra nada: cuando `despachar` decide "enviar" y la
+    plantilla esta vacia, el codigo ni siquiera incrementa un contador --ver su docstring,
+    "SIGUE pendiente -no se marca-, para cuando exista la plantilla"--, asi que el recuento
+    sale identico si no hubiera habido ninguna fila que mirar. Por eso las comprobaciones 2 a
+    4 ya dejaron el numero de esta cita SIN recordatorio vivo (se anulo al cancelar): esta
+    funcion crea uno nuevo, propio, y lo que prueba de verdad es que sigue EXACTAMENTE igual
+    -sin marcar, sin anular- despues del ciclo con la plantilla apagada.
+    """
+    inicio = bloque_habil(ctx.jornada, ctx.ahora, 6).replace(
+        hour=9, minute=0, second=0, microsecond=0
+    )
+    asyncio.run(
+        h._crear_cita(
+            ctx,
+            SolicitudCita(
+                nombre_completo="Paciente Del Modo Sin Enviar",
+                inicio=inicio,
+                tratamiento="limpieza",
+                clave_idempotencia="prueba-modo-sin-enviar",
+            ),
+        )
+    )
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT id, fecha_objetivo FROM seguimientos
+             WHERE cita_id IS NOT NULL AND anulado_en IS NULL AND enviado_en IS NULL
+            """
+        )
+        fila = cur.fetchone()
+    if fila is None:
+        # Mismo principio que el `if id_cita:` de `main()`: si la cita de esta comprobación
+        # no dejó recordatorio, se dice con un FALLA y se sigue -- nunca un `TypeError` a
+        # medio camino ni una comprobación que desaparece de la salida.
+        print(
+            f"{marca(False)} 5. el despachador decidio sin enviar: OMITIDA -- "
+            "no se creo la cita de prueba"
+        )
+        return
+    id_seguimiento, fecha_objetivo = fila
+    # `fecha_objetivo` es TIMESTAMPTZ (migración 001) y psycopg la devuelve normalizada a
+    # UTC, no en el huso con el que se calculó (el de `ctx.ahora`). `decidir()` compara
+    # `ahora.hour` tal cual -- G5 mira si esa hora cae dentro de la ventana de la jornada--,
+    # así que pasarla sin reconvertir corre el ciclo con la hora de reloj EQUIVOCADA: la
+    # primera versión de esta comprobación mandaba una `fecha_objetivo` de las 15:00 -05:00
+    # como si fueran las 20:00, la ventana la daba por cerrada, y la fila salía "aplazada"
+    # en vez de "decidida y retenida por falta de plantilla" -- que es lo que esto demuestra.
+    fecha_objetivo = fecha_objetivo.astimezone(ctx.ahora.tzinfo)
+
     recuento = asyncio.run(
         seguimientos.despachar(
             database_url=url,
             whatsapp=None,
-            jornada=Jornada(),
+            jornada=ctx.jornada,
             plantilla="",
-            ahora=ctx.ahora + timedelta(days=30),
+            ahora=fecha_objetivo,
         )
     )
-    ok = recuento["enviados"] == 0 and sum(recuento.values()) >= 0
-    print(f"{marca(ok)} 5. el despachador decidio sin enviar: {recuento}")
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT enviado_en, anulado_en FROM seguimientos WHERE id = %s",
+            (id_seguimiento,),
+        )
+        enviado_en, anulado_en = cur.fetchone()
+
+    # Los cuatro contadores en cero es justo lo que deja el camino real: `decidir()` dice
+    # "enviar" (las siete guardas pasaron) y el propio `if not plantilla: ... continue` de
+    # `despachar` no toca ninguno -- ver su docstring, "SIGUE pendiente -no se marca-". Un
+    # `aplazados` o un `anulados` aquí significaría que la fila NUNCA llegó a esa rama, y
+    # esta comprobación estaría demostrando otra cosa sin decirlo.
+    ok = (
+        recuento == {"enviados": 0, "anulados": 0, "aplazados": 0, "fallidos": 0}
+        and enviado_en is None
+        and anulado_en is None
+    )
+    print(
+        f"{marca(ok)} 5. el despachador decidio sin enviar: {recuento} "
+        f"(la fila sigue pendiente: enviado_en={enviado_en} anulado_en={anulado_en})"
+    )
 
 
 def seis_dos_despachadores_no_toman_la_misma_fila(url: str) -> None:
@@ -250,7 +344,14 @@ def main() -> int:
             if id_cita:
                 tres_reprogramar_mueve_el_recordatorio(conn, ctx, id_cita)
                 cuatro_cancelar_anula_el_recordatorio(conn, ctx, id_cita)
-        cinco_el_despachador_decide_sin_enviar(url, ctx)
+            else:
+                # Sin cita no hay nada que mover ni que cancelar. Que esto se calle en vez
+                # de fallar es justo el defecto que dejaba desaparecer dos comprobaciones de
+                # siete sin que la corrida se viera roja: un `FALLA` explícito por cada una,
+                # y el código de salida sigue siendo distinto de cero por `fallos`.
+                print(f"{marca(False)} 3. reprogramar_cita: OMITIDA -- la 2 no dejo una cita")
+                print(f"{marca(False)} 4. cancelar_cita: OMITIDA -- la 2 no dejo una cita")
+            cinco_el_despachador_decide_sin_enviar(conn, url, ctx)
         seis_dos_despachadores_no_toman_la_misma_fila(url)
 
         # -- 7. el único guardián de no-duplicado que corre contra Neon de verdad ------------
