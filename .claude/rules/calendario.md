@@ -111,6 +111,39 @@ El `CLAUDE.md` raíz lleva la regla en una línea. Aquí está el porqué.
   importa no se puede doblar: que un evento borrado devuelva `None` depende de que
   `HttpError` traiga `status_code`. Medido — vivo devuelve su hora, id inventado `None`, y
   recién borrado `None`.
+- **Y corregir Neon en silencio no bastaba: la tool tiene que DECIR lo que acaba de cambiar.**
+  Esa misma tarde del 14/09/2026 el cliente borró su evento a mano. La cancelación fue
+  correcta; la respuesta no: «no me aparece una cita futura registrada. Ya estoy confirmando
+  ese punto con el equipo» — escaló. El motivo lo dejó escrito el propio modelo en la fila de
+  `escalamientos`:
+
+  > «La consulta actual no muestra citas futuras, **aunque en turnos previos** del mismo chat
+  > aparecía una cita de cordales para el 15/09 a las 4:00 pm.»
+  > «Confirmar si la cita fue cancelada o si requiere corrección en el sistema.»
+
+  ```
+  18:43:48.220   citas.actualizada_en   ← el turno la cancela
+  18:43:53.933   escalamientos.creado_en ← el mismo turno le pregunta al doctor si se canceló
+  ```
+
+  Cinco segundos. Le preguntó a un humano algo que su propio turno acababa de resolver. **Y
+  escalar ahí era lo correcto:** quien ve que el sistema se desdice y no sabe por qué, llama a
+  alguien. El arreglo no es enseñarle a callarse — es quitarle la contradicción. Así que
+  `_sincronizar_con_calendar` devuelve también las **novedades**, y van delante de la lista:
+
+  ```
+  movida    «La clínica movió en su calendario la cita de X: estaba para el <vieja> y ahora
+             es el <nueva>. Es un hecho confirmado, no es un error del sistema…»
+  borrada   «La clínica eliminó de su calendario la cita de X que estaba para el <vieja>, así
+             que acaba de quedar CANCELADA… díselo con naturalidad y ofrécele otro horario.»
+  ```
+
+  La **hora vieja va dentro a propósito**: es la que el paciente oyó el turno pasado, y sin
+  ella el modelo ve un hueco en vez de una explicación. Solo se escribe cuando hay algo que
+  contar — un «tu cita sigue donde estaba» en cada consulta es ruido que acabaría repitiéndole
+  al paciente. Y esas horas **quedan autorizadas** igual que la vieja al reprogramar (no
+  negociable 13): sin eso, «la cita del 15/09 la eliminó la clínica» dispara
+  `sin_hora_no_verificada` y el escalamiento vuelve a entrar por la otra puerta.
 - **La credencial es `MAXICARE_GOOGLE_SA_B64`, no una ruta a un archivo.** `config.py`
   decía `MAXICARE_GOOGLE_CREDENTIALS_PATH`, que no existía en ningún `.env`; nadie lo notó
   porque ningún módulo leía ese campo. El nombre correcto es el que documenta `.env.ejemplo`.

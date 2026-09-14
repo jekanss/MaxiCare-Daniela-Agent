@@ -451,6 +451,18 @@ def corridas(url: str) -> int:
             en_base = cur.fetchone()[0]
     print(f"   y Neon queda corregido -> {marca(en_base == movida)} {en_base}")
 
+    # Y ademas tiene que DECIRLE al modelo que el cambio lo hizo la clinica. Sin eso ve que
+    # el sistema se desdice --el turno pasado dijo otra hora-- y escala; paso en produccion
+    # la misma tarde, cinco segundos despues de que la cancelacion entrara en la base.
+    explica = "clínica" in texto_movida and "no es un error" in texto_movida
+    print(f"   y explica quien la movio -> {marca(explica)} {texto_movida.splitlines()[0][:66]}")
+
+    # La otra mitad: borrado. Es la que disparo el escalamiento de verdad.
+    del agenda_de_la_clinica.eventos[evento_id]
+    texto_borrada = asyncio.run(h._consultar_citas(contexto(url, "573009994004", "Marta Regresa", agenda_de_la_clinica)))
+    dice_cancelada = "CANCELADA" in texto_borrada and "clínica" in texto_borrada
+    print(f"   borrada: dice por que -> {marca(dice_cancelada)} {texto_borrada.splitlines()[0][:66]}")
+
     print()
     if fallos:
         print(f"{fallos} comprobacion(es) fallaron.")

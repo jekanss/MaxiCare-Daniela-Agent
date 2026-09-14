@@ -1567,7 +1567,11 @@ def test_si_la_movieron_en_calendar_Daniela_dice_la_hora_NUEVA(monkeypatch):
     texto = asyncio.run(h._consultar_citas(ctx))
 
     assert f"{manana.day}/{manana.month}" in texto, texto
-    assert f"{INICIO.day}/{INICIO.month} a las" not in texto, "recito la hora vieja"
+    # La hora vieja SI sale, pero solo en el aviso de que la clinica la movio. Lo que no
+    # puede pasar es que siga figurando como la cita del paciente: eso es lo que lo mandaria
+    # a la clinica el dia que no le toca.
+    lista = texto.split("Citas activas de este número:")[1]
+    assert f"{INICIO.day}/{INICIO.month} a las" not in lista, "recito la hora vieja"
 
 
 def test_al_moverla_se_corrige_Neon_y_se_cambia_el_CUPO(monkeypatch):
@@ -1662,6 +1666,90 @@ def test_una_cita_SIN_evento_no_le_pregunta_nada_a_Google(monkeypatch):
     texto = asyncio.run(h._consultar_citas(ctx))
 
     assert "09:00" in texto and escrituras == []
+
+
+# ------------------------------------------------------------------------------------------
+# Y ademas hay que DECIRLE al modelo lo que acaba de pasar
+#
+# «¿Podria decirme cuando tengo cita de nuevo?» -- «En este momento no me aparece una cita
+# futura registrada. Ya estoy confirmando ese punto con el equipo.» El paciente habia borrado
+# el evento a mano, asi que la cancelacion era correcta. Lo que no era correcto es el aviso al
+# doctor, y el propio modelo dejo escrito por que escalo:
+#
+#     «La consulta actual no muestra citas futuras, AUNQUE EN TURNOS PREVIOS del mismo chat
+#      aparecia una cita de cordales para el 15/09 a las 4:00 pm.»
+#     «Confirmar si la cita fue cancelada o si requiere correccion en el sistema.»
+#
+# Medido en produccion: la cita se cancelo a las 18:43:48.220 y el escalamiento se registro a
+# las 18:43:53.933. CINCO SEGUNDOS, el mismo turno. El modelo le pregunto al doctor algo que
+# su propio turno acababa de resolver, porque la tool tiro la respuesta a la basura y le
+# devolvio el texto generico de «no hay citas».
+#
+# Escalar ante una contradiccion es lo correcto: quien ve que el sistema se desdice y no sabe
+# por que, llama a un humano. El arreglo no es ensenarle a callarse, es quitarle la
+# contradiccion.
+# ------------------------------------------------------------------------------------------
+
+
+def test_si_la_borraron_el_texto_DICE_QUE_LA_BORRO_LA_CLINICA(monkeypatch):
+    """Sin esto la cita desaparece sin explicacion y el modelo escala -- con razon."""
+    ctx = contexto(identidad_verificada=True, ahora=INICIO - timedelta(hours=1))
+    escrituras: list = []
+    _sincronizando(
+        monkeypatch,
+        ctx,
+        [_cita(inicio=INICIO, evento_calendar_id="ev-borrado", reserva_id=7)],
+        escrituras,
+    )
+
+    texto = asyncio.run(h._consultar_citas(ctx))
+
+    assert "clínica" in texto, texto
+    assert "CANCELADA" in texto
+    # La hora vieja tiene que aparecer: es la que el paciente oyo el turno pasado, y es lo
+    # unico que le permite al modelo atar una cosa con la otra en vez de ver un hueco.
+    assert "9:00" in texto
+    assert "no es un error" in texto, "hay que descartarle explicitamente el fallo de sistema"
+
+
+def test_si_la_movieron_el_texto_dice_que_la_movio_LA_CLINICA(monkeypatch):
+    """Misma contradiccion, al reves: el turno pasado dijo una hora y ahora dice otra.
+
+    Aqui no llego a escalar en produccion, pero la trampa es identica y depende de la suerte
+    del modelo. Decirselo cuesta una linea."""
+    ctx = contexto(identidad_verificada=True, ahora=INICIO - timedelta(hours=1))
+    manana = INICIO + timedelta(days=1)
+    ctx.calendario.eventos["ev-1"] = (manana, 60, "limpieza")
+    escrituras: list = []
+    _sincronizando(
+        monkeypatch,
+        ctx,
+        [_cita(inicio=INICIO, evento_calendar_id="ev-1", reserva_id=7)],
+        escrituras,
+    )
+
+    texto = asyncio.run(h._consultar_citas(ctx))
+
+    assert "clínica" in texto and "movió" in texto, texto
+    assert "no es un error" in texto
+
+
+def test_si_NO_cambio_nada_el_texto_no_lleva_ninguna_novedad(monkeypatch):
+    """El caso normal es que Calendar y Neon digan lo mismo. Un aviso en cada consulta seria
+    ruido que el modelo acabaria repitiendole al paciente: «tu cita sigue donde estaba»."""
+    ctx = contexto(identidad_verificada=True, ahora=INICIO - timedelta(hours=1))
+    ctx.calendario.eventos["ev-1"] = (INICIO, 60, "limpieza")
+    escrituras: list = []
+    _sincronizando(
+        monkeypatch,
+        ctx,
+        [_cita(inicio=INICIO, evento_calendar_id="ev-1", reserva_id=7)],
+        escrituras,
+    )
+
+    texto = asyncio.run(h._consultar_citas(ctx))
+
+    assert "clínica" not in texto and "no es un error" not in texto, texto
 
 
 def test_consultar_citas_exige_identidad_como_las_tres_de_escritura():

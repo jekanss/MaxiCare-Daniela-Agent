@@ -1411,7 +1411,7 @@ DIAS_HACIA_ATRAS_AL_SINCRONIZAR = 2
 
 async def _sincronizar_con_calendar(
     ctx: ContextoDaniela, citas: list[dict[str, Any]]
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], list[str]]:
     """Devuelve esas citas como están HOY en Google Calendar, corrigiendo Neon si hace falta.
 
     ------------------------------------------------------------------------------------
@@ -1442,10 +1442,32 @@ async def _sincronizar_con_calendar(
     ahí, en el calendario que él mira, y negarle la realidad a Neon solo consigue que Daniela
     vuelva a mentir. Queda sin reserva --la columna lo admite-- y con un `log.warning`, que es
     lo que un humano puede ver y corregir.
+
+    ------------------------------------------------------------------------------------
+    Y lo segundo que devuelve: las NOVEDADES (14/09/2026, tarde)
+    ------------------------------------------------------------------------------------
+
+    Corregir Neon en silencio no bastaba. El paciente borró su evento a mano, la cita se
+    canceló bien, y Daniela contestó «no me aparece una cita futura registrada; ya estoy
+    confirmando ese punto con el equipo»: escaló. Lo dejó escrito ella misma en el
+    escalamiento --«la consulta actual no muestra citas futuras, AUNQUE EN TURNOS PREVIOS
+    aparecía una cita de cordales para el 15/09»--, y las marcas de tiempo cierran el caso:
+    la cita se canceló a las 18:43:48 y el aviso al doctor salió a las 18:43:53. Cinco
+    segundos. **Le preguntó a un humano algo que su propio turno acababa de resolver.**
+
+    Y escalar ahí era lo correcto: quien ve que el sistema se desdice y no sabe por qué,
+    llama a alguien. Lo que estaba mal es que no supiera por qué, teniéndolo delante. Así que
+    lo que esta función corrige en la base sale también en el texto, con la hora VIEJA
+    dentro: sin ella el modelo ve un hueco en vez de una explicación, y no puede atar lo que
+    dijo el turno pasado con lo que lee ahora.
+
+    Solo cuando hay algo que contar. Un «tu cita sigue donde estaba» en cada consulta es
+    ruido que el modelo acabaría repitiéndole al paciente.
     """
     if not citas:
-        return citas
+        return citas, []
 
+    novedades: list[str] = []
     al_dia: list[dict[str, Any]] = []
     for cita in citas:
         evento_id = cita.get("evento_calendar_id")
@@ -1469,6 +1491,13 @@ async def _sincronizar_con_calendar(
         if evento is None:
             log.info("la cita %s ya no está en Calendar: se cancela", cita["id"])
             await _con_base(ctx, partial(_cancelar_porque_ya_no_esta, cita))
+            novedades.append(
+                f"La clínica eliminó de su calendario la cita de {cita['tratamiento']} que "
+                f"estaba para el {_formatear_hora(cita['inicio'])}, así que acaba de quedar "
+                "CANCELADA. Es un hecho confirmado, no es un error del sistema y no hay nada "
+                "que verificar: díselo al paciente con naturalidad, discúlpate por el cambio "
+                "y ofrécele buscar otro horario."
+            )
             continue
 
         if evento.inicio == cita["inicio"]:
@@ -1481,9 +1510,15 @@ async def _sincronizar_con_calendar(
             cita["inicio"],
             evento.inicio,
         )
+        novedades.append(
+            f"La clínica movió en su calendario la cita de {cita['tratamiento']}: estaba para "
+            f"el {_formatear_hora(cita['inicio'])} y ahora es el "
+            f"{_formatear_hora(evento.inicio)}. Es un hecho confirmado, no es un error del "
+            "sistema: si en un mensaje anterior le dijiste la hora vieja, corrígesela."
+        )
         al_dia.append(await _con_base(ctx, partial(_mover_porque_la_movieron, ctx, cita, evento)))
 
-    return al_dia
+    return al_dia, novedades
 
 
 def _cancelar_porque_ya_no_esta(cita: dict[str, Any], conn) -> None:
@@ -1540,13 +1575,25 @@ async def _consultar_citas(ctx: ContextoDaniela) -> str:
     # Contrastar ANTES de filtrar el pasado, no después: la cita que el doctor arrastró de
     # ayer a mañana está en el pasado según Neon y en el futuro según Calendar, y es
     # exactamente la que el paciente va a preguntar.
-    citas = await _sincronizar_con_calendar(ctx, await _con_base(ctx, buscar))
+    citas, novedades = await _sincronizar_con_calendar(ctx, await _con_base(ctx, buscar))
     citas = [c for c in citas if c["inicio"] >= ctx.ahora]
 
+    # Lo que acaba de cambiar va DELANTE de la lista. Es lo que explica por qué esto no dice
+    # lo mismo que el turno anterior, y sin esa explicación el modelo escala (18:43:48 la
+    # cancelación, 18:43:53 el aviso al doctor).
+    aviso = "\n".join(novedades) + "\n\n" if novedades else ""
+    # Y esas horas quedan autorizadas, igual que la vieja al reprogramar y la cancelada al
+    # cancelar (no negociable 13). Es el mismo caso exacto: son horas que una tool acaba de
+    # leer de la base y que el paciente TIENE que oír para entender qué pasó. Sin esto,
+    # «la cita del 15/09 la eliminó la clínica» dispara `sin_hora_no_verificada` y el
+    # escalamiento que estamos quitando entra por la otra puerta.
+    ctx.turno.horas_autorizadas |= horas_de(aviso)
+
     if not citas:
-        # RESULTADO, no error, y sin una sola hora dentro: lo que el modelo lea aquí es lo
-        # único que tiene: cualquier hora que escriba después saldría de su memoria.
-        return (
+        # RESULTADO, no error, y sin una sola hora dentro salvo las del aviso: lo que el
+        # modelo lea aquí es lo único que tiene: cualquier hora que escriba después saldría
+        # de su memoria.
+        return aviso + (
             "Este número no tiene ninguna cita futura registrada. NO afirmes que tiene una "
             "ni menciones ninguna hora. Si quiere agendar, consulta la disponibilidad."
         )
@@ -1556,7 +1603,7 @@ async def _consultar_citas(ctx: ContextoDaniela) -> str:
         f"{cita['nombre_completo']}. Id de la cita: {cita['id']}."
         for cita in citas
     )
-    texto = f"Citas activas de este número:\n{lineas}"
+    texto = f"{aviso}Citas activas de este número:\n{lineas}"
     # Igual que en `reprogramar` y `cancelar`: la hora que una tool acaba de leer de la base
     # queda autorizada. Sin esto, «tu cita es el martes a las 9» dispara
     # `sin_hora_no_verificada` y el paciente que solo preguntaba cuándo era su cita recibe

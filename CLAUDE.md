@@ -195,7 +195,14 @@ una —qué se midió, qué costó— está en la regla que cubre ese archivo.
    **si la hora destino está llena la cita se mueve igual**, sin reserva y con un warning: el
    doctor ya decidió meterla ahí. Lo mide el paso 5b de `scripts/probar_calendario.py`, que
    es donde se comprueba lo único que un doble no puede: que un evento borrado devuelva
-   `None`.
+   `None`. **Y lo que corrige lo DICE en el texto de la tool, con la hora vieja dentro.**
+   Corregir en silencio dejaba al modelo viendo al sistema desdecirse —el turno pasado le
+   dijo al paciente «15/09 a las 4pm», este dice que no hay ninguna cita— y escalaba: medido
+   la misma tarde, cancelación a las 18:43:48 y aviso al doctor a las 18:43:53, cinco
+   segundos, preguntándole a un humano lo que su propio turno acababa de resolver. Escalar
+   ante una contradicción es lo correcto; lo que había que quitar era la contradicción. Esas
+   horas quedan autorizadas como la vieja al reprogramar (no negociable 13): sin eso el
+   escalamiento vuelve por `sin_hora_no_verificada`.
 
 # Dónde está el resto
 
