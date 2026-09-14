@@ -965,6 +965,18 @@ def _agendar(
             f"evento no aparece en la agenda: {_escapar(str(e))[:200]}. Créalo a mano.",
         )
 
+    # ESTA VÍA NO PROGRAMA RECORDATORIO, y el hueco se deja visible a propósito.
+    #
+    # Las otras tres formas de crear una cita --`crear_cita`, `reprogramar_cita` y la
+    # corrección contra Calendar-- encolan la suya. Esta no. Añadirlo aquí es un
+    # `insertar_seguimiento` dentro de este mismo `with`, pero sería una cuarta vía de
+    # escritura en producción que ningún paso de la spec de recordatorios diseñó ni probó, y
+    # el canal del relevo tiene sus propias reglas (no negociables 15, 17 y 19) que nadie ha
+    # contrastado con la cola. Va en su propia tarea, no en una ronda de arreglos.
+    #
+    # Lo que sí se arregló es la promesa: los dos mensajes que decían «y sus recordatorios»
+    # eran anteriores a que existiera ningún despachador --inocuos entonces, falsos ahora-- y
+    # una promesa falsa a un doctor es peor que una función ausente.
     with persistencia.conectar(database_url) as conn:
         paciente_id = persistencia.asegurar_paciente(
             conn, nombre_completo=nombre, telefono=telefono
@@ -988,8 +1000,9 @@ def _agendar(
         True,
         f"✅ <b>Cita registrada: {_formatear(inicio)}</b>\n"
         f"{_escapar(tratamiento)}\n"
-        "Toma el cupo, está en el calendario de la clínica y el paciente entra en los "
-        "recordatorios.",
+        "Toma el cupo y está en el calendario de la clínica.\n"
+        "<i>Esta cita NO entra en los recordatorios automáticos: si quieres que le llegue "
+        "uno, escríbele tú.</i>",
     )
 
 
@@ -1141,7 +1154,7 @@ async def pedir_el_nombre(
             "<b>¿Cómo se llama el paciente?</b>\n\n"
             "<code>María Fernanda Ríos</code>\n\n"
             "<b>Tu próximo mensaje en este hilo NO le llega al paciente.</b>\n"
-            "<i>Con esto queda su cita en la agenda y sus recordatorios.</i>",
+            "<i>Con esto queda su cita en la agenda.</i>",
             tema_id=tema_id,
             silencioso=False,
         )

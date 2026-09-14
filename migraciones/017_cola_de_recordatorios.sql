@@ -44,6 +44,12 @@ ALTER TABLE conversaciones
 CREATE INDEX IF NOT EXISTS ix_seguimientos_por_despachar ON seguimientos (fecha_objetivo)
     WHERE enviado_en IS NULL AND anulado_en IS NULL;
 
+-- Y el de la 001 se va: el de arriba lo REEMPLAZA, no lo acompaña. Conviviendo, cada INSERT
+-- y cada UPDATE de la tabla mantiene dos índices en vez de uno, y el viejo indexa justo las
+-- filas que ya nadie busca -- las anuladas, que para él siguen estando pendientes. `IF
+-- EXISTS` para que correr esta migración dos veces no falle, como las dieciséis anteriores.
+DROP INDEX IF EXISTS ix_seguimientos_pendientes;
+
 INSERT INTO configuracion (clave, valor, descripcion) VALUES
     ('hora_recordatorio_vispera', '18',
      'Hora a la que salen los recordatorios de las citas del dia siguiente. Entero, hora de Bogota.'),

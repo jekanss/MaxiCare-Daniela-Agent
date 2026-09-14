@@ -28,14 +28,21 @@ siempre no lo decide el modelo.
 
 ## Alcance
 
-Dentro:
+Dentro (y **lo que la rama entregó de verdad** va anotado en cada línea, porque no coincide con
+lo que esta lista prometía):
 
-- Tres recordatorios, todos atados a una cita real.
-- El despachador, colgado del barrido que ya corre en `runtime.py`.
-- La programación automática desde `crear_cita`, `reprogramar_cita` y `cancelar_cita`.
-- La cascada de anulación cuando la cita cambia.
-- `WhatsApp.enviar_plantilla`.
-- El parte diario de citas a los doctores, por WhatsApp.
+- Tres recordatorios, todos atados a una cita real. → **Entregado uno**, `recordatorio_cita`.
+  Los otros dos no se disparan desde ninguna parte: ver la sección 1.
+- El despachador, colgado del barrido que ya corre en `runtime.py`. → **Entregado**, en su propia
+  tarea y no dentro del barrido de relevos: aquel no arranca sin Telegram y los recordatorios no
+  dependen de Telegram para nada.
+- La programación automática desde `crear_cita`, `reprogramar_cita` y `cancelar_cita`. →
+  **Entregado**, y también desde la corrección contra Calendar (sección 3).
+- La cascada de anulación cuando la cita cambia. → **Entregado.**
+- `WhatsApp.enviar_plantilla`. → **Entregado**, con el nombre de la plantilla y su código de
+  idioma en configuración. Vacío el nombre, el despachador decide y no manda.
+- El parte diario de citas a los doctores, por WhatsApp. → **NO construido**, y correctamente:
+  sus dos condiciones siguen sin existir. Ver la sección 9.
 
 Fuera, por decisión explícita:
 
@@ -53,6 +60,19 @@ Fuera, por decisión explícita:
 | `recordatorio_cita` | se crea o reprograma una cita | ver la tabla de la sección 2 |
 | `reactivacion_inasistencia` | alguien marca `asistio = false` | 24 h después de la cita perdida |
 | `reactivacion_cancelacion` | el paciente cancela | 7 días después, si no reagendó |
+
+**De los tres, la rama entrega UNO.** `recordatorio_cita` se programa, se despacha y llega a un
+paciente. `reactivacion_cancelacion` y `reactivacion_inasistencia` **no se disparan desde ninguna
+parte**: ninguna línea de `src/` las encola. El plan de implementación lo aplazó a propósito y el
+argumento era razonable —`reactivacion_inasistencia` depende de `asistio`, que nadie escribe, y
+`reactivacion_cancelacion` es comercial y no clínica—, pero esta sección nunca se enmendó y
+seguía prometiendo tres. Se enmienda aquí: **queda uno**, y la fila de la tabla de la sección 3
+que dice «`cancelar_cita` … programa `reactivacion_cancelacion` a 7 días» describe algo que hoy
+no ocurre.
+
+El despachador sí está preparado para los otros dos —un seguimiento sin `cita_inicio` llega a la
+decisión y se anula con motivo `sin_plantilla`, porque la única plantilla que existe es la del
+recordatorio de cita— así que lo que falta es el disparador y una plantilla, no el proceso.
 
 `reactivacion_inasistencia` tiene una **dependencia dura que hoy no está construida**: nada en
 `src/` escribe la columna `asistio`. La pantalla de Agenda existe en el frontend con datos de
@@ -112,8 +132,18 @@ crear_cita()  ──┬─→ tomar_cupo
 |---|---|
 | `crear_cita` | programa el recordatorio de esa cita |
 | `reprogramar_cita` | anula el de la cita vieja, programa el de la hora nueva |
-| `cancelar_cita` | anula el recordatorio, programa `reactivacion_cancelacion` a 7 días |
-| marcar `asistio = false` | programa `reactivacion_inasistencia` a 24 h |
+| la corrección contra Calendar | igual que `reprogramar_cita`: anula el viejo y programa el de la hora a la que el doctor la arrastró |
+| `cancelar_cita` | anula el recordatorio (la `reactivacion_cancelacion` a 7 días **no se programa**: ver la sección 1) |
+| marcar `asistio = false` | **nada**: la columna no la escribe nadie todavía (sección 1) |
+
+La tercera fila no estaba en la primera versión de esta tabla, y su ausencia era un agujero:
+arrastrar la cita con el ratón es el gesto natural del doctor, y la primera guarda del
+despachador caza el **borrado** de una cita, no su movimiento. El recordatorio viejo seguía
+apuntando a una cita que existe, con la hora de la que el paciente acababa de salir.
+
+El ejemplo de la sección 5 está implementado **hasta el tercer paso**: la creación, la
+reprogramación y la anulación al cancelar. El cuarto —la reactivación a 7 días y su anulación al
+reagendar— no.
 
 `programar_seguimiento` **se conserva** y no cambia de firma: sigue siendo la vía para lo que
 sí es criterio del modelo — «llámenme el lunes que lo pienso». Lo que deja de depender del
@@ -326,7 +356,9 @@ Depende de dos cosas que **no existen hoy** y que hay que construir antes:
    `MAXICARE_TELEGRAM_CHAT_DOCTORES` (`config.py:400`); no hay ningún teléfono de doctor en
    ninguna parte del proyecto.
 
-Hasta que existan las dos, este componente no se construye.
+Hasta que existan las dos, este componente no se construye. **Y no se construyó**, que es lo
+correcto: la revisión de la rama entera lo confirmó contrastando las dos condiciones —no hay
+plantilla propia y no hay ningún teléfono de doctor en el proyecto—. Esta sección no cambia.
 
 ## 10. Migración 017
 
@@ -343,6 +375,8 @@ ALTER TABLE seguimientos
 CREATE INDEX IF NOT EXISTS ix_seguimientos_por_despachar ON seguimientos (fecha_objetivo)
     WHERE enviado_en IS NULL AND anulado_en IS NULL;
 
+DROP INDEX IF EXISTS ix_seguimientos_pendientes;
+
 INSERT INTO configuracion (clave, valor, descripcion) VALUES
     ('hora_recordatorio_vispera',   '18',
      'Hora a la que salen los recordatorios de las citas del día siguiente. Entero, hora de Bogotá.'),
@@ -354,7 +388,10 @@ ON CONFLICT (clave) DO NOTHING;
 `cita_id` es **nullable**: `programar_seguimiento` sigue pudiendo encolar algo que no cuelga de
 ninguna cita («llámenme el lunes»). Un seguimiento con `cita_id` NULL se salta G1, G2 y G3.
 
-El índice parcial reemplaza a `ix_seguimientos_pendientes` de la 001, que no conoce `anulado_en`.
+El índice parcial reemplaza a `ix_seguimientos_pendientes` de la 001, que no conoce
+`anulado_en`. **Reemplaza quiere decir que el viejo se borra**, no que conviven: dos índices
+sobre la misma tabla son dos que mantener en cada INSERT y en cada UPDATE, y el viejo indexa
+justo las filas que ya nadie busca — las anuladas, que para él siguen estando pendientes.
 
 Las dos filas de `configuracion` son enteros porque `leer_configuracion` hace `int(valor)` sobre
 todo lo que encuentra — la misma razón por la que `atiende_domingo` es 0/1 y no un booleano
@@ -379,7 +416,8 @@ semana caído manda de golpe todos los recordatorios atrasados.
 |---|---|---|
 | Las siete guardas, una por una, con reloj fijado | `tests/test_seguimientos.py` | no |
 | La cascada completa del ejemplo de la sección 5 | `tests/test_seguimientos_neon.py` (`-m neon`) | no |
-| Dos despachadores contra la misma fila | `tests/test_seguimientos_neon.py` | no |
+| Dos despachadores contra la misma fila | `scripts/probar_recordatorios.py` (comprobación 6) | no |
+| Los cuatro huecos de la plantilla, con `cita_inicio` en UTC | `tests/test_seguimientos.py` | no |
 | El despachador de punta a punta contra Neon | `scripts/probar_recordatorios.py` | no |
 | Envío real de la plantilla a un número de prueba | `scripts/probar_recordatorios.py --enviar` | **sí** |
 
@@ -390,7 +428,17 @@ El reloj se fija por `ctx.ahora`, como ya hace `_programar_seguimiento` (`herram
 ninguna prueba depende del reloj de la máquina.
 
 La prueba de concurrencia exige la conexión **directa** a Neon, sin el `-pooler.` del host: con
-el pooler no hay dos sesiones de verdad y `SKIP LOCKED` no se ejercita.
+el pooler no hay dos sesiones de verdad y `SKIP LOCKED` no se ejercita. Por eso acabó en
+`scripts/probar_recordatorios.py` y no en `tests/test_seguimientos_neon.py`, donde esta tabla la
+había puesto: el script ya va contra la conexión directa por diseño, y un archivo de pruebas que
+construyera su propia conexión directa para una sola prueba se saltaría el aislamiento por
+esquema que comparte con el resto.
+
+La prueba de los cuatro huecos llama a `_parametros_del_recordatorio` de verdad, y con un
+`cita_inicio` en UTC — que es como lo devuelve psycopg. Es la única función de todo esto cuyo
+resultado lee un paciente, estuvo sin prueba hasta la revisión de la rama entera, y en ese hueco
+cabían dos defectos que llegaban al WhatsApp del paciente: la hora en UTC y la fecha repetida.
+Una prueba que escribe los cuatro valores a mano no cubre nada de esto.
 
 ## 13. Orden de construcción
 
