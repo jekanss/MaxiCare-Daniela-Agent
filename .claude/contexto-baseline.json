@@ -2,8 +2,43 @@
   "version": 1,
   "mediciones": [
     {
+      "fecha": "2026-09-13T22:20:00.000Z",
+      "fuente": "context",
+      "nota": "ANTES. Salida de /context pegada por el usuario, sesion en curso.",
+      "tokensArranque": 113000,
+      "desglose": {
+        "instrucciones": 7000,
+        "mcp": 189200,
+        "skills": 9600,
+        "systemPrompt": 4200
+      },
+      "cambiosAplicados": []
+    },
+    {
+      "fecha": "2026-09-13T22:45:00.000Z",
+      "fuente": "estimacion",
+      "nota": "DESPUES de escribir los cambios. Suma de tokensEstimados de lo que carga siempre, segun scripts/inventario.mjs. NO es comparable con la medicion anterior: aquella es /context real y esta es una estimacion del script. La cifra real la dara el proximo /context en sesion nueva.",
+      "tokensArranque": 3932,
+      "desglose": {
+        "instrucciones": 3932,
+        "mcp": null,
+        "skills": null,
+        "systemPrompt": null
+      },
+      "cambiosAplicados": [
+        "CLAUDE.md raiz: de 223 a 186 lineas (3962 -> 3174 tok est.)",
+        "Creada .claude/rules/scripts-entregables.md con paths: scripts/** (885 tok, ya no carga siempre)",
+        "El caso de la variable de entorno vacia baja a .claude/rules/despliegue.md",
+        "despliegue.md gana runtime.py y config.py en sus paths",
+        "El detalle de /clearstate sale de CLAUDE.md: ya estaba, mas completo, en atencion-whatsapp.md",
+        "permissions.deny sobre docs/superpowers/plans/**/* y docs/superpowers/specs/**/*",
+        "Corregido 'No hay remoto todavia': si hay origin, y main va muy por delante"
+      ]
+    },
+    {
       "fecha": "2026-09-14T04:05:00.000Z",
       "fuente": "context",
+      "nota": "DESPUES de apagar los MCP sin uso. Salida de /context pegada por el usuario. Es la primera cifra real posterior a los cambios de la pasada anterior, asi que cierra tambien aquella medicion, que se habia quedado en estimacion.",
       "tokensArranque": 43400,
       "desglose": {
         "instrucciones": 5700,
@@ -18,9 +53,9 @@
         "Plugin engineering@knowledge-work-plugins: desactivado (ocho servidores MCP)"
       ],
       "notas": [
-        "tokensArranque = system prompt + system tools + memory files + skills. No incluye Messages (115,1k en esa sesion) ni el autocompact buffer (33k), que no son coste de arranque.",
-        "La categoria MCP ya no aparece en el desglose. Antes de estos cambios el mismo cliente reportaba ~189,2k en definiciones diferidas de MCP.",
-        "El repositorio no se modifico: no habia hallazgo con ahorro material. Nueve reglas en .claude/rules/ ya tienen paths:, el CLAUDE.md raiz tiene 186 lineas (objetivo <200) y los dos candidatos a deny ya estaban en .gitignore.",
+        "tokensArranque = system prompt + system tools + memory files + skills. No incluye Messages (115,1k en esa sesion) ni el autocompact buffer (33k), que no son coste de arranque. La medicion ANTES no separaba systemTools, asi que los dos totales no se restan directamente: lo comparable es el desglose linea a linea.",
+        "La categoria MCP desaparecio del desglose: 189200 -> 0.",
+        "El repositorio no se modifico en esta pasada: no habia hallazgo con ahorro material. Las nueve reglas de .claude/rules/ ya tienen paths:, el CLAUDE.md raiz quedo en 186 lineas (objetivo <200) y los dos candidatos a deny ya estaban en .gitignore.",
         "Medicion real del CLAUDE.md raiz: 5,5k tokens, frente a los 3,17k que estimaba el inventario a 4 bytes por token. La estimacion del script se queda corta; no son cifras equivalentes.",
         "Siguen activos los siete conectores de claude.ai (Apollo.io, AgentMail, Figma, Gmail, Google Drive, Google Calendar, Microsoft 365). No se pueden apagar desde la maquina: se gestionan en la cuenta."
       ]
