@@ -1787,14 +1787,24 @@ def seguimientos_por_despachar(
     los recordatorios del día a la vez-- haría cientos de viajes a Neon.
 
     `FOR UPDATE ... SKIP LOCKED` es lo que permite que dos instancias no manden el mismo
-    recordatorio dos veces. `OF s` porque el bloqueo va sobre la cola, no sobre las citas.
+    recordatorio dos veces -pero solo HASTA el primer `commit` de la conexión que hizo esta
+    lectura. Después de ese `commit`, quien impide el duplicado ya no es este candado: sigue
+    leyendo.
 
-    Esta función no hace `commit` ni `rollback`: las filas devueltas quedan tomadas mientras
-    dure la transacción de `conn`. Es quien LLAMA -el despachador- quien tiene que soltarlas,
-    confirmando o revirtiendo esa MISMA conexión. Soltarlas antes de tiempo -por ejemplo
-    abriendo una conexión nueva para cada `UPDATE` posterior- deja a esa conexión nueva
-    esperando el candado que la primera todavía no soltó, o a otra instancia recogiendo una
-    fila que esta sigue procesando.
+    Esta función no hace `commit` ni `rollback`. El candado es de la TRANSACCIÓN, no de la
+    fila: mientras `conn` no confirme ni revierta, las N filas del lote entero siguen tomadas.
+    Pero en cuanto `conn` haga su PRIMER `commit()` -y quien llama esta función normalmente
+    escribe sobre cada fila con su propio `commit()` interno, uno por fila- se suelta el
+    candado del LOTE COMPLETO, no solo el de la fila que se acaba de escribir: las filas
+    2..N, que siguen con `enviado_en`/`anulado_en` en NULL, quedan libres para que OTRA
+    instancia las recoja en su propio ciclo mientras esta sigue procesando las suyas.
+
+    Por eso el candado de aquí NO es, por sí solo, la protección contra el envío duplicado
+    -solo lo es hasta esa primera escritura-. La protección real, para la escritura que de
+    verdad importa, vive en la propia sentencia de esa escritura: `marcar_seguimiento_enviado`
+    solo marca si `enviado_en` seguía en NULL en ese instante, así que una fila que ya se llevó
+    otra instancia no se vuelve a marcar ni se manda dos veces, la haya recogido quien la haya
+    recogido.
     """
     with conn.cursor() as cur:
         cur.execute(
@@ -1819,7 +1829,7 @@ def seguimientos_por_despachar(
         return [dict(zip(columnas, fila)) for fila in cur.fetchall()]
 
 
-def marcar_seguimiento_enviado(conn, id_seguimiento: int) -> None:
+def marcar_seguimiento_enviado(conn, id_seguimiento: int) -> bool:
     """Va ANTES del envío y con su propio commit, y el orden es deliberado.
 
     No hay transacción que cubra una llamada HTTP a Meta. Si se enviara primero y el proceso
@@ -1828,12 +1838,23 @@ def marcar_seguimiento_enviado(conn, id_seguimiento: int) -> None:
     detectara, porque todas seguirían diciendo que sí.
 
     Antes marcar y no mandar, que mandar y no marcar.
+
+    Devuelve `True` si ESTA llamada fue la que marcó la fila, `False` si ya la había marcado
+    otra. El `WHERE ... AND enviado_en IS NULL` es la comprobación: es lo que sostiene la
+    garantía de no duplicado desde el instante en que `seguimientos_por_despachar` suelta el
+    candado del lote entero con el primer `commit` de la conexión (ver su docstring) -a partir
+    de ahí dos instancias pueden tener la MISMA fila en su lista en memoria, y sin este
+    `AND` las dos la marcarían y las dos mandarían. Quien llama tiene que mirar el resultado:
+    con `False`, no se manda nada y no se cuenta como enviada -otra instancia ya se la llevó.
     """
     with conn.cursor() as cur:
         cur.execute(
-            "UPDATE seguimientos SET enviado_en = now() WHERE id = %s", (id_seguimiento,)
+            "UPDATE seguimientos SET enviado_en = now() WHERE id = %s AND enviado_en IS NULL",
+            (id_seguimiento,),
         )
+        marcada = cur.rowcount == 1
     conn.commit()
+    return marcada
 
 
 def aplazar_seguimiento(conn, id_seguimiento: int, *, hasta: datetime) -> None:

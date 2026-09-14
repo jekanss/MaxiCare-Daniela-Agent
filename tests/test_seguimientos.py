@@ -292,11 +292,11 @@ def test_el_despachador_marca_antes_de_enviar(monkeypatch):
     monkeypatch.setattr(
         persistencia, "ultimo_mensaje_del_paciente", lambda conn, telefono: None
     )
-    monkeypatch.setattr(
-        persistencia,
-        "marcar_seguimiento_enviado",
-        lambda conn, id_seguimiento: orden.append("marcar"),
-    )
+    def _marcar(conn, id_seguimiento):
+        orden.append("marcar")
+        return True  # nadie más se la llevó: es esta llamada la que la marca
+
+    monkeypatch.setattr(persistencia, "marcar_seguimiento_enviado", _marcar)
     monkeypatch.setattr(
         persistencia,
         "anotar_recordatorio_en_conversacion",
@@ -324,12 +324,20 @@ def test_el_despachador_marca_antes_de_enviar(monkeypatch):
 
 def test_sin_plantilla_configurada_decide_pero_no_manda(monkeypatch):
     """Es lo que permite colgar el despachador en producción y comprobar que decide bien antes
-    de que mande un solo mensaje."""
+    de que mande un solo mensaje.
+
+    Y la fila NO se marca `enviado_en`: con la plantilla apagada, `despachar` mira si hay
+    plantilla ANTES de llamar a `marcar_seguimiento_enviado`, así que la cola no se consume en
+    silencio. Si se marcara igual, el modo de prueba se comería el recordatorio para siempre
+    -nunca se reintentaría, ni el día en que alguien configure la plantilla-, que es peor que
+    los cuatro hallazgos de la revisión juntos. Esta prueba lo deja en firme.
+    """
     import asyncio
 
     from maxicare_daniela import persistencia, seguimientos as s
 
     mandados: list[str] = []
+    marcadas: list[int] = []
 
     monkeypatch.setattr(persistencia, "conectar", lambda url: _ConexionFalsa())
     monkeypatch.setattr(persistencia, "leer_configuracion", lambda conn: {})
@@ -339,9 +347,12 @@ def test_sin_plantilla_configurada_decide_pero_no_manda(monkeypatch):
     monkeypatch.setattr(
         persistencia, "ultimo_mensaje_del_paciente", lambda conn, telefono: None
     )
-    monkeypatch.setattr(
-        persistencia, "marcar_seguimiento_enviado", lambda conn, id_seguimiento: None
-    )
+
+    def _marcar(conn, id_seguimiento):
+        marcadas.append(id_seguimiento)
+        return True
+
+    monkeypatch.setattr(persistencia, "marcar_seguimiento_enviado", _marcar)
 
     class _WhatsAppFalso:
         async def enviar_plantilla(self, telefono, **k):
@@ -359,6 +370,7 @@ def test_sin_plantilla_configurada_decide_pero_no_manda(monkeypatch):
     )
 
     assert mandados == []
+    assert marcadas == []
     assert recuento["enviados"] == 0
 
 
@@ -387,7 +399,7 @@ def test_el_despachador_lee_la_hora_de_vispera_de_la_configuracion(monkeypatch):
         persistencia, "ultimo_mensaje_del_paciente", lambda conn, telefono: None
     )
     monkeypatch.setattr(
-        persistencia, "marcar_seguimiento_enviado", lambda conn, id_seguimiento: None
+        persistencia, "marcar_seguimiento_enviado", lambda conn, id_seguimiento: True
     )
     monkeypatch.setattr(
         persistencia,
@@ -410,3 +422,208 @@ def test_el_despachador_lee_la_hora_de_vispera_de_la_configuracion(monkeypatch):
     )
 
     assert recuento == {"enviados": 1, "anulados": 0, "aplazados": 0, "fallidos": 0}
+
+
+def test_un_seguimiento_sin_cita_se_anula_por_falta_de_plantilla_y_no_se_manda(monkeypatch):
+    """Un seguimiento sin cita (p. ej. una reactivación) llega a "enviar" -G1-G3 se saltan sin
+    cita que mirar, ver `test_un_seguimiento_sin_cita_se_salta_las_tres_primeras_guardas`- pero
+    la plantilla que manda `despachar` es LA DE RECORDATORIO DE CITA. Sin `cita_inicio`,
+    mandarla dejaría al paciente leyendo el literal "PENDIENTE" por WhatsApp: no es una regla
+    de negocio, es que hoy no existe una plantilla para este tipo. Se anula con un motivo
+    propio, no se manda, y el canal ni se toca.
+    """
+    import asyncio
+
+    from maxicare_daniela import persistencia, seguimientos as s
+
+    anuladas: list[tuple[int, str]] = []
+    mandados: list[str] = []
+
+    monkeypatch.setattr(persistencia, "conectar", lambda url: _ConexionFalsa())
+    monkeypatch.setattr(persistencia, "leer_configuracion", lambda conn: {})
+    monkeypatch.setattr(
+        persistencia,
+        "seguimientos_por_despachar",
+        lambda conn, **k: [
+            fila(cita_id=None, cita_inicio=None, cita_estado=None, tipo="reactivacion")
+        ],
+    )
+    monkeypatch.setattr(
+        persistencia, "ultimo_mensaje_del_paciente", lambda conn, telefono: None
+    )
+    monkeypatch.setattr(
+        persistencia,
+        "anular_seguimiento",
+        lambda conn, id_seguimiento, *, motivo: anuladas.append((id_seguimiento, motivo)),
+    )
+
+    class _WhatsAppFalso:
+        async def enviar_plantilla(self, telefono, **k):
+            mandados.append(telefono)
+            return "wamid.X"
+
+    recuento = asyncio.run(
+        s.despachar(
+            database_url="postgresql://no-se-usa",
+            whatsapp=_WhatsAppFalso(),
+            jornada=JORNADA,
+            plantilla="recordatorio_cita",
+            ahora=momento(16, 18),
+        )
+    )
+
+    assert anuladas == [(1, "sin_plantilla")]
+    assert mandados == []
+    assert recuento == {"enviados": 0, "anulados": 1, "aplazados": 0, "fallidos": 0}
+
+
+def test_una_fila_que_decidir_anula_no_toca_el_canal(monkeypatch):
+    """Cubre la salida `anulados` del bucle -G1, una cita cancelada-, que ninguna prueba
+    ejercitaba todavía: hasta ahora solo se probaba `enviados`."""
+    import asyncio
+
+    from maxicare_daniela import persistencia, seguimientos as s
+
+    anuladas: list[tuple[int, str]] = []
+    mandados: list[str] = []
+
+    monkeypatch.setattr(persistencia, "conectar", lambda url: _ConexionFalsa())
+    monkeypatch.setattr(persistencia, "leer_configuracion", lambda conn: {})
+    monkeypatch.setattr(
+        persistencia,
+        "seguimientos_por_despachar",
+        lambda conn, **k: [fila(cita_estado="cancelada")],
+    )
+    monkeypatch.setattr(
+        persistencia, "ultimo_mensaje_del_paciente", lambda conn, telefono: None
+    )
+    monkeypatch.setattr(
+        persistencia,
+        "anular_seguimiento",
+        lambda conn, id_seguimiento, *, motivo: anuladas.append((id_seguimiento, motivo)),
+    )
+
+    class _WhatsAppFalso:
+        async def enviar_plantilla(self, telefono, **k):
+            mandados.append(telefono)
+            return "wamid.X"
+
+    recuento = asyncio.run(
+        s.despachar(
+            database_url="postgresql://no-se-usa",
+            whatsapp=_WhatsAppFalso(),
+            jornada=JORNADA,
+            plantilla="recordatorio_cita",
+            ahora=momento(16, 18),
+        )
+    )
+
+    assert anuladas == [(1, "cita_cambio")]
+    assert mandados == []
+    assert recuento == {"enviados": 0, "anulados": 1, "aplazados": 0, "fallidos": 0}
+
+
+def test_una_fila_que_decidir_aplaza_no_toca_el_canal(monkeypatch):
+    """Cubre la salida `aplazados` del bucle -G4, el relevo puesto-, con el `hasta` que
+    `decidir` calculó de verdad y no uno inventado por la prueba."""
+    import asyncio
+
+    from maxicare_daniela import persistencia, seguimientos as s
+
+    aplazadas: list[tuple[int, object]] = []
+    mandados: list[str] = []
+
+    monkeypatch.setattr(persistencia, "conectar", lambda url: _ConexionFalsa())
+    monkeypatch.setattr(persistencia, "leer_configuracion", lambda conn: {})
+    monkeypatch.setattr(
+        persistencia,
+        "seguimientos_por_despachar",
+        lambda conn, **k: [fila(tomada_por="Dr. Pérez")],
+    )
+    monkeypatch.setattr(
+        persistencia, "ultimo_mensaje_del_paciente", lambda conn, telefono: None
+    )
+    monkeypatch.setattr(
+        persistencia,
+        "aplazar_seguimiento",
+        lambda conn, id_seguimiento, *, hasta: aplazadas.append((id_seguimiento, hasta)),
+    )
+
+    class _WhatsAppFalso:
+        async def enviar_plantilla(self, telefono, **k):
+            mandados.append(telefono)
+            return "wamid.X"
+
+    recuento = asyncio.run(
+        s.despachar(
+            database_url="postgresql://no-se-usa",
+            whatsapp=_WhatsAppFalso(),
+            jornada=JORNADA,
+            plantilla="recordatorio_cita",
+            ahora=momento(16, 18),
+        )
+    )
+
+    assert aplazadas == [(1, momento(16, 18, 30))]
+    assert mandados == []
+    assert recuento == {"enviados": 0, "anulados": 0, "aplazados": 1, "fallidos": 0}
+
+
+def test_los_intentos_agotados_marcan_fallido_y_no_se_pierden(monkeypatch):
+    """Cubre la salida `fallidos` del bucle: el único camino de error de la única ruta que
+    llega a un paciente real. El `sleep` entre intentos se dobla para no pagar los segundos
+    reales -son `INTENTOS_DE_ENVIO - 1` esperas de `SEGUNDOS_ENTRE_INTENTOS`- y la prueba fija
+    el número de intentos: hoy nadie más lo garantiza."""
+    import asyncio
+
+    from maxicare_daniela import canales, persistencia, seguimientos as s
+
+    llamadas_al_canal: list[str] = []
+    fallos: list[tuple[int, str]] = []
+
+    async def _sin_espera(_segundos):
+        return None
+
+    # OJO al doblar esto: `s.asyncio` ES el módulo `asyncio` -no una copia-, así que
+    # `lambda _: asyncio.sleep(0)` se llamaría a sí misma para siempre (`asyncio.sleep` ya
+    # es la propia lambda cuando corre). Por eso el reemplazo no puede invocar `asyncio.sleep`
+    # ni directa ni indirectamente: tiene que ser una corrutina que no espere nada.
+    monkeypatch.setattr(s.asyncio, "sleep", _sin_espera)
+    monkeypatch.setattr(persistencia, "conectar", lambda url: _ConexionFalsa())
+    monkeypatch.setattr(persistencia, "leer_configuracion", lambda conn: {})
+    monkeypatch.setattr(
+        persistencia, "seguimientos_por_despachar", lambda conn, **k: [fila()]
+    )
+    monkeypatch.setattr(
+        persistencia, "ultimo_mensaje_del_paciente", lambda conn, telefono: None
+    )
+    monkeypatch.setattr(
+        persistencia, "marcar_seguimiento_enviado", lambda conn, id_seguimiento: True
+    )
+    monkeypatch.setattr(
+        persistencia,
+        "anotar_fallo_de_seguimiento",
+        lambda conn, id_seguimiento, *, fallo: fallos.append((id_seguimiento, fallo)),
+    )
+
+    class _WhatsAppQueSiempreFalla:
+        async def enviar_plantilla(self, telefono, **k):
+            llamadas_al_canal.append(telefono)
+            raise canales.ErrorDeCanal("Meta no contestó")
+
+    recuento = asyncio.run(
+        s.despachar(
+            database_url="postgresql://no-se-usa",
+            whatsapp=_WhatsAppQueSiempreFalla(),
+            jornada=JORNADA,
+            plantilla="recordatorio_cita",
+            ahora=momento(16, 18),
+        )
+    )
+
+    assert len(llamadas_al_canal) == s.INTENTOS_DE_ENVIO == 3
+    assert len(fallos) == 1
+    id_seguimiento, fallo = fallos[0]
+    assert id_seguimiento == 1
+    assert fallo.startswith("ErrorDeCanal")
+    assert recuento == {"enviados": 0, "anulados": 0, "aplazados": 0, "fallidos": 1}

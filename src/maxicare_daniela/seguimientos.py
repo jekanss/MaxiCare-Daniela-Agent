@@ -293,12 +293,16 @@ async def despachar(
     y los aplazamientos se escriben, y no sale un solo mensaje. Es lo que permite comprobar en
     producción que decide bien antes de arriesgar un WhatsApp.
 
-    Todo el ciclo corre sobre UNA sola conexión, y no una por operación. La razón no es de
-    estilo: `persistencia.seguimientos_por_despachar` deja las filas tomadas con `FOR UPDATE OF
-    s SKIP LOCKED` y es quien LLAMA -esta función- quien las libera, confirmando o revirtiendo
-    esa misma conexión. Abrir una conexión nueva para cada `UPDATE` no libera nada antes de
-    tiempo: intentaría escribir sobre una fila que la conexión de la lectura sigue bloqueando
-    sin haber confirmado un `commit`, y el proceso se quedaría esperando su propio candado.
+    Todo el ciclo corre sobre UNA sola conexión, y no una por operación: es quien LLAMA -esta
+    función- quien libera lo que `seguimientos_por_despachar` deja tomado con `FOR UPDATE OF s
+    SKIP LOCKED`. Pero esa liberación NO espera al final del ciclo: las cinco funciones de
+    escritura hacen su propio `commit()` sobre esta misma conexión, y el PRIMER `commit` ya
+    suelta el candado del LOTE entero -no solo el de la fila que se acaba de escribir-, porque
+    el candado es de la transacción y no de la fila. Desde ese instante, cualquier otra
+    instancia puede recoger las filas 2..N de este mismo lote en su propio ciclo. Por eso la
+    protección real contra el envío duplicado no es el candado -que ya se soltó- sino que
+    `marcar_seguimiento_enviado` solo marca si `enviado_en` seguía en NULL: si otra instancia
+    ya se la llevó, aquí no se manda ni se cuenta.
     """
     momento_actual = ahora or datetime.now(jornada_zona())
     recuento = {"enviados": 0, "anulados": 0, "aplazados": 0, "fallidos": 0}
@@ -349,14 +353,52 @@ async def despachar(
                 recuento["aplazados"] += 1
                 continue
 
-            # MARCAR PRIMERO. Ver `persistencia.marcar_seguimiento_enviado`: no hay transacción
-            # que cubra una llamada a Meta, y mandar dos veces es peor que perder uno.
-            await asyncio.to_thread(persistencia.marcar_seguimiento_enviado, conn, fila["id"])
+            # A partir de aquí `decision.accion == "enviar"`. Un seguimiento sin cita (p. ej.
+            # una reactivación) llega hasta aquí porque G1-G3 se saltan sin cita que mirar (ver
+            # `decidir`), pero la plantilla que manda este despachador es LA DE RECORDATORIO DE
+            # CITA: sin fecha ni hora que meter en sus huecos, mandarla dejaría al paciente
+            # leyendo el literal "PENDIENTE" por WhatsApp -la regla dura 3 es para el código,
+            # nunca fue permiso para mandarle el marcador a un paciente-. No es una regla de
+            # negocio que decida no avisarle: es que HOY no existe una plantilla para este tipo
+            # de seguimiento. Se anula -no se pierde, queda visible en la tabla con su motivo-
+            # hasta que exista una.
+            if fila.get("cita_inicio") is None:
+                await asyncio.to_thread(
+                    persistencia.anular_seguimiento, conn, fila["id"], motivo="sin_plantilla"
+                )
+                recuento["anulados"] += 1
+                continue
+
+            if telefono:
+                # G7 se apoya en que este número YA tiene (o está a punto de tener) un
+                # recordatorio en esta tanda. Se anota aquí, antes de mirar si hay plantilla o
+                # canal, para que el modo "decide y no manda" (`plantilla == ""`) agrupe igual
+                # que agruparía con el canal encendido: si se anotara solo tras un envío que
+                # salió bien, dos citas del mismo número decidirían las dos "enviar" con la
+                # plantilla apagada, que no es la decisión que se tomaría con la plantilla
+                # puesta.
+                numeros_de_esta_tanda.add(telefono)
 
             if not plantilla or whatsapp is None or not telefono:
                 log.info(
                     "seguimiento %s: decidido ENVIAR y no se manda (plantilla o canal sin "
-                    "configurar). El despachador decide, el canal está apagado.",
+                    "configurar). El despachador decide, el canal está apagado, y la fila "
+                    "SIGUE pendiente -no se marca- para cuando exista la plantilla.",
+                    fila["id"],
+                )
+                continue
+
+            # MARCAR PRIMERO. Ver `persistencia.marcar_seguimiento_enviado`: no hay transacción
+            # que cubra una llamada a Meta, y mandar dos veces es peor que perder uno. El
+            # `bool` que devuelve es la protección real contra el duplicado -ver el docstring
+            # de esta función-: si ya la marcó otra instancia, aquí no se manda ni se cuenta.
+            marcada = await asyncio.to_thread(
+                persistencia.marcar_seguimiento_enviado, conn, fila["id"]
+            )
+            if not marcada:
+                log.info(
+                    "seguimiento %s: otra instancia ya la marcó enviada entre la lectura y "
+                    "este punto; no se manda ni se cuenta aquí.",
                     fila["id"],
                 )
                 continue
@@ -396,7 +438,6 @@ async def despachar(
                 tipo=fila["tipo"],
                 cuando=momento_actual,
             )
-            numeros_de_esta_tanda.add(telefono)
             recuento["enviados"] += 1
 
     return recuento
