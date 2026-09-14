@@ -9,6 +9,7 @@ import pytest
 
 from maxicare_daniela import persistencia
 from maxicare_daniela.calendario import ZONA_BOGOTA
+from maxicare_daniela.config import cargar_dotenv
 
 pytestmark = pytest.mark.neon
 
@@ -22,8 +23,6 @@ def _url_de_pruebas() -> str:
     `options` como parámetro de arranque, y cada archivo de la suite de Neon usa su propio
     esquema para que un `DROP SCHEMA` de una prueba no le borre las tablas a otra.
     """
-    from maxicare_daniela.config import cargar_dotenv
-
     cargar_dotenv()
     base = os.environ.get("MAXICARE_DATABASE_URL", "").strip()
     if not base:
