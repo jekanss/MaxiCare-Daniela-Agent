@@ -275,6 +275,19 @@ def test_cancelar_se_intenta_recuperar_UNA_vez_y_despues_se_cancela():
     assert "no llega, que para la clínica es peor" in texto
 
 
+def test_la_oferta_de_horarios_no_se_queda_en_la_manana():
+    """La otra mitad del defecto del miércoles 16, y esta es del modelo, no de la tool.
+
+    Con la tool arreglada la lista ya abarca el día; si el modelo sigue tomando las tres
+    primeras, el paciente sigue sin enterarse de que hay tarde. Y al revés importa igual:
+    quien YA pidió «en la mañana» no quiere que le ofrezcan las cuatro.
+    """
+    texto = agentes.INSTRUCCIONES_DANIELA
+
+    assert "ofrécele al menos una de cada" in texto
+    assert "Si él ya pidió una franja, respétala" in texto
+
+
 def test_una_confirmacion_no_se_queda_en_el_dato_seco():
     """Pedido por MaxiCare el 13/09/2026, sobre dos mensajes reales de producción:
 

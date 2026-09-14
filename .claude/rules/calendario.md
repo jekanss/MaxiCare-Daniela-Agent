@@ -40,6 +40,16 @@ El `CLAUDE.md` raíz lleva la regla en una línea. Aquí está el porqué.
   dijo que no puede. Cuesta una consulta a Neon y una llamada a Google en un camino que
   antes no tocaba ninguna: se paga antes de tomar ningún cupo, y a cambio la conversación
   no muere en «esa hora no puede ser».
+- **La oferta de un día entero se REPARTE; las alternativas de una hora llena, no.** Son dos
+  preguntas distintas con la misma función detrás. `_huecos_libres` cortaba en los seis
+  primeros bloques seguidos, y un día completo devolvía 08:00–13:00: **la tarde no le llegaba
+  al modelo**, así que Daniela ofreció «8:00 am, 9:00 am o 10:00 am» con el miércoles entero
+  libre (producción, 13/09/2026). Ahora `consultar_disponibilidad` pasa `repartir=True` y
+  `_repartidas` conserva el primero y el último repartiendo el resto a pasos iguales. Los
+  otros dos usos —las alternativas de `crear_cita` y `_proximos_huecos`— siguen SIN repartir
+  a propósito: quien pidió las nueve quiere lo más parecido a las nueve, no las cinco de la
+  tarde. La otra mitad es del prompt: con la lista repartida, tomar las tres primeras seguía
+  dejando fuera la tarde.
 - **El horario vive en DOS sitios y se mueven juntos.** Los números (`hora_apertura`,
   `hora_cierre`, `hora_cierre_sabado`, `atiende_domingo`, tabla `configuracion`, migración
   012) filtran la rejilla; la fila `_general`/`horario` de la base de conocimiento es la que

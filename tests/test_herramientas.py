@@ -859,6 +859,59 @@ def test_agendar_registra_al_paciente_y_lo_deja_verificado(monkeypatch):
     assert ctx.identidad_verificada is True
 
 
+def test_la_oferta_de_un_dia_entero_llega_hasta_la_TARDE(monkeypatch):
+    """Visto en producción el 13/09/2026:
+
+        «Sí, tengo disponibilidad el miércoles 16 a las 8:00 am, 9:00 am o 10:00 am.»
+
+    Con el día entero libre. `_huecos_libres` cortaba en los seis primeros bloques SEGUIDOS
+    --08:00 a 13:00-- así que la tarde no llegaba siquiera al modelo: no es que la
+    descartara, es que no existía para él. El paciente que solo puede después de almorzar se
+    iba creyendo que no había nada.
+    """
+    ctx = contexto(ahora=datetime(2026, 9, 16, 6, 0, tzinfo=h.ZONA_BOGOTA))
+
+    async def base_falsa(_ctx, trabajo):
+        return trabajo(BaseFalsa())
+
+    monkeypatch.setattr(h, "_con_base", base_falsa)
+    monkeypatch.setattr(persistencia, "bloques_ocupados", lambda conn, desde, hasta: {})
+
+    texto = asyncio.run(
+        h._consultar_disponibilidad(ctx, "2026-09-16T00:00:00", "2026-09-16T23:59:59")
+    )
+
+    assert "08:00" in texto, "la primera hora del día tiene que seguir estando"
+    de_la_tarde = [hora for hora in ("14:00", "15:00", "16:00") if hora in texto]
+    assert de_la_tarde, f"ninguna hora de la tarde en la oferta: {texto}"
+
+
+def test_pero_las_alternativas_de_una_hora_llena_siguen_siendo_las_MAS_CERCANAS(monkeypatch):
+    """El reparto es para «¿qué tienes el miércoles?», no para «esa hora está llena».
+
+    Son preguntas distintas: la primera pide un panorama del día, la segunda pide lo más
+    parecido a la hora que el paciente ya eligió. Repartir ahí le ofrecería las cinco de la
+    tarde a quien acaba de pedir las nueve de la mañana.
+    """
+    ctx = contexto(ahora=datetime(2026, 9, 16, 6, 0, tzinfo=h.ZONA_BOGOTA))
+
+    async def base_falsa(_ctx, trabajo):
+        return trabajo(BaseFalsa())
+
+    monkeypatch.setattr(h, "_con_base", base_falsa)
+    monkeypatch.setattr(persistencia, "bloques_ocupados", lambda conn, desde, hasta: {})
+
+    libres = asyncio.run(
+        h._proximos_huecos(ctx, datetime(2026, 9, 16, 8, 0, tzinfo=h.ZONA_BOGOTA))
+    )
+
+    assert libres[:3] == [
+        datetime(2026, 9, 16, 8, 0, tzinfo=h.ZONA_BOGOTA),
+        datetime(2026, 9, 16, 9, 0, tzinfo=h.ZONA_BOGOTA),
+        datetime(2026, 9, 16, 10, 0, tzinfo=h.ZONA_BOGOTA),
+    ], "dejaron de ser las más cercanas"
+
+
 # ==========================================================================================
 # Pedir una hora con la clínica cerrada no es un callejón sin salida
 # ==========================================================================================
