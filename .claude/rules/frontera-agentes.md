@@ -8,9 +8,18 @@ paths:
 El evaluador disparaba con «¿sabes alguna cosa de unicornios?» —«usando la asistente como
 asistente general»— y dejaba pasar «¿qué opinas del partido de ayer?». La misma categoría
 con dos veredictos opuestos, y el que disparaba estaba mal: el prompt de Daniela **ya** dice
-que ante algo ajeno lo reconduzca «con naturalidad y calidez, nunca con un mensaje de
+que ante algo ajeno diga que no con amabilidad y reconduzca, «nunca con un mensaje de
 bloqueo». El guardrail le quitaba el turno antes de que pudiera hacerlo, y quien preguntó
 una tontería recibía el mensaje seguro **y una alerta a los doctores**.
+
+Que el guardrail la deje hablar no significa que conteste. Son dos cosas separadas y las dos
+se decidieron el mismo día: el guardrail no la frena, y el prompt le prohíbe **dar el dato
+ajeno** —«ni por encima ni solo esta vez»—. La versión intermedia, que decía «lo reconoces
+con naturalidad y calidez», autorizaba sin querer el contenido: en producción contestó a
+medias la primera vez y del todo la segunda, cuando el paciente insistió. La regla de no
+repetirse, tres líneas más abajo en el mismo prompt, empuja a variar la respuesta ante una
+insistencia — y ceder es la variación más barata. Por eso ahora dice, literal, que se cambian
+las palabras y no la respuesta.
 
 La línea buena: **le pide que HAGA algo ajeno** —escribir código, traducir, resolver un
 ejercicio— frente a **menciona** algo ajeno. Solo lo primero es usar el sistema para otra
