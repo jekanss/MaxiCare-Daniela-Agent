@@ -101,6 +101,21 @@ quien cambia de número o tiene una cita que le abrió la clínica.
 - **`cancelar_cita` devuelve la hora que cancela**, por lo mismo: «tu cita del martes a las 2
   quedó cancelada» es la frase natural.
 
+**Y el HORARIO DE LA CLÍNICA también son horas.** «Atendemos de 8:00 a 5:00» deja dos horas
+concretas en el mensaje, y `revisar_horas` no distingue una promesa de cita de un dato
+general: si nada las autorizó, bloquea el mensaje entero. MaxiCare pidió el 13/09/2026 que
+Daniela «le recuerde los horarios de atención» a quien pregunte fuera de hora, y eso era
+literalmente imposible hasta que las dos tools que devuelven `_texto_fuera_de_horario`
+—`crear_cita` y `reprogramar_cita`, más `consultar_disponibilidad`— empezaron a registrar
+sus horas. El docstring de esa función lo dice: quien la llame, autoriza.
+
+El mismo defecto estaba en `consultar_base_conocimiento`, que registraba `cifras_autorizadas`
+y no `horas_autorizadas`. La fila `_general`/`horario` es la que Daniela **recita** cuando
+le preguntan a qué hora abren: el paciente recibía «te escribe el doctor» por hacer la
+pregunta más inocente del repertorio. La base de conocimiento es contenido aprobado por
+MaxiCare palabra por palabra, así que el criterio de confianza es el mismo que ya se le
+aplicaba a las cifras.
+
 En los dos casos el fallo era el peor posible, porque **la escritura ya había ocurrido**: la
 cita movida o cancelada en Neon y en Calendar, y el paciente recibiendo el mensaje seguro.
 Se presentaba a la hora vieja, a un cupo que el sistema acababa de liberar.
