@@ -386,6 +386,12 @@ class Config:
     #: funciona entero sin relevo, igual que funcionaba antes de la 6C.
     telegram_webhook_secret: str = ""
 
+    #: El nombre EXACTO de la plantilla aprobada en el Business Manager de Meta. Vacía
+    #: --su default-- apaga el envío: el despachador decide igual, anota lo que habría hecho y
+    #: no manda nada. Es lo que permite comprobar en producción que decide bien antes de que
+    #: mande un solo mensaje. PENDIENTE: el nombre real, que sale de la aprobación de Meta.
+    plantilla_recordatorio: str = ""
+
     @classmethod
     def desde_entorno(cls) -> Config:
         return cls(
@@ -399,6 +405,7 @@ class Config:
             telegram_bot_token=_opcional("MAXICARE_TELEGRAM_BOT_TOKEN"),
             telegram_chat_doctores=_opcional("MAXICARE_TELEGRAM_CHAT_DOCTORES"),
             telegram_webhook_secret=_opcional("MAXICARE_TELEGRAM_WEBHOOK_SECRET"),
+            plantilla_recordatorio=_opcional("MAXICARE_PLANTILLA_RECORDATORIO"),
             google_sa_b64=_opcional("MAXICARE_GOOGLE_SA_B64"),
             google_calendar_id=_opcional("MAXICARE_GOOGLE_CALENDAR_ID"),
             modelo_daniela=_opcional("MAXICARE_MODELO_DANIELA", MODELO_DANIELA),

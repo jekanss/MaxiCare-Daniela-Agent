@@ -204,3 +204,57 @@ def test_un_seguimiento_sin_cita_se_salta_las_tres_primeras_guardas():
         ultimo_mensaje=None,
     )
     assert d.accion == "enviar"
+
+
+class _RespuestaFalsa:
+    status_code = 200
+
+    def json(self):
+        return {"messages": [{"id": "wamid.PRUEBA"}]}
+
+
+def test_la_plantilla_viaja_con_el_tipo_y_los_parametros_que_meta_espera(monkeypatch):
+    """Meta rechaza el envío entero si el cuerpo no lleva `type: template` con su `language`.
+
+    Se comprueba la FORMA del cuerpo y no solo que no lance: un cuerpo mal armado devuelve 200
+    en algunos casos y el mensaje no llega nunca.
+    """
+    import asyncio
+
+    from maxicare_daniela import canales
+
+    enviados = {}
+
+    class _ClienteFalso:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, url, headers=None, json=None):
+            enviados["url"] = url
+            enviados["cuerpo"] = json
+            return _RespuestaFalsa()
+
+    monkeypatch.setattr(canales.httpx, "AsyncClient", _ClienteFalso)
+
+    wa = canales.WhatsApp("token-falso", "phone-id-falso")
+    wamid = asyncio.run(
+        wa.enviar_plantilla(
+            "573001112233",
+            plantilla="recordatorio_cita",
+            parametros=["Ana", "miércoles 17/9", "09:00", "Limpieza"],
+        )
+    )
+
+    assert wamid == "wamid.PRUEBA"
+    cuerpo = enviados["cuerpo"]
+    assert cuerpo["type"] == "template"
+    assert cuerpo["template"]["name"] == "recordatorio_cita"
+    assert cuerpo["template"]["language"] == {"code": "es"}
+    valores = [p["text"] for p in cuerpo["template"]["components"][0]["parameters"]]
+    assert valores == ["Ana", "miércoles 17/9", "09:00", "Limpieza"]
