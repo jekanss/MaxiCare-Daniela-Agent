@@ -190,15 +190,15 @@ def cuatro_cancelar_anula_el_recordatorio(conn, ctx, id_cita: str) -> None:
 
 def cinco_el_despachador_decide_sin_enviar(conn, url: str, ctx) -> None:
     """Con `plantilla=""` el despachador corre entero y no manda nada. Es el modo con el que
-    se cuelga en produccion para ver que decide bien antes de arriesgar un WhatsApp.
+    se cuelga en producción para ver que decide bien antes de arriesgar un WhatsApp.
 
-    El RECUENTO por si solo no demuestra nada: cuando `despachar` decide "enviar" y la
-    plantilla esta vacia, el codigo ni siquiera incrementa un contador --ver su docstring,
-    "SIGUE pendiente -no se marca-, para cuando exista la plantilla"--, asi que el recuento
-    sale identico si no hubiera habido ninguna fila que mirar. Por eso las comprobaciones 2 a
-    4 ya dejaron el numero de esta cita SIN recordatorio vivo (se anulo al cancelar): esta
-    funcion crea uno nuevo, propio, y lo que prueba de verdad es que sigue EXACTAMENTE igual
-    -sin marcar, sin anular- despues del ciclo con la plantilla apagada.
+    El RECUENTO por sí solo no demuestra nada: cuando `despachar` decide "enviar" y la
+    plantilla está vacía, el código ni siquiera incrementa un contador --ver su docstring,
+    "SIGUE pendiente -no se marca-, para cuando exista la plantilla"--, así que el recuento
+    sale idéntico si no hubiera habido ninguna fila que mirar. Por eso las comprobaciones 2 a
+    4 ya dejaron el número de esta cita SIN recordatorio vivo (se anuló al cancelar): esta
+    función crea uno nuevo, propio, y lo que prueba de verdad es que sigue EXACTAMENTE igual
+    -sin marcar, sin anular- después del ciclo con la plantilla apagada.
     """
     inicio = bloque_habil(ctx.jornada, ctx.ahora, 6).replace(
         hour=9, minute=0, second=0, microsecond=0
@@ -215,11 +215,19 @@ def cinco_el_despachador_decide_sin_enviar(conn, url: str, ctx) -> None:
         )
     )
     with conn.cursor() as cur:
+        # Filtrado por `c.inicio`, y no por "el único recordatorio vivo que quede": las
+        # comprobaciones 2-4 dejan el suyo anulado en el camino feliz, pero si la 4 fallara
+        # dejando uno huérfano vivo, un SELECT sin filtro ni ORDER BY podría recoger esa fila
+        # ajena y esta comprobación mentiría en vez de fallar con claridad. `inicio` es el
+        # mismo valor con el que se creó ESTA cita, en un bloque hábil que ninguna otra
+        # comprobación usa.
         cur.execute(
             """
-            SELECT id, fecha_objetivo FROM seguimientos
-             WHERE cita_id IS NOT NULL AND anulado_en IS NULL AND enviado_en IS NULL
-            """
+            SELECT s.id, s.fecha_objetivo
+              FROM seguimientos s JOIN citas c ON c.id = s.cita_id
+             WHERE c.inicio = %s AND s.anulado_en IS NULL AND s.enviado_en IS NULL
+            """,
+            (inicio,),
         )
         fila = cur.fetchone()
     if fila is None:
@@ -289,7 +297,7 @@ def seis_dos_despachadores_no_toman_la_misma_fila(url: str) -> None:
             conn.autocommit = False
             barrera.wait()
             filas = persistencia.seguimientos_por_despachar(
-                conn, ahora=datetime.now().astimezone() + timedelta(days=365)
+                conn, ahora=datetime.now(h.ZONA_BOGOTA) + timedelta(days=365)
             )
             tomadas.append([f["id"] for f in filas])
             # Se mantiene la transaccion abierta un instante: sin esto el bloqueo se suelta
@@ -334,7 +342,13 @@ def main() -> int:
                 telefono_completo="573000000000",
                 database_url=url,
                 calendario=CalendarioDoble(),
-                ahora=datetime.now().astimezone().replace(
+                # `h.ZONA_BOGOTA`, no la zona de la máquina: la clínica está en Bogotá, el
+                # servidor no necesariamente. Este mismo script corre en el VPS (CLAUDE.md),
+                # que casi siempre va en UTC -cinco horas por delante-, y con
+                # `datetime.now().astimezone()` ese desfase se cuela a la vez en los bloques
+                # hábiles, en la ventana de G5 y en la hora de víspera. Es el mismo defecto
+                # de "depende de cuándo se corre" con otra variable: dónde.
+                ahora=datetime.now(h.ZONA_BOGOTA).replace(
                     hour=9, minute=0, second=0, microsecond=0
                 ),
                 jornada=Jornada(),
