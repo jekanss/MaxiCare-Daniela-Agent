@@ -58,6 +58,12 @@ class BaseFalsa:
     def __init__(self) -> None:
         self.llamadas: list[str] = []
 
+    def commit(self) -> None:
+        """La cita y su recordatorio nacen en UNA transacción, así que el `commit` dejó de
+        estar dentro de `registrar_cita` y pasó a ser una línea de la tool. Sin este método
+        el doble no sirve para probar el camino que de verdad corre en producción."""
+        self.llamadas.append("commit")
+
 
 # ==========================================================================================
 # La regla más importante del sistema: la ausencia de dato es un dato
@@ -834,6 +840,9 @@ def test_agendar_registra_al_paciente_y_lo_deja_verificado(monkeypatch):
         "registrar_cita",
         lambda conn, **kw: (guardadas.append(kw), "cita-nueva")[1],
     )
+    # Lo mismo que en `_descripcion_del_evento`: esta prueba mira la ficha del paciente, no
+    # la cola, pero `guardar` corre entero contra los dobles.
+    monkeypatch.setattr(h.persistencia, "insertar_seguimiento", lambda conn, **kw: True)
 
     texto = asyncio.run(
         h._crear_cita(
@@ -1084,6 +1093,10 @@ def _descripcion_del_evento(monkeypatch, ctx, solicitud) -> str:
     monkeypatch.setattr(h, "_con_base", base_falsa)
     monkeypatch.setattr(h.persistencia, "asegurar_paciente", lambda conn, **kw: 42)
     monkeypatch.setattr(h.persistencia, "registrar_cita", lambda conn, **kw: "cita-nueva")
+    # `guardar` programa el recordatorio en la misma transacción desde la tarea 4. Estas
+    # pruebas no miran la cola, pero sí corren `guardar` de verdad: sin el doble, la
+    # inserción llegaría a `BaseFalsa` buscando un cursor.
+    monkeypatch.setattr(h.persistencia, "insertar_seguimiento", lambda conn, **kw: True)
 
     asyncio.run(h._crear_cita(ctx, solicitud))
     (descripcion,) = ctx.calendario.descripciones.values()
@@ -1788,6 +1801,205 @@ def test_la_clave_de_reprogramacion_depende_del_destino_y_no_de_un_delta():
     assert primera == segunda
     assert primera != otra_hora
     assert destino.isoformat() in primera
+
+
+# ==========================================================================================
+# El recordatorio lo emite el código, y la cascada lo sigue cuando la cita cambia
+# ==========================================================================================
+
+
+def test_crear_cita_programa_el_recordatorio_sin_que_el_modelo_lo_pida(monkeypatch):
+    """El no-negociable 2 aplicado a otro caso: lo que tiene que ocurrir siempre no lo decide
+    el modelo.
+
+    Hasta hoy el recordatorio dependía de que el modelo llamara a `programar_seguimiento`, y ni
+    el prompt de `agentes.py` ni `crear_cita` la mencionaban. En la práctica la cola estaba
+    vacía: la tool existía desde la fase 3 y nadie la llamaba.
+    """
+    programados: list[dict] = []
+    ctx = contexto(ahora=datetime(2026, 9, 14, 9, 0, tzinfo=h.ZONA_BOGOTA))
+
+    async def base_falsa(_ctx, trabajo):
+        return trabajo(BaseFalsa())
+
+    monkeypatch.setattr(h, "_con_base", base_falsa)
+    monkeypatch.setattr(persistencia, "bloques_ocupados", lambda conn, desde, hasta: {})
+    monkeypatch.setattr(persistencia, "tomar_cupo", lambda conn, **kw: (55, 1))
+    monkeypatch.setattr(persistencia, "cita_viva_de_reserva", lambda conn, reserva_id: None)
+    monkeypatch.setattr(persistencia, "asegurar_paciente", lambda conn, **kw: 7)
+    monkeypatch.setattr(persistencia, "registrar_cita", lambda conn, **kw: "cita-nueva")
+
+    def _insertar(conn, **kwargs):
+        programados.append(kwargs)
+        return True
+
+    monkeypatch.setattr(persistencia, "insertar_seguimiento", _insertar)
+
+    texto = asyncio.run(
+        h._crear_cita(
+            ctx,
+            SolicitudCita(
+                nombre_completo="Ana Gómez",
+                # Tres días vista: cae en la banda de la víspera.
+                inicio=datetime(2026, 9, 17, 9, 0, tzinfo=h.ZONA_BOGOTA),
+                tratamiento="limpieza",
+                clave_idempotencia="da-igual",
+            ),
+        )
+    )
+
+    assert "Cita confirmada" in texto
+    assert len(programados) == 1, "la cita se creó sin recordatorio"
+    assert programados[0]["tipo"] == "recordatorio_cita"
+    assert programados[0]["cita_id"] == "cita-nueva"
+    # La víspera a las 18:00, no «24 horas antes».
+    assert programados[0]["fecha_objetivo"] == datetime(
+        2026, 9, 16, 18, 0, tzinfo=h.ZONA_BOGOTA
+    )
+    # La clave la arma `ctx.clave`, nunca el modelo: lleva el id de la conversación delante.
+    assert programados[0]["clave_idempotencia"].startswith("conv-1:")
+    assert "da-igual" not in programados[0]["clave_idempotencia"]
+
+
+def test_una_cita_a_dos_horas_no_deja_recordatorio(monkeypatch):
+    """El piso de las 4 horas, desde la tool: el paciente acaba de hablar con Daniela."""
+    programados: list[dict] = []
+    ctx = contexto(ahora=datetime(2026, 9, 15, 9, 0, tzinfo=h.ZONA_BOGOTA))
+
+    async def base_falsa(_ctx, trabajo):
+        return trabajo(BaseFalsa())
+
+    monkeypatch.setattr(h, "_con_base", base_falsa)
+    monkeypatch.setattr(persistencia, "bloques_ocupados", lambda conn, desde, hasta: {})
+    monkeypatch.setattr(persistencia, "tomar_cupo", lambda conn, **kw: (55, 1))
+    monkeypatch.setattr(persistencia, "cita_viva_de_reserva", lambda conn, reserva_id: None)
+    monkeypatch.setattr(persistencia, "asegurar_paciente", lambda conn, **kw: 7)
+    monkeypatch.setattr(persistencia, "registrar_cita", lambda conn, **kw: "cita-nueva")
+    monkeypatch.setattr(
+        persistencia,
+        "insertar_seguimiento",
+        lambda conn, **kw: programados.append(kw) or True,
+    )
+
+    asyncio.run(
+        h._crear_cita(
+            ctx,
+            SolicitudCita(
+                nombre_completo="Ana Gómez",
+                inicio=datetime(2026, 9, 15, 11, 0, tzinfo=h.ZONA_BOGOTA),
+                tratamiento="limpieza",
+                clave_idempotencia="da-igual",
+            ),
+        )
+    )
+
+    assert programados == []
+
+
+def test_cancelar_cita_anula_su_recordatorio(monkeypatch):
+    """Sin esto, el paciente que canceló recibe la víspera un recordatorio de la cita que
+    canceló. Es el fallo que `cita_id` existe para hacer detectable."""
+    anulados: list[tuple[str, str]] = []
+    ctx = contexto(
+        ahora=datetime(2026, 9, 14, 9, 0, tzinfo=h.ZONA_BOGOTA),
+        id_paciente=7,
+        identidad_verificada=True,
+    )
+
+    cita = {
+        "id": "cita-1",
+        "reserva_id": 55,
+        "conversacion_id": "conv-1",
+        "paciente_id": 7,
+        "nombre_completo": "Ana Gómez",
+        "telefono": "573001112233",
+        "tratamiento": "limpieza",
+        "inicio": datetime(2026, 9, 17, 9, 0, tzinfo=h.ZONA_BOGOTA),
+        "duracion_minutos": 60,
+        "evento_calendar_id": None,
+        "estado": "confirmada",
+    }
+
+    async def base_falsa(_ctx, trabajo):
+        return trabajo(BaseFalsa())
+
+    monkeypatch.setattr(h, "_con_base", base_falsa)
+    monkeypatch.setattr(persistencia, "leer_cita", lambda conn, id_cita: cita)
+    monkeypatch.setattr(persistencia, "marcar_cita_cancelada", lambda conn, id_cita, **k: None)
+    monkeypatch.setattr(persistencia, "liberar_cupo", lambda conn, reserva_id: None)
+    monkeypatch.setattr(
+        persistencia,
+        "anular_seguimientos_de_cita",
+        lambda conn, cita_id, **k: (anulados.append((cita_id, k["motivo"])), 1)[1],
+    )
+
+    asyncio.run(
+        h._cancelar_cita(
+            ctx,
+            SolicitudCancelacion(
+                id_cita="cita-1", motivo="no puedo ir", clave_idempotencia="cita-1"
+            ),
+        )
+    )
+
+    assert anulados == [("cita-1", "cita_cancelada")]
+
+
+def test_reprogramar_anula_el_recordatorio_viejo_y_deja_uno_nuevo(monkeypatch):
+    """La otra mitad de la cascada: mover la cita sin mover su recordatorio le recuerda al
+    paciente la hora de la que acaba de salir.
+
+    La clave del recordatorio nuevo lleva el DESTINO dentro. Sin él, la segunda reprogramación
+    de la misma cita chocaría con la clave de la primera y `insertar_seguimiento` la
+    descartaría en silencio: la cita movida dos veces se quedaría sin recordatorio.
+    """
+    anulados: list[tuple[str, str]] = []
+    programados: list[dict] = []
+    ctx = contexto(
+        ahora=datetime(2026, 9, 14, 9, 0, tzinfo=h.ZONA_BOGOTA),
+        identidad_verificada=True,
+    )
+    cita = {
+        "id": "cita-1",
+        "reserva_id": 5,
+        "paciente_id": None,
+        "telefono": "573001112233",
+        "estado": "confirmada",
+        "evento_calendar_id": None,
+        "inicio": datetime(2026, 9, 16, 9, 0, tzinfo=h.ZONA_BOGOTA),
+    }
+    destino = datetime(2026, 9, 17, 9, 0, tzinfo=h.ZONA_BOGOTA)
+    pasos: list[int] = []
+
+    async def base_falsa(_ctx, trabajo):
+        pasos.append(1)
+        if len(pasos) == 1:
+            return ("ok", cita, (6, 1), [])
+        return trabajo(BaseFalsa())  # `aplicar`: corre de verdad contra los dobles
+
+    monkeypatch.setattr(h, "_con_base", base_falsa)
+    monkeypatch.setattr(persistencia, "mover_cita", lambda conn, id_cita, **kw: None)
+    monkeypatch.setattr(persistencia, "liberar_cupo", lambda conn, reserva_id: None)
+    monkeypatch.setattr(
+        persistencia,
+        "anular_seguimientos_de_cita",
+        lambda conn, cita_id, **k: (anulados.append((cita_id, k["motivo"])), 1)[1],
+    )
+    monkeypatch.setattr(
+        persistencia,
+        "insertar_seguimiento",
+        lambda conn, **kw: programados.append(kw) or True,
+    )
+
+    asyncio.run(h._reprogramar_cita(ctx, "cita-1", destino.isoformat()))
+
+    assert anulados == [("cita-1", "cita_reprogramada")]
+    assert len(programados) == 1, "la cita se movió y se quedó sin recordatorio"
+    assert programados[0]["cita_id"] == "cita-1"
+    assert programados[0]["fecha_objetivo"] == datetime(
+        2026, 9, 16, 18, 0, tzinfo=h.ZONA_BOGOTA
+    )
+    assert destino.isoformat() in programados[0]["clave_idempotencia"]
 
 
 # ==========================================================================================

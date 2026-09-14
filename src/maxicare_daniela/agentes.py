@@ -327,18 +327,48 @@ def instrucciones_daniela(ctx, agente) -> str:
         )
 
     ahora = getattr(contexto, "ahora", None)
-    if ahora is None:
-        return texto
+    if ahora is not None:
+        texto = (
+            f"{texto}\n\n"
+            "AHORA MISMO\n"
+            f"Hoy es {fecha_en_palabras(ahora)}, hora de Bogotá.\n"
+            "Con eso resuelves tú las fechas relativas —«el próximo 16 de septiembre», «este "
+            "viernes», «mañana»— a la próxima ocurrencia futura, y las pasas a las tools en "
+            "ISO completo. No preguntes el año si se deduce sin ambigüedad. Pregunta solo el "
+            "dato que falte cuando de verdad haya más de una lectura posible."
+        )
 
-    return (
-        f"{texto}\n\n"
-        "AHORA MISMO\n"
-        f"Hoy es {fecha_en_palabras(ahora)}, hora de Bogotá.\n"
-        "Con eso resuelves tú las fechas relativas —«el próximo 16 de septiembre», «este "
-        "viernes», «mañana»— a la próxima ocurrencia futura, y las pasas a las tools en ISO "
-        "completo. No preguntes el año si se deduce sin ambigüedad. Pregunta solo el dato "
-        "que falte cuando de verdad haya más de una lectura posible."
-    )
+    # El último, porque es el más volátil de todos y el más raro: solo aparece en las
+    # conversaciones a las que el despachador ya les mandó algo. Delante de la fecha
+    # descachearía el prefijo de TODOS los pacientes de esa hora, que es justo lo que
+    # `fecha_en_palabras` existe para evitar.
+    #
+    # El campo llega del contexto --de `conversaciones`, no del modelo-- y sin esta línea
+    # llegaría mudo: el mensaje lo mandó un proceso, así que no está en el historial, y un
+    # «sí, confirmo» del paciente le estaría diciendo que sí a algo que Daniela no sabe que
+    # se dijo. Con la línea, el «sí» tiene antecedente.
+    recordatorio = getattr(contexto, "ultimo_recordatorio_tipo", None)
+    if recordatorio:
+        # La columna es `TIMESTAMPTZ` y vuelve de Postgres en UTC: sin pasarla a la zona de
+        # `ahora` --que siempre es la de Bogotá-- el prompt diría cinco horas de más, y «le
+        # salió hacia las 23:00» sobre un recordatorio de las 18:00 es peor que no decir nada.
+        # Se hace aquí y no con un import de `ZONA_BOGOTA` porque la zona correcta ya viaja
+        # en el contexto, y dos fuentes para el mismo desfase horario acaban divergiendo.
+        cuando = getattr(contexto, "ultimo_recordatorio_en", None)
+        if cuando is not None and cuando.tzinfo and ahora is not None and ahora.tzinfo:
+            cuando = cuando.astimezone(ahora.tzinfo)
+        texto = (
+            f"{texto}\n\n"
+            "YA LE ESCRIBIMOS NOSOTROS\n"
+            f"A este paciente le salió un mensaje automático de tipo '{recordatorio}'"
+            + (f", el {fecha_en_palabras(cuando)}" if cuando is not None else "")
+            + ". No lo escribiste tú en esta conversación y por eso no lo ves en el "
+            "historial, pero él sí lo leyó: si responde «sí», «confirmo», «ahí estaré» o "
+            "«no puedo», se refiere a la cita de la que hablaba ese mensaje. Si lo que "
+            "quiere es mover o cancelar, consulta sus citas antes de prometer nada."
+        )
+
+    return texto
 
 
 #: `agentes[lector_archivos].instrucciones_esqueleto` del plan, con el formato de salida

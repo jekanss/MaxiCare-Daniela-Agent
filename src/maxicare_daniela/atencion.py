@@ -72,6 +72,7 @@ import logging
 import random
 import time
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any, Awaitable, Callable
 
 from . import conversacion, guardrails, ingesta
@@ -238,6 +239,12 @@ class _Estado:
     #: que `identidad_antes_de_datos` lo frene -- ver `guardrails.revisar_identidad`.
     telefono_sin_paciente: bool
     tomada_por: str | None
+    #: El último recordatorio que le salió a este paciente, si lo hubo. Viaja por el mismo
+    #: camino que `tomada_por` --una consulta por id sobre `conversaciones`-- porque lo mandó
+    #: el despachador y no la conversación: el historial del agente no lo contiene. Sin esto,
+    #: un «sí, confirmo» llega sin que Daniela sepa a qué contesta.
+    ultimo_recordatorio_tipo: str | None = field(default=None)
+    ultimo_recordatorio_en: datetime | None = field(default=None)
     #: `None` si la tabla `configuracion` no respondió. No es lo mismo que un diccionario
     #: vacío: quien lo recibe tiene que poder distinguir «no se pudo leer» de «está vacía».
     operativa: dict[str, int] | None = field(default=None)
@@ -290,6 +297,10 @@ def _leer_estado(database_url: str, telefono: str, wamids: list[str]) -> _Estado
             operativa = None
 
         tomada_por = persistencia.conversacion_tomada(conn, id_conversacion)
+        # El recordatorio que el despachador ya mandó por esta conversación. Va aquí y no en
+        # una conexión aparte por lo mismo que las otras cinco lecturas: una conexión por
+        # turno, cerrada antes de llamar al modelo.
+        recordatorio = persistencia.ultimo_recordatorio(conn, id_conversacion)
         # Todos los del grupo, no solo el que abrió el turno: si se ligara solo ese, los
         # demás quedarían en `mensajes_entrantes` sin conversación, y «¿de qué charla
         # salió este mensaje?» dejaría de tener respuesta justo para los mensajes que
@@ -312,6 +323,8 @@ def _leer_estado(database_url: str, telefono: str, wamids: list[str]) -> _Estado
         nombre_paciente=paciente[1] if paciente else None,
         telefono_sin_paciente=paciente is None,
         tomada_por=tomada_por,
+        ultimo_recordatorio_tipo=recordatorio[0] if recordatorio else None,
+        ultimo_recordatorio_en=recordatorio[1] if recordatorio else None,
         operativa=operativa,
     )
 
@@ -949,6 +962,14 @@ async def atender(
             capacidad_por_hora=operativa.get("capacidad_por_hora", 2),
             duracion_cita_minutos=operativa.get("duracion_cita_minutos", 60),
             cierre_relevo_minutos=operativa.get("cierre_relevo_minutos", 180),
+            # Las perillas de los recordatorios. Las leen `crear_cita` y `reprogramar_cita`
+            # para decidir CUÁNDO sale el de cada cita, y los dos campos de abajo le dicen a
+            # Daniela cuál salió ya -- un dato que no está en el historial porque no lo
+            # escribió ninguna conversación.
+            hora_recordatorio_vispera=operativa.get("hora_recordatorio_vispera", 18),
+            horas_minimas_para_recordar=operativa.get("horas_minimas_para_recordar", 4),
+            ultimo_recordatorio_tipo=estado.ultimo_recordatorio_tipo,
+            ultimo_recordatorio_en=estado.ultimo_recordatorio_en,
             jornada=Jornada(
                 apertura=operativa.get("hora_apertura", 8),
                 cierre=operativa.get("hora_cierre", 17),

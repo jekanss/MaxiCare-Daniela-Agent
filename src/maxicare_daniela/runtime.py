@@ -1406,6 +1406,12 @@ def _contexto_de_prueba(quien: dict, id_conversacion: str | None) -> tuple[Conte
         # aquí. Una prueba no le hace sonar el teléfono a un doctor.
         telegram_bot_token="",
         telegram_chat_doctores="",
+        # Los dos en `None`, y no es un descuido: al chat del panel no le llega ningún
+        # recordatorio. El despachador sale por WhatsApp, y aquí no hay número al que salir.
+        # Copiar el valor de otra conversación haría que Daniela creyera que a quien escribe
+        # desde el panel le salió un recordatorio que nunca existió.
+        ultimo_recordatorio_tipo=None,
+        ultimo_recordatorio_en=None,
     )
     try:
         with persistencia.conectar(url) as conn:

@@ -1650,8 +1650,16 @@ def citas_activas_de_telefono(
     return [dict(zip(columnas, fila)) for fila in filas]
 
 
-def mover_cita(conn, id_cita: str, *, reserva_id: int, inicio: datetime) -> None:
-    """Apunta la cita al cupo nuevo. El cupo viejo lo libera quien llama."""
+def mover_cita(
+    conn, id_cita: str, *, reserva_id: int, inicio: datetime, commit: bool = True
+) -> None:
+    """Apunta la cita al cupo nuevo. El cupo viejo lo libera quien llama.
+
+    `commit=False` es lo que permite que el movimiento y la cascada de sus recordatorios
+    --anular el de la hora vieja, programar el de la nueva-- viajen en UNA transacción. Una
+    caída entre las dos deja un recordatorio vivo apuntando a una hora de la que el paciente
+    ya salió, y el despachador lo mandaría: sus guardas solo miran lo que hay en la base.
+    """
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -1661,10 +1669,16 @@ def mover_cita(conn, id_cita: str, *, reserva_id: int, inicio: datetime) -> None
             """,
             (reserva_id, inicio, id_cita),
         )
-    conn.commit()
+    if commit:
+        conn.commit()
 
 
-def marcar_cita_cancelada(conn, id_cita: str, *, motivo: str | None = None) -> None:
+def marcar_cita_cancelada(
+    conn, id_cita: str, *, motivo: str | None = None, commit: bool = True
+) -> None:
+    """`commit=False`, por lo mismo que en `mover_cita`: la cancelación y la anulación de los
+    recordatorios de esa cita tienen que ser atómicas, o el paciente que canceló recibe la
+    víspera el recordatorio de la cita que canceló."""
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -1674,7 +1688,8 @@ def marcar_cita_cancelada(conn, id_cita: str, *, motivo: str | None = None) -> N
             """,
             (motivo, id_cita),
         )
-    conn.commit()
+    if commit:
+        conn.commit()
 
 
 # ==========================================================================================
@@ -1928,6 +1943,31 @@ def anotar_recordatorio_en_conversacion(
             (tipo, cuando, id_conversacion),
         )
     conn.commit()
+
+
+def ultimo_recordatorio(conn, id_conversacion: str) -> tuple[str, datetime] | None:
+    """El último recordatorio que salió por esa conversación, o `None` si no salió ninguno.
+
+    La lectura que le falta a `anotar_recordatorio_en_conversacion`, y va por el mismo camino
+    que `conversacion_tomada`: una consulta de una columna sobre `conversaciones`, por id.
+    `atencion._leer_estado` la llama y el par acaba en el contexto.
+
+    Devuelve `None` también cuando la fila tiene el tipo pero no la fecha (o al revés): media
+    verdad aquí sería que Daniela creyera que hubo un recordatorio sin saber cuándo, y el
+    «sí» del paciente se referiría a algo que no se puede situar en el tiempo.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT ultimo_recordatorio_tipo, ultimo_recordatorio_en
+              FROM conversaciones WHERE id = %s
+            """,
+            (id_conversacion,),
+        )
+        fila = cur.fetchone()
+    if not fila or not fila[0] or fila[1] is None:
+        return None
+    return (fila[0], fila[1])
 
 
 def insertar_escalamiento(

@@ -117,6 +117,35 @@ def test_la_017_deja_las_columnas_y_las_perillas(conexion_pruebas):
     assert operativa["horas_minimas_para_recordar"] == 4
 
 
+def test_lo_que_se_anota_en_la_conversacion_se_vuelve_a_leer(conexion_pruebas, cita_de_prueba):
+    """El viaje de ida y vuelta de las dos columnas que la 017 le puso a `conversaciones`.
+
+    `anotar_recordatorio_en_conversacion` escribe y `ultimo_recordatorio` lee, y de esa
+    lectura sale el campo del contexto que le dice a Daniela a qué contesta un «sí, confirmo»
+    que no tiene antecedente en el historial. Ninguna prueba offline la alcanza --todas doblan
+    `persistencia`--, así que un nombre de columna mal escrito no se vería hasta producción, y
+    allí se vería como lo peor posible: `atencion._leer_estado` reventando para TODOS los
+    pacientes a la vez, con el mensaje de emergencia como única respuesta de la clínica.
+
+    Antes de anotar nada la respuesta es `None`, y ese caso es el normal: la inmensa mayoría
+    de las conversaciones nunca recibe un recordatorio.
+    """
+    _, id_conversacion = cita_de_prueba
+    cuando = datetime(2026, 9, 16, 18, 0, tzinfo=ZONA_BOGOTA)
+
+    assert persistencia.ultimo_recordatorio(conexion_pruebas, id_conversacion) is None
+
+    persistencia.anotar_recordatorio_en_conversacion(
+        conexion_pruebas, id_conversacion, tipo="recordatorio_cita", cuando=cuando
+    )
+
+    leido = persistencia.ultimo_recordatorio(conexion_pruebas, id_conversacion)
+    assert leido is not None
+    assert leido[0] == "recordatorio_cita"
+    # La columna es `TIMESTAMPTZ`: vuelve en UTC, y lo que tiene que coincidir es el INSTANTE.
+    assert leido[1] == cuando
+
+
 def test_la_cascada_anula_el_recordatorio_de_una_cita_que_se_movio(conexion_pruebas, cita_de_prueba):
     id_cita, id_conversacion = cita_de_prueba
     objetivo = datetime(2026, 9, 16, 18, 0, tzinfo=ZONA_BOGOTA)

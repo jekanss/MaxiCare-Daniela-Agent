@@ -167,10 +167,14 @@ class BaseFalsa:
         tomada: str | None = None,
         configuracion: dict | None = None,
         nueva: str = "conv-nueva",
+        recordatorio: tuple[str, datetime] | None = None,
     ) -> None:
         self.viva = viva
         self.paciente = paciente
         self.tomada = tomada
+        #: Lo que devuelve `persistencia.ultimo_recordatorio`: el par (tipo, cuándo) del
+        #: último mensaje que el despachador le mandó a este paciente, o `None`.
+        self.recordatorio = recordatorio
         self.configuracion = CONFIGURACION_OPERATIVA if configuracion is None else configuracion
         self.nueva = nueva
         self.llamadas: list[tuple] = []
@@ -238,6 +242,11 @@ class BaseFalsa:
             anotar("conversacion_tomada", id_conversacion)
             return self.tomada
 
+        def ultimo_recordatorio(conn, id_conversacion):
+            conn.comprobar()
+            anotar("ultimo_recordatorio", id_conversacion)
+            return self.recordatorio
+
         def ligar_mensaje_a_conversacion(conn, wamid, id_conversacion):
             conn.comprobar()
             anotar("ligar_mensaje_a_conversacion", wamid, id_conversacion)
@@ -262,6 +271,7 @@ class BaseFalsa:
         monkeypatch.setattr(persistencia, "asegurar_conversacion", asegurar_conversacion)
         monkeypatch.setattr(persistencia, "leer_configuracion", leer_configuracion)
         monkeypatch.setattr(persistencia, "conversacion_tomada", conversacion_tomada)
+        monkeypatch.setattr(persistencia, "ultimo_recordatorio", ultimo_recordatorio)
         monkeypatch.setattr(
             persistencia, "ligar_mensaje_a_conversacion", ligar_mensaje_a_conversacion
         )
