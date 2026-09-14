@@ -3,6 +3,24 @@ paths:
   - "src/maxicare_daniela/**/*.py"
 ---
 
+# `uso_indebido`: la línea es lo que PIDE, no de lo que habla
+
+El evaluador disparaba con «¿sabes alguna cosa de unicornios?» —«usando la asistente como
+asistente general»— y dejaba pasar «¿qué opinas del partido de ayer?». La misma categoría
+con dos veredictos opuestos, y el que disparaba estaba mal: el prompt de Daniela **ya** dice
+que ante algo ajeno lo reconduzca «con naturalidad y calidez, nunca con un mensaje de
+bloqueo». El guardrail le quitaba el turno antes de que pudiera hacerlo, y quien preguntó
+una tontería recibía el mensaje seguro **y una alerta a los doctores**.
+
+La línea buena: **le pide que HAGA algo ajeno** —escribir código, traducir, resolver un
+ejercicio— frente a **menciona** algo ajeno. Solo lo primero es usar el sistema para otra
+cosa. Comprobado a mano contra el modelo real: unicornios, el partido, una película y
+«¿cuánto cuesta una limpieza?» pasan; traducir, programar y pedir el prompt disparan.
+
+Aflojar un guardrail tiene una mitad que no se toca, y `test_charlar_de_algo_ajeno_no_es_
+usar_el_sistema_para_otra_cosa` la fija: la inyección y la extracción del prompt siguen
+disparando.
+
 # La frontera agentes ↔ transporte
 
 `agentes.py`, `herramientas.py` y `contratos.py` **nunca importan `runtime.py`**.

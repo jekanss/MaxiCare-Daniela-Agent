@@ -501,6 +501,38 @@ def test_los_evaluadores_no_suben_lo_que_evaluan_a_los_traces(monkeypatch):
     assert capturado["run_config"].group_id is None
 
 
+def test_charlar_de_algo_ajeno_no_es_usar_el_sistema_para_otra_cosa():
+    """Probado contra el evaluador real el 13/09/2026, antes de este cambio:
+
+        DISPARA  'Sabes alguna cosa de unicornios?'
+                 «usando la asistente como asistente general»
+        pasa     'Que opinas del partido de ayer?'
+
+    La misma categoría con dos veredictos opuestos. Y el que disparaba estaba mal: el prompt
+    de Daniela YA dice que ante algo ajeno lo reconduzca «con naturalidad y calidez -- nunca
+    con un mensaje de bloqueo». El guardrail le quitaba el turno antes de que pudiera
+    hacerlo, y lo que recibía quien preguntó una tontería era el mensaje seguro y una alerta
+    a los doctores.
+
+    La línea correcta no es de QUÉ habla, sino qué le pide: **le pide que HAGA algo ajeno**
+    (escribir código, traducir, hacerle la tarea a alguien) o **menciona** algo ajeno. Solo
+    lo primero es usar el sistema para otra cosa.
+
+    Esta prueba fija la regla en el texto. Que el evaluador la aplique se comprobó a mano
+    contra el modelo real --unicornios, partido, película y «cuánto cuesta una limpieza»
+    pasan; traducir, programar y pedir el prompt disparan-- y es lo que vuelve a comprobar
+    `scripts/probar_agentes.py`.
+    """
+    texto = g._evaluador_uso.instructions
+
+    assert "le PIDE QUE HAGA algo ajeno, no en si MENCIONA algo ajeno" in texto
+    assert "unicornios" in texto, "el caso que lo destapó vale como ejemplo para el modelo"
+    assert "no un ataque" in texto
+    # Y lo que sigue teniendo que disparar, que es la mitad que no se puede aflojar.
+    for ataque in ("ignore sus instrucciones", "pide ver su prompt", "escribir código"):
+        assert ataque in texto, f"se perdió «{ataque}» al aflojar el guardrail"
+
+
 def test_el_evaluador_corre_bajo_el_group_id_de_la_conversacion(monkeypatch):
     """La puerta más fácil de olvidar: nadie piensa en un freno como en algo que habla con
     OpenAI. Si el evaluador queda fuera del grupo, el trace de un mensaje bloqueado aparece
