@@ -14,7 +14,7 @@ está el porqué de cada uno: lo que hace falta al **tocarlos**, no al usarlos.
 corre.** Añadirle un parámetro a algo que un script dobla —`lectura.leer_archivo`,
 `conversacion.responder`— los rompe en silencio: la suite entera sigue verde. Pasó en la fase
 7, y solo apareció al ejecutarlos (`TypeError: lector_doblado() got an unexpected keyword
-argument 'group_id'`). **Quien cambie una de esas firmas corre los cinco que no gastan.**
+argument 'group_id'`). **Quien cambie una de esas firmas corre los seis que no gastan.**
 
 ## Uno por uno
 
@@ -72,6 +72,19 @@ argument 'group_id'`). **Quien cambie una de esas firmas corre los cinco que no 
   el cliente ya lo señaló. Los bloques comparten teléfono salvo donde se parametriza
   `nuevo_contexto`, así que lo que siembra un bloque sigue vivo en el siguiente: un `FALLA`
   puede ser del escenario y no del modelo.
+- `probar_recordatorios.py` escribe en `pruebas` —el mismo esquema y el mismo molde
+  (`url_de_pruebas`, `montar_esquema`, `limpiar`) que `probar_tools.py`— y no gasta un token:
+  el despachador corre con `whatsapp=None` o con la plantilla vacía en todo el camino. Dobla a
+  mano las firmas de `h._crear_cita`, `h._reprogramar_cita`, `h._cancelar_cita` y de
+  `persistencia.seguimientos_por_despachar`; quien les cambie la firma rompe este script en
+  silencio, igual que a los demás de esta lista. Su trampa es la comprobación 6: exige la
+  conexión DIRECTA de Neon (sin `-pooler.`) porque necesita dos sesiones de verdad compitiendo
+  por la misma fila con `FOR UPDATE ... SKIP LOCKED` — con el pooler, PgBouncer reparte las
+  dos entre sesiones compartidas y la comprobación pasa en verde sin haber probado nada. La
+  comprobación 7 es la única prueba contra Postgres real de `persistencia.marcar_seguimiento_
+  enviado`: llama la función dos veces sobre la misma fila y exige `True` la primera vez y
+  `False` la segunda — es el único guardián real contra mandar el mismo recordatorio dos
+  veces, y hasta este script ninguna prueba lo había ejercitado contra la base de verdad.
 
 ## `medir_historial.py`
 

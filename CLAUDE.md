@@ -49,12 +49,13 @@ Entregables por fase. **Los marcados gastan tokens**; los demás, ni uno:
 | `scripts/probar_relevo.py` | que el bot PUEDA relevar: permisos y webhook (fase 6C) | no |
 | `scripts/probar_persistencia.py` | que una conversación sobrevive a reiniciar (fase 7) | solo con `--chat` |
 | `scripts/probar_panel.py` | el panel de tratamientos (fase 8) | solo con `--chat` |
+| `scripts/probar_recordatorios.py` | la cola de recordatorios y su despachador | no |
 | `scripts/probar_calendario.py` | `CalendarioGoogle` contra el calendario real | no |
 | `scripts/probar_webhook.py <url>` | el webhook en producción | **sí** (despierta a Daniela) |
 
 **Estos scripts doblan funciones de `src/` con firmas escritas a mano, y `pytest -q` no los
 corre.** Cambiarle la firma a algo que un script dobla los rompe en silencio, con la suite
-entera en verde: quien toque una de esas firmas corre los cinco que no gastan. Lo demás de
+entera en verde: quien toque una de esas firmas corre los seis que no gastan. Lo demás de
 cada script —en qué esquema escribe, qué dobla, qué trampa tiene— está en
 `.claude/rules/scripts-entregables.md`.
 
@@ -138,6 +139,13 @@ una —qué se midió, qué costó— está en la regla que cubre ese archivo.
    corrige lo DICE en el texto de la tool, con la hora vieja dentro**: corregir en silencio
    dejaba al modelo viendo al sistema desdecirse, y escalaba. Esas horas quedan autorizadas
    como la vieja al reprogramar (13).
+21. **Un recordatorio se MARCA antes de enviarse, y lo emite el código, no el modelo.** No hay
+   transacción que cubra una llamada a Meta: enviar primero y marcar después manda el mismo
+   recordatorio otra vez sesenta segundos más tarde, y **ninguna de las siete guardas lo
+   detecta** —todas siguen diciendo que sí—. La cola cuelga de `cita_id` y no solo de la
+   conversación: sin eso, reprogramar deja vivo un recordatorio de una cita que ya no existe.
+   El despacho vive en su **propia** tarea de `runtime.py`, no en la de relevos, que no arranca
+   sin Telegram.
 
 # Dónde está el resto
 
