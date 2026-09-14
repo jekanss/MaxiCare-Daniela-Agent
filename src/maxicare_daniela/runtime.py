@@ -62,6 +62,7 @@ from . import (
     persistencia,
     relevo,
     reseteo,
+    seguimientos,
 )
 from .calendario import CalendarioCaido, CalendarioDoble, Jornada, calendario_desde_config
 from .canales import Telegram, WhatsApp
@@ -1821,6 +1822,82 @@ async def _parar_barrido_de_relevos() -> None:
     _tarea_de_barrido.cancel()
     try:
         await _tarea_de_barrido
+    except (asyncio.CancelledError, Exception):  # noqa: BLE001
+        pass
+
+
+# ==========================================================================================
+# El despacho de recordatorios
+# ==========================================================================================
+
+
+def _leer_configuracion_operativa() -> dict[str, int]:
+    with persistencia.conectar(config.database_url) as conn:
+        return persistencia.leer_configuracion(conn)
+
+
+#: La referencia viva de la tarea de recordatorios. Igual que `_tarea_de_barrido`: sin
+#: guardarla, el recolector de basura se puede llevar una tarea que nadie mira y los
+#: recordatorios dejarían de salir sin un solo error en el log.
+_tarea_de_recordatorios: asyncio.Task | None = None
+
+
+async def _despachar_recordatorios_sin_parar() -> None:
+    """El reloj de la cola de recordatorios.
+
+    Va en una tarea PROPIA y no dentro de `_barrer_relevos_sin_parar`, aunque el intervalo sea
+    el mismo: aquella no arranca sin Telegram --correcto, sin Telegram no hay relevos que
+    cerrar-- y los recordatorios no dependen de Telegram para nada. Compartirlas dejaría los
+    recordatorios apagados en cualquier despliegue sin grupo de doctores.
+
+    **Asume un solo worker**, igual que el barrido de relevos y que `_candados` de `atencion`.
+    Con varias réplicas el daño está acotado por `FOR UPDATE SKIP LOCKED`: cada fila la toma
+    una sola.
+    """
+    while True:
+        await asyncio.sleep(SEGUNDOS_ENTRE_BARRIDOS)
+        try:
+            operativa = await asyncio.to_thread(_leer_configuracion_operativa)
+            recuento = await seguimientos.despachar(
+                database_url=config.database_url,
+                whatsapp=_whatsapp,
+                jornada=Jornada(
+                    apertura=operativa.get("hora_apertura", 8),
+                    cierre=operativa.get("hora_cierre", 17),
+                    cierre_sabado=operativa.get("hora_cierre_sabado", 15),
+                    atiende_domingo=bool(operativa.get("atiende_domingo", 0)),
+                ),
+                plantilla=config.plantilla_recordatorio,
+            )
+            if any(recuento.values()):
+                log.info("recordatorios: %s", recuento)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 -- tiene que seguir vivo mañana
+            log.exception("el despacho de recordatorios falló; se reintenta en el ciclo siguiente")
+
+
+@app.on_event("startup")
+async def _arrancar_despacho_de_recordatorios() -> None:
+    global _tarea_de_recordatorios
+    if not config.database_url:
+        log.info("sin base configurada: no arranca el despacho de recordatorios")
+        return
+    if not config.plantilla_recordatorio:
+        log.warning(
+            "MAXICARE_PLANTILLA_RECORDATORIO vacía: el despachador decidirá y NO enviará. "
+            "Es el modo de comprobación; para enviar de verdad hace falta la plantilla de Meta."
+        )
+    _tarea_de_recordatorios = asyncio.create_task(_despachar_recordatorios_sin_parar())
+
+
+@app.on_event("shutdown")
+async def _parar_despacho_de_recordatorios() -> None:
+    if _tarea_de_recordatorios is None:
+        return
+    _tarea_de_recordatorios.cancel()
+    try:
+        await _tarea_de_recordatorios
     except (asyncio.CancelledError, Exception):  # noqa: BLE001
         pass
 

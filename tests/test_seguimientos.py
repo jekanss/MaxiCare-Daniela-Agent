@@ -627,3 +627,16 @@ def test_los_intentos_agotados_marcan_fallido_y_no_se_pierden(monkeypatch):
     assert id_seguimiento == 1
     assert fallo.startswith("ErrorDeCanal")
     assert recuento == {"enviados": 0, "anulados": 0, "aplazados": 0, "fallidos": 1}
+
+
+def test_el_despachador_arranca_aunque_no_haya_telegram():
+    """El barrido de relevos NO arranca sin Telegram, y es correcto: sin Telegram no hay
+    relevos que cerrar. Los recordatorios no dependen de Telegram, así que colgarlos de esa
+    misma tarea los dejaría apagados en cualquier despliegue sin grupo de doctores -- sin un
+    solo error en el log, que es exactamente como el barrido de relevos estuvo días caído."""
+    import inspect
+
+    from maxicare_daniela import runtime
+
+    fuente = inspect.getsource(runtime._arrancar_despacho_de_recordatorios)
+    assert "telegram_bot_token" not in fuente
