@@ -41,7 +41,10 @@ from maxicare_daniela.calendario import (  # noqa: E402
     a_bloqueo,
 )
 from maxicare_daniela.config import Config, cargar_dotenv  # noqa: E402
-from maxicare_daniela.herramientas import _bloqueo_que_tapa  # noqa: E402
+from maxicare_daniela.herramientas import (  # noqa: E402
+    _bloqueo_que_tapa,
+    _descripcion_del_evento,
+)
 
 #: Las pruebas se hacen en 2029, a las 3 de la mañana. Ningún paciente se cita ahí, así que
 #: un evento que sobreviviera a la limpieza sería obvio a simple vista y no chocaría con
@@ -146,11 +149,18 @@ def main() -> int:
         # -----------------------------------------------------------------------------
         print("\n2. Crear un evento")
         # -----------------------------------------------------------------------------
+        # La descripción la arma la MISMA función que en producción, no una copia: si
+        # alguien le cambia la forma, este script se entera. Lleva tilde a propósito --lo
+        # que viaja a Google es UTF-8 y la consola de Windows es cp1252.
+        descripcion = _descripcion_del_evento(
+            SimpleNamespace(telefono_completo="573001112233", id_conversacion="probar-calendario"),
+            SimpleNamespace(tratamiento="limpieza", motivo="Creado por probar_calendario.py."),
+        )
         evento_id = calendario.crear_evento(
             inicio=CUANDO,
             duracion_minutos=60,
             titulo=f"{MARCA} no es una cita",
-            descripcion="Creado por scripts/probar_calendario.py. Si ves esto, sobró: bórralo.",
+            descripcion=descripcion,
         )
         revisar("insert devolvió un id", bool(evento_id), evento_id)
 
@@ -184,6 +194,13 @@ def main() -> int:
         marca = crudo.get("extendedProperties", {}).get("private", {}).get(CLAVE_ORIGEN)
         revisar("lleva la marca de origen", marca == VALOR_ORIGEN, repr(marca))
         revisar("y `a_bloqueo` lo descarta por esa marca", a_bloqueo(crudo) is None)
+        # Lo que la clínica lee al abrir la cita. Comprobado contra lo que Google DEVUELVE,
+        # no contra lo que le mandamos: el doble puede guardar la descripción perfectamente
+        # y Google seguir recibiendo otra cosa.
+        guardada = crudo.get("description") or ""
+        revisar("el teléfono del paciente llegó a Google", "573001112233" in guardada)
+        revisar("y el servicio también", "limpieza" in guardada)
+        revisar("con las tildes intactas", "Teléfono" in guardada, guardada.splitlines()[:1])
 
         # -----------------------------------------------------------------------------
         print("\n5. Mover el evento conservando su duración")

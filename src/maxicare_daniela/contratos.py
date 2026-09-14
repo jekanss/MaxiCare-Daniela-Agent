@@ -366,6 +366,17 @@ class SolicitudCita(BaseModel):
             "ofrece hoy; la lista viva va al final de las instrucciones del agente."
         ),
     )
+    motivo: str = Field(
+        default="",
+        max_length=300,
+        description=(
+            "Una frase corta de por qué agenda, con las palabras del paciente. La lee el "
+            "doctor en su calendario, no el paciente. Descriptiva, NUNCA clínica: 'quiere "
+            "valoración para diseño de sonrisa, no le gustan sus dientes de adelante' sí; "
+            "un diagnóstico o un tratamiento que nadie ha determinado, no. Si no lo tienes "
+            "claro, déjalo vacío: el servicio ya va aparte."
+        ),
+    )
     clave_idempotencia: str = Field(
         min_length=8,
         max_length=200,
@@ -381,6 +392,15 @@ class SolicitudCita(BaseModel):
     @classmethod
     def _nombre_sin_documento(cls, v: str) -> str:
         return _rechazar_documento_de_identidad(v, "nombre_completo")
+
+    @field_validator("motivo")
+    @classmethod
+    def _motivo_sin_documento(cls, v: str) -> str:
+        # Texto libre que el modelo escribe y que acaba GUARDADO en el calendario de la
+        # clínica. Es justo la forma de la prohibición: «no se registran cédulas ni
+        # documentos de identidad de ningún tipo». Que el paciente dicte su cédula en la
+        # conversación no puede convertirse en una cédula apuntada en un evento.
+        return _rechazar_documento_de_identidad(v, "motivo")
 
     @field_validator("tratamiento")
     @classmethod

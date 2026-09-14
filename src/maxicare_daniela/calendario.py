@@ -210,6 +210,11 @@ class CalendarioDoble:
     #: evento_id -> (inicio, duracion_minutos, titulo)
     eventos: dict[str, tuple[datetime, int, str]] = field(default_factory=dict)
 
+    #: evento_id -> descripción. Aparte de `eventos` y no como un cuarto elemento de la
+    #: tupla: ese desempaquetado está escrito en `mover_evento` y en varias pruebas, y
+    #: alargarlo rompería todas por un dato que solo una prueba mira.
+    descripciones: dict[str, str] = field(default_factory=dict)
+
     _bloqueos: list[Bloqueo] = field(default_factory=list)
     _siguiente: int = 1
 
@@ -231,6 +236,7 @@ class CalendarioDoble:
         evento_id = f"doble-{self._siguiente}"
         self._siguiente += 1
         self.eventos[evento_id] = (inicio, duracion_minutos, titulo)
+        self.descripciones[evento_id] = descripcion
         return evento_id
 
     def mover_evento(self, evento_id: str, *, inicio: datetime) -> None:

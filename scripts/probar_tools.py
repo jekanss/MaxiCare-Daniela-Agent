@@ -258,11 +258,23 @@ def corridas(url: str) -> int:
                 nombre_completo="Carlos Ciclo",
                 inicio=hora(20),
                 tratamiento="cordales",
+                motivo="Quiere valoracion de las cordales; le molestan al masticar.",
                 clave_idempotencia=f"{ctx2.telefono_completo}:{hora(20).isoformat()}",
             ),
         )
     )
     id_cita = salida.rsplit("Id de la cita: ", 1)[1].rstrip(".")
+
+    # Lo que la clinica lee al abrir la cita. El telefono lo pone el codigo desde el
+    # contexto, nunca el modelo: `SolicitudCita` no tiene campo de telefono.
+    (descripcion,) = ctx2.calendario.descripciones.values()
+    lleva_telefono = ctx2.telefono_completo in descripcion
+    lleva_servicio = "cordales" in descripcion
+    lleva_motivo = "masticar" in descripcion
+    print(f"   el evento en Calendar:")
+    print(f"     telefono            -> {marca(lleva_telefono)} para poder llamar al paciente")
+    print(f"     servicio            -> {marca(lleva_servicio)} a que viene")
+    print(f"     motivo              -> {marca(lleva_motivo)} con las palabras del paciente")
     destino = hora(21)
     movida = asyncio.run(h._reprogramar_cita(ctx2, id_cita, destino.isoformat()))
     with persistencia.conectar(url) as conn, conn.cursor() as cur:
