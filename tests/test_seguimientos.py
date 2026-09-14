@@ -84,3 +84,123 @@ def test_un_momento_que_ya_paso_no_se_programa():
         )
         is None
     )
+
+
+def fila(**cambios) -> dict:
+    base = dict(
+        id=1,
+        conversacion_id="conv-1",
+        cita_id="cita-1",
+        tipo="recordatorio_cita",
+        fecha_objetivo=momento(16, 18),
+        intentos=0,
+        telefono="573001112233",
+        nombre_completo="Ana Gómez",
+        cita_inicio=momento(17, 9),
+        cita_estado="confirmada",
+        tomada_por=None,
+    )
+    base.update(cambios)
+    return base
+
+
+def test_g1_una_cita_cancelada_no_recibe_recordatorio():
+    d = s.decidir(
+        fila(cita_estado="cancelada"),
+        ahora=momento(16, 18),
+        jornada=JORNADA,
+        ultimo_mensaje=None,
+    )
+    assert d.accion == "anular"
+    assert d.motivo == "cita_cambio"
+
+
+def test_g2_una_cita_que_ya_paso_no_recibe_recordatorio():
+    d = s.decidir(
+        fila(cita_inicio=momento(16, 9)),
+        ahora=momento(16, 18),
+        jornada=JORNADA,
+        ultimo_mensaje=None,
+    )
+    assert d.accion == "anular"
+    assert d.motivo == "cita_pasada"
+
+
+def test_g3_un_recordatorio_con_mas_de_dos_horas_de_retraso_se_descarta():
+    # El proceso estuvo caído: le tocaba a las 18:00 y son las 21:00.
+    d = s.decidir(
+        fila(),
+        ahora=momento(16, 21),
+        jornada=JORNADA,
+        ultimo_mensaje=None,
+    )
+    assert d.accion == "anular"
+    assert d.motivo == "llego_tarde"
+
+
+def test_g4_con_el_relevo_puesto_se_aplaza_y_no_se_anula():
+    # El doctor puede devolver la conversación en diez minutos: el recordatorio sigue siendo
+    # válido. Anularlo aquí lo perdería para siempre.
+    d = s.decidir(
+        fila(tomada_por="Dr. Pérez"),
+        ahora=momento(16, 18),
+        jornada=JORNADA,
+        ultimo_mensaje=None,
+    )
+    assert d.accion == "aplazar"
+    assert d.hasta == momento(16, 18, 30)
+
+
+def test_g5_fuera_de_la_jornada_se_aplaza_a_la_apertura():
+    d = s.decidir(
+        fila(fecha_objetivo=momento(16, 6), cita_inicio=momento(17, 9)),
+        ahora=momento(16, 6),
+        jornada=JORNADA,
+        ultimo_mensaje=None,
+    )
+    assert d.accion == "aplazar"
+    assert d.hasta == momento(16, 8)
+
+
+def test_g6_si_el_paciente_acaba_de_escribir_no_se_le_recuerda_nada():
+    d = s.decidir(
+        fila(),
+        ahora=momento(16, 18),
+        jornada=JORNADA,
+        ultimo_mensaje=momento(16, 17, 40),
+    )
+    assert d.accion == "anular"
+    assert d.motivo == "contacto_reciente"
+
+
+def test_g7_no_se_manda_un_segundo_mensaje_al_mismo_numero():
+    d = s.decidir(
+        fila(),
+        ahora=momento(16, 18),
+        jornada=JORNADA,
+        ultimo_mensaje=None,
+        ya_salio_a_ese_numero=True,
+    )
+    assert d.accion == "aplazar"
+    assert d.motivo == "agrupado"
+
+
+def test_un_recordatorio_limpio_sale():
+    d = s.decidir(
+        fila(),
+        ahora=momento(16, 18),
+        jornada=JORNADA,
+        ultimo_mensaje=momento(14, 9),
+    )
+    assert d.accion == "enviar"
+
+
+def test_un_seguimiento_sin_cita_se_salta_las_tres_primeras_guardas():
+    # «Llámenme el lunes»: no cuelga de ninguna cita, así que G1, G2 y G3 no aplican.
+    d = s.decidir(
+        fila(cita_id=None, cita_inicio=None, cita_estado=None, tipo="reactivacion"),
+        ahora=momento(16, 18),
+        jornada=JORNADA,
+        ultimo_mensaje=None,
+    )
+    assert d.accion == "enviar"

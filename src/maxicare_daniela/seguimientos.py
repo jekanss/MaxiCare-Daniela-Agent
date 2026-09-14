@@ -118,3 +118,122 @@ def momento_del_recordatorio(
     if candidato is None or candidato <= ahora:
         return None
     return candidato
+
+
+#: Cuánto se aplaza un recordatorio que pilló al doctor hablando con el paciente.
+MINUTOS_DE_ESPERA_POR_RELEVO = 30
+
+#: A partir de cuánto retraso un recordatorio deja de servir y pasa a estorbar.
+HORAS_DE_RETRASO_QUE_LO_INVALIDAN = 2
+
+#: Si el paciente escribió hace menos de esto, ya está hablando con Daniela.
+MINUTOS_DE_CONTACTO_RECIENTE = 60
+
+
+@dataclass(frozen=True)
+class Decision:
+    """Qué hacer con una fila de la cola. `hasta` solo tiene valor si la acción es aplazar."""
+
+    accion: Literal["enviar", "anular", "aplazar"]
+    motivo: str
+    hasta: datetime | None = None
+
+
+def decidir(
+    fila: dict[str, Any],
+    *,
+    ahora: datetime,
+    jornada: Jornada,
+    ultimo_mensaje: datetime | None,
+    ya_salio_a_ese_numero: bool = False,
+    hora_vispera: int = HORA_VISPERA_POR_DEFECTO,
+) -> Decision:
+    """Las siete guardas, en orden. Es lo que separa un recordatorio de un buzón de spam.
+
+    El orden importa: las tres primeras son sobre la cita y se saltan si el seguimiento no
+    cuelga de ninguna; las dos siguientes aplazan en vez de anular, porque su motivo deja de
+    ser cierto más tarde; las dos últimas anulan o agrupan.
+    """
+    cita_estado = fila.get("cita_estado")
+    cita_inicio = fila.get("cita_inicio")
+
+    if fila.get("cita_id") is not None:
+        # G1. Cancelada o movida: el recordatorio habla de algo que ya no existe. `reprogramada`
+        # no basta para anular --la cascada ya anuló el viejo y creó otro-- pero `cancelada` sí,
+        # y una cita que desapareció de la fila también.
+        if cita_estado is None or cita_estado == "cancelada":
+            return Decision("anular", "cita_cambio")
+
+        # G2. Recordar una cita que ya pasó no es tarde: es decirle al paciente que el sistema
+        # no sabe lo que pasó.
+        if cita_inicio is not None and cita_inicio <= ahora:
+            return Decision("anular", "cita_pasada")
+
+        # G3. El proceso estuvo caído. Sin esto, arrancarlo tras un fin de semana manda de golpe
+        # todos los recordatorios atrasados.
+        if ahora - fila["fecha_objetivo"] > timedelta(hours=HORAS_DE_RETRASO_QUE_LO_INVALIDAN):
+            return Decision("anular", "llego_tarde")
+
+    # G4. Mientras un doctor tiene el relevo, el sistema no se le atraviesa: podría estar
+    # acordando otra fecha en ese mismo momento. Aplaza, NO anula.
+    if fila.get("tomada_por"):
+        return Decision(
+            "aplazar",
+            "relevo_activo",
+            ahora + timedelta(minutes=MINUTOS_DE_ESPERA_POR_RELEVO),
+        )
+
+    # G5. Nada a las tres de la mañana. La jornada sale de `configuracion`, no de una constante
+    # nueva: duplicarla deja dos horarios que se contradicen.
+    cierre = jornada.cierre_de(ahora)
+    if cierre is None:
+        return Decision("aplazar", "fuera_de_jornada", _proxima_apertura(ahora, jornada))
+    # La ventana de envío llega hasta el cierre, o hasta pasada la hora de víspera si esa cae
+    # más tarde: el recordatorio de víspera se programa a `hora_vispera` (18:00 por defecto) a
+    # propósito -- Ruling 1 -- y una ventana que acabara en el cierre (17:00) lo aplazaría
+    # SIEMPRE a la apertura del día siguiente, que es la mañana de la cita. El `+ 1` es
+    # deliberado: el barrido corre a `hora_vispera` en punto (más el retardo del búfer), así
+    # que esa hora tiene que quedar DENTRO de la ventana -- con `>= hora_vispera` el propio
+    # recordatorio de víspera se aplazaría a sí mismo.
+    limite = max(cierre, hora_vispera + 1)
+    if ahora.hour < jornada.apertura or ahora.hour >= limite:
+        return Decision("aplazar", "fuera_de_jornada", _proxima_apertura(ahora, jornada))
+
+    # G6. Si está hablando con Daniela ahora mismo, recordarle la cita que acaba de agendar la
+    # hace ver desmemoriada.
+    if (
+        ultimo_mensaje is not None
+        and ahora - ultimo_mensaje < timedelta(minutes=MINUTOS_DE_CONTACTO_RECIENTE)
+    ):
+        return Decision("anular", "contacto_reciente")
+
+    # G7. Un paciente con dos citas la misma semana recibe UN mensaje, no dos. Se aplaza al
+    # siguiente ciclo, donde el agrupador lo recogerá junto al otro.
+    if ya_salio_a_ese_numero:
+        return Decision("aplazar", "agrupado", ahora + timedelta(minutes=1))
+
+    return Decision("enviar", "ok")
+
+
+def _proxima_apertura(ahora: datetime, jornada: Jornada) -> datetime:
+    """El próximo momento en que la clínica está abierta, desde `ahora`.
+
+    Avanza día a día como mucho una semana: si en siete días no abre, la configuración está
+    rota y devolver un momento cualquiera sería inventarse un horario. En ese caso devuelve
+    mañana a la hora de apertura, y la guarda volverá a aplazarlo -- lo que deja el problema
+    visible en la tabla en vez de escondido en un bucle.
+    """
+    cierre_de_hoy = jornada.cierre_de(ahora)
+    if cierre_de_hoy is not None and ahora.hour < jornada.apertura:
+        return ahora.replace(hour=jornada.apertura, minute=0, second=0, microsecond=0)
+
+    candidato = ahora
+    for _ in range(7):
+        candidato = (candidato + timedelta(days=1)).replace(
+            hour=jornada.apertura, minute=0, second=0, microsecond=0
+        )
+        if jornada.cierre_de(candidato) is not None:
+            return candidato
+    return (ahora + timedelta(days=1)).replace(
+        hour=jornada.apertura, minute=0, second=0, microsecond=0
+    )
