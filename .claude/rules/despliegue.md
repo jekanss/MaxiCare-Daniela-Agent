@@ -16,6 +16,54 @@ antes de levantar** y espera a que el contenedor esté sano. Traefik sigue manda
 webhooks de Meta al contenedor viejo hasta que el nuevo responde `/salud`, así que un
 despliegue fallido no deja a los doctores sin radiografías.
 
+## Un despliegue no puede matar un turno a media frase
+
+**`stop_grace_period: 120s`, `runtime.SEGUNDOS_PARA_DRENAR = 75`, y el orden importa:** el
+segundo tiene que ser MENOR que el primero, o Docker mata el proceso mientras espera y la
+espera no sirve de nada.
+
+Por qué existen. Docker da **10 segundos** por defecto entre el SIGTERM y el SIGKILL, y un
+turno de Daniela necesita más: 20 s de ventana del búfer, más el modelo, más el retardo
+humano. Con ese valor, todo despliegue que pillara a alguien escribiendo le mataba el turno.
+Pasó el 13/09/2026 y así se veía en `mensajes_entrantes`:
+
+```
+02:50:00  RESPONDIDO     '?'
+02:47:22  SIN RESPUESTA  'Sabes alguna cosa de unicornios?'
+```
+
+`respondido_en` NULL y `fallo_respuesta` NULL. **Un proceso muerto no escribe su motivo**, y
+esos dos NULL juntos son la firma exacta de esa muerte: un fallo de verdad deja motivo, una
+respuesta que salió deja fecha. No aparecía en ningún indicador —`sin_entregar` mira el
+viaje hacia los doctores, que sí había ocurrido— así que la pérdida era silenciosa.
+
+Tres piezas, y cada una cubre lo que la anterior no puede:
+
+1. **El drenaje** (`_EN_VUELO` + `_esperar_a_que_drenen`). Cubre el apagado ordenado. Cada
+   turno se anota al empezar y se borra en un `finally`; el `finally` no es cosmética: un
+   `wamid` colgado haría que todos los apagados siguientes esperaran los 75 segundos
+   completos a algo que ya no existe.
+2. **El barrido de arranque** (`_recoger_lo_que_quedo_sin_responder`). Cubre lo que el
+   drenaje no puede: un `kill -9`, un reinicio del VPS, un OOM. **No pasa por `_entregar`**,
+   y quien lo "simplifique" reutilizándolo deja el arreglo en nada: `_entregar` empieza por
+   `procesar_mensaje`, que deduplica por `wamid`, devolvería `nuevo=False` con razón —el
+   mensaje ya se registró y ya se le reenvió al doctor— y se iría sin correr el turno, que es
+   justo la mitad que falta.
+3. **`sin_responder` en `/salud`**. Convierte una pérdida silenciosa en un número. Lleva
+   ventana de 24 h para que vuelva a cero solo: un indicador que nunca baja es un indicador
+   que nadie mira.
+
+El riesgo asumido del barrido, dicho para que nadie lo descubra solo: entre que WhatsApp
+acepta la respuesta y `marcar_respondido` la escribe hay milisegundos, y un proceso que muera
+justo ahí hace que el paciente la reciba dos veces. Se acepta porque el silencio es peor, y
+sobre todo porque **las claves de idempotencia impiden lo que de verdad importaría**:
+reintentar no crea una segunda cita ni consume un segundo cupo.
+
+**`/clearstate` era el único camino que respondía sin pasar por `atender`**, así que
+respondía de verdad y dejaba la fila con `respondido_en` NULL: el barrido le habría pasado a
+Daniela el texto «/clearstate» como si fuera un paciente preguntando. Ahora
+`_avisar_del_reseteo` lo anota, y el barrido además los descarta por si acaso.
+
 - **`desplegar.sh` empaqueta a mano lo que el Dockerfile copia, y ya se desincronizó una
   vez.** El script es de la fase 2; el Dockerfile creció su etapa de Node en la fase 5 y el
   tar nunca creció con él, así que **todo lo construido entre la fase 2 y la 8 se quedó sin

@@ -39,6 +39,7 @@ from __future__ import annotations
 import asyncio
 import html
 import logging
+import time
 
 from pathlib import Path
 from typing import Any
@@ -263,6 +264,54 @@ def _construir_el_calendario() -> None:
     log.info("calendario listo · %s", type(_calendario).__name__)
 
 
+#: Los `wamid` cuyo turno está corriendo AHORA en este proceso. Existe para una sola cosa:
+#: que apagar el servidor espere a que terminen en vez de matarlos a media frase.
+_EN_VUELO: set[str] = set()
+
+#: Cuánto se espera a que drenen. Un turno son 20 s de ventana de búfer + el modelo + el
+#: retardo humano; 75 s cubren el caso normal con holgura. Tiene que ser MENOR que el
+#: `stop_grace_period` del `docker-compose.yml`, o Docker mata el proceso mientras espera y
+#: la espera no habrá servido de nada.
+SEGUNDOS_PARA_DRENAR = 75.0
+
+
+async def _esperar_a_que_drenen(limite: float = SEGUNDOS_PARA_DRENAR) -> int:
+    """Espera a que no quede ningún turno en vuelo. Devuelve cuántos se quedaron fuera.
+
+    Esto es el arreglo del 13/09/2026. Un despliegue recreó el contenedor mientras un turno
+    estaba a medias y el mensaje del paciente quedó SIN respuesta y SIN fallo: no falló, lo
+    mataron, y un proceso muerto no escribe su motivo. Con `stop_grace_period` en su valor
+    por defecto --10 segundos-- eso no era mala suerte: pasaba en todo despliegue que pillara
+    a alguien escribiendo.
+
+    Se espera con un sondeo y no con un `Event` porque lo que se vigila es un conjunto que
+    otras corrutinas modifican: el sondeo no puede perderse un cambio ni quedarse colgado si
+    alguien olvida avisar.
+    """
+    fin = time.monotonic() + limite
+    while _EN_VUELO and time.monotonic() < fin:
+        await asyncio.sleep(0.25)
+    return len(_EN_VUELO)
+
+
+@app.on_event("shutdown")
+async def _drenar_turnos_en_vuelo() -> None:
+    """Va ANTES de cerrar los pools: un turno que sigue vivo necesita su conexión a Neon."""
+    if not _EN_VUELO:
+        return
+    pendientes = len(_EN_VUELO)
+    log.info("apagando: se esperan %d turno(s) en vuelo", pendientes)
+    quedaron = await _esperar_a_que_drenen()
+    if quedaron:
+        # Se dice en voz alta: estos son exactamente los mensajes que el barrido de arranque
+        # tendrá que recoger.
+        log.error(
+            "apagado con %d turno(s) sin terminar: %s", quedaron, ", ".join(sorted(_EN_VUELO))
+        )
+    else:
+        log.info("apagando: los %d turno(s) terminaron", pendientes)
+
+
 @app.on_event("shutdown")
 async def _cerrar_engines_de_persistencia() -> None:
     """Cierra los pools de `SQLAlchemySession` (fase 7) al apagar el servidor.
@@ -356,7 +405,8 @@ async def recibir(request: Request, tareas: BackgroundTasks) -> Response:
 
     for m in mensajes:
         log.info("entra %s de +%s (%s)", m.wamid, m.telefono, m.tipo)
-        tareas.add_task(_entregar, m)
+        # `_rastreado` y no `_entregar` a secas: apagar el servidor tiene que esperar a esto.
+        tareas.add_task(_rastreado, m)
 
     return Response(status_code=200, content="ok", media_type="text/plain")
 
@@ -500,6 +550,20 @@ async def _avisar_a_doctores(
         log.exception("no se pudo avisar a los doctores del escalamiento de %s", ctx.id_conversacion)
 
 
+async def _rastreado(m: ingesta.MensajeEntrante) -> None:
+    """`_entregar` anotando que este turno está vivo, para que el apagado lo espere.
+
+    El `finally` no es cosmética: si `_entregar` reventara --promete que no, y este envoltorio
+    no depende de esa promesa-- un `wamid` colgado en `_EN_VUELO` haría que cada apagado se
+    quedara esperando los 75 segundos completos a algo que ya no existe.
+    """
+    _EN_VUELO.add(m.wamid)
+    try:
+        await _entregar(m)
+    finally:
+        _EN_VUELO.discard(m.wamid)
+
+
 async def _entregar(m: ingesta.MensajeEntrante) -> None:
     """Se ejecuta después de haber respondido. Nunca lanza: si lanzara, el error se perdería
     en el log del servidor sin dejar rastro consultable. `procesar_mensaje` ya registra el
@@ -637,7 +701,7 @@ async def _resetear_numero(m: ingesta.MensajeEntrante) -> None:
         # El único caso en que se aborta a propósito: Calendar no dejó borrar un evento y
         # borrar las filas lo habría vuelto un cupo fantasma de la clínica.
         log.warning("reseteo de %s abortado: %s", m.telefono, exc)
-        await _avisar_del_reseteo(m.telefono, f"No reseteé nada. {exc}")
+        await _avisar_del_reseteo(m.telefono, f"No reseteé nada. {exc}", wamid=m.wamid)
         return
     except Exception:  # noqa: BLE001
         log.exception("el reseteo de %s reventó", m.telefono)
@@ -645,18 +709,37 @@ async def _resetear_numero(m: ingesta.MensajeEntrante) -> None:
             m.telefono,
             "No pude resetear el número: algo falló a mitad. Revisa los logs antes de "
             "volver a intentarlo.",
+            wamid=m.wamid,
         )
         return
 
     log.info("RESETEO de %s: %s", m.telefono, borrado)
-    await _avisar_del_reseteo(m.telefono, reseteo.confirmacion(borrado))
+    await _avisar_del_reseteo(m.telefono, reseteo.confirmacion(borrado), wamid=m.wamid)
 
 
-async def _avisar_del_reseteo(telefono: str, texto: str) -> None:
+async def _avisar_del_reseteo(telefono: str, texto: str, *, wamid: str | None = None) -> None:
     try:
-        await _whatsapp.enviar_texto(telefono, texto)
+        respuesta = await _whatsapp.enviar_texto(telefono, texto)
     except Exception:  # noqa: BLE001
         log.exception("no se pudo confirmar el reseteo a %s", telefono)
+        return
+
+    # Y se ANOTA. `/clearstate` es el único camino que contesta sin pasar por `atender`, así
+    # que era el único que respondía de verdad y dejaba la fila con `respondido_en` NULL: un
+    # mensaje contestado que cualquier informe --y desde hoy el barrido de arranque-- leería
+    # como perdido. El barrido lo habría reatendido pasándole a Daniela el texto
+    # «/clearstate» como si fuera un paciente.
+    if wamid is None or respuesta is None:
+        return
+    try:
+        await asyncio.to_thread(_marcar_reseteo_respondido, wamid, respuesta)
+    except Exception:  # noqa: BLE001
+        log.warning("no se pudo anotar la confirmación del reseteo de %s", wamid, exc_info=True)
+
+
+def _marcar_reseteo_respondido(wamid: str, wamid_respuesta: str) -> None:
+    with persistencia.conectar(config.database_url) as conn:
+        persistencia.marcar_respondido(conn, wamid, wamid_respuesta=wamid_respuesta)
 
 
 # ==========================================================================================
@@ -685,6 +768,12 @@ async def salud() -> dict:
                 "WHERE reenviado_en IS NULL AND fallo IS NOT NULL"
             )
             estado["sin_entregar"] = cur.fetchone()[0]
+        # `sin_entregar` mira el viaje HACIA los doctores y solo cuenta lo que dejó un fallo
+        # escrito. Un proceso matado a media frase no escribe nada, así que la pérdida del
+        # 13/09/2026 --el despliegue que se llevó un turno por delante-- no aparecía en
+        # ningún indicador. Esta cuenta es la que mira al paciente: entró y nadie le
+        # contestó, sin motivo anotado.
+        estado["sin_responder"] = persistencia.contar_sin_responder(conn)
         estado["base_de_datos"] = "ok"
     except Exception as e:  # noqa: BLE001
         estado["base_de_datos"] = f"FALLA: {e}"
@@ -1256,6 +1345,90 @@ def _cargar_vocabulario_de_tratamientos() -> None:
             "no se pudo leer la tabla de tratamientos al arrancar; se usan los catorce del "
             "Literal. El webhook sigue funcionando.", exc_info=True
         )
+
+
+async def _recoger_lo_que_quedo_sin_responder() -> int:
+    """Atiende los mensajes que el proceso anterior dejó colgados. Devuelve cuántos.
+
+    La red por debajo del drenaje. El drenaje cubre el apagado ordenado --un despliegue-- y
+    no puede cubrir lo demás: un `kill -9`, que el VPS se reinicie, que el contenedor se
+    quede sin memoria. En esos casos el mensaje queda con `respondido_en` NULL y
+    `fallo_respuesta` NULL, y hasta el 13/09/2026 ahí se acababa la historia: el paciente sin
+    respuesta y nadie enterado.
+
+    **No pasa por `_entregar`, y es a propósito.** `_entregar` empieza por
+    `procesar_mensaje`, que deduplica por `wamid` y devolvería `nuevo=False` --con razón: el
+    mensaje YA se registró y YA se le reenvió al doctor-- y se iría sin correr el turno, que
+    es justamente lo que falta. Se llama a `atender` directo, que es la mitad que no llegó a
+    ocurrir.
+
+    El riesgo asumido, dicho para que nadie lo descubra solo: entre que WhatsApp acepta la
+    respuesta y `marcar_respondido` la escribe hay unos milisegundos. Un proceso que muera
+    justo ahí hace que el paciente reciba la respuesta dos veces. Se acepta porque la ventana
+    es diminuta, porque el silencio es peor que la repetición, y sobre todo porque **las
+    claves de idempotencia impiden lo que de verdad importaría**: reintentar no crea una
+    segunda cita ni consume un segundo cupo.
+    """
+    try:
+        with persistencia.conectar(config.database_url) as conn:
+            colgados = persistencia.mensajes_sin_responder(conn)
+    except Exception:  # noqa: BLE001
+        log.warning("no se pudo consultar los mensajes sin responder", exc_info=True)
+        return 0
+
+    # `/clearstate` no se reatiende JAMÁS, y el cinturón va aparte del tirante. El tirante es
+    # que `_avisar_del_reseteo` ahora anota el mensaje como respondido, así que los nuevos ni
+    # aparecen aquí; el cinturón es esta línea, para las filas que quedaron sin anotar antes
+    # de ese arreglo. Reatender un reseteo no lo repetiría --`atender` no mira el comando--
+    # pero le pasaría a Daniela el texto «/clearstate» como si fuera un paciente preguntando.
+    colgados = [fila for fila in colgados if not reseteo.es_comando(fila.get("texto"))]
+
+    if not colgados:
+        return 0
+
+    log.warning(
+        "arranque: %d mensaje(s) se quedaron sin responder y se reintentan: %s",
+        len(colgados),
+        ", ".join(fila["wamid"] for fila in colgados),
+    )
+    for fila in colgados:
+        mensaje = ingesta.MensajeEntrante(
+            wamid=fila["wamid"],
+            telefono=fila["telefono"],
+            nombre_perfil=fila["nombre_perfil"],
+            tipo=fila["tipo"] or "text",
+            texto=fila["texto"],
+            media_id=fila["media_id"],
+            mime=fila["mime"],
+        )
+        _EN_VUELO.add(mensaje.wamid)
+        try:
+            await atencion.atender(
+                mensaje,
+                whatsapp=_whatsapp,
+                telegram=_telegram,
+                config=config,
+                calendario=_calendario,
+                al_escalar=_avisar_a_doctores,
+                # Sin `lectura`: si el mensaje traía archivo, el lector ya corrió y su nota
+                # se entregó al doctor antes de morir el proceso. Rehacerla costaría otra
+                # llamada al modelo para un destinatario que ya la tiene.
+                lectura=None,
+            )
+        except Exception:  # noqa: BLE001
+            log.exception("el reintento de %s también falló", mensaje.wamid)
+        finally:
+            _EN_VUELO.discard(mensaje.wamid)
+    return len(colgados)
+
+
+@app.on_event("startup")
+async def _recoger_al_arrancar() -> None:
+    """Va en una tarea aparte: el barrido llama al modelo una vez por mensaje, y el arranque
+    no puede quedarse esperando eso. Mientras corre, `/salud` ya responde y Traefik puede
+    empezar a mandar tráfico --que es justo lo que hace falta para que no se pierda el
+    siguiente mensaje mientras se recoge el anterior."""
+    asyncio.create_task(_recoger_lo_que_quedo_sin_responder())
 
 
 # ------------------------------------------------------------------------------------------

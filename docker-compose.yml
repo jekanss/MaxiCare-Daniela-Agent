@@ -25,6 +25,16 @@ services:
     environment:
       TZ: America/Bogota
 
+    # Docker da 10 segundos por defecto entre el SIGTERM y el SIGKILL, y un turno de Daniela
+    # necesita más: 20 s de ventana del búfer, más el modelo, más el retardo humano. Con los
+    # 10 por defecto, TODO despliegue que pillara a alguien escribiendo le mataba el turno a
+    # media frase -- y el mensaje quedaba sin respuesta y sin fallo anotado, porque un
+    # proceso muerto no escribe su motivo. Pasó el 13/09/2026.
+    #
+    # Tiene que ser MAYOR que `runtime.SEGUNDOS_PARA_DRENAR` (75): si Docker mata antes de
+    # que el servidor termine de esperar, la espera no sirve de nada.
+    stop_grace_period: 120s
+
     labels:
       - traefik.enable=true
       - traefik.http.routers.daniela.rule=Host(`daniela.maxicarecol.com`)

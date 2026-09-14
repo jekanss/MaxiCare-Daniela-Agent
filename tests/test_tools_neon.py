@@ -40,7 +40,7 @@ import pytest
 
 from maxicare_daniela import herramientas as h
 from maxicare_daniela import persistencia
-from maxicare_daniela.calendario import CalendarioDoble
+from maxicare_daniela.calendario import CalendarioDoble, Jornada
 from maxicare_daniela.config import cargar_dotenv
 from maxicare_daniela.contratos import ContextoDaniela, SolicitudCancelacion, SolicitudCita
 
@@ -133,9 +133,32 @@ def contexto_de(esquema):
 
 
 def _hora_libre(desplazamiento: int = 0) -> datetime:
-    """Una hora futura distinta en cada prueba, para que no se estorben entre sí."""
-    base = datetime.now(h.ZONA_BOGOTA).replace(minute=0, second=0, microsecond=0)
-    return base + timedelta(days=30, hours=desplazamiento)
+    """El bloque HÁBIL número `desplazamiento`, a partir de dentro de 30 días.
+
+    Era `ahora + 30 días + N horas`, y dejó de valer el 13/09/2026, cuando la rejilla aprendió
+    el horario de la clínica: corriendo de madrugada --o con un desplazamiento que cruzara la
+    medianoche-- la hora caía fuera de jornada y las tools la rechazaban con «la clínica no
+    atiende en ese momento». Seis pruebas en rojo, y ninguna hablaba de horarios.
+
+    Es el mismo arreglo que ya se le hizo a `scripts/probar_tools.py::hora`, y estuvo tres
+    horas sin hacerse **aquí** porque `-m neon` solo se corre bajo demanda: el defecto vivió
+    en verde desde el merge de la jornada hasta que alguien volvió a correr esa suite.
+
+    Lo que el archivo necesita se conserva --que dos desplazamientos distintos sean horas
+    distintas, y que los consecutivos sean contiguos-- y se añade lo que ahora hace falta:
+    que todos existan para la clínica. `_hora_libre(20)` ya no son veinte horas después.
+    """
+    jornada = Jornada()
+    actual = (datetime.now(h.ZONA_BOGOTA) + timedelta(days=30)).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    habiles = 0
+    while True:
+        if jornada.cabe(actual, 60):
+            if habiles == desplazamiento:
+                return actual
+            habiles += 1
+        actual += timedelta(hours=1)
 
 
 # ==========================================================================================
@@ -892,3 +915,62 @@ def test_un_numero_sin_fila_no_tiene_tema_ni_lo_finge(esquema):
     with persistencia.conectar(esquema) as conn:
         assert persistencia.buscar_paciente_por_telefono(conn, desconocido) is None
         assert persistencia.tema_del_paciente(conn, desconocido) is None
+
+
+# ==========================================================================================
+# ¿A quién no le contestamos?
+# ==========================================================================================
+
+
+@pytest.mark.neon
+def test_un_mensaje_sin_respuesta_y_sin_fallo_es_el_que_se_perdio(esquema):
+    """La consulta que `marcar_fallo_respuesta` lleva nombrando desde que existen estas
+    columnas --«¿a quién no le contestamos?»-- y que nadie había escrito.
+
+    Los dos NULL juntos son la firma de un proceso MATADO: un fallo de verdad deja motivo y
+    una respuesta que salió deja fecha. Pasó el 13/09/2026, cuando un despliegue recreó el
+    contenedor con un turno a medias.
+
+    Sin esta prueba el SQL puede quedarse en un no-op silencioso --devolver siempre vacío-- y
+    en producción se vería exactamente igual que el defecto que viene a arreglar.
+    """
+    with persistencia.conectar(esquema) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO mensajes_entrantes
+                    (wamid, telefono, tipo, texto, recibido_en, respondido_en,
+                     wamid_respuesta, fallo_respuesta)
+                VALUES
+                    ('w.perdido',   '573001', 'text', 'unicornios?',
+                     now() - interval '5 minutes',  NULL, NULL, NULL),
+                    ('w.contestado','573001', 'text', 'hola',
+                     now() - interval '5 minutes',  now(), 'w.salida', NULL),
+                    ('w.fallado',   '573001', 'text', 'ay',
+                     now() - interval '5 minutes',  NULL, NULL, 'OpenAI se cayo'),
+                    ('w.enVuelo',   '573001', 'text', 'ahora mismo',
+                     now(),                         NULL, NULL, NULL),
+                    ('w.antiguo',   '573001', 'text', 'de anteayer',
+                     now() - interval '3 days',     NULL, NULL, NULL)
+                """
+            )
+        conn.commit()
+
+        wamids = [f["wamid"] for f in persistencia.mensajes_sin_responder(conn)]
+
+        assert wamids == ["w.perdido"], (
+            "la firma es respondido_en NULL Y fallo_respuesta NULL, dentro de la ventana"
+        )
+        # Y cada exclusión por su motivo, porque cada una protege de algo distinto:
+        assert "w.contestado" not in wamids, "reatenderlo le repetiría la respuesta al paciente"
+        assert "w.fallado" not in wamids, "un fallo anotado ya tiene quien lo mire"
+        assert "w.enVuelo" not in wamids, "está corriendo: contarlo como pérdida es contar el trabajo"
+        assert "w.antiguo" not in wamids, "contestar tres días tarde es peor que no contestar"
+
+        # El contador de `/salud` usa un margen más ancho -- cinco minutos -- para que un
+        # turno en curso no lo encienda. Con el mensaje perdido justo en el borde, se mira
+        # con un margen explícito para que la prueba no dependa de esos segundos.
+        assert persistencia.contar_sin_responder(conn, margen_segundos=60) == 1
+        assert persistencia.contar_sin_responder(conn, margen_segundos=60, ventana_horas=96) == 2, (
+            "la ventana de 24 h es lo que hace que el indicador vuelva a cero solo"
+        )

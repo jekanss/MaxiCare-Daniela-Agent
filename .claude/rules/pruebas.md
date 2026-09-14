@@ -22,6 +22,19 @@ conexión **directa** —sin `-pooler.` en el host—, porque el pooler de Neon 
 `options` como parámetro de arranque y además comparte sesiones, lo que falsearía
 cualquier medición de concurrencia.
 
+## La suite de Neon es el punto ciego, y ya cobró
+
+Como solo corre bajo demanda, un cambio puede dejarla en rojo y nadie enterarse. Pasó el
+13/09/2026: la rejilla aprendió el horario de la clínica y `_hora_libre(n)` de
+`test_tools_neon.py` —que era `ahora + 30 días + N horas`— empezó a devolver horas de
+madrugada. **Seis pruebas en rojo, ninguna hablando de horarios**, y vivieron así varias
+horas mientras `uv run pytest -q` seguía verde. El mismo defecto se había arreglado ya en
+`scripts/probar_tools.py::hora` el mismo día; aquí no, porque nadie volvió a correr `-m neon`.
+
+**Quien toque la rejilla, la jornada o el reloj corre también `-m neon`.** Tarda tres
+minutos y medio. Los dos helpers cuentan ahora **bloques hábiles**, no horas de reloj: un
+`_hora_libre(20)` no son veinte horas después.
+
 ## Una tool se prueba por su función interna
 
 Cada tool vive en dos piezas: la lógica en `_nombre_de_la_tool(...)` y encima una
