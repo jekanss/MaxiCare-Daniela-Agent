@@ -59,6 +59,32 @@
         "Medicion real del CLAUDE.md raiz: 5,5k tokens, frente a los 3,17k que estimaba el inventario a 4 bytes por token. La estimacion del script se queda corta; no son cifras equivalentes.",
         "Siguen activos los siete conectores de claude.ai (Apollo.io, AgentMail, Figma, Gmail, Google Drive, Google Calendar, Microsoft 365). No se pueden apagar desde la maquina: se gestionan en la cuenta."
       ]
+    },
+    {
+      "fecha": "2026-09-14T19:30:00.000Z",
+      "fuente": "estimacion",
+      "nota": "TERCERA PASADA. El usuario no aporto /context ni antes ni despues, asi que las dos cifras son estimacion del script a 4 bytes por token. NO son comparables con las mediciones 'context' de arriba. El factor 1,74 medido el 14/09 (5,5k reales frente a 3,17k estimados para el CLAUDE.md raiz) sugiere un ahorro real de ~2650 tokens, pero eso es una extrapolacion y no una medicion.",
+      "tokensArranque": 4761,
+      "desglose": {
+        "instrucciones": 4761,
+        "mcp": null,
+        "skills": null,
+        "systemPrompt": null
+      },
+      "cambiosAplicados": [
+        "CLAUDE.md raiz: de 289 a 224 lineas (5529 -> 4003 tok est.). Los no negociables 10 a 20 vuelven a la convencion que declara su propio preambulo: la invariante se queda, el porque baja a la regla con paths:",
+        "No negociables 10-20: de 118 lineas / 10569 bytes a 50 lineas / 4468 bytes",
+        "atencion-whatsapp.md: seccion nueva 'Al General solo va lo que le pide algo al doctor' -- el no negociable 14 NO estaba en ninguna regla del repo, se escribio antes de recortarlo",
+        "atencion-whatsapp.md: CORREGIDA la contradiccion de las lineas 151-163, que describia asegurar_tema con el comportamiento anterior a la migracion 014 como si fuera vigente",
+        "relevo-telegram.md: anadidas las tres frases que faltaban -- fallo_respuesta con prefijo 'relevo:' (del 15), asegurar_tema ya no exige ficha (del 16), tomar_cupo puede negarse (del 17)"
+      ],
+      "notas": [
+        "Antes de recortar se verificaron los once puntos uno por uno contra los cinco archivos de regla LEIDOS ENTEROS: 7 cubiertos, 3 parciales, 1 ausente. En seis casos la regla tenia MAS nivel que el CLAUDE.md.",
+        "El mapeo intuitivo fallo en dos: el punto 11 (regeneracion) vive en atencion-whatsapp.md 258-295, no en frontera-agentes.md; y el punto 14 no vivia en ninguna parte.",
+        "Se quedo en 224 lineas y no bajo de las 200 del objetivo oficial. Llegar ahi exigia recortar invariantes operativas, y este archivo existe para sobrevivir a compactaciones. Decision consciente, no descuido.",
+        "Las 10 reglas de .claude/rules/ siguen todas con paths:. Los dos candidatos a deny (web/dist, web/node_modules) siguen en .gitignore. Cero MCP locales. El repositorio no tenia ninguna otra palanca con ahorro material.",
+        "Sin ejecutar y entregado al usuario: /plugin install python-lsp@claude-plugins-official (65 de los 137 archivos son Python)."
+      ]
     }
   ]
 }

@@ -29,6 +29,15 @@ pulsa «Listo» en el mismo minuto en que el barrido lo da por vencido.
 Los tres motivos son los del CHECK cerrado de la migración 003 y no hay un cuarto:
 `devuelto_por_doctor`, `tiempo_agotado`, `tema_perdido`.
 
+**Mientras dura el relevo, una columna se usa al revés, y es la segunda inversión del
+proyecto.** Un mensaje del paciente que entra con el relevo tomado se anota con
+`fallo_respuesta` empezando por `relevo:` **sin ser un fallo**: es la marca de «esto lo
+atendió un humano». Sin ella el mensaje se queda con `fallo_respuesta` NULL y sin respuesta
+de Daniela, que es justo la forma que tiene `mensajes_sin_responder` de reconocer un pendiente
+— se lo entregaría a Daniela media hora después y **contestaría por encima del doctor**,
+delante del paciente. Quien lea esa columna como un registro de averías contará relevos como
+fallos; quien la escriba sin el prefijo reabre el agujero.
+
 ## El candado lo pone Telegram, no nuestra disciplina
 
 Un tema **cerrado** impide físicamente escribir a quien no es administrador del grupo,
@@ -112,6 +121,12 @@ clínica cayeron al General, y el hilo que le abrió el botón **nació vacío**
 Ahora vive en `temas_telegram(telefono, topic_id, abierto)`. **Tener hilo y estar verificado
 son cosas distintas**, y por eso el guardrail de identidad no se tocó. La 014 deja caer las
 dos columnas viejas: el mismo hecho en dos sitios es como nace el bug del mes siguiente.
+
+El estado vigente de la función, que es lo que hay que recordar al tocarla: **`asegurar_tema`
+ya no exige ficha y sigue sin crear ninguna.** Las dos mitades importan. Que no exija ficha es
+lo que le da hilo a un lead desde su primer archivo; que siga sin crearla es lo que impide que
+mandar una foto verifique a un desconocido, porque `identidad_verificada` deriva de la
+EXISTENCIA de la fila en `pacientes` y de nada más.
 
 `temas_telegram` **no cuelga de nada**, así que ningún CASCADE la vacía: `borrar_rastro` la
 borra a mano, y los fixtures de las pruebas de Neon tienen que limpiarla aparte.
@@ -300,6 +315,14 @@ lo cierra el barrido por `tiempo_agotado`.
 reiniciara mientras se espera la fecha, el «15/09 14:30» se le aparecería al **paciente** en
 su WhatsApp. El parseo es estricto y nunca adivina «mañana a las 10» — una fecha mal
 interpretada es un paciente presentándose a la hora equivocada.
+
+El orden `cupo + Calendar + fila` no es arbitrario y `tomar_cupo` va primero a propósito:
+**es lo único que impide que la clínica le dé esa hora a otro**. Puede decir que no, y esa
+negativa es el caso normal, no el raro — el doctor está tecleando una hora que eligió
+hablando con el paciente, sin mirar la agenda. Por eso el diálogo se lo dice y SIGUE
+esperando en vez de abortar el cierre: el relevo sigue tomado y él escribe otra. Un cierre
+que creara la fila sin pasar por el cupo mandaría a dos personas a la misma hora, que es
+exactamente el fallo que este proyecto no se permite.
 
 ## Lo único que cruza el muro hacia Daniela
 

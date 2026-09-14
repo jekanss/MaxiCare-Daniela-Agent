@@ -87,122 +87,57 @@ una —qué se midió, qué costó— está en la regla que cubre ese archivo.
    `session_id = id_conversacion`). Quien toque `/clearstate` tiene que borrarlo, y va
    ANTES del `DELETE FROM conversaciones`: los `session_id` SON esos ids.
 10. **Las columnas de la 010 las fija el SDK, no nosotros.** `SQLAlchemySession` corre con
-   `create_tables=False`, así que `agent_sessions` y `agent_messages` tienen que coincidir
-   con lo que el SDK espera —incluido el `TIMESTAMP` **sin zona**, al revés que el resto del
-   esquema—. Quien suba la versión del SDK compara columna por columna; lo que caza el
-   desajuste es `tests/test_sesion_neon.py`, y solo corre con `-m neon`.
+   `create_tables=False`: `agent_sessions` y `agent_messages` tienen que coincidir con lo que
+   el SDK espera, incluido el `TIMESTAMP` **sin zona**. Quien suba la versión compara columna
+   por columna; lo caza `tests/test_sesion_neon.py`, solo con `-m neon`.
 11. **La regeneración corre SIN los guardrails de ENTRADA, y un tripwire de entrada no se
-   regenera nunca.** `CORRECCION` empieza con «AVISO DEL SISTEMA» y le reescribe la conducta
-   a Daniela: pasada por `uso_indebido`, el evaluador la clasificaba como inyección
-   **siempre**, así que cualquier guardrail de salida que saltara acababa en mensaje seguro
-   más escalamiento y el paciente se iba sin su cita. Los de SALIDA se conservan los tres. Y
-   el `{motivo}` que viaja en la corrección es el TEXTO del guardrail, jamás su nombre: con
-   el nombre, el segundo intento es tan ciego como el primero.
+   regenera nunca.** Va sobre `agente.clone(input_guardrails=[])` y conserva los tres de
+   SALIDA. El `{motivo}` que viaja en `CORRECCION` es el TEXTO del guardrail, jamás su nombre.
 12. **Un teléfono SIN ficha en `pacientes` puede crear su primera cita; mover o cancelar,
-   nunca.** `identidad_antes_de_datos` protege los datos de alguien que ya existe —«que no se
-   mezclen cuando alguien escribe por un familiar»—, y quien no tiene ficha no tiene datos
-   que proteger: bloquearlo dejaba a la clínica sin pacientes nuevos, con `citas.paciente_id`
-   NULLABLE desde la 001 justo para ese caso. El permiso lo da `ctx.telefono_sin_paciente`,
-   que sale de la base y **nunca del modelo**, y la excepción es una lista blanca de UNA tool.
-   Lo que impide que eso lo deje encerrado: **`crear_cita` registra al paciente**, así que
-   desde el turno siguiente sí puede mover y cancelar lo suyo.
-13. **La pertenencia de una cita va por TELÉFONO, y toda hora que una tool confirma queda
-   autorizada — incluida la vieja al reprogramar y la cancelada al cancelar.** El id de una
-   cita es un UUID que el sistema le mandó al paciente: no es un control de acceso. Y si la
-   hora no queda autorizada, `sin_hora_no_verificada` bloquea la confirmación de una escritura
-   **que ya ocurrió**: la cita movida y el paciente yendo a la hora vieja.
-14. **Al General solo va lo que le pide algo al doctor, y `telegram_message_id` NULL ya no es
-   una alarma.** Un texto va mudo al tema de su paciente, o a ninguna parte si no tiene tema
-   —nunca lo crea: eso es del primer archivo—. El aviso de archivos suena UNA vez por tanda
-   (`_primer_archivo_de_la_tanda`, ventana de 24 h). Lo que invierte: la migración 004 dice
-   que `telegram_message_id` NULL + `fallo` NULL es «entró y no llegó a nadie», y eso pasó a
-   ser lo normal; **la señal de alarma es `reenviado_en` NULL**, que es sobre lo que ya está
-   construido `ix_mensajes_sin_reenviar`. El SQL de las dos consultas nuevas solo lo ejercita
-   `tests/test_ingesta_neon.py`, con `-m neon`: offline van dobladas y degradan en silencio.
+   nunca.** El permiso lo da `ctx.telefono_sin_paciente`, que sale de la base y **nunca del
+   modelo**, y la excepción es una lista blanca de UNA tool (`_ESCRITURAS_PARA_DESCONOCIDO`).
+   **`crear_cita` registra al paciente**, así que desde el turno siguiente sí puede mover lo suyo.
+13. **La pertenencia de una cita va por TELÉFONO (`_es_ajena`), nunca por el UUID, y toda hora
+   que una tool confirma queda autorizada** — incluida la vieja al reprogramar y la cancelada
+   al cancelar. Si no, `sin_hora_no_verificada` bloquea la confirmación de una escritura **que
+   ya ocurrió**: la cita movida y el paciente yendo a la hora vieja.
+14. **Al General solo va lo que le pide algo al doctor, y la señal de alarma es `reenviado_en`
+   NULL, no `telegram_message_id` NULL.** Un texto va mudo al tema de su paciente, o a ninguna
+   parte si no tiene tema —nunca lo crea: eso es del primer archivo—. El aviso de archivos
+   suena UNA vez por tanda (`_primer_archivo_de_la_tanda`, 24 h).
 15. **El relevo tiene UNA puerta de salida, y `/webhook/telegram` se cierra cuando falta el
-   secreto.** `conversaciones.tomada_por` puesto significa dos cosas a la vez: a Daniela **no
-   se la llama** (`atencion.atender` corta antes del modelo) y el tema de ese paciente está
-   **abierto** en Telegram, o sea que es un canal en vivo hacia su WhatsApp. Las dos tienen
-   que dejar de ser verdad juntas, y por eso los tres motivos del CHECK de la 003
-   —`devuelto_por_doctor`, `tiempo_agotado`, `tema_perdido`— salen todos por `relevo.cerrar`.
-   El reloj de cierre cuenta desde `GREATEST(tomada_en, ultimo_mensaje_doctor_en)`: desde la
-   activación sería un cronómetro que corta a un doctor a mitad de frase. `/webhook/telegram`
-   **sin `MAXICARE_TELEGRAM_WEBHOOK_SECRET` responde 403 a todo** —degrada al revés que el
-   resto del proyecto, porque es la única puerta por la que algo de fuera puede hacer que el
-   bot le escriba al WhatsApp de un paciente—. Y la segunda inversión de una columna, después
-   de la 14: un mensaje que entra durante un relevo se anota con `fallo_respuesta` empezando
-   por `relevo:` **sin ser un fallo**; sin eso, `mensajes_sin_responder` se lo entregaría a
-   Daniela media hora después y contestaría por encima del doctor.
+   secreto.** `conversaciones.tomada_por` puesto significa Daniela callada **y** tema abierto:
+   las dos dejan de ser verdad juntas, por `relevo.cerrar` con uno de los tres motivos del
+   CHECK de la 003. El reloj cuenta desde `GREATEST(tomada_en, ultimo_mensaje_doctor_en)`. Sin
+   `MAXICARE_TELEGRAM_WEBHOOK_SECRET` responde 403 a todo. Y un mensaje que entra durante un
+   relevo se anota con `fallo_respuesta` empezando por `relevo:` **sin ser un fallo**.
 16. **El hilo de Telegram va por TELÉFONO (`temas_telegram`), no por ficha, y tener hilo NO
-   es estar verificado.** La 014 lo sacó de `pacientes` y dejó caer las dos columnas viejas.
-   Eso es lo que permite que un lead tenga hilo desde su primer archivo —antes sus
-   radiografías caían al General, sus textos no se archivaban en ninguna parte y el hilo que
-   le abría el relevo nacía vacío— **sin** tocar el guardrail de identidad, que sigue
-   derivando de la EXISTENCIA de la fila en `pacientes`. `lectura.asegurar_tema` ya no exige
-   ficha y sigue sin crear ninguna.
+   es estar verificado.** `lectura.asegurar_tema` ya no exige ficha y sigue sin crear ninguna;
+   la identidad sigue derivando de la EXISTENCIA de la fila en `pacientes`.
 17. **Lo único que cruza del relevo hacia Daniela es que hubo relevo y, si la hubo, una
-   CITA.** Nunca lo que escribió el doctor, ni literal ni resumido: eso puede ser clínico, y
-   `relevo._avisar_a_daniela` escribe en el contexto del agente que le habla al paciente. Por
-   eso el cierre PREGUNTA («¿quedó agendada una cita?») en vez de resumir — decide un humano.
-   La cita se crea de verdad (cupo → Calendar → fila, ese orden), y `tomar_cupo` puede decir
-   que no: es lo único que impide que la clínica le dé esa hora a otro. El estado de esa
-   pregunta vive en `conversaciones.cierre_pendiente`, **en la base y no en memoria**: un
-   reinicio a mitad le mandaría al PACIENTE el «15/09 14:30» que el doctor estaba escribiendo.
-   Y el MIME de un archivo que baja de Telegram sale de la EXTENSIÓN: su servidor responde
-   `application/octet-stream` siempre, y Meta rechaza la subida entera con eso.
-18. **El relevo tiene CUATRO salidas, y la cuarta es cerrar el hilo a mano.** Es el gesto que
-   sale natural al terminar, y dejaba el estado que prohíbe la 15: tema cerrado con
-   `tomada_por` puesto. Lo atiende `relevo.cerrar_por_tema_cerrado` desde el evento
-   `forum_topic_closed`, con motivo `devuelto_por_doctor` —el CHECK de la 003 sigue cerrado
-   con tres— y **sin** preguntar por la cita: preguntar deja el relevo tomado, y con el tema
-   cerrado eso es el estado prohibido otra vez. Es idempotente porque `cerrar` también
-   dispara ese evento al cerrar el tema. El botón «Listo» va **anclado** (`can_pin_messages`)
-   porque viaja en el primer mensaje del hilo, y la despedida lleva el de volver a entrar.
-   Y lo que el doctor lee como transcripción es la FRASE: `daniela` tiene `output_type`, así
-   que el contenido del item es el JSON entero de `RespuestaDaniela` y hay que desempaquetar
-   DOS niveles (`persistencia._solo_la_frase`).
+   CITA.** Nunca lo que escribió el doctor, ni literal ni resumido. La cita se crea en el orden
+   cupo → Calendar → fila, y `tomar_cupo` puede decir que no: es lo único que impide que la
+   clínica le dé esa hora a otro. El estado vive en `conversaciones.cierre_pendiente`, **en la
+   base y no en memoria**. Y el MIME de un archivo que baja de Telegram sale de la EXTENSIÓN.
+18. **El relevo tiene CUATRO salidas, y la cuarta es cerrar el hilo a mano.**
+   `relevo.cerrar_por_tema_cerrado` la atiende desde `forum_topic_closed` con motivo
+   `devuelto_por_doctor`, **sin** preguntar por la cita, y es idempotente. El botón «Listo» va
+   anclado (`can_pin_messages`). La transcripción se desempaqueta DOS niveles
+   (`persistencia._solo_la_frase`).
 19. **Borrar un tema NO emite ningún evento, y el `tratamiento` del relevo lo escribe el
-   doctor.** Lo primero hacía el peor de los agujeros —relevo tomado, Daniela callada y el
-   paciente sin nadie que le conteste durante 3 h—, y lo detecta el barrido con
-   `telegram.estado_del_tema`, que pregunta con **`reopenForumTopic`**: `editForumTopic` sin
-   argumentos no cambia nada y **por eso mismo no valida el id** —devolvía `ok: true` para un
-   tema borrado, así que la sonda decía que sí a todo y el agujero siguió abierto un día
-   entero, con la suite en verde—. Ninguna prueba offline puede cazar eso, porque todas
-   doblan a Telegram: lo caza `scripts/probar_relevo.py` contra la API de verdad, y quien
-   toque la sonda lo corre. Devuelve TRES estados y no un booleano: `"reabierto"` significa
-   que el tema existía pero estaba cerrado —un `forum_topic_closed` perdido con el bot
-   caído— y se cierra como `devuelto_por_doctor`; su `None` es «no se pudo saber» y **no**
-   cierra nada, porque un timeout no es un tema borrado. Al cerrar por
-   `tema_perdido` el hilo se OLVIDA (`persistencia.olvidar_tema`), no se marca cerrado: una
-   fila apuntando a un `topic_id` muerto deja a ese número sin poder recibir archivos nunca
-   más. Y lo segundo: la 015 sustituyó el `tratamiento="valoracion"` fijo —que ni siquiera
-   era una de las catorce claves— por lo que el doctor escriba, **sin validar contra la lista
-   viva**; es la única excepción del proyecto, decidida por el cliente sabiendo que Daniela
-   lee ese campo y se lo repite al paciente. La 016 añadió delante el paso del NOMBRE, y solo
-   se dispara cuando la ficha dice `PENDIENTE`: sin él la cita entraba en la agenda de la
-   clínica como «PENDIENTE · Cordales», que es el caso normal de una cita salida de un relevo
-   —el paciente nuevo es el que más escala—. Nunca pisa un nombre de verdad.
-20. **Para una cita que YA existe manda Google Calendar, no Neon.** Ahí es donde el doctor
-   mueve las cosas —arrastrándolas con el ratón, que es el gesto natural— y hasta el
-   14/09/2026 eso dejaba la fila mintiendo: el cliente movió su cita al día siguiente y
-   Daniela le siguió recitando la hora vieja. `herramientas._sincronizar_con_calendar` la
-   contrasta en cada `consultar_citas` y corrige Neon: movida → mueve la fila, suelta el cupo
-   viejo y toma el nuevo; borrada → la cancela y suelta el cupo. **Se contrasta ANTES de
-   cortar el pasado** —la cita arrastrada de ayer a mañana es pasado según Neon, y con el
-   corte delante es justo la que no se miraría—, **un `ErrorDeCalendario` no es «la borraron»**
-   —deja la fila como está: tratar un timeout como cancelación cancelaría citas buenas en
-   silencio, y por eso `CalendarioCaido.obtener_evento` lanza en vez de devolver `None`— y
-   **si la hora destino está llena la cita se mueve igual**, sin reserva y con un warning: el
-   doctor ya decidió meterla ahí. Lo mide el paso 5b de `scripts/probar_calendario.py`, que
-   es donde se comprueba lo único que un doble no puede: que un evento borrado devuelva
-   `None`. **Y lo que corrige lo DICE en el texto de la tool, con la hora vieja dentro.**
-   Corregir en silencio dejaba al modelo viendo al sistema desdecirse —el turno pasado le
-   dijo al paciente «15/09 a las 4pm», este dice que no hay ninguna cita— y escalaba: medido
-   la misma tarde, cancelación a las 18:43:48 y aviso al doctor a las 18:43:53, cinco
-   segundos, preguntándole a un humano lo que su propio turno acababa de resolver. Escalar
-   ante una contradicción es lo correcto; lo que había que quitar era la contradicción. Esas
-   horas quedan autorizadas como la vieja al reprogramar (no negociable 13): sin eso el
-   escalamiento vuelve por `sin_hora_no_verificada`.
+   doctor.** Lo detecta el barrido con `telegram.estado_del_tema`, que pregunta con
+   **`reopenForumTopic`** y devuelve TRES estados más un `None` que **no** cierra nada. Al
+   cerrar por `tema_perdido` el hilo se OLVIDA (`persistencia.olvidar_tema`), no se marca
+   cerrado. Ninguna prueba offline lo caza: quien toque la sonda corre
+   `scripts/probar_relevo.py`. Y el `tratamiento` se guarda tal cual, **sin validar contra la
+   lista viva** — única excepción del proyecto.
+20. **Para una cita que YA existe manda Google Calendar, no Neon.**
+   `herramientas._sincronizar_con_calendar` la contrasta en cada `consultar_citas` y corrige
+   Neon: **antes de cortar el pasado**, dejando la fila quieta si hay `ErrorDeCalendario` (un
+   timeout no es «la borraron») y moviendo igual si la hora destino está llena. **Y lo que
+   corrige lo DICE en el texto de la tool, con la hora vieja dentro**: corregir en silencio
+   dejaba al modelo viendo al sistema desdecirse, y escalaba. Esas horas quedan autorizadas
+   como la vieja al reprogramar (13).
 
 # Dónde está el resto
 
