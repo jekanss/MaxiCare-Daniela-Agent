@@ -88,7 +88,7 @@ agente al canal de hoy y convierte un cambio de transporte en una reescritura.
 
 ### Los dos agentes
 
-- **`daniela`** — habla con el paciente. Nueve tools, salida estructurada, cuatro
+- **`daniela`** — habla con el paciente. Diez tools, salida estructurada, cuatro
   guardrails colgados. Razonamiento bajo y verbosidad baja: un párrafo largo no se lee en
   un celular.
 - **`lector_archivos`** — lee documentos clínicos para el doctor. Sin tools. **Sin los
@@ -102,7 +102,7 @@ agente al canal de hoy y convierte un cambio de transporte en una reescritura.
 |---|---|
 | `identidad_antes_de_datos` | tocar la agenda de alguien sin haber verificado quién es |
 | `sin_cifra_no_documentada` | decir un precio que ninguna tool autorizó en este turno |
-| `sin_hora_no_verificada` | confirmar una hora que el calendario no devolvió |
+| `sin_hora_no_verificada` | decir cualquier hora concreta que ninguna tool devolvió en ese turno |
 | `sin_lectura_clinica` | interpretar una radiografía o un síntoma |
 | `uso_indebido` | jailbreak, extracción del prompt, uso como asistente general |
 
@@ -110,6 +110,54 @@ Los dos de cifras y horas comparan **dígitos**, y está documentado en el códi
 escrito en letras no se detecta. Se acepta porque el fallo que persiguen —inventar una
 cifra— se escribe casi siempre en dígitos, y porque un guardrail que intente entender texto
 libre deja de ser determinista, que era justo su valor.
+
+---
+
+## La agenda
+
+**Google Calendar es la fuente oficial de la disponibilidad.** Los doctores gestionan su
+tiempo desde su propio calendario y no desde ninguna pantalla de este sistema: si uno
+bloquea de 2 a 5 de la tarde, Daniela deja de ofrecer esas horas en la siguiente consulta;
+si borra el evento, vuelven a estar libres. No hay nada que sincronizar porque **no hay
+caché**, y es deliberado: cada consulta le pregunta a Google.
+
+Una hora se ofrece solo si pasa tres filtros a la vez, y ninguno sobra:
+
+```
+   la rejilla de bloques          ┐
+   ∩ el horario de la clínica     │   los tres, o no se ofrece
+   ∩ el cupo que queda en Neon    │   (y los mismos tres al AGENDAR,
+   ∩ los bloqueos del doctor      ┘    no solo al ofrecer)
+```
+
+Que los tres valgan también **al escribir** no es redundancia: el paciente puede pedir «las
+3» sin preguntar antes qué hay libre, y el doctor puede bloquear esa hora *después* de que
+Daniela la ofreciera —en WhatsApp, minutos—. Comprobarlo solo al ofrecer deja el evento
+encima de la cirugía de alguien.
+
+El horario de atención vive en la tabla de configuración (`hora_apertura`, `hora_cierre`,
+`hora_cierre_sabado`, `atiende_domingo`) y no en el prompt. La diferencia se midió en
+producción: sin él, la ventana que el modelo pedía **era** la oferta, y una consulta por «el
+próximo martes» devolvía las 00:00, 01:00 y 02:00. Una instrucción del prompt se puede
+desobedecer; un filtro no.
+
+Y pedir una hora cerrada no termina la conversación: Daniela recuerda el horario y ofrece
+las horas libres más cercanas, buscando hacia adelante los días que haga falta —quien
+escribe a las siete de la tarde no tiene nada más ese día—.
+
+Cada cita crea un evento que le dice a la clínica lo que necesita para trabajar:
+
+```
+  Jean Carlos Chamorro · cordales
+  ─────────────────────────────────────────────
+  Teléfono: +57...          ← lo pone el código, nunca el modelo
+  Servicio: cordales
+  Motivo:   Quiere valoración de las cordales; le molestan al masticar.
+```
+
+El teléfono sale del webhook y no de lo que el modelo escriba, por la misma razón por la
+que la solicitud de cita no tiene campo de teléfono: el caso real es la hija agendando por
+su madre, y un número inventado manda el recordatorio a otra persona.
 
 ---
 
@@ -132,9 +180,12 @@ rompiéndolas:
    búfer se saca en un `finally`.** Mover cualquiera de las tres rompe algo en silencio.
 6. **Una cita de Daniela no es un bloqueo del doctor.** Sin esa marca, la clínica atiende a
    uno por hora en vez de a dos.
-7. **El archivo llega al doctor antes de que ningún modelo lo haya visto, y sin esperarlo.**
+7. **Ninguna tool lee el reloj de la máquina.** El instante lo pone el contexto, una sola
+   vez por turno. Dos relojes en el mismo módulo son dos relojes que un día discrepan, y el
+   que no viaja en el contexto no se puede fijar desde una prueba.
+8. **El archivo llega al doctor antes de que ningún modelo lo haya visto, y sin esperarlo.**
    El lector corre *en paralelo* con la ventana del búfer, nunca delante.
-8. **No se registran cédulas ni documentos de identidad de ningún tipo.** La tabla de
+9. **No se registran cédulas ni documentos de identidad de ningún tipo.** La tabla de
    pacientes no tiene esa columna, y esa ausencia **es** la política.
 
 ---
@@ -245,6 +296,31 @@ correr y mirar. Siete están cerradas, una a medias, y dos sin empezar:
 **El relevo** es la mitad que le falta a la fase 6: que un doctor tome la conversación desde
 Telegram y hable él con el paciente, con cierre automático por tiempo. El andamiaje ya está
 —la columna `tomada_por`, el tema del paciente naciendo cerrado— pero nada lo escribe aún.
+
+### Lo que cerró la agenda, 13/09/2026
+
+El sistema lleva días atendiendo por WhatsApp, y casi todo lo de esta tanda salió de leer
+conversaciones reales en vez de imaginarlas:
+
+- **Google Calendar manda también al escribir.** Se respetaba al ofrecer desde la fase 3;
+  `crear_cita` y `reprogramar_cita` pasaban de largo por los bloqueos del doctor.
+- **La clínica tiene horario, y la rejilla no lo sabía.** Un paciente pidió cita «el próximo
+  martes» y Daniela le ofreció «12:00 am, 1:00 am o 2:00 am». El modelo no alucinó: tradujo
+  correctamente unas horas que el sistema le dio.
+- **Mover una cita al pasado destruía una cita buena.** `crear_cita` comprobaba la hora
+  pasada y `reprogramar_cita` no, y ahí el daño es mayor: suelta el cupo que el paciente sí
+  tenía y arrastra el evento del doctor detrás.
+- **Recordar el horario le costaba la respuesta al paciente.** «Atendemos de 8:00 a 5:00»
+  son dos horas concretas, y sin autorizarlas el guardrail bloqueaba el mensaje entero: la
+  pregunta más inocente del repertorio acababa en «te escribe el doctor».
+- **El evento del calendario no servía para llamar a nadie.** Ahora lleva teléfono, servicio
+  y motivo.
+- Y una que no se ve en ninguna conversación: **el prompt pagaba el minuto**. El bloque de
+  fecha llevaba `HH:MM`, así que cada minuto nuevo invalidaba la caché de las herramientas y
+  del historial completo. Truncarlo a la hora no cambia ninguna conducta y, contando tokens
+  sobre una conversación de agenda de seis turnos, sale por algo menos de la mitad del coste
+  anterior. Es un cálculo, no una medición contra la API: el número real se confirma leyendo
+  `usage.cached_tokens` en producción, y eso está pendiente.
 
 **La fase 7** eran dos cosas, y las dos están hechas.
 
