@@ -256,7 +256,7 @@ class _Estado:
 
 
 def _leer_estado(database_url: str, telefono: str, wamids: list[str]) -> _Estado:
-    """Las seis lecturas del turno en una sola conexión, que se cierra al volver.
+    """Las siete lecturas del turno en una sola conexión, que se cierra al volver.
 
     Cerrarla antes de llamar al modelo no es higiene: es el ruling 5 de la revisión de la
     tarea 1. Ninguna de estas funciones hace `commit()` tras su SELECT, así que una conexión
@@ -297,10 +297,22 @@ def _leer_estado(database_url: str, telefono: str, wamids: list[str]) -> _Estado
             operativa = None
 
         tomada_por = persistencia.conversacion_tomada(conn, id_conversacion)
-        # El recordatorio que el despachador ya mandó por esta conversación. Va aquí y no en
-        # una conexión aparte por lo mismo que las otras cinco lecturas: una conexión por
-        # turno, cerrada antes de llamar al modelo.
-        recordatorio = persistencia.ultimo_recordatorio(conn, id_conversacion)
+        # El recordatorio que el despachador ya le mandó a este NÚMERO. Va aquí y no en una
+        # conexión aparte por lo mismo que las otras seis lecturas: una conexión por turno,
+        # cerrada antes de llamar al modelo.
+        #
+        # Por teléfono y NO por `id_conversacion`, aunque quede al lado de una consulta que sí
+        # va por id: el despachador anota en la conversación que creó la cita, y un
+        # recordatorio de víspera sale más de 24 h después de esa conversación -- que es
+        # justo la ventana de `conversacion_viva`. Cuando el paciente contesta «sí, confirmo»
+        # ya está en una conversación NUEVA, y buscar por su id devolvía `None` siempre. Ver
+        # `persistencia.ultimo_recordatorio`.
+        #
+        # Y por eso siguen siendo dos consultas y no una: preguntan cosas distintas sobre la
+        # misma tabla --una por el id de ESTA conversación, la otra por el máximo de todas las
+        # de este número-- y unirlas exigiría un `LEFT JOIN` que devolviera `tomada_por`
+        # incluso cuando no hay ningún recordatorio, que es el caso normal.
+        recordatorio = persistencia.ultimo_recordatorio(conn, telefono)
         # Todos los del grupo, no solo el que abrió el turno: si se ligara solo ese, los
         # demás quedarían en `mensajes_entrantes` sin conversación, y «¿de qué charla
         # salió este mensaje?» dejaría de tener respuesta justo para los mensajes que

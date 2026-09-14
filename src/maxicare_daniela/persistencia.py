@@ -1962,24 +1962,42 @@ def anotar_recordatorio_en_conversacion(
     conn.commit()
 
 
-def ultimo_recordatorio(conn, id_conversacion: str) -> tuple[str, datetime] | None:
-    """El último recordatorio que salió por esa conversación, o `None` si no salió ninguno.
+def ultimo_recordatorio(conn, telefono: str) -> tuple[str, datetime] | None:
+    """El último recordatorio que le salió a ese NÚMERO, o `None` si no salió ninguno.
 
-    La lectura que le falta a `anotar_recordatorio_en_conversacion`, y va por el mismo camino
-    que `conversacion_tomada`: una consulta de una columna sobre `conversaciones`, por id.
-    `atencion._leer_estado` la llama y el par acaba en el contexto.
+    La lectura que le falta a `anotar_recordatorio_en_conversacion`, y de ella sale el campo
+    del contexto que le dice a Daniela a qué contesta un «sí, confirmo» que no tiene
+    antecedente en el historial.
 
-    Devuelve `None` también cuando la fila tiene el tipo pero no la fecha (o al revés): media
-    verdad aquí sería que Daniela creyera que hubo un recordatorio sin saber cuándo, y el
-    «sí» del paciente se referiría a algo que no se puede situar en el tiempo.
+    **Va por teléfono y no por `id_conversacion`, y esa es la única forma en que sirve para
+    algo.** El despachador anota en la conversación que CREÓ la cita; `atencion._leer_estado`
+    lee la conversación VIVA, y `conversacion_viva` tiene una ventana de 24 h. Un recordatorio
+    de víspera sale, por definición de su banda, más de 24 h después de la conversación que
+    agendó, y `anotar_recordatorio_en_conversacion` no toca `actualizada_en`: cuando el
+    paciente responde «sí, confirmo» se abre una conversación NUEVA y la consulta por id
+    devolvía `None`. El bloque «YA LE ESCRIBIMOS NOSOTROS» no se emitía JAMÁS para la banda
+    mayoritaria -- solo funcionaba en la de 2 h, la única que cabe dentro de la ventana.
+
+    Es el mismo criterio que ya rige `_es_ajena` y `ultimo_mensaje_del_paciente`: **la
+    identidad de este proyecto va por teléfono.** El `ORDER BY ... DESC LIMIT 1` es lo que
+    convierte «alguna conversación de este número» en «el último», que es lo que se pregunta.
+
+    Devuelve `None` también cuando la fila tiene el tipo pero no la fecha: media verdad aquí
+    sería que Daniela creyera que hubo un recordatorio sin saber cuándo, y el «sí» del
+    paciente se referiría a algo que no se puede situar en el tiempo. El `IS NOT NULL` del
+    `WHERE` va sobre la fecha por lo mismo: ordenar por una columna nula pondría delante una
+    conversación sin recordatorio.
     """
     with conn.cursor() as cur:
         cur.execute(
             """
             SELECT ultimo_recordatorio_tipo, ultimo_recordatorio_en
-              FROM conversaciones WHERE id = %s
+              FROM conversaciones
+             WHERE telefono = %s AND ultimo_recordatorio_en IS NOT NULL
+             ORDER BY ultimo_recordatorio_en DESC
+             LIMIT 1
             """,
-            (id_conversacion,),
+            (telefono,),
         )
         fila = cur.fetchone()
     if not fila or not fila[0] or fila[1] is None:

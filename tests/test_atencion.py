@@ -242,9 +242,12 @@ class BaseFalsa:
             anotar("conversacion_tomada", id_conversacion)
             return self.tomada
 
-        def ultimo_recordatorio(conn, id_conversacion):
+        def ultimo_recordatorio(conn, telefono):
+            # Por TELÉFONO, no por `id_conversacion`: el recordatorio de víspera sale más de
+            # 24 h después de la conversación que agendó, así que el «sí, confirmo» del
+            # paciente entra en una conversación nueva y la búsqueda por id devolvía `None`.
             conn.comprobar()
-            anotar("ultimo_recordatorio", id_conversacion)
+            anotar("ultimo_recordatorio", telefono)
             return self.recordatorio
 
         def ligar_mensaje_a_conversacion(conn, wamid, id_conversacion):

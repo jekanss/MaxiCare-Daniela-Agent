@@ -131,19 +131,63 @@ def test_lo_que_se_anota_en_la_conversacion_se_vuelve_a_leer(conexion_pruebas, c
     de las conversaciones nunca recibe un recordatorio.
     """
     _, id_conversacion = cita_de_prueba
+    telefono = "573000000099"
     cuando = datetime(2026, 9, 16, 18, 0, tzinfo=ZONA_BOGOTA)
 
-    assert persistencia.ultimo_recordatorio(conexion_pruebas, id_conversacion) is None
+    assert persistencia.ultimo_recordatorio(conexion_pruebas, telefono) is None
 
     persistencia.anotar_recordatorio_en_conversacion(
         conexion_pruebas, id_conversacion, tipo="recordatorio_cita", cuando=cuando
     )
 
-    leido = persistencia.ultimo_recordatorio(conexion_pruebas, id_conversacion)
+    leido = persistencia.ultimo_recordatorio(conexion_pruebas, telefono)
     assert leido is not None
     assert leido[0] == "recordatorio_cita"
     # La columna es `TIMESTAMPTZ`: vuelve en UTC, y lo que tiene que coincidir es el INSTANTE.
     assert leido[1] == cuando
+
+
+def test_el_recordatorio_se_lee_desde_la_conversacion_SIGUIENTE(
+    conexion_pruebas, cita_de_prueba
+):
+    """El caso mayoritario, y el que la ida y vuelta sobre un mismo id no podía ver.
+
+    El despachador anota en la conversación que CREÓ la cita. `atencion._leer_estado` lee la
+    conversación VIVA, y `conversacion_viva` tiene una ventana de 24 h: un recordatorio de
+    víspera sale, por definición de su banda, más de 24 h después de esa conversación. Cuando
+    el paciente contesta «sí, confirmo» ya está en una conversación NUEVA, así que la lectura
+    por `id_conversacion` devolvía `None` y el bloque «YA LE ESCRIBIMOS NOSOTROS» no se emitía
+    jamás para la banda mayoritaria.
+
+    Aquí se monta exactamente eso: se anota en la conversación vieja, se abre otra para el
+    mismo número --`asegurar_conversacion` SIEMPRE inserta, pese al nombre-- y se comprueba
+    que la lectura sigue encontrando el recordatorio.
+    """
+    _, id_conversacion = cita_de_prueba
+    telefono = "573000000099"
+    cuando = datetime(2026, 9, 16, 18, 0, tzinfo=ZONA_BOGOTA)
+
+    persistencia.anotar_recordatorio_en_conversacion(
+        conexion_pruebas, id_conversacion, tipo="recordatorio_cita", cuando=cuando
+    )
+
+    otra = persistencia.asegurar_conversacion(
+        conexion_pruebas, telefono=telefono, paciente_id=None
+    )
+    assert otra != id_conversacion
+
+    leido = persistencia.ultimo_recordatorio(conexion_pruebas, telefono)
+    assert leido is not None, "el recordatorio se perdió al abrirse la conversación siguiente"
+    assert leido[0] == "recordatorio_cita"
+    assert leido[1] == cuando
+
+    # Y con dos anotados, el que vale es el ÚLTIMO: es lo que hace el `ORDER BY ... DESC`.
+    despues = cuando + timedelta(days=1)
+    persistencia.anotar_recordatorio_en_conversacion(
+        conexion_pruebas, otra, tipo="reactivacion_cancelacion", cuando=despues
+    )
+    leido = persistencia.ultimo_recordatorio(conexion_pruebas, telefono)
+    assert leido == ("reactivacion_cancelacion", despues)
 
 
 def test_la_anulacion_perdona_la_fila_que_acaba_de_programarse(conexion_pruebas, cita_de_prueba):
