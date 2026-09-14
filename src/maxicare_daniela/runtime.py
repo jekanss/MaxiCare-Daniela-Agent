@@ -1842,6 +1842,42 @@ def _leer_configuracion_operativa() -> dict[str, int]:
 _tarea_de_recordatorios: asyncio.Task | None = None
 
 
+async def _avisar_de_recordatorios_fallidos(fallidos: int) -> None:
+    """El escalamiento que la spec pide en §8 y §11 y que no estaba construido.
+
+    Sin esto, un recordatorio que no sale deja rastro en `seguimientos.fallo` y en un
+    `log.error`, y **nadie consulta ninguna de las dos cosas**. El precio que la spec aceptó a
+    conciencia al marcar ANTES de enviar --«un recordatorio perdido es un paciente que quizá no
+    llega, *y la clínica se entera*»-- se quedaba sin pagar: la mitad del empate que justificó
+    ese orden.
+
+    Vive aquí y no en `seguimientos.py` por lo mismo que el despachador no importa Telegram:
+    esta es la capa del transporte y aquella es la de la decisión. El bucle ya tiene el
+    recuento, así que no hace falta una consulta más.
+
+    Nunca propaga: un fallo avisando de un fallo no puede tumbar el ciclo siguiente.
+    """
+    if not config.telegram_bot_token or not config.telegram_chat_doctores:
+        # Sin Telegram el aviso no existe, pero el despacho SÍ: la tarea arranca igual (ver
+        # `_arrancar_despacho_de_recordatorios`). Queda en el log, que es lo único que hay.
+        log.error(
+            "%d recordatorio(s) no salieron y no hay Telegram configurado para avisarlo",
+            fallidos,
+        )
+        return
+    try:
+        await _telegram.enviar_mensaje(
+            f"⚠️ <b>{fallidos} recordatorio(s) no salieron</b>\n\n"
+            "WhatsApp rechazó el envío tres veces seguidas. Esos pacientes <b>no recibieron "
+            "nada</b> y no se va a reintentar: la fila ya está marcada.\n\n"
+            "Si alguno tiene cita próxima, conviene llamarlo. El detalle está en "
+            "<code>seguimientos</code>, en las filas con <code>fallo</code> escrito.",
+            tema_id=_tema_general or 0,
+        )
+    except Exception:  # noqa: BLE001 -- ver docstring
+        log.exception("no se pudo avisar a los doctores de los recordatorios fallidos")
+
+
 async def _despachar_recordatorios_sin_parar() -> None:
     """El reloj de la cola de recordatorios.
 
@@ -1872,6 +1908,8 @@ async def _despachar_recordatorios_sin_parar() -> None:
             )
             if any(recuento.values()):
                 log.info("recordatorios: %s", recuento)
+            if recuento["fallidos"]:
+                await _avisar_de_recordatorios_fallidos(recuento["fallidos"])
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001 -- tiene que seguir vivo mañana

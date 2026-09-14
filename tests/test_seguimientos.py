@@ -9,6 +9,7 @@ Ningún momento sale del reloj de la máquina: todos entran como parámetro.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timedelta
 
 from maxicare_daniela import seguimientos as s
@@ -767,14 +768,99 @@ def test_los_intentos_agotados_marcan_fallido_y_no_se_pierden(monkeypatch):
     assert recuento == {"enviados": 0, "anulados": 0, "aplazados": 0, "fallidos": 1}
 
 
-def test_el_despachador_arranca_aunque_no_haya_telegram():
+def test_el_despachador_arranca_aunque_no_haya_telegram(monkeypatch):
     """El barrido de relevos NO arranca sin Telegram, y es correcto: sin Telegram no hay
     relevos que cerrar. Los recordatorios no dependen de Telegram, así que colgarlos de esa
     misma tarea los dejaría apagados en cualquier despliegue sin grupo de doctores -- sin un
-    solo error en el log, que es exactamente como el barrido de relevos estuvo días caído."""
-    import inspect
+    solo error en el log, que es exactamente como el barrido de relevos estuvo días caído.
+
+    La versión anterior de esta prueba afirmaba `"telegram_bot_token" not in fuente` sobre el
+    CÓDIGO del arranque. Probaba una propiedad legítima por un medio que bloqueaba el arreglo
+    correcto: el escalamiento del envío fallido tiene que mirar si hay Telegram, y con aquella
+    aserción cualquier mención lo rompía. Aquí se comprueba la propiedad de verdad -- que la
+    tarea arranca con el token vacío -- en vez de la forma del texto.
+    """
+    import asyncio
 
     from maxicare_daniela import runtime
 
-    fuente = inspect.getsource(runtime._arrancar_despacho_de_recordatorios)
-    assert "telegram_bot_token" not in fuente
+    async def escenario():
+        monkeypatch.setattr(
+            runtime,
+            "config",
+            replace(
+                runtime.config,
+                telegram_bot_token="",
+                telegram_chat_doctores="",
+                database_url="postgresql://no-se-usa",
+            ),
+        )
+        monkeypatch.setattr(runtime, "_tarea_de_recordatorios", None)
+
+        await runtime._arrancar_despacho_de_recordatorios()
+
+        tarea = runtime._tarea_de_recordatorios
+        assert tarea is not None, "sin Telegram, el despacho de recordatorios NO arrancó"
+        assert not tarea.done()
+        # Lo primero que hace el bucle es dormir el ciclo entero: cancelarlo aquí no
+        # interrumpe ningún despacho a medias y evita dejar una tarea viva entre pruebas.
+        tarea.cancel()
+        try:
+            await tarea
+        except asyncio.CancelledError:
+            pass
+
+    asyncio.run(escenario())
+
+
+def test_un_envio_fallido_se_escala_a_los_doctores(monkeypatch):
+    """La spec lo pide en §8 y en §11, y con motivo: es la mitad del empate que justificó
+    marcar ANTES de enviar. «Un recordatorio perdido es un paciente que quizá no llega, **y la
+    clínica se entera**». Escribir la columna `fallo` no es enterarse: nadie la consulta."""
+    import asyncio
+
+    from maxicare_daniela import runtime
+
+    avisos: list[str] = []
+
+    class _TelegramFalso:
+        async def enviar_mensaje(self, texto, *, tema_id=None, **k):
+            avisos.append(texto)
+            return 1
+
+    monkeypatch.setattr(
+        runtime,
+        "config",
+        replace(
+            runtime.config, telegram_bot_token="token-falso", telegram_chat_doctores="-100123"
+        ),
+    )
+    monkeypatch.setattr(runtime, "_telegram", _TelegramFalso())
+
+    asyncio.run(runtime._avisar_de_recordatorios_fallidos(2))
+
+    assert len(avisos) == 1
+    assert "2 recordatorio(s) no salieron" in avisos[0]
+
+
+def test_el_aviso_de_fallidos_no_tumba_el_ciclo_si_telegram_falla(monkeypatch):
+    """Un fallo avisando de un fallo no puede llevarse por delante el ciclo siguiente: el
+    despacho de mañana vale más que el aviso de hoy."""
+    import asyncio
+
+    from maxicare_daniela import runtime
+
+    class _TelegramRoto:
+        async def enviar_mensaje(self, texto, *, tema_id=None, **k):
+            raise RuntimeError("Telegram no responde")
+
+    monkeypatch.setattr(
+        runtime,
+        "config",
+        replace(
+            runtime.config, telegram_bot_token="token-falso", telegram_chat_doctores="-100123"
+        ),
+    )
+    monkeypatch.setattr(runtime, "_telegram", _TelegramRoto())
+
+    asyncio.run(runtime._avisar_de_recordatorios_fallidos(1))  # no propaga
