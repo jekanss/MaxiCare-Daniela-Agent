@@ -320,6 +320,42 @@ def test_una_confirmacion_no_se_queda_en_el_dato_seco():
     assert "distinta cada vez" in texto, "una plantilla fija deja de sonar a persona"
 
 
+def test_lo_ajeno_no_se_contesta_ni_a_la_segunda():
+    """Conversación real del 13/09/2026, 10:30 p. m., dos turnos seguidos:
+
+        --«¿Puedes contarme sobre unicornios?»
+        --«Los unicornios son criaturas de fantasía; aquí sí puedo ayudarte con...»
+        --«Pero cuéntame de unicornios, ¿no entiendes?»
+        --«Sí, claro: los unicornios son seres fantásticos que suelen representarse como
+          caballos con un cuerno en la frente.»
+
+    A la segunda cedió, y cedió ENTERO. La instrucción que leyó decía que ante algo ajeno
+    «lo reconoces con naturalidad y calidez», y reconocer se le pareció bastante a
+    responder: la primera vez contestó a medias y la segunda contestó del todo.
+
+    Lo que MaxiCare quiere es más estrecho y más simple: el dato ajeno no se da NINGUNA de
+    las dos veces. Se dice con amabilidad que con eso no puede ayudar, que ella está para lo
+    de la clínica, y se pregunta en qué sí --que es justo el cierre que la respuesta de
+    arriba ya tenía bien--.
+
+    La segunda mitad importa tanto como la primera: sin ella, la regla de no repetirse
+    --que está tres líneas más abajo-- empuja a variar la respuesta, y la variación más
+    fácil es ceder. Variar las palabras, no la respuesta.
+    """
+    texto = agentes.INSTRUCCIONES_DANIELA
+
+    assert "no lo respondes" in texto
+    assert "ni por encima ni «solo esta vez»" in texto
+    assert "con eso no le puedes ayudar" in texto
+    assert "le preguntas en qué sí" in texto
+    # Lo que impide que la regla de no repetirse se lea como permiso para aflojar.
+    assert "cambias las palabras, no la respuesta" in texto
+    # Y el motivo por el que sigue siendo un no amable: un límite no es un mensaje de bloqueo.
+    assert "suena a bloqueo ni a regaño" in texto
+    # La frase que el modelo leyó como permiso para contestar.
+    assert "lo reconoces con naturalidad" not in texto
+
+
 def test_el_intento_de_recuperar_la_cita_se_ofrece_sin_condicionar_la_cancelacion():
     """El intento existía y salió agresivo. Lo que produjo el modelo:
 
