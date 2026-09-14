@@ -275,6 +275,38 @@ def test_cancelar_se_intenta_recuperar_UNA_vez_y_despues_se_cancela():
     assert "no llega, que para la clínica es peor" in texto
 
 
+def test_una_confirmacion_no_se_queda_en_el_dato_seco():
+    """Pedido por MaxiCare el 13/09/2026, sobre dos mensajes reales de producción:
+
+        «Listo, Jean Carlos: tu cita quedó reprogramada para el viernes a las 10:00 am.»
+        «Listo, Jean Carlos: tu cita quedó cancelada.»
+
+    Correctos los dos, y secos los dos. Es el mismo vacío que ya se arregló al PEDIR la
+    cancelación, movido al final: el dato está bien y a la persona no le dijeron nada.
+
+    La regla de cierre que ya existía --«cierras proponiendo el siguiente paso»-- no cubre
+    este momento, porque cuando algo ya quedó hecho no hay siguiente paso que proponer. Sin
+    una regla propia, el cierre correcto es no cerrar.
+
+    Esta prueba comprueba que la instrucción está escrita, que es todo lo que puede
+    comprobar sin gastar: que el modelo la obedezca solo lo ve `scripts/probar_agentes.py`
+    contra la API real, o una conversación de verdad.
+    """
+    texto = agentes.INSTRUCCIONES_DANIELA
+
+    assert "CUANDO CONFIRMAS ALGO QUE YA QUEDÓ HECHO" in texto
+    assert "el cierre es de calidez" in texto
+    # Y las dos mitades, que son conductas distintas: la cita en pie mira hacia el día que
+    # viene; la cancelada NO puede acabar empujando a reagendar, o el cierre amable se
+    # convierte en la traba que el arreglo de cancelación quitó.
+    assert "que lo esperan ese día" in texto
+    assert "Sin pedirle que reagende" in texto
+    # Lo que no puede prometer. Una línea de calidez es el sitio más fácil del prompt para
+    # que se cuele un compromiso que nadie firmó.
+    assert "no prometes en ella nada que no puedas cumplir" in texto
+    assert "distinta cada vez" in texto, "una plantilla fija deja de sonar a persona"
+
+
 def test_el_intento_de_recuperar_la_cita_se_ofrece_sin_condicionar_la_cancelacion():
     """El intento existía y salió agresivo. Lo que produjo el modelo:
 
