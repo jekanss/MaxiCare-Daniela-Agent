@@ -41,6 +41,18 @@ El `CLAUDE.md` raíz lleva la regla en una línea. Aquí está el porqué.
   son minutos—. El guardia es `_bloqueo_que_tapa`, y va **antes de tocar la base**: un cupo
   consumido por una cita que nunca se pudo crear hay que ir a devolverlo. El mensaje no
   nombra el título del evento: es la agenda privada del doctor.
+- **El evento lleva el teléfono del paciente, y lo pone el CÓDIGO.** MaxiCare lo pidió el
+  13/09/2026: «el nombre, el número de teléfono y por qué agendó, o sea el servicio que está
+  interesado». Antes la descripción entera era «Agendado por Daniela. Conversación <uuid>»,
+  con la que no se puede llamar a nadie. Ahora `_descripcion_del_evento` arma tres líneas:
+  teléfono, servicio y —si el modelo lo escribió— motivo. El número sale de
+  `ctx.telefono_completo` y **nunca de la solicitud**: `SolicitudCita` no tiene campo de
+  teléfono justamente para que el modelo no pueda escribir otro, y así el número del evento
+  es el número desde el que se escribió. `motivo` es opcional a propósito —el «por qué» ya
+  lo garantiza `tratamiento`, que siempre llega— y pasa por
+  `rechazar_documento_de_identidad`: es texto libre que acaba GUARDADO, y una cédula dictada
+  en la conversación no puede terminar apuntada en un evento. Al reprogramar, `mover_evento`
+  conserva título y descripción: el motivo NO se actualiza.
 - **No hay caché de bloqueos, y es deliberado.** Cada consulta le pregunta a Google, que es
   lo que hace que borrar el evento libere la hora sin sincronizar nada. Los pasos 6b y 6c de
   `probar_calendario.py` existen para cazar a quien meta uno «para bajar la latencia».

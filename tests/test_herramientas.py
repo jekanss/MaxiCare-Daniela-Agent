@@ -851,6 +851,123 @@ def test_agendar_registra_al_paciente_y_lo_deja_verificado(monkeypatch):
     assert ctx.identidad_verificada is True
 
 
+# ==========================================================================================
+# Qué le dice el evento del calendario a la clínica
+# ==========================================================================================
+#
+# Pedido por MaxiCare el 13/09/2026: que en el evento vayan «el nombre, el número de
+# teléfono y por qué agendó, o sea el servicio que está interesado». Hasta ese día la
+# descripción entera era «Agendado por Daniela. Conversación <uuid>»: con eso no se puede
+# llamar a nadie si hay que mover una cita o avisar de una urgencia.
+
+
+def _descripcion_del_evento(monkeypatch, ctx, solicitud) -> str:
+    """Corre `_crear_cita` completa contra los dobles y devuelve lo que quedó en Calendar."""
+    pasos: list[int] = []
+
+    async def base_falsa(_ctx, trabajo):
+        pasos.append(1)
+        if len(pasos) == 1:
+            return ((77, 1), None, [])  # cupo libre y ninguna cita previa
+        return trabajo(BaseFalsa())
+
+    monkeypatch.setattr(h, "_con_base", base_falsa)
+    monkeypatch.setattr(h.persistencia, "asegurar_paciente", lambda conn, **kw: 42)
+    monkeypatch.setattr(h.persistencia, "registrar_cita", lambda conn, **kw: "cita-nueva")
+
+    asyncio.run(h._crear_cita(ctx, solicitud))
+    (descripcion,) = ctx.calendario.descripciones.values()
+    return descripcion
+
+
+def test_el_evento_lleva_el_telefono_del_paciente(monkeypatch):
+    """Y lo pone el CÓDIGO, desde `ctx.telefono_completo`.
+
+    `SolicitudCita` no tiene campo de teléfono a propósito --lo comprueba
+    `test_solicitud_cita_no_tiene_campo_de_telefono`-- justamente para que el modelo no
+    pueda escribir otro número: el caso real es la hija agendando por su madre. Que el
+    número del evento salga del webhook y no del texto significa que el doctor que marque
+    ese número le está marcando a quien escribió.
+    """
+    ctx = contexto(telefono_completo="573001112233")
+
+    descripcion = _descripcion_del_evento(
+        monkeypatch,
+        ctx,
+        SolicitudCita(
+            nombre_completo="Ana Gómez",
+            inicio=INICIO,
+            tratamiento="limpieza",
+            clave_idempotencia="clave-suficientemente-larga",
+        ),
+    )
+
+    assert "573001112233" in descripcion, "el doctor no tiene a qué número llamar"
+
+
+def test_el_evento_dice_por_que_agendo(monkeypatch):
+    """El motivo, con las palabras del paciente. Es lo que distingue «cordales» de «vengo a
+    que me valoren las cordales porque me duele al masticar»."""
+    ctx = contexto()
+
+    descripcion = _descripcion_del_evento(
+        monkeypatch,
+        ctx,
+        SolicitudCita(
+            nombre_completo="Ana Gómez",
+            inicio=INICIO,
+            tratamiento="diseno_sonrisa",
+            clave_idempotencia="clave-suficientemente-larga",
+            motivo="Valoración para diseño de sonrisa; no le gustan sus dientes de adelante.",
+        ),
+    )
+
+    assert "diseño de sonrisa" in descripcion
+    assert "dientes de adelante" in descripcion
+
+
+def test_sin_motivo_el_evento_igual_dice_el_servicio(monkeypatch):
+    """`motivo` es opcional, y por eso no puede ser la única fuente del «por qué».
+
+    El servicio ya viaja en `tratamiento`, que la tool SIEMPRE recibe. Hacerlo obligatorio
+    habría movido los veinticinco sitios que construyen una `SolicitudCita` sin comprar
+    ninguna garantía que el código no dé ya.
+    """
+    ctx = contexto()
+
+    descripcion = _descripcion_del_evento(
+        monkeypatch,
+        ctx,
+        SolicitudCita(
+            nombre_completo="Ana Gómez",
+            inicio=INICIO,
+            tratamiento="limpieza",
+            clave_idempotencia="clave-suficientemente-larga",
+        ),
+    )
+
+    assert "limpieza" in descripcion, "el evento no dice a qué viene el paciente"
+
+
+def test_el_nombre_sigue_en_el_titulo(monkeypatch):
+    """Lo que se ve en la vista de mes sin abrir el evento. MaxiCare pidió que «siga»."""
+    ctx = contexto()
+
+    _descripcion_del_evento(
+        monkeypatch,
+        ctx,
+        SolicitudCita(
+            nombre_completo="Ana Gómez",
+            inicio=INICIO,
+            tratamiento="limpieza",
+            clave_idempotencia="clave-suficientemente-larga",
+        ),
+    )
+
+    (evento,) = ctx.calendario.eventos.values()
+    assert "Ana Gómez" in evento[2]
+
+
 def test_una_cita_de_otro_telefono_no_se_puede_cancelar(monkeypatch):
     """La pertenencia se comprueba por TELÉFONO, no solo por `paciente_id`.
 

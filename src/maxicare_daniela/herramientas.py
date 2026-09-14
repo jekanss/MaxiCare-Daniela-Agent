@@ -546,6 +546,36 @@ class CitaNoConfirmada(RuntimeError):
     """
 
 
+def _descripcion_del_evento(ctx: ContextoDaniela, solicitud: SolicitudCita) -> str:
+    """Lo que la clínica lee al abrir la cita en su calendario.
+
+    Pedido por MaxiCare el 13/09/2026: «el nombre, el número de teléfono y por qué agendó,
+    o sea el servicio que está interesado». Antes decía solo «Agendado por Daniela.
+    Conversación <uuid>», y con eso no se puede llamar a nadie para mover una cita ni para
+    avisar de algo.
+
+    El teléfono lo pone AQUÍ el código, leyéndolo de `ctx`, y no el modelo: `SolicitudCita`
+    no tiene campo de teléfono justamente para que no pueda escribir otro --la hija que
+    agenda por su madre--. El número del evento es el número desde el que se escribió.
+
+    El servicio sale de `tratamiento`, que siempre llega; `motivo` es opcional y se suma
+    cuando el modelo lo escribió. Por eso el «por qué» no depende de que el modelo llene
+    nada: un campo que se puede omitir acaba omitido.
+    """
+    telefono = ctx.telefono_completo.strip()
+    if telefono and not telefono.startswith("+"):
+        telefono = f"+{telefono}"
+
+    lineas = [
+        f"Teléfono: {telefono}" if telefono else "Teléfono: PENDIENTE",
+        f"Servicio: {solicitud.tratamiento}",
+    ]
+    if solicitud.motivo.strip():
+        lineas.append(f"Motivo: {solicitud.motivo.strip()}")
+    lineas.append(f"Agendado por Daniela. Conversación {ctx.id_conversacion}.")
+    return "\n".join(lineas)
+
+
 async def _crear_cita(ctx: ContextoDaniela, solicitud: SolicitudCita) -> str:
     inicio = (
         solicitud.inicio
@@ -664,7 +694,7 @@ async def _crear_cita(ctx: ContextoDaniela, solicitud: SolicitudCita) -> str:
             inicio=inicio,
             duracion_minutos=ctx.duracion_cita_minutos,
             titulo=f"{solicitud.nombre_completo} · {solicitud.tratamiento}",
-            descripcion=f"Agendado por Daniela. Conversación {ctx.id_conversacion}.",
+            descripcion=_descripcion_del_evento(ctx, solicitud),
         )
     except ErrorDeCalendario as e:
         await asyncio.to_thread(_liberar, ctx, reserva_id)
