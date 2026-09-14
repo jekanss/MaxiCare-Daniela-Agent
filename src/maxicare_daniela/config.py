@@ -392,6 +392,15 @@ class Config:
     #: mande un solo mensaje. PENDIENTE: el nombre real, que sale de la aprobación de Meta.
     plantilla_recordatorio: str = ""
 
+    #: El código de idioma EXACTO con el que la traducción está registrada en el Business
+    #: Manager. No es cosmético y no admite un valor aproximado: si no coincide al carácter,
+    #: Meta rechaza el envío entero con el error 132001 («template name does not exist in the
+    #: translation») y una plantilla creada como `es_CO` no acepta `es`. Cableado en el código
+    #: eso sería el 100 % de los recordatorios fallando, con rastro solo en el log y en una
+    #: columna que nadie mira. PENDIENTE: el código real, que sale de la aprobación de Meta;
+    #: `es` es el default más probable y por eso mismo no es una comprobación.
+    plantilla_recordatorio_idioma: str = "es"
+
     @classmethod
     def desde_entorno(cls) -> Config:
         return cls(
@@ -406,6 +415,9 @@ class Config:
             telegram_chat_doctores=_opcional("MAXICARE_TELEGRAM_CHAT_DOCTORES"),
             telegram_webhook_secret=_opcional("MAXICARE_TELEGRAM_WEBHOOK_SECRET"),
             plantilla_recordatorio=_opcional("MAXICARE_PLANTILLA_RECORDATORIO"),
+            plantilla_recordatorio_idioma=_opcional(
+                "MAXICARE_PLANTILLA_RECORDATORIO_IDIOMA", "es"
+            ),
             google_sa_b64=_opcional("MAXICARE_GOOGLE_SA_B64"),
             google_calendar_id=_opcional("MAXICARE_GOOGLE_CALENDAR_ID"),
             modelo_daniela=_opcional("MAXICARE_MODELO_DANIELA", MODELO_DANIELA),

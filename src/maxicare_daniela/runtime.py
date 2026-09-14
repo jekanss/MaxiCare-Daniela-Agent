@@ -1868,6 +1868,7 @@ async def _despachar_recordatorios_sin_parar() -> None:
                     atiende_domingo=bool(operativa.get("atiende_domingo", 0)),
                 ),
                 plantilla=config.plantilla_recordatorio,
+                idioma=config.plantilla_recordatorio_idioma,
             )
             if any(recuento.values()):
                 log.info("recordatorios: %s", recuento)

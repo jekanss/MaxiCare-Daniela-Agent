@@ -217,10 +217,27 @@ palabra, y un texto que cambia es un texto que no está aprobado.
 
 ```
 Hola {{1}}, le recordamos su cita en MaxiCare
-mañana {{2}} a las {{3}} para {{4}}.
+el {{2}} a las {{3}} para {{4}}.
 
 [ Confirmar ]   [ Necesito cambiarla ]
 ```
+
+**«mañana» no puede ir en este texto, y la primera redacción de esta sección lo llevaba.** La
+sección 2 decide que la víspera retrocede al día hábil anterior cuando la víspera está cerrada:
+la víspera de un lunes es siempre domingo, así que **toda cita de lunes agendada con más de 24 h
+de antelación recibe su recordatorio el sábado**. No es un caso raro, es un quinto de la semana,
+y el paciente leería «mañana» sobre una cita que es pasado mañana. El segundo camino es por
+composición de guardas: una fila de víspera que a las 18:00 pilla al doctor en relevo encadena
+G4 → G5 → la mañana siguiente, y llega una hora antes de la cita diciendo «mañana».
+
+Las dos secciones se escribieron en tareas distintas y ninguna revisión de tarea podía ver que
+se contradecían. El texto no lleva ninguna palabra relativa al día: `{{2}}` dice la fecha
+completa («jueves 17/9») y se lee igual de bien salga cuando salga. `{{3}}` es SOLO la hora
+(«09:00»): son dos huecos con dos datos distintos, no la misma cadena dos veces.
+
+**Y la hora va en el huso de la clínica.** `citas.inicio` es `TIMESTAMPTZ` y psycopg la devuelve
+normalizada a UTC: el valor que se mete en `{{3}}` se convierte a Bogotá antes de formatearlo, o
+el paciente lee «14:00» sobre una cita de las 9:00.
 
 Los dos botones son quick replies de la plantilla, y hacen algo que un texto no puede: al
 tocarlos el paciente **emite un mensaje**, lo que abre la ventana de 24 h y deja a Daniela
@@ -230,6 +247,12 @@ aviso y pasa a ser una puerta.
 PENDIENTE, y no se rellena con un valor plausible:
 
 - El nombre de la plantilla en el Business Manager.
+- **El código de idioma con el que quede registrada la traducción**
+  (`MAXICARE_PLANTILLA_RECORDATORIO_IDIOMA`). Meta no busca la traducción más parecida: si el
+  código no coincide al carácter rechaza el envío entero con el error 132001, y una plantilla
+  creada como `es_CO` o `es_MX` **no acepta `es`**. El default del código es `es` porque es lo
+  probable, y por eso mismo no es una comprobación: un idioma equivocado no falla un envío,
+  falla el 100 % de ellos.
 - La categoría con la que Meta la apruebe (`utility` es lo que corresponde; **confirmar**, la
   categoría decide el precio por mensaje).
 - El texto definitivo, que lo aprueba MaxiCare.

@@ -217,6 +217,44 @@ def test_un_seguimiento_sin_cita_se_salta_las_tres_primeras_guardas():
     assert d.accion == "enviar"
 
 
+def test_los_cuatro_huecos_de_la_plantilla_salen_en_hora_de_bogota(monkeypatch):
+    """La única función de esta rama cuyo resultado lee un paciente, llamada de verdad.
+
+    El `cita_inicio` entra **en UTC**, que es como lo devuelve psycopg: `citas.inicio` es
+    `TIMESTAMPTZ` y `persistencia.conectar` no fija el `TimeZone` de la sesión, así que la
+    fila llega normalizada a UTC y no en el huso con el que se calculó. Mandar
+    `f"{inicio:%H:%M}"` sobre ese valor le decía al paciente «a las 14:00» sobre una cita de
+    las 9:00: cinco horas tarde a una clínica donde ya nadie lo esperaba.
+
+    Y los huecos 2 y 3 son datos DISTINTOS. Con el formateador de `herramientas`, que devuelve
+    «jueves 17/9 a las 09:00», la plantilla quedaba «su cita el jueves 17/9 a las 09:00 a las
+    09:00 para Limpieza». La prueba que parecía cubrirlo escribía los cuatro valores a mano y
+    documentaba una forma que la función nunca produjo.
+    """
+    from datetime import timezone
+
+    # Jueves 17/9/2026, 9:00 en Bogotá == 14:00 UTC.
+    utc = datetime(2026, 9, 17, 14, 0, tzinfo=timezone.utc)
+    huecos = s._parametros_del_recordatorio(
+        {
+            "cita_inicio": utc,
+            "nombre_completo": "Ana Gómez",
+            "tratamiento": "Limpieza",
+        }
+    )
+    assert huecos == ["Ana", "jueves 17/9", "09:00", "Limpieza"]
+
+
+def test_sin_cita_los_dos_huecos_de_fecha_quedan_en_pendiente():
+    """La regla dura 3 es para el código, no un permiso para mandarle el marcador a un
+    paciente: `despachar` anula la fila antes de llegar al canal. Esto solo fija que la
+    función no se inventa una fecha plausible si la recibe vacía."""
+    huecos = s._parametros_del_recordatorio(
+        {"cita_inicio": None, "nombre_completo": None, "tratamiento": None}
+    )
+    assert huecos == ["paciente", "PENDIENTE", "PENDIENTE", "su cita"]
+
+
 class _RespuestaFalsa:
     status_code = 200
 
@@ -269,6 +307,54 @@ def test_la_plantilla_viaja_con_el_tipo_y_los_parametros_que_meta_espera(monkeyp
     assert cuerpo["template"]["language"] == {"code": "es"}
     valores = [p["text"] for p in cuerpo["template"]["components"][0]["parameters"]]
     assert valores == ["Ana", "miércoles 17/9", "09:00", "Limpieza"]
+
+
+def test_el_idioma_de_la_plantilla_llega_hasta_meta(monkeypatch):
+    """Meta no busca la traducción más parecida: si el código no coincide al carácter con el
+    de la traducción registrada, rechaza el envío entero con el error 132001. Cableado a `es`,
+    una plantilla aprobada como `es_CO` sería el 100 % de los recordatorios fallando, con
+    rastro solo en el log y en una columna que nadie consulta. Aquí se fija que el valor
+    RECORRE el camino entero: de `despachar` al cuerpo que sale a la Graph API."""
+    import asyncio
+
+    from maxicare_daniela import persistencia, seguimientos as s
+
+    enviados: list[dict] = []
+
+    monkeypatch.setattr(persistencia, "conectar", lambda url: _ConexionFalsa())
+    monkeypatch.setattr(persistencia, "leer_configuracion", lambda conn: {})
+    monkeypatch.setattr(
+        persistencia, "seguimientos_por_despachar", lambda conn, **k: [fila()]
+    )
+    monkeypatch.setattr(
+        persistencia, "ultimo_mensaje_del_paciente", lambda conn, telefono: None
+    )
+    monkeypatch.setattr(
+        persistencia, "marcar_seguimiento_enviado", lambda conn, id_seguimiento: True
+    )
+    monkeypatch.setattr(
+        persistencia,
+        "anotar_recordatorio_en_conversacion",
+        lambda conn, id_conversacion, **k: None,
+    )
+
+    class _WhatsAppFalso:
+        async def enviar_plantilla(self, telefono, **k):
+            enviados.append(k)
+            return "wamid.X"
+
+    asyncio.run(
+        s.despachar(
+            database_url="postgresql://no-se-usa",
+            whatsapp=_WhatsAppFalso(),
+            jornada=JORNADA,
+            plantilla="recordatorio_cita",
+            idioma="es_CO",
+            ahora=momento(16, 18),
+        )
+    )
+
+    assert enviados and enviados[0]["idioma"] == "es_CO"
 
 
 def test_el_despachador_marca_antes_de_enviar(monkeypatch):

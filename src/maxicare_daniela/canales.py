@@ -182,6 +182,17 @@ class WhatsApp:
         Los parámetros van posicionales, en el orden en que aparecen los `{{1}}`, `{{2}}`... del
         texto que Meta aprobó. Cambiar el orden aquí no cambia la plantilla: manda otro dato en
         otro hueco, y el paciente lee una hora donde esperaba un nombre.
+
+        `idioma` tiene que coincidir EXACTAMENTE con el código de la traducción registrada en
+        el Business Manager. Meta no busca la traducción más parecida: una plantilla creada
+        como `es_CO` y llamada con `es` devuelve el error 132001 y no se manda nada. Por eso
+        el valor sale de `config` y no de aquí -- el default es el caso probable, no un hecho.
+
+        **Solo manda el componente `body`.** Para los dos quick replies del recordatorio es
+        correcto: un quick reply lleva su carga útil dentro de la plantilla aprobada y el
+        emisor no tiene nada que rellenar. Si Meta aprueba algún día un botón con carga
+        DINÁMICA --una URL con una variable, o un `flow`--, el cuerpo hay que ampliarlo con su
+        `{"type": "button", "sub_type": ..., "index": ...}`: sin él, ese botón se manda vacío.
         """
         cuerpo = {
             "messaging_product": "whatsapp",

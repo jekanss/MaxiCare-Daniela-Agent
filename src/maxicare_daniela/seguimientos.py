@@ -256,20 +256,39 @@ INTENTOS_DE_ENVIO = 3
 SEGUNDOS_ENTRE_INTENTOS = 2.0
 
 
+#: Los días como los escribe la plantilla. Van aquí y no se importan de `herramientas`: el
+#: formateador de allí (`_formatear_hora`) es privado, es de otro módulo, y sobre todo devuelve
+#: «jueves 17/9 a las 09:00» -- fecha Y hora en una sola cadena, que es lo que un hueco de esta
+#: plantilla NO puede llevar.
+_DIAS = ("lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo")
+
+
 def _parametros_del_recordatorio(fila: dict[str, Any]) -> list[str]:
     """Los cuatro huecos de la plantilla, en el orden en que Meta los aprobó.
 
     Cambiar este orden no cambia la plantilla: manda otro dato en otro hueco, y el paciente lee
     una hora donde esperaba su nombre.
-    """
-    from .herramientas import _formatear_hora
 
+    Dos cosas que costaron cinco revisiones y que esta función es la única en poder romper,
+    porque es la única de la rama cuyo resultado lee un paciente:
+
+    - **La hora se convierte a Bogotá antes de formatearla.** `citas.inicio` es `TIMESTAMPTZ`
+      y `persistencia.conectar` es un `psycopg.connect(url)` pelado: nada fija el `TimeZone`
+      de la sesión, así que psycopg devuelve el valor normalizado a UTC y no en el huso con el
+      que se calculó. Un `%H:%M` sobre eso le decía al paciente «a las 14:00» sobre una cita
+      de las 9:00 -- llegaba cinco horas tarde a una clínica donde ya nadie lo esperaba. Se
+      convierte UNA vez, arriba, y los dos huecos salen de esa conversión.
+    - **Los huecos 2 y 3 son datos distintos**: el 2 es la fecha y el 3 la hora. Un formateador
+      que devuelva las dos juntas deja la plantilla diciendo «su cita el jueves 17/9 a las
+      09:00 a las 09:00 para Limpieza».
+    """
     inicio = fila["cita_inicio"]
     nombre = (fila.get("nombre_completo") or "").split(" ")[0] or "paciente"
+    local = inicio.astimezone(jornada_zona()) if inicio else None
     return [
         nombre,
-        _formatear_hora(inicio) if inicio else "PENDIENTE",
-        f"{inicio:%H:%M}" if inicio else "PENDIENTE",
+        f"{_DIAS[local.weekday()]} {local.day}/{local.month}" if local else "PENDIENTE",
+        f"{local:%H:%M}" if local else "PENDIENTE",
         fila.get("tratamiento") or "su cita",
     ]
 
@@ -280,6 +299,7 @@ async def despachar(
     whatsapp: Any | None,
     jornada: Jornada,
     plantilla: str,
+    idioma: str = "es",
     ahora: datetime | None = None,
     limite: int = 50,
 ) -> dict[str, int]:
@@ -292,6 +312,11 @@ async def despachar(
     `plantilla` vacía apaga el ENVÍO sin apagar la decisión: las guardas corren, las anulaciones
     y los aplazamientos se escriben, y no sale un solo mensaje. Es lo que permite comprobar en
     producción que decide bien antes de arriesgar un WhatsApp.
+
+    `idioma` viaja junto a la plantilla y sale de `configuracion`, no de aquí: Meta rechaza el
+    envío entero (error 132001) si el código no coincide EXACTAMENTE con el de la traducción
+    registrada, y una plantilla creada como `es_CO` no acepta `es`. El default es el caso
+    probable, no una comprobación.
 
     Todo el ciclo corre sobre UNA sola conexión, y no una por operación: es quien LLAMA -esta
     función- quien libera lo que `seguimientos_por_despachar` deja tomado con `FOR UPDATE OF s
@@ -410,6 +435,7 @@ async def despachar(
                         telefono,
                         plantilla=plantilla,
                         parametros=_parametros_del_recordatorio(fila),
+                        idioma=idioma,
                     )
                     fallo = None
                     break
