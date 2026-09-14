@@ -9,11 +9,13 @@ canales. Es lo que permite probar las siete guardas en milisegundos y sin señal
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Literal
 
+from . import persistencia
 from .calendario import Jornada
 
 log = logging.getLogger(__name__)
@@ -237,3 +239,164 @@ def _proxima_apertura(ahora: datetime, jornada: Jornada) -> datetime:
     return (ahora + timedelta(days=1)).replace(
         hour=jornada.apertura, minute=0, second=0, microsecond=0
     )
+
+
+def jornada_zona():
+    """La zona de Bogotá, importada tarde para no crear un ciclo con `herramientas`."""
+    from .herramientas import ZONA_BOGOTA
+
+    return ZONA_BOGOTA
+
+
+#: Cuántas veces se reintenta un envío DENTRO del mismo ciclo. No vuelve a la cola: la fila ya
+#: está marcada.
+INTENTOS_DE_ENVIO = 3
+
+#: Entre un intento y el siguiente. Corto a propósito: el ciclo entero tiene sesenta segundos.
+SEGUNDOS_ENTRE_INTENTOS = 2.0
+
+
+def _parametros_del_recordatorio(fila: dict[str, Any]) -> list[str]:
+    """Los cuatro huecos de la plantilla, en el orden en que Meta los aprobó.
+
+    Cambiar este orden no cambia la plantilla: manda otro dato en otro hueco, y el paciente lee
+    una hora donde esperaba su nombre.
+    """
+    from .herramientas import _formatear_hora
+
+    inicio = fila["cita_inicio"]
+    nombre = (fila.get("nombre_completo") or "").split(" ")[0] or "paciente"
+    return [
+        nombre,
+        _formatear_hora(inicio) if inicio else "PENDIENTE",
+        f"{inicio:%H:%M}" if inicio else "PENDIENTE",
+        fila.get("tratamiento") or "su cita",
+    ]
+
+
+async def despachar(
+    *,
+    database_url: str,
+    whatsapp: Any | None,
+    jornada: Jornada,
+    plantilla: str,
+    ahora: datetime | None = None,
+    limite: int = 50,
+) -> dict[str, int]:
+    """Un ciclo del despachador. Devuelve el recuento por acción.
+
+    `ahora` entra como parámetro para que una prueba pueda fijarlo: es la misma regla que
+    `ctx.ahora` en las tools, y la razón por la que esto se puede probar sin esperar a las seis
+    de la tarde.
+
+    `plantilla` vacía apaga el ENVÍO sin apagar la decisión: las guardas corren, las anulaciones
+    y los aplazamientos se escriben, y no sale un solo mensaje. Es lo que permite comprobar en
+    producción que decide bien antes de arriesgar un WhatsApp.
+
+    Todo el ciclo corre sobre UNA sola conexión, y no una por operación. La razón no es de
+    estilo: `persistencia.seguimientos_por_despachar` deja las filas tomadas con `FOR UPDATE OF
+    s SKIP LOCKED` y es quien LLAMA -esta función- quien las libera, confirmando o revirtiendo
+    esa misma conexión. Abrir una conexión nueva para cada `UPDATE` no libera nada antes de
+    tiempo: intentaría escribir sobre una fila que la conexión de la lectura sigue bloqueando
+    sin haber confirmado un `commit`, y el proceso se quedaría esperando su propio candado.
+    """
+    momento_actual = ahora or datetime.now(jornada_zona())
+    recuento = {"enviados": 0, "anulados": 0, "aplazados": 0, "fallidos": 0}
+    numeros_de_esta_tanda: set[str] = set()
+
+    with persistencia.conectar(database_url) as conn:
+        configuracion = await asyncio.to_thread(persistencia.leer_configuracion, conn)
+        # G5 calcula su ventana de envío hasta `max(cierre, hora_vispera + 1)` (ver `decidir`).
+        # Esa hora la cambia la clínica desde el panel sin desplegar nada, así que pasarle la
+        # constante de respaldo en vez de leerla dejaría la ventana calculada contra un valor
+        # que ya no es el vigente.
+        hora_vispera = configuracion.get("hora_recordatorio_vispera", HORA_VISPERA_POR_DEFECTO)
+
+        filas = await asyncio.to_thread(
+            persistencia.seguimientos_por_despachar, conn, ahora=momento_actual, limite=limite
+        )
+
+        for fila in filas:
+            telefono = fila.get("telefono") or ""
+
+            ultimo = await asyncio.to_thread(
+                persistencia.ultimo_mensaje_del_paciente, conn, telefono
+            )
+
+            decision = decidir(
+                fila,
+                ahora=momento_actual,
+                jornada=jornada,
+                ultimo_mensaje=ultimo,
+                ya_salio_a_ese_numero=telefono in numeros_de_esta_tanda,
+                hora_vispera=hora_vispera,
+            )
+
+            if decision.accion == "anular":
+                await asyncio.to_thread(
+                    persistencia.anular_seguimiento, conn, fila["id"], motivo=decision.motivo
+                )
+                recuento["anulados"] += 1
+                continue
+
+            if decision.accion == "aplazar":
+                await asyncio.to_thread(
+                    persistencia.aplazar_seguimiento,
+                    conn,
+                    fila["id"],
+                    hasta=decision.hasta or momento_actual,
+                )
+                recuento["aplazados"] += 1
+                continue
+
+            # MARCAR PRIMERO. Ver `persistencia.marcar_seguimiento_enviado`: no hay transacción
+            # que cubra una llamada a Meta, y mandar dos veces es peor que perder uno.
+            await asyncio.to_thread(persistencia.marcar_seguimiento_enviado, conn, fila["id"])
+
+            if not plantilla or whatsapp is None or not telefono:
+                log.info(
+                    "seguimiento %s: decidido ENVIAR y no se manda (plantilla o canal sin "
+                    "configurar). El despachador decide, el canal está apagado.",
+                    fila["id"],
+                )
+                continue
+
+            fallo: str | None = None
+            for intento in range(INTENTOS_DE_ENVIO):
+                try:
+                    await whatsapp.enviar_plantilla(
+                        telefono,
+                        plantilla=plantilla,
+                        parametros=_parametros_del_recordatorio(fila),
+                    )
+                    fallo = None
+                    break
+                except Exception as e:  # noqa: BLE001 -- el ciclo tiene que seguir con los demás
+                    fallo = f"{type(e).__name__}: {e}"
+                    if intento + 1 < INTENTOS_DE_ENVIO:
+                        await asyncio.sleep(SEGUNDOS_ENTRE_INTENTOS)
+
+            if fallo is not None:
+                await asyncio.to_thread(
+                    persistencia.anotar_fallo_de_seguimiento, conn, fila["id"], fallo=fallo
+                )
+                recuento["fallidos"] += 1
+                log.error(
+                    "seguimiento %s no salió tras %d intentos: %s",
+                    fila["id"],
+                    INTENTOS_DE_ENVIO,
+                    fallo,
+                )
+                continue
+
+            await asyncio.to_thread(
+                persistencia.anotar_recordatorio_en_conversacion,
+                conn,
+                fila["conversacion_id"],
+                tipo=fila["tipo"],
+                cuando=momento_actual,
+            )
+            numeros_de_esta_tanda.add(telefono)
+            recuento["enviados"] += 1
+
+    return recuento

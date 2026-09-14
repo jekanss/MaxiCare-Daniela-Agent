@@ -1788,6 +1788,13 @@ def seguimientos_por_despachar(
 
     `FOR UPDATE ... SKIP LOCKED` es lo que permite que dos instancias no manden el mismo
     recordatorio dos veces. `OF s` porque el bloqueo va sobre la cola, no sobre las citas.
+
+    Esta función no hace `commit` ni `rollback`: las filas devueltas quedan tomadas mientras
+    dure la transacción de `conn`. Es quien LLAMA -el despachador- quien tiene que soltarlas,
+    confirmando o revirtiendo esa MISMA conexión. Soltarlas antes de tiempo -por ejemplo
+    abriendo una conexión nueva para cada `UPDATE` posterior- deja a esa conexión nueva
+    esperando el candado que la primera todavía no soltó, o a otra instancia recogiendo una
+    fila que esta sigue procesando.
     """
     with conn.cursor() as cur:
         cur.execute(

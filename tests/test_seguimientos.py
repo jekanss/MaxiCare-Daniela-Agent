@@ -11,13 +11,24 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
-import pytest
-
 from maxicare_daniela import seguimientos as s
 from maxicare_daniela.calendario import Jornada
 from maxicare_daniela.herramientas import ZONA_BOGOTA
 
 JORNADA = Jornada()  # 8-17 entre semana, 15 el sábado, domingo cerrado
+
+
+class _ConexionFalsa:
+    """`persistencia.conectar` se usa como context manager. Esto es lo mínimo para doblarlo."""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def commit(self):
+        pass
 
 
 def momento(dia: int, hora: int, minuto: int = 0) -> datetime:
@@ -258,3 +269,144 @@ def test_la_plantilla_viaja_con_el_tipo_y_los_parametros_que_meta_espera(monkeyp
     assert cuerpo["template"]["language"] == {"code": "es"}
     valores = [p["text"] for p in cuerpo["template"]["components"][0]["parameters"]]
     assert valores == ["Ana", "miércoles 17/9", "09:00", "Limpieza"]
+
+
+def test_el_despachador_marca_antes_de_enviar(monkeypatch):
+    """El orden es la defensa contra el duplicado, y es lo contrario del instinto.
+
+    No hay transacción que cubra una llamada a Meta. Si se envía primero y el proceso muere
+    antes del commit, la fila sigue pendiente y el barrido de sesenta segundos después manda el
+    mismo recordatorio otra vez, sin que ninguna guarda lo detecte.
+    """
+    import asyncio
+
+    from maxicare_daniela import persistencia, seguimientos as s
+
+    orden: list[str] = []
+
+    monkeypatch.setattr(persistencia, "conectar", lambda url: _ConexionFalsa())
+    monkeypatch.setattr(persistencia, "leer_configuracion", lambda conn: {})
+    monkeypatch.setattr(
+        persistencia, "seguimientos_por_despachar", lambda conn, **k: [fila()]
+    )
+    monkeypatch.setattr(
+        persistencia, "ultimo_mensaje_del_paciente", lambda conn, telefono: None
+    )
+    monkeypatch.setattr(
+        persistencia,
+        "marcar_seguimiento_enviado",
+        lambda conn, id_seguimiento: orden.append("marcar"),
+    )
+    monkeypatch.setattr(
+        persistencia,
+        "anotar_recordatorio_en_conversacion",
+        lambda conn, id_conversacion, **k: None,
+    )
+
+    class _WhatsAppFalso:
+        async def enviar_plantilla(self, telefono, **k):
+            orden.append("enviar")
+            return "wamid.X"
+
+    recuento = asyncio.run(
+        s.despachar(
+            database_url="postgresql://no-se-usa",
+            whatsapp=_WhatsAppFalso(),
+            jornada=JORNADA,
+            plantilla="recordatorio_cita",
+            ahora=momento(16, 18),
+        )
+    )
+
+    assert orden == ["marcar", "enviar"]
+    assert recuento["enviados"] == 1
+
+
+def test_sin_plantilla_configurada_decide_pero_no_manda(monkeypatch):
+    """Es lo que permite colgar el despachador en producción y comprobar que decide bien antes
+    de que mande un solo mensaje."""
+    import asyncio
+
+    from maxicare_daniela import persistencia, seguimientos as s
+
+    mandados: list[str] = []
+
+    monkeypatch.setattr(persistencia, "conectar", lambda url: _ConexionFalsa())
+    monkeypatch.setattr(persistencia, "leer_configuracion", lambda conn: {})
+    monkeypatch.setattr(
+        persistencia, "seguimientos_por_despachar", lambda conn, **k: [fila()]
+    )
+    monkeypatch.setattr(
+        persistencia, "ultimo_mensaje_del_paciente", lambda conn, telefono: None
+    )
+    monkeypatch.setattr(
+        persistencia, "marcar_seguimiento_enviado", lambda conn, id_seguimiento: None
+    )
+
+    class _WhatsAppFalso:
+        async def enviar_plantilla(self, telefono, **k):
+            mandados.append(telefono)
+            return "wamid.X"
+
+    recuento = asyncio.run(
+        s.despachar(
+            database_url="postgresql://no-se-usa",
+            whatsapp=_WhatsAppFalso(),
+            jornada=JORNADA,
+            plantilla="",
+            ahora=momento(16, 18),
+        )
+    )
+
+    assert mandados == []
+    assert recuento["enviados"] == 0
+
+
+def test_el_despachador_lee_la_hora_de_vispera_de_la_configuracion(monkeypatch):
+    """G5 necesita la `hora_recordatorio_vispera` REAL, no la constante de respaldo, porque
+    la víspera sale a las 18:00 con la clínica cerrada desde las 17:00.
+
+    Sin este cableado, `decidir` recibiría siempre el respaldo (18) así la clínica haya
+    cambiado la hora desde el panel, y esta prueba lo demuestra sin tocar `decidir` --a las
+    19:00, con el respaldo la ventana de envío ya cerró (`limite = max(17, 19) = 19`) y el
+    seguimiento se aplazaría; con la hora configurada (20) la ventana llega hasta las 21 y
+    el mismo seguimiento sale.
+    """
+    import asyncio
+
+    from maxicare_daniela import persistencia, seguimientos as s
+
+    monkeypatch.setattr(persistencia, "conectar", lambda url: _ConexionFalsa())
+    monkeypatch.setattr(
+        persistencia, "leer_configuracion", lambda conn: {"hora_recordatorio_vispera": 20}
+    )
+    monkeypatch.setattr(
+        persistencia, "seguimientos_por_despachar", lambda conn, **k: [fila()]
+    )
+    monkeypatch.setattr(
+        persistencia, "ultimo_mensaje_del_paciente", lambda conn, telefono: None
+    )
+    monkeypatch.setattr(
+        persistencia, "marcar_seguimiento_enviado", lambda conn, id_seguimiento: None
+    )
+    monkeypatch.setattr(
+        persistencia,
+        "anotar_recordatorio_en_conversacion",
+        lambda conn, id_conversacion, **k: None,
+    )
+
+    class _WhatsAppFalso:
+        async def enviar_plantilla(self, telefono, **k):
+            return "wamid.X"
+
+    recuento = asyncio.run(
+        s.despachar(
+            database_url="postgresql://no-se-usa",
+            whatsapp=_WhatsAppFalso(),
+            jornada=JORNADA,
+            plantilla="recordatorio_cita",
+            ahora=momento(16, 19),
+        )
+    )
+
+    assert recuento == {"enviados": 1, "anulados": 0, "aplazados": 0, "fallidos": 0}
