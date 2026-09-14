@@ -128,6 +128,22 @@ MINUTOS_DE_ESPERA_POR_RELEVO = 30
 #: A partir de cuánto retraso un recordatorio deja de servir y pasa a estorbar.
 HORAS_DE_RETRASO_QUE_LO_INVALIDAN = 2
 
+#: Lo mismo, medido contra la CITA en vez de contra `fecha_objetivo`. Por debajo de esto el
+#: recordatorio ya no recuerda nada: quien iba a salir de casa ya salió, y a quien se le había
+#: olvidado no le da tiempo.
+#:
+#: Es menor que `HORAS_ANTES_EN_EL_MISMO_DIA` en minutos (120) a propósito, y el margen no es
+#: holgura por gusto -- lo fija un caso real cada uno:
+#:
+#: - La banda corta programa el recordatorio EXACTAMENTE a dos horas de la cita, y el ciclo
+#:   recoge la fila siempre unos segundos DESPUÉS de su `fecha_objetivo`. Medir contra los 120
+#:   redondos anularía la banda corta entera, todos los días.
+#: - G4 aplaza media hora porque «el doctor puede devolver la conversación en diez minutos y el
+#:   recordatorio sigue siendo válido». Sin margen, ese aplazamiento se convertiría en silencio
+#:   en una anulación, y un recordatorio a hora y media de la cita todavía sirve para salir de
+#:   casa. Mandarlo ayuda al paciente a llegar; anularlo no ayuda a nadie.
+MINUTOS_MINIMOS_ANTES_DE_LA_CITA = 75
+
 #: Si el paciente escribió hace menos de esto, ya está hablando con Daniela.
 MINUTOS_DE_CONTACTO_RECIENTE = 60
 
@@ -154,7 +170,7 @@ def decidir(
 
     El orden importa: las tres primeras son sobre la cita y se saltan si el seguimiento no
     cuelga de ninguna; las dos siguientes aplazan en vez de anular, porque su motivo deja de
-    ser cierto más tarde; las dos últimas anulan o agrupan.
+    ser cierto más tarde; la sexta anula y la séptima aplaza al día siguiente.
     """
     cita_estado = fila.get("cita_estado")
     cita_inicio = fila.get("cita_inicio")
@@ -175,6 +191,23 @@ def decidir(
         # todos los recordatorios atrasados.
         if ahora - fila["fecha_objetivo"] > timedelta(hours=HORAS_DE_RETRASO_QUE_LO_INVALIDAN):
             return Decision("anular", "llego_tarde")
+
+        # G3 bis. La MISMA pregunta, medida contra algo que un aplazamiento no puede
+        # reescribir. `aplazar_seguimiento` sobrescribe `fecha_objetivo`, así que la cuenta de
+        # arriba se pone a cero cada vez que G4 o G5 aplazan: una fila de víspera que a las
+        # 18:00 pilla al doctor en relevo encadena G4 -> 18:30 -> 19:00 -> G5 -> la mañana
+        # siguiente, y a las 08:00 llega FRESCA según esa cuenta, a una hora de la cita. La
+        # garantía que la spec §11 le atribuye a G3 --«el barrido lleva horas caído, no hay
+        # avalancha»-- solo valía para la caída dura.
+        #
+        # La hora de la cita es lo único de esta fila que ningún aplazamiento toca, y por eso
+        # es la referencia. El motivo va aparte de `llego_tarde`: son dos preguntas distintas y
+        # la clínica tiene que poder distinguirlas al preguntar por qué no salió un
+        # recordatorio.
+        if cita_inicio is not None and cita_inicio - ahora < timedelta(
+            minutes=MINUTOS_MINIMOS_ANTES_DE_LA_CITA
+        ):
+            return Decision("anular", "cita_inminente")
 
     # G4. Mientras un doctor tiene el relevo, el sistema no se le atraviesa: podría estar
     # acordando otra fecha en ese mismo momento. Aplaza, NO anula.
@@ -209,10 +242,23 @@ def decidir(
     ):
         return Decision("anular", "contacto_reciente")
 
-    # G7. Un paciente con dos citas la misma semana recibe UN mensaje, no dos. Se aplaza al
-    # siguiente ciclo, donde el agrupador lo recogerá junto al otro.
+    # G7. Un número recibe UN recordatorio por ventana de envío. La segunda fila se aplaza a la
+    # PRÓXIMA APERTURA de la ventana, que con la ventana ya abierta es la mañana siguiente.
+    #
+    # No agrupa, y decirlo importa: la plantilla que Meta aprueba tiene cuatro huecos y sitio
+    # para UNA cita. Meter dos exigiría otra plantilla, que es otra spec. La versión anterior
+    # aplazaba un minuto «para que el agrupador lo recoja», y ese agrupador no existe: en el
+    # ciclo siguiente la tanda arranca vacía, G7 da `False` y la segunda fila sale sola con
+    # sesenta segundos de diferencia sobre la primera. El paciente recibía las dos plantillas
+    # que esta guarda existe para evitar, y la clínica las pagaba las dos.
+    #
+    # De las dos salidas posibles, anular la segunda fila deja a un paciente sin recordatorio
+    # de una cita real: clínicamente peor que cualquier alternativa. Así que se aplaza. Para
+    # una segunda cita de esa misma semana, la mañana siguiente sigue llegando a tiempo; donde
+    # no llegue, G2 o G3 la anulan y la fila registra por qué. La limitación queda escrita en
+    # los datos y no escondida en un silencio.
     if ya_salio_a_ese_numero:
-        return Decision("aplazar", "agrupado", ahora + timedelta(minutes=1))
+        return Decision("aplazar", "uno_por_numero", _proxima_apertura(ahora, jornada))
 
     return Decision("enviar", "ok")
 

@@ -149,6 +149,50 @@ def test_g3_un_recordatorio_con_mas_de_dos_horas_de_retraso_se_descarta():
     assert d.motivo == "llego_tarde"
 
 
+def test_g3_un_aplazamiento_no_le_borra_la_memoria_a_la_guarda_del_retraso():
+    """`aplazar_seguimiento` reescribe `fecha_objetivo`, así que la cuenta contra ella se pone
+    a cero en cada aplazamiento. Una fila de víspera que a las 18:00 pilla al doctor en relevo
+    encadena G4 -> G5 -> la mañana siguiente y llega FRESCA según esa cuenta, a una hora de la
+    cita. La cita es lo que ningún aplazamiento puede reescribir, así que se mide contra ella."""
+    d = s.decidir(
+        # `fecha_objetivo` de hace un instante: la reescribió el último aplazamiento.
+        fila(fecha_objetivo=momento(17, 8), cita_inicio=momento(17, 9)),
+        ahora=momento(17, 8),
+        jornada=JORNADA,
+        ultimo_mensaje=None,
+    )
+    assert d.accion == "anular"
+    assert d.motivo == "cita_inminente"
+
+
+def test_la_banda_de_dos_horas_sobrevive_a_la_guarda_de_la_cita_inminente():
+    """La guarda de arriba mide contra la cita, y la banda corta se programa EXACTAMENTE a dos
+    horas de ella: medirla contra las dos horas redondas anularía la banda entera, todos los
+    días, porque el ciclo recoge la fila siempre unos segundos después de su `fecha_objetivo`.
+    Es el caso que fija el margen, y por eso se prueba con el ciclo llegando tarde."""
+    d = s.decidir(
+        fila(fecha_objetivo=momento(16, 13), cita_inicio=momento(16, 15)),
+        ahora=momento(16, 13) + timedelta(seconds=55),
+        jornada=JORNADA,
+        ultimo_mensaje=None,
+    )
+    assert d.accion == "enviar"
+
+
+def test_un_aplazamiento_de_g4_no_se_come_la_banda_corta():
+    """G4 aplaza media hora a propósito --«el doctor puede devolver la conversación en diez
+    minutos y el recordatorio sigue siendo válido»--. El margen de la guarda anterior cubre ese
+    aplazamiento: un recordatorio a hora y media de la cita todavía sirve para salir de casa, y
+    anularlo convertiría en silencio el aplazamiento de G4 en una anulación."""
+    d = s.decidir(
+        fila(fecha_objetivo=momento(16, 13, 30), cita_inicio=momento(16, 15)),
+        ahora=momento(16, 13, 30),
+        jornada=JORNADA,
+        ultimo_mensaje=None,
+    )
+    assert d.accion == "enviar"
+
+
 def test_g4_con_el_relevo_puesto_se_aplaza_y_no_se_anula():
     # El doctor puede devolver la conversación en diez minutos: el recordatorio sigue siendo
     # válido. Anularlo aquí lo perdería para siempre.
@@ -185,6 +229,13 @@ def test_g6_si_el_paciente_acaba_de_escribir_no_se_le_recuerda_nada():
 
 
 def test_g7_no_se_manda_un_segundo_mensaje_al_mismo_numero():
+    """Y se aplaza a la PRÓXIMA APERTURA de la ventana de envío, no un minuto.
+
+    El minuto prometía un agrupador que no existe: en el ciclo siguiente la tanda arranca
+    vacía, G7 da `False` y la segunda fila sale sola, con sesenta segundos de diferencia sobre
+    la primera. El paciente recibía las dos plantillas que G7 existe para evitar, y la clínica
+    las pagaba las dos.
+    """
     d = s.decidir(
         fila(),
         ahora=momento(16, 18),
@@ -193,7 +244,8 @@ def test_g7_no_se_manda_un_segundo_mensaje_al_mismo_numero():
         ya_salio_a_ese_numero=True,
     )
     assert d.accion == "aplazar"
-    assert d.motivo == "agrupado"
+    assert d.motivo == "uno_por_numero"
+    assert d.hasta == momento(17, 8)  # la apertura del día siguiente, no 18:01
 
 
 def test_un_recordatorio_limpio_sale():

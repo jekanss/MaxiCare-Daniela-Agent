@@ -142,10 +142,11 @@ Cada 60 s:
   G1  ¿La cita sigue viva y a la misma hora?      no → anular ('cita_cambio')
   G2  ¿La cita ya pasó?                           sí → anular ('cita_pasada')
   G3  ¿Llega con más de 2 h de retraso?           sí → anular ('llego_tarde')
+      ¿Quedan menos de 75 min para la cita?       sí → anular ('cita_inminente')
   G4  ¿conversaciones.tomada_por está puesto?     sí → aplazar 30 min
   G5  ¿Estamos dentro de la jornada de envío?     no → aplazar a la apertura
   G6  ¿El paciente escribió hace menos de 1 h?    sí → anular ('contacto_reciente')
-  G7  ¿Ya salió algo a ese número hoy?            sí → agrupar en un solo mensaje
+  G7  ¿Ya salió algo a ese número?                sí → aplazar a la próxima apertura
 
   UPDATE enviado_en = now()  +  COMMIT     ← PRIMERO
   enviar                                   ← DESPUÉS
@@ -172,6 +173,20 @@ Por qué cada una:
 - **G2 y G3**: un recordatorio que llega después de la cita no es tarde, es dañino — le dice al
   paciente que el sistema no sabe lo que pasó. Si el proceso estuvo caído toda la noche, lo
   correcto es callarse.
+
+  G3 mide **dos veces**, y la segunda no estaba en la primera versión de esta sección.
+  `aplazar_seguimiento` reescribe `fecha_objetivo`, así que la cuenta contra ella se pone a cero
+  en cada aplazamiento: una fila de víspera que a las 18:00 pilla al doctor en relevo encadena
+  G4 → G5 → la mañana siguiente y llega **fresca** según esa cuenta, a una hora de la cita. La
+  garantía que la sección 11 le atribuye a G3 solo valía para la caída dura. La segunda medida va
+  contra la hora de la **cita**, que es lo único de la fila que ningún aplazamiento puede tocar.
+
+  El umbral son **75 minutos y no las 2 h de la banda corta**, y el margen no es holgura: la
+  banda corta programa el recordatorio exactamente a 2 h de la cita y el ciclo recoge la fila
+  siempre unos segundos después de su `fecha_objetivo`, así que medir contra las 2 h redondas
+  anularía esa banda entera todos los días. El margen cubre además el aplazamiento de 30 min de
+  G4 — un recordatorio a hora y media de la cita todavía sirve para salir de casa, y mandarlo
+  ayuda al paciente a llegar mientras que anularlo no ayuda a nadie.
 - **G4** es la misma regla que ya aplica al programar (`herramientas.py:1211`): mientras un
   doctor tiene el relevo, el sistema no se le atraviesa. **Aplaza, no anula** — el doctor puede
   devolver la conversación en diez minutos y el recordatorio sigue siendo válido.
@@ -181,7 +196,19 @@ Por qué cada una:
   012 documenta entre la rejilla y la base de conocimiento.
 - **G6**: si el paciente está conversando con Daniela ahora mismo, recordarle la cita que acaba
   de agendar la hace ver desmemoriada.
-- **G7**: un paciente con dos citas la misma semana recibe **un** mensaje con las dos.
+- **G7**: un número recibe **un** recordatorio por ventana de envío.
+
+  **No agrupa, y esa es una renuncia consciente.** La primera versión de esta sección decía «un
+  mensaje con las dos», y eso exige una plantilla con sitio para dos citas: la que Meta aprueba
+  tiene cuatro huecos y sitio para una. Otra plantilla es otra spec, no un detalle de
+  implementación de esta.
+
+  De las dos salidas posibles, anular la segunda fila deja a un paciente sin recordatorio de una
+  cita real, que es clínicamente lo peor. Así que la segunda fila **se aplaza a la próxima
+  apertura de la ventana de envío**: el paciente recibe hoy el recordatorio de la cita más
+  próxima y el segundo le llega a la mañana siguiente, que para una segunda cita de esa misma
+  semana sigue llegando a tiempo. Donde no llegue, G2 o G3 lo anulan y la fila registra el
+  motivo — la limitación queda visible en los datos y no escondida en un silencio.
 
 Los seguimientos anulados **no se borran**, se marcan con `anulado_en` y `motivo_anulacion`.
 Borrarlos deja al sistema sin poder responder «¿por qué este paciente no recibió recordatorio?»,
