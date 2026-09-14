@@ -25,6 +25,30 @@
 
 ---
 
+## Cómo está cortado este plan
+
+Cinco tareas, no nueve. El corte va donde un revisor podría rechazar una y aprobar la de al
+lado; donde no podría, no hay corte.
+
+Cuatro de las cinco tienen **dos mitades**, cada una con su propio ciclo de pruebas y su
+propio commit. Eso es deliberado: la granularidad de los pasos no cambia —son los mismos 55,
+con las mismas pruebas— pero un revisor no gana nada juzgando unas columnas de base de datos
+sin las funciones que las escriben, ni una función de horarios sin las guardas que la usan.
+
+Puedes parar y revisar al final de cada mitad; la puerta que importa está al final de cada
+tarea. Si ejecutas por subagentes, despacha uno por tarea y deja que haga las dos mitades.
+
+| Tarea | Qué demuestra al terminar | ¿Toca producción? |
+|---|---|---|
+| 1. La cola | la cola se puede leer, aplazar, anular y marcar | no |
+| 2. Las reglas de decisión | decide bien las tres bandas y las siete guardas | no |
+| 3. El despachador y su canal | manda una plantilla, y marca antes de mandarla | no |
+| 4. Programar y la cascada | crear, mover y cancelar llevan su recordatorio detrás | **sí** — tres tools vivas |
+| 5. A correr y demostrado | corre en el servidor y hay un script que lo enseña | **sí** — el arranque |
+
+Las tres primeras se pueden hacer y fusionar sin que cambie nada de lo que hoy funciona. El
+riesgo entra en la 4.
+
 ## File Structure
 
 | Archivo | Responsabilidad |
@@ -44,7 +68,8 @@
 
 ---
 
-## Task 1: La migración 017
+## Task 1: La cola de recordatorios
+
 
 **Files:**
 - Create: `migraciones/017_cola_de_recordatorios.sql`
@@ -196,9 +221,360 @@ git commit -m "feat(017): la cola de seguimientos aprende de que cita habla
 Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 ```
 
+### Segunda mitad: las funciones que leen y escriben la cola
+
+
+**Files:**
+- Modify: `src/maxicare_daniela/persistencia.py:1514-1543` (`registrar_cita`), `:1706-1728` (`insertar_seguimiento`)
+- Modify: `tests/test_seguimientos_neon.py`
+
+**Interfaces:**
+- Consumes: la migración 017 (Task 1).
+- Produces, todas en `persistencia`:
+  ```python
+  def insertar_seguimiento(conn, *, id_conversacion: str, tipo: str, fecha_objetivo: datetime,
+                           clave_idempotencia: str, cita_id: str | None = None,
+                           commit: bool = True) -> bool
+  def registrar_cita(conn, *, ..., commit: bool = True) -> str          # firma existente + commit
+  def anular_seguimientos_de_cita(conn, cita_id: str, *, motivo: str,
+                                  commit: bool = True) -> int
+  def seguimientos_por_despachar(conn, *, ahora: datetime, limite: int = 50) -> list[dict[str, Any]]
+  def marcar_seguimiento_enviado(conn, id_seguimiento: int) -> None
+  def aplazar_seguimiento(conn, id_seguimiento: int, *, hasta: datetime) -> None
+  def anular_seguimiento(conn, id_seguimiento: int, *, motivo: str) -> None
+  def anotar_fallo_de_seguimiento(conn, id_seguimiento: int, *, fallo: str) -> None
+  def ultimo_mensaje_del_paciente(conn, telefono: str) -> datetime | None
+  def anotar_recordatorio_en_conversacion(conn, id_conversacion: str, *, tipo: str,
+                                          cuando: datetime) -> None
+  ```
+  Las claves de cada `dict` de `seguimientos_por_despachar`: `id`, `conversacion_id`, `cita_id`, `tipo`, `fecha_objetivo`, `intentos`, `telefono`, `nombre_completo`, `tratamiento`, `cita_inicio`, `cita_estado`, `tomada_por`. **`tratamiento` está porque es uno de los cuatro huecos de la plantilla** (Task 6): sin él, `_parametros_del_recordatorio` manda «su cita» donde el paciente espera leer qué le van a hacer.
+
+- [ ] **Step 8: Escribir las pruebas que fallan**
+
+Añadir a `tests/test_seguimientos_neon.py`:
+
+```python
+def test_la_cascada_anula_el_recordatorio_de_una_cita_que_se_movio(conexion_pruebas, cita_de_prueba):
+    id_cita, id_conversacion = cita_de_prueba
+    objetivo = datetime(2026, 9, 16, 18, 0, tzinfo=ZONA_BOGOTA)
+
+    assert persistencia.insertar_seguimiento(
+        conexion_pruebas,
+        id_conversacion=id_conversacion,
+        tipo="recordatorio_cita",
+        fecha_objetivo=objetivo,
+        clave_idempotencia=f"{id_conversacion}:recordatorio:1",
+        cita_id=id_cita,
+    )
+
+    anulados = persistencia.anular_seguimientos_de_cita(
+        conexion_pruebas, id_cita, motivo="cita_reprogramada"
+    )
+    assert anulados == 1
+
+    pendientes = persistencia.seguimientos_por_despachar(
+        conexion_pruebas, ahora=objetivo + timedelta(hours=1)
+    )
+    assert [p for p in pendientes if p["cita_id"] == id_cita] == []
+
+
+def test_un_seguimiento_anulado_no_vuelve_a_la_cola(conexion_pruebas, cita_de_prueba):
+    id_cita, id_conversacion = cita_de_prueba
+    objetivo = datetime(2026, 9, 16, 18, 0, tzinfo=ZONA_BOGOTA)
+    persistencia.insertar_seguimiento(
+        conexion_pruebas,
+        id_conversacion=id_conversacion,
+        tipo="recordatorio_cita",
+        fecha_objetivo=objetivo,
+        clave_idempotencia=f"{id_conversacion}:recordatorio:2",
+        cita_id=id_cita,
+    )
+    pendiente = persistencia.seguimientos_por_despachar(
+        conexion_pruebas, ahora=objetivo + timedelta(hours=1)
+    )[0]
+
+    persistencia.anular_seguimiento(conexion_pruebas, pendiente["id"], motivo="contacto_reciente")
+
+    restantes = persistencia.seguimientos_por_despachar(
+        conexion_pruebas, ahora=objetivo + timedelta(hours=1)
+    )
+    assert pendiente["id"] not in {r["id"] for r in restantes}
+
+
+def test_la_cola_trae_lo_que_el_despachador_necesita_para_decidir(conexion_pruebas, cita_de_prueba):
+    id_cita, id_conversacion = cita_de_prueba
+    objetivo = datetime(2026, 9, 16, 18, 0, tzinfo=ZONA_BOGOTA)
+    persistencia.insertar_seguimiento(
+        conexion_pruebas,
+        id_conversacion=id_conversacion,
+        tipo="recordatorio_cita",
+        fecha_objetivo=objetivo,
+        clave_idempotencia=f"{id_conversacion}:recordatorio:3",
+        cita_id=id_cita,
+    )
+
+    fila = persistencia.seguimientos_por_despachar(
+        conexion_pruebas, ahora=objetivo + timedelta(hours=1)
+    )[0]
+
+    # Sin estas claves el despachador tendría que hacer una consulta por guarda.
+    assert set(fila) >= {
+        "id", "conversacion_id", "cita_id", "tipo", "fecha_objetivo", "intentos",
+        "telefono", "nombre_completo", "tratamiento", "cita_inicio", "cita_estado",
+        "tomada_por",
+    }
+```
+
+Añade también el *fixture* `cita_de_prueba` al mismo archivo, que crea una conversación y una cita en el esquema `pruebas` y devuelve `(id_cita, id_conversacion)`. Cópialo del montaje que ya usa `tests/test_tools_neon.py` para crear citas — **no escribas SQL nuevo si allí ya hay un ayudante que lo hace**.
+
+- [ ] **Step 9: Correr para verificar que falla**
+
+```
+MAXICARE_PRUEBAS_NEON=1 uv run pytest -q -m neon tests/test_seguimientos_neon.py -v
+```
+
+Esperado: FALLA con `AttributeError: module 'maxicare_daniela.persistencia' has no attribute 'anular_seguimientos_de_cita'`.
+
+- [ ] **Step 10: Añadir `commit=False` a las dos funciones que ya existen**
+
+En `persistencia.py`, `insertar_seguimiento` (línea 1706) pasa a:
+
+```python
+def insertar_seguimiento(
+    conn,
+    *,
+    id_conversacion: str,
+    tipo: str,
+    fecha_objetivo: datetime,
+    clave_idempotencia: str,
+    cita_id: str | None = None,
+    commit: bool = True,
+) -> bool:
+    """`True` si quedó programado ahora, `False` si ya existía. Nunca duplica.
+
+    `cita_id` es NULLABLE a propósito: `programar_seguimiento` sigue pudiendo encolar algo que
+    no cuelga de ninguna cita («llámenme el lunes»). Un seguimiento sin cita se salta las tres
+    primeras guardas del despachador.
+
+    `commit=False` es lo que permite que la cita y su recordatorio nazcan en UNA transacción.
+    Quien lo use se queda a cargo del `commit`.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO seguimientos
+                (conversacion_id, tipo, fecha_objetivo, clave_idempotencia, cita_id)
+            VALUES (%s, %s, %s, %s, %s)
+            ON CONFLICT (clave_idempotencia) DO NOTHING
+            RETURNING id
+            """,
+            (id_conversacion, tipo, fecha_objetivo, clave_idempotencia, cita_id),
+        )
+        nuevo = cur.fetchone() is not None
+    if commit:
+        conn.commit()
+    return nuevo
+```
+
+En `registrar_cita` (línea 1514), añade `commit: bool = True` al final de los parámetros y cambia el `conn.commit()` de la línea 1542 por:
+
+```python
+    if commit:
+        conn.commit()
+    return id_cita
+```
+
+- [ ] **Step 11: Añadir las funciones nuevas**
+
+Al final de la sección «Estado, seguimientos y escalamientos» de `persistencia.py`, después de `insertar_seguimiento`:
+
+```python
+def anular_seguimientos_de_cita(
+    conn, cita_id: str, *, motivo: str, commit: bool = True
+) -> int:
+    """Anula los seguimientos vivos de esa cita y devuelve cuántos. Idempotente.
+
+    No borra: un seguimiento anulado con su motivo es lo que permite responder «¿por qué este
+    paciente no recibió recordatorio?», que es la primera pregunta que hace la clínica cuando
+    alguien no llega.
+
+    `commit=False` para que la anulación viaje en la MISMA transacción que el cambio de la
+    cita. Separadas, una caída entre las dos deja un recordatorio vivo apuntando a una cita
+    muerta -- y el despachador lo mandaría, porque sus guardas solo miran lo que hay en la base.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE seguimientos SET anulado_en = now(), motivo_anulacion = %s
+             WHERE cita_id = %s AND enviado_en IS NULL AND anulado_en IS NULL
+            """,
+            (motivo, cita_id),
+        )
+        anulados = cur.rowcount
+    if commit:
+        conn.commit()
+    return anulados
+
+
+def seguimientos_por_despachar(
+    conn, *, ahora: datetime, limite: int = 50
+) -> list[dict[str, Any]]:
+    """Las filas vencidas, con TODO lo que el despachador necesita para decidir.
+
+    El `LEFT JOIN` a `citas` y a `conversaciones` no es una optimización: sin él, cada guarda
+    sería una consulta más por fila, y el barrido de las 6 p. m. --que es cuando salen todos
+    los recordatorios del día a la vez-- haría cientos de viajes a Neon.
+
+    `FOR UPDATE ... SKIP LOCKED` es lo que permite que dos instancias no manden el mismo
+    recordatorio dos veces. `OF s` porque el bloqueo va sobre la cola, no sobre las citas.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT s.id, s.conversacion_id, s.cita_id, s.tipo, s.fecha_objetivo, s.intentos,
+                   COALESCE(c.telefono, cv.telefono)      AS telefono,
+                   c.nombre_completo, c.tratamiento, c.inicio AS cita_inicio,
+                   c.estado AS cita_estado, cv.tomada_por
+              FROM seguimientos s
+              LEFT JOIN citas c          ON c.id  = s.cita_id
+              LEFT JOIN conversaciones cv ON cv.id = s.conversacion_id
+             WHERE s.enviado_en IS NULL
+               AND s.anulado_en IS NULL
+               AND s.fecha_objetivo <= %s
+             ORDER BY s.fecha_objetivo
+             LIMIT %s
+               FOR UPDATE OF s SKIP LOCKED
+            """,
+            (ahora, limite),
+        )
+        columnas = [d[0] for d in cur.description]
+        return [dict(zip(columnas, fila)) for fila in cur.fetchall()]
+
+
+def marcar_seguimiento_enviado(conn, id_seguimiento: int) -> None:
+    """Va ANTES del envío y con su propio commit, y el orden es deliberado.
+
+    No hay transacción que cubra una llamada HTTP a Meta. Si se enviara primero y el proceso
+    muriera antes del commit, la fila seguiría pendiente y el barrido de sesenta segundos
+    después mandaría el mismo recordatorio otra vez -- sin que ninguna de las siete guardas lo
+    detectara, porque todas seguirían diciendo que sí.
+
+    Antes marcar y no mandar, que mandar y no marcar.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE seguimientos SET enviado_en = now() WHERE id = %s", (id_seguimiento,)
+        )
+    conn.commit()
+
+
+def aplazar_seguimiento(conn, id_seguimiento: int, *, hasta: datetime) -> None:
+    """Lo mueve en el tiempo sin gastarlo. Es lo que hacen las guardas del relevo y del horario:
+    el motivo por el que no sale ahora deja de ser cierto más tarde."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE seguimientos SET fecha_objetivo = %s WHERE id = %s",
+            (hasta, id_seguimiento),
+        )
+    conn.commit()
+
+
+def anular_seguimiento(conn, id_seguimiento: int, *, motivo: str) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE seguimientos SET anulado_en = now(), motivo_anulacion = %s WHERE id = %s",
+            (motivo[:200], id_seguimiento),
+        )
+    conn.commit()
+
+
+def anotar_fallo_de_seguimiento(conn, id_seguimiento: int, *, fallo: str) -> None:
+    """`enviado_en` puesto Y `fallo` con contenido es la señal a vigilar: la fila dice «lo
+    intenté» y no «salió». Es el mismo par que `reenviado_en` NULL en `mensajes_entrantes`.
+
+    El motivo se trunca a 2000, igual que `marcar_fallo_respuesta`: un traceback entero no
+    tiene por qué ocupar la base de la clínica.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE seguimientos SET fallo = %s, intentos = intentos + 1 WHERE id = %s",
+            (fallo[:2000], id_seguimiento),
+        )
+    conn.commit()
+
+
+def ultimo_mensaje_del_paciente(conn, telefono: str) -> datetime | None:
+    """Cuándo escribió ese número por última vez, o `None` si nunca.
+
+    Es la fuente exacta de dos cosas distintas: la guarda de contacto reciente --si está
+    hablando con Daniela ahora, recordarle la cita la hace ver desmemoriada-- y la ventana de
+    24 h de Meta, que se cuenta desde aquí y no desde `conversaciones.actualizada_en`, que
+    también la toca Daniela al responder.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT max(recibido_en) FROM mensajes_entrantes WHERE telefono = %s",
+            (telefono,),
+        )
+        fila = cur.fetchone()
+    return fila[0] if fila else None
+
+
+def anotar_recordatorio_en_conversacion(
+    conn, id_conversacion: str, *, tipo: str, cuando: datetime
+) -> None:
+    """Para que Daniela sepa a qué dice «sí» el paciente que responde a un recordatorio.
+
+    El mensaje lo mandó un proceso, no una conversación: el historial del agente no lo
+    contiene. Se anota aquí y `atencion._leer_estado` lo carga en el contexto. NO se inyecta
+    un mensaje en `agent_messages`: esas tablas las fija el SDK.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE conversaciones
+               SET ultimo_recordatorio_tipo = %s, ultimo_recordatorio_en = %s
+             WHERE id = %s
+            """,
+            (tipo, cuando, id_conversacion),
+        )
+    conn.commit()
+```
+
+- [ ] **Step 12: Correr las pruebas de Neon**
+
+```
+MAXICARE_PRUEBAS_NEON=1 uv run pytest -q -m neon tests/test_seguimientos_neon.py -v
+```
+
+Esperado: PASA.
+
+- [ ] **Step 13: Correr la suite completa y los scripts que doblan firmas**
+
+`registrar_cita` e `insertar_seguimiento` cambiaron de firma, y `scripts/probar_tools.py` las dobla a mano. **La suite en verde no lo caza.**
+
+```
+uv run pytest -q
+uv run python scripts/probar_tools.py
+uv run python scripts/probar_relevo.py
+uv run python scripts/probar_calendario.py
+```
+
+Esperado: los cuatro en verde. Los parámetros nuevos tienen default, así que no debería romperse nada; si algo cae, es un llamador posicional.
+
+- [ ] **Step 14: Commit**
+
+```bash
+git add src/maxicare_daniela/persistencia.py tests/test_seguimientos_neon.py
+git commit -m "feat: la cola de recordatorios se puede leer, aplazar, anular y marcar
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
+```
+
 ---
 
-## Task 2: Cuándo toca el recordatorio
+## Task 2: Las reglas de decisión
+
 
 La función pura de la sección 2 de la spec. Sin base, sin red, sin reloj de la máquina.
 
@@ -442,360 +818,8 @@ git commit -m "feat: cuando toca un recordatorio -- tres bandas y la excepcion d
 Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 ```
 
----
+### Segunda mitad: las siete guardas
 
-## Task 3: La cola y la cascada en persistencia
-
-**Files:**
-- Modify: `src/maxicare_daniela/persistencia.py:1514-1543` (`registrar_cita`), `:1706-1728` (`insertar_seguimiento`)
-- Modify: `tests/test_seguimientos_neon.py`
-
-**Interfaces:**
-- Consumes: la migración 017 (Task 1).
-- Produces, todas en `persistencia`:
-  ```python
-  def insertar_seguimiento(conn, *, id_conversacion: str, tipo: str, fecha_objetivo: datetime,
-                           clave_idempotencia: str, cita_id: str | None = None,
-                           commit: bool = True) -> bool
-  def registrar_cita(conn, *, ..., commit: bool = True) -> str          # firma existente + commit
-  def anular_seguimientos_de_cita(conn, cita_id: str, *, motivo: str,
-                                  commit: bool = True) -> int
-  def seguimientos_por_despachar(conn, *, ahora: datetime, limite: int = 50) -> list[dict[str, Any]]
-  def marcar_seguimiento_enviado(conn, id_seguimiento: int) -> None
-  def aplazar_seguimiento(conn, id_seguimiento: int, *, hasta: datetime) -> None
-  def anular_seguimiento(conn, id_seguimiento: int, *, motivo: str) -> None
-  def anotar_fallo_de_seguimiento(conn, id_seguimiento: int, *, fallo: str) -> None
-  def ultimo_mensaje_del_paciente(conn, telefono: str) -> datetime | None
-  def anotar_recordatorio_en_conversacion(conn, id_conversacion: str, *, tipo: str,
-                                          cuando: datetime) -> None
-  ```
-  Las claves de cada `dict` de `seguimientos_por_despachar`: `id`, `conversacion_id`, `cita_id`, `tipo`, `fecha_objetivo`, `intentos`, `telefono`, `nombre_completo`, `tratamiento`, `cita_inicio`, `cita_estado`, `tomada_por`. **`tratamiento` está porque es uno de los cuatro huecos de la plantilla** (Task 6): sin él, `_parametros_del_recordatorio` manda «su cita» donde el paciente espera leer qué le van a hacer.
-
-- [ ] **Step 1: Escribir las pruebas que fallan**
-
-Añadir a `tests/test_seguimientos_neon.py`:
-
-```python
-def test_la_cascada_anula_el_recordatorio_de_una_cita_que_se_movio(conexion_pruebas, cita_de_prueba):
-    id_cita, id_conversacion = cita_de_prueba
-    objetivo = datetime(2026, 9, 16, 18, 0, tzinfo=ZONA_BOGOTA)
-
-    assert persistencia.insertar_seguimiento(
-        conexion_pruebas,
-        id_conversacion=id_conversacion,
-        tipo="recordatorio_cita",
-        fecha_objetivo=objetivo,
-        clave_idempotencia=f"{id_conversacion}:recordatorio:1",
-        cita_id=id_cita,
-    )
-
-    anulados = persistencia.anular_seguimientos_de_cita(
-        conexion_pruebas, id_cita, motivo="cita_reprogramada"
-    )
-    assert anulados == 1
-
-    pendientes = persistencia.seguimientos_por_despachar(
-        conexion_pruebas, ahora=objetivo + timedelta(hours=1)
-    )
-    assert [p for p in pendientes if p["cita_id"] == id_cita] == []
-
-
-def test_un_seguimiento_anulado_no_vuelve_a_la_cola(conexion_pruebas, cita_de_prueba):
-    id_cita, id_conversacion = cita_de_prueba
-    objetivo = datetime(2026, 9, 16, 18, 0, tzinfo=ZONA_BOGOTA)
-    persistencia.insertar_seguimiento(
-        conexion_pruebas,
-        id_conversacion=id_conversacion,
-        tipo="recordatorio_cita",
-        fecha_objetivo=objetivo,
-        clave_idempotencia=f"{id_conversacion}:recordatorio:2",
-        cita_id=id_cita,
-    )
-    pendiente = persistencia.seguimientos_por_despachar(
-        conexion_pruebas, ahora=objetivo + timedelta(hours=1)
-    )[0]
-
-    persistencia.anular_seguimiento(conexion_pruebas, pendiente["id"], motivo="contacto_reciente")
-
-    restantes = persistencia.seguimientos_por_despachar(
-        conexion_pruebas, ahora=objetivo + timedelta(hours=1)
-    )
-    assert pendiente["id"] not in {r["id"] for r in restantes}
-
-
-def test_la_cola_trae_lo_que_el_despachador_necesita_para_decidir(conexion_pruebas, cita_de_prueba):
-    id_cita, id_conversacion = cita_de_prueba
-    objetivo = datetime(2026, 9, 16, 18, 0, tzinfo=ZONA_BOGOTA)
-    persistencia.insertar_seguimiento(
-        conexion_pruebas,
-        id_conversacion=id_conversacion,
-        tipo="recordatorio_cita",
-        fecha_objetivo=objetivo,
-        clave_idempotencia=f"{id_conversacion}:recordatorio:3",
-        cita_id=id_cita,
-    )
-
-    fila = persistencia.seguimientos_por_despachar(
-        conexion_pruebas, ahora=objetivo + timedelta(hours=1)
-    )[0]
-
-    # Sin estas claves el despachador tendría que hacer una consulta por guarda.
-    assert set(fila) >= {
-        "id", "conversacion_id", "cita_id", "tipo", "fecha_objetivo", "intentos",
-        "telefono", "nombre_completo", "tratamiento", "cita_inicio", "cita_estado",
-        "tomada_por",
-    }
-```
-
-Añade también el *fixture* `cita_de_prueba` al mismo archivo, que crea una conversación y una cita en el esquema `pruebas` y devuelve `(id_cita, id_conversacion)`. Cópialo del montaje que ya usa `tests/test_tools_neon.py` para crear citas — **no escribas SQL nuevo si allí ya hay un ayudante que lo hace**.
-
-- [ ] **Step 2: Correr para verificar que falla**
-
-```
-MAXICARE_PRUEBAS_NEON=1 uv run pytest -q -m neon tests/test_seguimientos_neon.py -v
-```
-
-Esperado: FALLA con `AttributeError: module 'maxicare_daniela.persistencia' has no attribute 'anular_seguimientos_de_cita'`.
-
-- [ ] **Step 3: Añadir `commit=False` a las dos funciones que ya existen**
-
-En `persistencia.py`, `insertar_seguimiento` (línea 1706) pasa a:
-
-```python
-def insertar_seguimiento(
-    conn,
-    *,
-    id_conversacion: str,
-    tipo: str,
-    fecha_objetivo: datetime,
-    clave_idempotencia: str,
-    cita_id: str | None = None,
-    commit: bool = True,
-) -> bool:
-    """`True` si quedó programado ahora, `False` si ya existía. Nunca duplica.
-
-    `cita_id` es NULLABLE a propósito: `programar_seguimiento` sigue pudiendo encolar algo que
-    no cuelga de ninguna cita («llámenme el lunes»). Un seguimiento sin cita se salta las tres
-    primeras guardas del despachador.
-
-    `commit=False` es lo que permite que la cita y su recordatorio nazcan en UNA transacción.
-    Quien lo use se queda a cargo del `commit`.
-    """
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            INSERT INTO seguimientos
-                (conversacion_id, tipo, fecha_objetivo, clave_idempotencia, cita_id)
-            VALUES (%s, %s, %s, %s, %s)
-            ON CONFLICT (clave_idempotencia) DO NOTHING
-            RETURNING id
-            """,
-            (id_conversacion, tipo, fecha_objetivo, clave_idempotencia, cita_id),
-        )
-        nuevo = cur.fetchone() is not None
-    if commit:
-        conn.commit()
-    return nuevo
-```
-
-En `registrar_cita` (línea 1514), añade `commit: bool = True` al final de los parámetros y cambia el `conn.commit()` de la línea 1542 por:
-
-```python
-    if commit:
-        conn.commit()
-    return id_cita
-```
-
-- [ ] **Step 4: Añadir las funciones nuevas**
-
-Al final de la sección «Estado, seguimientos y escalamientos» de `persistencia.py`, después de `insertar_seguimiento`:
-
-```python
-def anular_seguimientos_de_cita(
-    conn, cita_id: str, *, motivo: str, commit: bool = True
-) -> int:
-    """Anula los seguimientos vivos de esa cita y devuelve cuántos. Idempotente.
-
-    No borra: un seguimiento anulado con su motivo es lo que permite responder «¿por qué este
-    paciente no recibió recordatorio?», que es la primera pregunta que hace la clínica cuando
-    alguien no llega.
-
-    `commit=False` para que la anulación viaje en la MISMA transacción que el cambio de la
-    cita. Separadas, una caída entre las dos deja un recordatorio vivo apuntando a una cita
-    muerta -- y el despachador lo mandaría, porque sus guardas solo miran lo que hay en la base.
-    """
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            UPDATE seguimientos SET anulado_en = now(), motivo_anulacion = %s
-             WHERE cita_id = %s AND enviado_en IS NULL AND anulado_en IS NULL
-            """,
-            (motivo, cita_id),
-        )
-        anulados = cur.rowcount
-    if commit:
-        conn.commit()
-    return anulados
-
-
-def seguimientos_por_despachar(
-    conn, *, ahora: datetime, limite: int = 50
-) -> list[dict[str, Any]]:
-    """Las filas vencidas, con TODO lo que el despachador necesita para decidir.
-
-    El `LEFT JOIN` a `citas` y a `conversaciones` no es una optimización: sin él, cada guarda
-    sería una consulta más por fila, y el barrido de las 6 p. m. --que es cuando salen todos
-    los recordatorios del día a la vez-- haría cientos de viajes a Neon.
-
-    `FOR UPDATE ... SKIP LOCKED` es lo que permite que dos instancias no manden el mismo
-    recordatorio dos veces. `OF s` porque el bloqueo va sobre la cola, no sobre las citas.
-    """
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            SELECT s.id, s.conversacion_id, s.cita_id, s.tipo, s.fecha_objetivo, s.intentos,
-                   COALESCE(c.telefono, cv.telefono)      AS telefono,
-                   c.nombre_completo, c.tratamiento, c.inicio AS cita_inicio,
-                   c.estado AS cita_estado, cv.tomada_por
-              FROM seguimientos s
-              LEFT JOIN citas c          ON c.id  = s.cita_id
-              LEFT JOIN conversaciones cv ON cv.id = s.conversacion_id
-             WHERE s.enviado_en IS NULL
-               AND s.anulado_en IS NULL
-               AND s.fecha_objetivo <= %s
-             ORDER BY s.fecha_objetivo
-             LIMIT %s
-               FOR UPDATE OF s SKIP LOCKED
-            """,
-            (ahora, limite),
-        )
-        columnas = [d[0] for d in cur.description]
-        return [dict(zip(columnas, fila)) for fila in cur.fetchall()]
-
-
-def marcar_seguimiento_enviado(conn, id_seguimiento: int) -> None:
-    """Va ANTES del envío y con su propio commit, y el orden es deliberado.
-
-    No hay transacción que cubra una llamada HTTP a Meta. Si se enviara primero y el proceso
-    muriera antes del commit, la fila seguiría pendiente y el barrido de sesenta segundos
-    después mandaría el mismo recordatorio otra vez -- sin que ninguna de las siete guardas lo
-    detectara, porque todas seguirían diciendo que sí.
-
-    Antes marcar y no mandar, que mandar y no marcar.
-    """
-    with conn.cursor() as cur:
-        cur.execute(
-            "UPDATE seguimientos SET enviado_en = now() WHERE id = %s", (id_seguimiento,)
-        )
-    conn.commit()
-
-
-def aplazar_seguimiento(conn, id_seguimiento: int, *, hasta: datetime) -> None:
-    """Lo mueve en el tiempo sin gastarlo. Es lo que hacen las guardas del relevo y del horario:
-    el motivo por el que no sale ahora deja de ser cierto más tarde."""
-    with conn.cursor() as cur:
-        cur.execute(
-            "UPDATE seguimientos SET fecha_objetivo = %s WHERE id = %s",
-            (hasta, id_seguimiento),
-        )
-    conn.commit()
-
-
-def anular_seguimiento(conn, id_seguimiento: int, *, motivo: str) -> None:
-    with conn.cursor() as cur:
-        cur.execute(
-            "UPDATE seguimientos SET anulado_en = now(), motivo_anulacion = %s WHERE id = %s",
-            (motivo[:200], id_seguimiento),
-        )
-    conn.commit()
-
-
-def anotar_fallo_de_seguimiento(conn, id_seguimiento: int, *, fallo: str) -> None:
-    """`enviado_en` puesto Y `fallo` con contenido es la señal a vigilar: la fila dice «lo
-    intenté» y no «salió». Es el mismo par que `reenviado_en` NULL en `mensajes_entrantes`.
-
-    El motivo se trunca a 2000, igual que `marcar_fallo_respuesta`: un traceback entero no
-    tiene por qué ocupar la base de la clínica.
-    """
-    with conn.cursor() as cur:
-        cur.execute(
-            "UPDATE seguimientos SET fallo = %s, intentos = intentos + 1 WHERE id = %s",
-            (fallo[:2000], id_seguimiento),
-        )
-    conn.commit()
-
-
-def ultimo_mensaje_del_paciente(conn, telefono: str) -> datetime | None:
-    """Cuándo escribió ese número por última vez, o `None` si nunca.
-
-    Es la fuente exacta de dos cosas distintas: la guarda de contacto reciente --si está
-    hablando con Daniela ahora, recordarle la cita la hace ver desmemoriada-- y la ventana de
-    24 h de Meta, que se cuenta desde aquí y no desde `conversaciones.actualizada_en`, que
-    también la toca Daniela al responder.
-    """
-    with conn.cursor() as cur:
-        cur.execute(
-            "SELECT max(recibido_en) FROM mensajes_entrantes WHERE telefono = %s",
-            (telefono,),
-        )
-        fila = cur.fetchone()
-    return fila[0] if fila else None
-
-
-def anotar_recordatorio_en_conversacion(
-    conn, id_conversacion: str, *, tipo: str, cuando: datetime
-) -> None:
-    """Para que Daniela sepa a qué dice «sí» el paciente que responde a un recordatorio.
-
-    El mensaje lo mandó un proceso, no una conversación: el historial del agente no lo
-    contiene. Se anota aquí y `atencion._leer_estado` lo carga en el contexto. NO se inyecta
-    un mensaje en `agent_messages`: esas tablas las fija el SDK.
-    """
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            UPDATE conversaciones
-               SET ultimo_recordatorio_tipo = %s, ultimo_recordatorio_en = %s
-             WHERE id = %s
-            """,
-            (tipo, cuando, id_conversacion),
-        )
-    conn.commit()
-```
-
-- [ ] **Step 5: Correr las pruebas de Neon**
-
-```
-MAXICARE_PRUEBAS_NEON=1 uv run pytest -q -m neon tests/test_seguimientos_neon.py -v
-```
-
-Esperado: PASA.
-
-- [ ] **Step 6: Correr la suite completa y los scripts que doblan firmas**
-
-`registrar_cita` e `insertar_seguimiento` cambiaron de firma, y `scripts/probar_tools.py` las dobla a mano. **La suite en verde no lo caza.**
-
-```
-uv run pytest -q
-uv run python scripts/probar_tools.py
-uv run python scripts/probar_relevo.py
-uv run python scripts/probar_calendario.py
-```
-
-Esperado: los cuatro en verde. Los parámetros nuevos tienen default, así que no debería romperse nada; si algo cae, es un llamador posicional.
-
-- [ ] **Step 7: Commit**
-
-```bash
-git add src/maxicare_daniela/persistencia.py tests/test_seguimientos_neon.py
-git commit -m "feat: la cola de recordatorios se puede leer, aplazar, anular y marcar
-
-Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
-```
-
----
-
-## Task 4: Las siete guardas
 
 El corazón del despachador, y todo sin base ni red: `decidir` es una función pura que recibe una fila y devuelve qué hacer con ella.
 
@@ -818,7 +842,7 @@ El corazón del despachador, y todo sin base ni red: `decidir` es una función p
               ya_salio_a_ese_numero: bool = False) -> Decision
   ```
 
-- [ ] **Step 1: Escribir las pruebas que fallan**
+- [ ] **Step 6: Escribir las pruebas que fallan**
 
 Añadir a `tests/test_seguimientos.py`:
 
@@ -943,7 +967,7 @@ def test_un_seguimiento_sin_cita_se_salta_las_tres_primeras_guardas():
     assert d.accion == "enviar"
 ```
 
-- [ ] **Step 2: Correr para verificar que falla**
+- [ ] **Step 7: Correr para verificar que falla**
 
 ```
 uv run pytest -q tests/test_seguimientos.py -v
@@ -951,7 +975,7 @@ uv run pytest -q tests/test_seguimientos.py -v
 
 Esperado: FALLA con `AttributeError: module 'maxicare_daniela.seguimientos' has no attribute 'decidir'`.
 
-- [ ] **Step 3: Implementar `decidir`**
+- [ ] **Step 8: Implementar `decidir`**
 
 Añadir a `src/maxicare_daniela/seguimientos.py`:
 
@@ -1064,7 +1088,7 @@ def _proxima_apertura(ahora: datetime, jornada: Jornada) -> datetime:
     )
 ```
 
-- [ ] **Step 4: Correr para verificar que pasa**
+- [ ] **Step 9: Correr para verificar que pasa**
 
 ```
 uv run pytest -q tests/test_seguimientos.py -v
@@ -1072,7 +1096,7 @@ uv run pytest -q tests/test_seguimientos.py -v
 
 Esperado: PASA, las quince (seis de la Task 2 más nueve de esta).
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 10: Commit**
 
 ```bash
 git add src/maxicare_daniela/seguimientos.py tests/test_seguimientos.py
@@ -1083,7 +1107,8 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 
 ---
 
-## Task 5: Enviar la plantilla por WhatsApp
+## Task 3: El despachador y su canal
+
 
 **Files:**
 - Modify: `src/maxicare_daniela/canales.py:147-167` (junto a `enviar_texto`)
@@ -1259,9 +1284,8 @@ git commit -m "feat: enviar_plantilla -- la unica puerta fuera de la ventana de 
 Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 ```
 
----
+### Segunda mitad: el bucle que las usa
 
-## Task 6: El bucle de despacho
 
 Une la cola (Task 3), las guardas (Task 4) y el envío (Task 5).
 
@@ -1279,7 +1303,7 @@ Une la cola (Task 3), las guardas (Task 4) y el envío (Task 5).
   ```
   Devuelve el recuento por acción: `{"enviados": n, "anulados": n, "aplazados": n, "fallidos": n}`.
 
-- [ ] **Step 1: Escribir la prueba que falla**
+- [ ] **Step 7: Escribir la prueba que falla**
 
 Añadir a `tests/test_seguimientos.py`:
 
@@ -1389,7 +1413,7 @@ class _ConexionFalsa:
         pass
 ```
 
-- [ ] **Step 2: Correr para verificar que falla**
+- [ ] **Step 8: Correr para verificar que falla**
 
 ```
 uv run pytest -q tests/test_seguimientos.py -k despachador -v
@@ -1397,7 +1421,7 @@ uv run pytest -q tests/test_seguimientos.py -k despachador -v
 
 Esperado: FALLA con `AttributeError: module 'maxicare_daniela.seguimientos' has no attribute 'despachar'`.
 
-- [ ] **Step 3: Implementar `despachar`**
+- [ ] **Step 9: Implementar `despachar`**
 
 Añadir a `src/maxicare_daniela/seguimientos.py` (y `import asyncio`, `from . import persistencia` arriba):
 
@@ -1558,7 +1582,7 @@ def jornada_zona():
     return ZONA_BOGOTA
 ```
 
-- [ ] **Step 4: Correr para verificar que pasa**
+- [ ] **Step 10: Correr para verificar que pasa**
 
 ```
 uv run pytest -q tests/test_seguimientos.py -v
@@ -1568,7 +1592,7 @@ Esperado: PASA, las diecisiete.
 
 Si `test_el_despachador_marca_antes_de_enviar` falla con `orden == ["enviar", "marcar"]`, el orden de las dos llamadas está invertido en el código — es exactamente el error que la prueba existe para cazar.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 11: Commit**
 
 ```bash
 git add src/maxicare_daniela/seguimientos.py tests/test_seguimientos.py
@@ -1579,7 +1603,8 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 
 ---
 
-## Task 7: Programar desde el código, y la cascada
+## Task 4: Programar desde el código, y la cascada
+
 
 Aquí el recordatorio deja de depender de que el modelo se acuerde.
 
@@ -1907,7 +1932,8 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 
 ---
 
-## Task 8: Colgarlo del servidor
+## Task 5: Ponerlo a correr y demostrarlo
+
 
 **Files:**
 - Modify: `src/maxicare_daniela/runtime.py:1755-1820`
@@ -2039,9 +2065,8 @@ git commit -m "feat: el despacho de recordatorios vive en su propia tarea, no en
 Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 ```
 
----
+### Segunda mitad: el entregable y la documentación
 
-## Task 9: El entregable y la documentación
 
 **Files:**
 - Create: `scripts/probar_recordatorios.py`
@@ -2052,7 +2077,7 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 - Consumes: todo lo anterior.
 - Produces: el entregable verificable de la fase.
 
-- [ ] **Step 1: Escribir el script**
+- [ ] **Step 6: Escribir el script**
 
 Crear `scripts/probar_recordatorios.py` con esta estructura. Los ayudantes `marca`, `url_de_pruebas`, `montar_esquema` y `limpiar` **ya existen en `scripts/probar_tools.py`**: cópialos tal cual, no los reinventes — el aislamiento del esquema `pruebas` y el `search_path` sobre la conexión directa son la mitad del valor de ese molde.
 
@@ -2260,7 +2285,7 @@ if __name__ == "__main__":
 
 Los cuatro nombres marcados con «copiar de probar_tools.py» son ayudantes que existen ahí: `url_de_pruebas`, `montar_esquema`, `limpiar` y el montaje que crea una conversación. Ábrelo y cópialos; si alguno tiene otro nombre, usa el que tenga — **no escribas SQL de montaje nuevo**, el aislamiento del esquema depende de ese molde.
 
-- [ ] **Step 2: Correrlo**
+- [ ] **Step 7: Correrlo**
 
 ```
 uv run python scripts/probar_recordatorios.py
@@ -2268,7 +2293,7 @@ uv run python scripts/probar_recordatorios.py
 
 Esperado: seis `OK`, ningún `FALLA`.
 
-- [ ] **Step 3: Añadirlo a la tabla de entregables del CLAUDE.md**
+- [ ] **Step 8: Añadirlo a la tabla de entregables del CLAUDE.md**
 
 En la tabla de «Entregables por fase», después de la fila de `probar_panel.py`:
 
@@ -2278,7 +2303,7 @@ En la tabla de «Entregables por fase», después de la fila de `probar_panel.py
 
 Y en la frase que sigue a la tabla, donde dice «quien toque una de esas firmas corre los cinco que no gastan», cambia **cinco** por **seis**.
 
-- [ ] **Step 4: Añadir el no-negociable**
+- [ ] **Step 9: Añadir el no-negociable**
 
 En la sección «No negociables» del `CLAUDE.md`, como punto 21:
 
@@ -2292,11 +2317,11 @@ En la sección «No negociables» del `CLAUDE.md`, como punto 21:
    sin Telegram.
 ```
 
-- [ ] **Step 5: Documentar el script en su regla**
+- [ ] **Step 10: Documentar el script en su regla**
 
 En `.claude/rules/scripts-entregables.md`, añade la entrada de `probar_recordatorios.py`: en qué esquema escribe (`pruebas`), qué dobla a mano (las firmas de `_crear_cita`, `_reprogramar_cita` y `persistencia.seguimientos_por_despachar`) y su trampa (el punto 6 exige la conexión directa; con el pooler pasa en verde sin probar nada).
 
-- [ ] **Step 6: Correr todo, por última vez**
+- [ ] **Step 11: Correr todo, por última vez**
 
 ```
 uv run pytest -q
@@ -2309,7 +2334,7 @@ uv run python scripts/probar_calendario.py
 
 Esperado: todo en verde.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 12: Commit**
 
 ```bash
 git add scripts/probar_recordatorios.py CLAUDE.md .claude/rules/scripts-entregables.md
