@@ -293,15 +293,24 @@ def test_la_disponibilidad_del_dia_entero_no_ofrece_la_madrugada(monkeypatch):
 
 
 def test_no_se_agenda_fuera_del_horario_de_la_clinica(monkeypatch):
-    """Ofrecer bien no basta, igual que con los bloqueos: el paciente puede pedir «a las 7»."""
+    """Ofrecer bien no basta, igual que con los bloqueos: el paciente puede pedir «a las 7».
+
+    Esta prueba afirmaba `tocada == []` --que la base no se tocaba en absoluto-- y eso era un
+    proxy de lo que de verdad importa: que no se tome un cupo a las dos de la mañana. Dejó de
+    valer cuando este camino pasó a buscar la hora libre más cercana para ofrecérsela al
+    paciente, que es una consulta de lectura. Lo que se comprueba ahora es la intención
+    directa: `tomar_cupo` no se llama. Leer no es reservar.
+    """
     ctx = contexto(ahora=datetime(2026, 9, 13, 18, 0, tzinfo=h.ZONA_BOGOTA))
-    tocada = []
 
     async def base_falsa(_ctx, trabajo):
-        tocada.append("la base")
         return trabajo(BaseFalsa())
 
     monkeypatch.setattr(h, "_con_base", base_falsa)
+    monkeypatch.setattr(persistencia, "bloques_ocupados", lambda conn, desde, hasta: {})
+    monkeypatch.setattr(
+        persistencia, "tomar_cupo", lambda *a, **kw: pytest.fail("tomó un cupo a las 2 a.m.")
+    )
 
     texto = asyncio.run(
         h._crear_cita(
@@ -316,7 +325,6 @@ def test_no_se_agenda_fuera_del_horario_de_la_clinica(monkeypatch):
     )
 
     assert "no atiende" in texto
-    assert tocada == [], "tomó un cupo a las dos de la mañana"
 
 
 # ==========================================================================================
@@ -849,6 +857,155 @@ def test_agendar_registra_al_paciente_y_lo_deja_verificado(monkeypatch):
     assert ctx.nombre_paciente == "Ana Gómez"
     assert ctx.telefono_sin_paciente is False
     assert ctx.identidad_verificada is True
+
+
+# ==========================================================================================
+# Pedir una hora con la clínica cerrada no es un callejón sin salida
+# ==========================================================================================
+#
+# Pedido por MaxiCare el 13/09/2026: «cuando alguien pregunte por un horario fuera del
+# horario de atención, que le recuerde los horarios y le ofrezca un horario cercano y libre».
+#
+# Lo que lo hacía imposible no era el texto: era `sin_hora_no_verificada`. «Atendemos de 8:00
+# a 5:00» son DOS horas concretas, y toda hora del mensaje al paciente tiene que haberla
+# devuelto una tool en este mismo turno. Sin autorizarlas, recordarle el horario al paciente
+# bloquea el mensaje entero y lo que recibe es «te escribe el doctor».
+
+
+def _fuera_de_horario(monkeypatch, ctx, cuando: datetime, libres: list[datetime]):
+    """Corre `_crear_cita` con una hora fuera de jornada. Devuelve (texto, cupos tomados)."""
+    cupos: list[str] = []
+
+    async def base_falsa(_ctx, trabajo):
+        cupos.append("tomó cupo")
+        return trabajo(BaseFalsa())
+
+    monkeypatch.setattr(h, "_con_base", base_falsa)
+    monkeypatch.setattr(
+        persistencia, "bloques_ocupados", lambda conn, desde, hasta: {}
+    )
+    monkeypatch.setattr(persistencia, "tomar_cupo", lambda *a, **kw: pytest.fail("tomó cupo"))
+
+    texto = asyncio.run(
+        h._crear_cita(
+            ctx,
+            SolicitudCita(
+                nombre_completo="Ana Gómez",
+                inicio=cuando,
+                tratamiento="limpieza",
+                clave_idempotencia="clave-suficientemente-larga",
+            ),
+        )
+    )
+    return texto
+
+
+def test_fuera_de_horario_recuerda_el_horario_y_ofrece_lo_mas_cercano(monkeypatch):
+    """Antes decía «no atiende» y «consulta la disponibilidad», y ahí se acababa: el paciente
+    que escribía a las 7 de la mañana se quedaba sin ninguna hora concreta."""
+    ctx = contexto(ahora=datetime(2026, 9, 14, 6, 0, tzinfo=h.ZONA_BOGOTA))
+
+    texto = _fuera_de_horario(
+        monkeypatch, ctx, datetime(2026, 9, 14, 7, 0, tzinfo=h.ZONA_BOGOTA), []
+    )
+
+    assert "8:00" in texto and "17:00" in texto, "no le recordó el horario"
+    # Y le da algo concreto: las 8:00 del mismo día son la hora libre más cercana a las 7:00.
+    assert "08:00" in texto, "no le ofreció ninguna hora concreta"
+
+
+def test_el_horario_que_recuerda_queda_AUTORIZADO(monkeypatch):
+    """La prueba que sostiene toda la funcionalidad.
+
+    Sin esto el texto es correcto y da igual: `sin_hora_no_verificada` compara contra
+    `ctx.turno.horas_autorizadas`, y una hora que ninguna tool devolvió bloquea la respuesta
+    entera. Recordarle el horario al paciente le costaría un «te escribe el doctor».
+    """
+    ctx = contexto(ahora=datetime(2026, 9, 14, 6, 0, tzinfo=h.ZONA_BOGOTA))
+
+    _fuera_de_horario(monkeypatch, ctx, datetime(2026, 9, 14, 7, 0, tzinfo=h.ZONA_BOGOTA), [])
+
+    assert "08:00" in ctx.turno.horas_autorizadas, "no podría decir a qué hora abren"
+    assert "17:00" in ctx.turno.horas_autorizadas, "no podría decir a qué hora cierran"
+
+
+def test_la_noche_ofrece_el_dia_siguiente_y_no_se_queda_muda(monkeypatch):
+    """A las 7 de la tarde no queda nada del mismo día: la ventana de alternativas son ocho
+    horas y todas caen con la clínica cerrada. Si la búsqueda no cruzara el día, el paciente
+    que escribe de noche --que es cuando la gente escribe-- no recibiría ninguna hora."""
+    ctx = contexto(ahora=datetime(2026, 9, 14, 18, 0, tzinfo=h.ZONA_BOGOTA))
+
+    texto = _fuera_de_horario(
+        monkeypatch, ctx, datetime(2026, 9, 14, 19, 0, tzinfo=h.ZONA_BOGOTA), []
+    )
+
+    assert "15/9" in texto, "no ofreció ninguna hora del día siguiente"
+
+
+def test_la_disponibilidad_distingue_CERRADO_de_LLENO(monkeypatch):
+    """Dos situaciones opuestas con el mismo texto llevan al modelo a lo contrario de lo que
+    toca: «no hay cupo» manda al paciente a buscar otro DÍA cuando lo que necesita es otra
+    HORA del mismo día."""
+    ctx = contexto(ahora=datetime(2026, 9, 14, 6, 0, tzinfo=h.ZONA_BOGOTA))
+
+    async def base_falsa(_ctx, trabajo):
+        return trabajo(BaseFalsa())
+
+    monkeypatch.setattr(h, "_con_base", base_falsa)
+    monkeypatch.setattr(persistencia, "bloques_ocupados", lambda conn, desde, hasta: {})
+
+    texto = asyncio.run(
+        h._consultar_disponibilidad(ctx, "2026-09-14T19:00:00", "2026-09-14T20:00:00")
+    )
+
+    assert "fuera del horario" in texto, f"lo contó como falta de cupo: {texto}"
+    assert "no hay cupo" not in texto
+
+
+def test_reprogramar_fuera_de_horario_tambien_ofrece_algo(monkeypatch):
+    """El mismo hueco en la tool de al lado. Es el patrón que ya costó dos arreglos."""
+    ctx = contexto(
+        ahora=datetime(2026, 9, 14, 6, 0, tzinfo=h.ZONA_BOGOTA), identidad_verificada=True
+    )
+
+    async def base_falsa(_ctx, trabajo):
+        return trabajo(BaseFalsa())
+
+    monkeypatch.setattr(h, "_con_base", base_falsa)
+    monkeypatch.setattr(persistencia, "bloques_ocupados", lambda conn, desde, hasta: {})
+
+    texto = asyncio.run(
+        h._reprogramar_cita(ctx, "una-cita", "2026-09-14T07:00:00")
+    )
+
+    assert "fuera del horario" in texto
+    assert "08:00" in texto, "no le ofreció a dónde moverla"
+    assert "08:00" in ctx.turno.horas_autorizadas
+
+
+def test_el_horario_de_la_base_de_conocimiento_tambien_queda_autorizado(monkeypatch):
+    """El otro camino por el que llega el horario, y tenía el mismo defecto.
+
+    `consultar_base_conocimiento` registraba `cifras_autorizadas` --para que Daniela pueda
+    decir un precio-- y no `horas_autorizadas`. Así que el paciente que pregunta «¿a qué hora
+    abren?» recibía la respuesta aprobada por MaxiCare... y el guardrail la bloqueaba por
+    contener horas que ninguna tool había verificado.
+    """
+    ctx = contexto()
+
+    async def base_falsa(_ctx, trabajo):
+        return trabajo(BaseFalsa())
+
+    monkeypatch.setattr(h, "_con_base", base_falsa)
+    monkeypatch.setattr(
+        persistencia,
+        "consultar_conocimiento",
+        lambda conn, tratamiento, pregunta=None: "[HORARIO] Lunes a viernes de 8:00 a 17:00.",
+    )
+
+    asyncio.run(h._consultar_base_conocimiento(ctx, "_general", "horario"))
+
+    assert {"08:00", "17:00"} <= ctx.turno.horas_autorizadas
 
 
 # ==========================================================================================

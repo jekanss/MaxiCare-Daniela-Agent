@@ -25,6 +25,21 @@ El `CLAUDE.md` raíz lleva la regla en una línea. Aquí está el porqué.
   CORRECTA de 00:00, 01:00 y 02:00. El modelo no alucinó: el sistema le dio esas horas.
   Ahora `calendario.Jornada` filtra, y las tres tools de agenda la respetan. Pedir el día
   entero sigue siendo razonable; acotar la respuesta es trabajo del código.
+- **«Cerrado» y «lleno» son opuestos, y hasta el 13/09/2026 decían lo mismo.** Una ventana
+  entera fuera de jornada devolvía «No quedan bloques libres en esa ventana», el mismo texto
+  que con la agenda saturada, y eso manda al paciente a buscar otro **día** cuando lo que
+  necesita es otra **hora**. Ahora `_consultar_disponibilidad` comprueba si algún bloque de
+  la ventana cae dentro de la jornada —`bloques_del_dia` sin `no_antes_de`, que es justo la
+  pregunta «¿existe algún bloque aquí?»— y si no, contesta con `_texto_fuera_de_horario`.
+  Las tres tools de agenda dan la misma respuesta: el horario **y** las horas libres más
+  cercanas, buscadas con `VENTANA_PROXIMO_HUECO` (tres días), que cruza el día y el fin de
+  semana. `VENTANA_ALTERNATIVAS` (ocho horas) no sirve aquí: quien pide las siete de la
+  tarde no tiene nada más ese día, y ocho horas hacia adelante siguen cayendo de madrugada.
+  La búsqueda va **hacia adelante** desde la hora pedida y no mira antes: a quien pide las
+  7 p. m. se le ofrece el día siguiente, no las 4 p. m. de hoy, que es una hora a la que ya
+  dijo que no puede. Cuesta una consulta a Neon y una llamada a Google en un camino que
+  antes no tocaba ninguna: se paga antes de tomar ningún cupo, y a cambio la conversación
+  no muere en «esa hora no puede ser».
 - **El horario vive en DOS sitios y se mueven juntos.** Los números (`hora_apertura`,
   `hora_cierre`, `hora_cierre_sabado`, `atiende_domingo`, tabla `configuracion`, migración
   012) filtran la rejilla; la fila `_general`/`horario` de la base de conocimiento es la que

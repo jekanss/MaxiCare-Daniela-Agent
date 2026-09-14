@@ -185,6 +185,26 @@ def corridas(url: str) -> int:
     ok = f"{desde:%H:%M}" not in con_bloqueo
     print(f"   con hora bloqueada    -> {marca(ok)} no ofrece la hora que el doctor aparto")
 
+    # Pedir una hora con la clinica cerrada no es quedarse sin cupo, y decirlo igual manda al
+    # paciente a buscar otro DIA cuando lo que necesita es otra HORA.
+    madrugada = desde.replace(hour=3, minute=0)
+    cerrado = asyncio.run(
+        h._consultar_disponibilidad(
+            ctx, madrugada.isoformat(), (madrugada + timedelta(hours=1)).isoformat()
+        )
+    )
+    print(f"   con la clinica cerrada:")
+    print(f"     lo distingue        -> {marca('fuera del horario' in cerrado)} "
+          f"no lo cuenta como falta de cupo")
+    print(f"     recuerda el horario -> {marca(f'{Jornada().apertura}:00' in cerrado)} "
+          f"le dice cuando si atiende")
+    print(f"     ofrece alternativa  -> {marca('Estas si' in cerrado or 'Estas sí' in cerrado)} "
+          f"y una hora libre concreta")
+    # Y esas horas quedan AUTORIZADAS: sin esto el guardrail bloquea el mensaje entero y el
+    # paciente recibe «te escribe el doctor» por preguntar a que hora abren.
+    autorizado = f"{Jornada().apertura:02d}:00" in ctx.turno.horas_autorizadas
+    print(f"     puede decirlo       -> {marca(autorizado)} el horario queda autorizado")
+
     # -- 4. EL ENTREGABLE ----------------------------------------------------------------
     print("\n4. crear_cita  ***  LA PRUEBA QUE CIERRA LA FASE  ***")
     inicio = hora(10)

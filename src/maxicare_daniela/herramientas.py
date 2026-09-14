@@ -91,6 +91,11 @@ MAX_INTENTOS_IDENTIFICACION = 2
 #: ofrecer dos repertorios distintos según por dónde se entre.
 VENTANA_ALTERNATIVAS = timedelta(hours=8)
 
+#: Hasta dónde se busca la hora libre más cercana cuando la pedida cae con la clínica
+#: cerrada. Tiene que cruzar el día --y el fin de semana-- o quien escribe un domingo por la
+#: noche no recibe nada: tres días cubren el peor caso, que es sábado tarde a lunes mañana.
+VENTANA_PROXIMO_HUECO = timedelta(days=3)
+
 
 # ==========================================================================================
 # Utilidades internas
@@ -168,21 +173,66 @@ async def _bloqueo_que_tapa(ctx: ContextoDaniela, inicio: datetime) -> Bloqueo |
     return None
 
 
-def _texto_fuera_de_horario(ctx: ContextoDaniela, inicio: datetime) -> str:
+def _texto_fuera_de_horario(
+    ctx: ContextoDaniela, inicio: datetime, cercanos: list[datetime]
+) -> str:
     """Lo que el modelo lee cuando pide una hora con la clínica cerrada. RESULTADO, no error.
 
-    Le dice el horario para que pueda corregir en el mismo turno en vez de volver a probar a
-    ciegas. Sale de `ctx.jornada`, no de una constante: si la clínica cambia el horario desde
-    el panel, este texto cambia con él.
+    Trae las dos cosas que MaxiCare pidió el 13/09/2026: el horario, para que el paciente
+    sepa por qué esa hora no puede ser, y horas libres CONCRETAS, para que la conversación
+    siga. Antes acababa en «consulta la disponibilidad», y quien escribía a las siete de la
+    mañana se quedaba sin ninguna hora que mirar.
+
+    El horario sale de `ctx.jornada` y no de una constante: si la clínica lo cambia, este
+    texto cambia con él.
+
+    **Quien llame a esto tiene que autorizar sus horas** (`horas_autorizadas |=
+    horas_de(texto)`). No es opcional: «de 8:00 a 17:00» son dos horas concretas, y
+    `sin_hora_no_verificada` bloquea el mensaje entero si ninguna tool las devolvió en este
+    turno. Sin ese registro, recordarle el horario al paciente le cuesta un «te escribe el
+    doctor», que es justo lo contrario de lo que se pidió.
     """
     j = ctx.jornada
-    return (
-        f"Esa hora ({_formatear_hora(inicio)}) está fuera del horario: la clínica no atiende "
-        f"en ese momento. Atiende de lunes a viernes de {j.apertura}:00 a {j.cierre}:00 y los "
-        f"sábados de {j.apertura}:00 a {j.cierre_sabado}:00"
+    horario = (
+        f"Atiende de lunes a viernes de {j.apertura}:00 a {j.cierre}:00 y los sábados de "
+        f"{j.apertura}:00 a {j.cierre_sabado}:00"
         + ("." if j.atiende_domingo else ", y los domingos no abre.")
-        + " NO agendes ahí. Consulta la disponibilidad y ofrécele al paciente lo que salga."
     )
+    if cercanos:
+        oferta = (
+            " Estas sí están libres, y son las más cercanas a lo que pidió: "
+            + "; ".join(_formatear_hora(b) for b in cercanos)
+            + ". Recuérdale el horario y ofrécele una de estas."
+        )
+    else:
+        oferta = (
+            " No encontré ninguna hora libre en los próximos días. Recuérdale el horario y "
+            "ofrécele mirar otra fecha."
+        )
+    return (
+        f"Esa hora ({_formatear_hora(inicio)}) está fuera del horario de atención: la "
+        f"clínica no atiende en ese momento. {horario} NO agendes ahí.{oferta}"
+    )
+
+
+async def _proximos_huecos(ctx: ContextoDaniela, desde: datetime) -> list[datetime]:
+    """Las primeras horas libres a partir de `desde`, cruzando los días que haga falta.
+
+    `VENTANA_ALTERNATIVAS` no sirve aquí: son ocho horas, pensadas para «esa hora está llena,
+    toma otra del mismo día». Quien pide las siete de la tarde no tiene nada más ese día --la
+    clínica ya cerró-- y ocho horas hacia adelante siguen cayendo de madrugada. Sin cruzar el
+    día, el paciente que escribe de noche, que es cuando la gente escribe, no recibiría ni
+    una hora.
+
+    Cuesta una consulta a Neon y una llamada a Google en un camino que antes no tocaba
+    ninguna de las dos. Es deliberado y es barato: se paga una vez, antes de tomar ningún
+    cupo, a cambio de que la conversación no muera en «esa hora no puede ser».
+    """
+
+    def trabajo(conn) -> list[datetime]:
+        return _huecos_libres(conn, ctx, desde, desde + VENTANA_PROXIMO_HUECO)
+
+    return await _con_base(ctx, trabajo)
 
 
 def _texto_bloqueado(inicio: datetime, bloqueo: Bloqueo) -> str:
@@ -353,6 +403,12 @@ async def _consultar_base_conocimiento(
     # tool no devolvió, el tripwire salta. Registrarlo aquí --y no confiar en que el modelo
     # "use lo que le dieron"-- es lo que convierte esa instrucción en una garantía.
     ctx.turno.cifras_autorizadas |= cifras_de(texto)
+    # Y las horas, por lo mismo. Faltaba: la fila `_general`/`horario` es la que Daniela
+    # RECITA cuando le preguntan a qué hora abren, y «de 8:00 a 17:00» son dos horas
+    # concretas. Sin registrarlas, `sin_hora_no_verificada` bloqueaba una respuesta que
+    # MaxiCare había aprobado palabra por palabra. La base de conocimiento es contenido
+    # aprobado, igual que las cifras: el criterio de confianza es el mismo.
+    ctx.turno.horas_autorizadas |= horas_de(texto)
     return texto
 
 
@@ -398,6 +454,20 @@ async def _consultar_disponibilidad(ctx: ContextoDaniela, desde: str, hasta: str
         libres = _huecos_libres(conn, ctx, inicio, fin_efectivo)
         if libres:
             return _texto_alternativas(libres)
+        # «Cerrado» y «lleno» son opuestos y hasta el 13/09/2026 decían lo mismo. Si NINGÚN
+        # bloque de la ventana cae dentro de la jornada, no es que no quede cupo: es que la
+        # clínica no abre a esa hora, y «no hay cupo» manda al paciente a buscar otro DÍA
+        # cuando lo que necesita es otra HORA. La rejilla sin `no_antes_de` es justo la
+        # pregunta «¿existe algún bloque aquí?», sin mezclarla con si ya pasó.
+        if not bloques_del_dia(
+            inicio,
+            fin_efectivo,
+            duracion_minutos=ctx.duracion_cita_minutos,
+            jornada=ctx.jornada,
+        ):
+            return _texto_fuera_de_horario(
+                ctx, inicio, _huecos_libres(conn, ctx, inicio, inicio + VENTANA_PROXIMO_HUECO)
+            )
         # Antes de declarar que no hay nada, se mira el resto de la jornada. Es la misma
         # ventana que `crear_cita` usa para sus alternativas: sin esto, la consulta era la
         # única de las dos que dejaba al paciente sin una sola opción concreta.
@@ -597,7 +667,11 @@ async def _crear_cita(ctx: ContextoDaniela, solicitud: SolicitudCita) -> str:
     # bloqueo del doctor por lo mismo que la hora pasada: es local, y `bloqueos()` es una
     # llamada a Google.
     if not ctx.jornada.cabe(inicio, ctx.duracion_cita_minutos):
-        return _texto_fuera_de_horario(ctx, inicio)
+        texto = _texto_fuera_de_horario(ctx, inicio, await _proximos_huecos(ctx, inicio))
+        # Sin esto el texto es correcto y da igual: el horario que Daniela le recuerde al
+        # paciente son horas concretas, y `sin_hora_no_verificada` bloquearía el mensaje.
+        ctx.turno.horas_autorizadas |= horas_de(texto)
+        return texto
 
     # Google Calendar es la fuente de la disponibilidad, y eso vale también en el momento de
     # escribir. Ver `_bloqueo_que_tapa`: sin esto, una hora que el doctor apartó se podía
@@ -827,7 +901,9 @@ async def _reprogramar_cita(ctx: ContextoDaniela, id_cita: str, nuevo_inicio: st
 
     # Mover una cita fuera del horario es el mismo defecto que crearla ahí.
     if not ctx.jornada.cabe(destino, ctx.duracion_cita_minutos):
-        return _texto_fuera_de_horario(ctx, destino)
+        texto = _texto_fuera_de_horario(ctx, destino, await _proximos_huecos(ctx, destino))
+        ctx.turno.horas_autorizadas |= horas_de(texto)
+        return texto
 
     # Mover una cita a una hora que el doctor apartó es el mismo defecto que crearla ahí, y
     # se comprueba en el mismo sitio: antes de tocar la base. Ver `_bloqueo_que_tapa`.
