@@ -494,3 +494,67 @@ def test_sin_compilar_el_frontend_lo_dice_con_el_comando(cliente, monkeypatch, t
 
     assert r.status_code == 503
     assert "npm run build" in r.json()["detalle"]
+
+
+def test_salud_cuenta_los_mensajes_sin_responder(monkeypatch):
+    """`/salud` es lo que mira la clínica para saber si algo va mal, y el 13/09/2026 aprendió
+    a contar los mensajes que entraron y nadie contestó.
+
+    Esta prueba existe por un despiste que llegó a producción: la consulta nueva se escribió
+    un nivel a la izquierda, o sea FUERA del `with persistencia.conectar(...)`, y corría con
+    la conexión ya cerrada. `/salud` contestaba `base_de_datos: "FALLA: the connection is
+    closed"` -- el indicador de salud mintiendo sobre la salud, y encima estrenándose así.
+    Ninguna prueba lo cazó porque el `except` de `/salud` se traga cualquier error de base y
+    el endpoint sigue devolviendo 200.
+
+    El doble cierra la conexión al salir del `with` y revienta si alguien la usa después: es
+    la reproducción exacta del fallo, no una aproximación.
+    """
+    class ConexionQueSeCierra:
+        def __init__(self) -> None:
+            self.cerrada = False
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            self.cerrada = True
+            return False
+
+        def cursor(self):
+            if self.cerrada:
+                raise RuntimeError("the connection is closed")
+            return self
+
+        def __iter__(self):
+            return iter(())
+
+        def execute(self, *_a, **_k):
+            if self.cerrada:
+                raise RuntimeError("the connection is closed")
+
+        def fetchone(self):
+            return (0,)
+
+    conexiones: list[ConexionQueSeCierra] = []
+
+    def conectar_falso(_url):
+        conexion = ConexionQueSeCierra()
+        conexiones.append(conexion)
+        return conexion
+
+    def contar_falso(conn, **_kw):
+        if conn.cerrada:
+            raise RuntimeError("the connection is closed")
+        return 3
+
+    monkeypatch.setattr(runtime, "_secreto_sesion", SECRETO)
+    monkeypatch.setattr(persistencia, "conectar", conectar_falso)
+    monkeypatch.setattr(persistencia, "contar_sin_responder", contar_falso)
+
+    cuerpo = TestClient(runtime.app).get("/salud").json()
+
+    assert cuerpo["base_de_datos"] == "ok", (
+        "la cuenta nueva corrió con la conexión cerrada: mira su indentación"
+    )
+    assert cuerpo["sin_responder"] == 3

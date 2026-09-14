@@ -768,12 +768,17 @@ async def salud() -> dict:
                 "WHERE reenviado_en IS NULL AND fallo IS NOT NULL"
             )
             estado["sin_entregar"] = cur.fetchone()[0]
-        # `sin_entregar` mira el viaje HACIA los doctores y solo cuenta lo que dejó un fallo
-        # escrito. Un proceso matado a media frase no escribe nada, así que la pérdida del
-        # 13/09/2026 --el despliegue que se llevó un turno por delante-- no aparecía en
-        # ningún indicador. Esta cuenta es la que mira al paciente: entró y nadie le
-        # contestó, sin motivo anotado.
-        estado["sin_responder"] = persistencia.contar_sin_responder(conn)
+            # `sin_entregar` mira el viaje HACIA los doctores y solo cuenta lo que dejó un
+            # fallo escrito. Un proceso matado a media frase no escribe nada, así que la
+            # pérdida del 13/09/2026 --el despliegue que se llevó un turno por delante-- no
+            # aparecía en ningún indicador. Esta cuenta es la que mira al paciente: entró y
+            # nadie le contestó, sin motivo anotado.
+            #
+            # DENTRO del `with`, y aquí se pagó el despiste: escrita un nivel a la izquierda
+            # corría con la conexión ya cerrada y `/salud` contestaba
+            # `base_de_datos: "FALLA: the connection is closed"` -- el indicador de salud
+            # mintiendo sobre la salud. Lo caza `test_salud_cuenta_los_mensajes_sin_responder`.
+            estado["sin_responder"] = persistencia.contar_sin_responder(conn)
         estado["base_de_datos"] = "ok"
     except Exception as e:  # noqa: BLE001
         estado["base_de_datos"] = f"FALLA: {e}"
