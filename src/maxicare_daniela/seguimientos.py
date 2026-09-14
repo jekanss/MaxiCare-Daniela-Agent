@@ -59,12 +59,12 @@ def _vispera_util(
     for _ in range(7):
         cierre = jornada.cierre_de(candidato)
         if cierre is not None:
-            if es_la_vispera_natural:
-                hora = min(hora_preferida, cierre) if recortar_al_cierre else max(
-                    hora_preferida, jornada.apertura
-                )
-            else:
+            if not es_la_vispera_natural:
                 hora = cierre
+            elif recortar_al_cierre:
+                hora = min(hora_preferida, cierre)
+            else:
+                hora = max(hora_preferida, jornada.apertura)
             if hora >= jornada.apertura:
                 return candidato.replace(hour=hora, minute=0, second=0, microsecond=0)
         candidato = (candidato - timedelta(days=1)).replace(hour=12)
