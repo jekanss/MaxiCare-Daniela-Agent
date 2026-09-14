@@ -6,7 +6,10 @@
       "Read(./**/__pycache__/**/*)",
       "Read(./docs/agentes/plan-agentes.json)",
       "Read(./docs/superpowers/plans/**/*)",
-      "Read(./docs/superpowers/specs/**/*)"
+      "Read(./docs/superpowers/specs/2026-09-12-fase-6a-daniela-contesta-design.md)",
+      "Read(./docs/superpowers/specs/2026-09-12-fase-6b-el-muro-design.md)",
+      "Read(./docs/superpowers/specs/2026-09-12-pantalla-tratamientos-design.md)",
+      "Read(./docs/superpowers/specs/2026-09-13-fase-7-persistencia-design.md)"
     ]
   }
 }
