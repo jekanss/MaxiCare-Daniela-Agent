@@ -58,7 +58,7 @@ from typing import Any, Callable
 
 from agents import RunContextWrapper, function_tool
 
-from . import contratos, persistencia
+from . import contratos, persistencia, seguimientos
 from .calendario import (
     ZONA_BOGOTA,
     Bloqueo,
@@ -818,6 +818,25 @@ async def _crear_cita(ctx: ContextoDaniela, solicitud: SolicitudCita) -> str:
             "liberó y la cita NO existe. No se le puede confirmar nada al paciente."
         ) from e
 
+    # CUÁNDO sale el recordatorio se decide AQUÍ, fuera de la transacción, y no dentro de
+    # `guardar`. Es una función pura de tres valores que ya se conocen --el horario pedido,
+    # `ctx.ahora` y `ctx.jornada`--: ninguno depende de que la cita se haya escrito. Dentro
+    # quedan solo las dos ESCRITURAS, y con eso ningún fallo del recordatorio puede tumbar la
+    # cita: un error de lógica al calcular el momento revienta antes de que exista nada que
+    # deshacer, y lo único que puede fallar del `INSERT` --que la base se caiga-- habría
+    # matado igual el `commit` de la propia cita. La seguridad clínica prevalece: perder una
+    # cita por un recordatorio es exactamente el intercambio que este proyecto prohíbe.
+    #
+    # `None` no es un fallo: es «esta cita no lleva recordatorio». La que se agenda para
+    # dentro de dos horas no lo lleva porque el paciente acaba de hablar con Daniela.
+    cuando_recordar = seguimientos.momento_del_recordatorio(
+        inicio_cita=inicio,
+        ahora=ctx.ahora,
+        jornada=ctx.jornada,
+        hora_vispera=ctx.hora_recordatorio_vispera,
+        horas_minimas=ctx.horas_minimas_para_recordar,
+    )
+
     def guardar(conn) -> tuple[str, int]:
         # Quien saca su primera cita deja de ser un desconocido, y aquí es donde deja de
         # serlo. Sin esta fila, `identificar_paciente` no tendría nunca contra qué
@@ -833,21 +852,52 @@ async def _crear_cita(ctx: ContextoDaniela, solicitud: SolicitudCita) -> str:
             nombre_completo=solicitud.nombre_completo,
             telefono=ctx.telefono_completo,
         )
-        return (
-            persistencia.registrar_cita(
-                conn,
-                reserva_id=reserva_id,
-                conversacion_id=ctx.id_conversacion,
-                paciente_id=paciente_id,
-                nombre_completo=solicitud.nombre_completo,
-                telefono=ctx.telefono_completo,
-                tratamiento=solicitud.tratamiento,
-                inicio=inicio,
-                duracion_minutos=ctx.duracion_cita_minutos,
-                evento_calendar_id=evento_id,
-            ),
-            paciente_id,
+        id_cita = persistencia.registrar_cita(
+            conn,
+            reserva_id=reserva_id,
+            conversacion_id=ctx.id_conversacion,
+            paciente_id=paciente_id,
+            nombre_completo=solicitud.nombre_completo,
+            telefono=ctx.telefono_completo,
+            tratamiento=solicitud.tratamiento,
+            inicio=inicio,
+            duracion_minutos=ctx.duracion_cita_minutos,
+            evento_calendar_id=evento_id,
+            commit=False,
         )
+        # El recordatorio lo emite el CÓDIGO, no el modelo. `programar_seguimiento` sigue
+        # existiendo para lo que sí es criterio suyo --«llámenme el lunes»--, pero un
+        # recordatorio que depende de que se acuerde es un recordatorio que a veces no
+        # existe, y nadie se entera de cuál faltó. Es el no-negociable 2 aplicado a otro
+        # caso: lo que tiene que ocurrir siempre no lo decide el modelo.
+        #
+        # Va en la MISMA transacción que la cita --de ahí el `commit=False` de las dos
+        # escrituras y el `conn.commit()` de abajo--: separadas, una caída entre ellas deja
+        # una cita sin recordatorio y nadie se entera hasta que el paciente no llega. El
+        # CUÁNDO ya se calculó arriba, fuera de la transacción, a propósito.
+        if cuando_recordar is not None:
+            nuevo = persistencia.insertar_seguimiento(
+                conn,
+                id_conversacion=ctx.id_conversacion,
+                tipo="recordatorio_cita",
+                fecha_objetivo=cuando_recordar,
+                # La clave la arma `ctx.clave`, como las otras cuatro. Nunca el modelo.
+                clave_idempotencia=ctx.clave("recordatorio", id_cita),
+                cita_id=id_cita,
+                commit=False,
+            )
+            if not nuevo:
+                # Aquí `id_cita` es un UUID recién creado, así que esta clave no puede haber
+                # existido antes: si el booleano dice que sí, hay algo que no entendemos y
+                # tiene que dejar rastro. Se anota y no se interrumpe -- la cita está bien, y
+                # tumbarla por el recordatorio es el intercambio que este proyecto prohíbe.
+                log.info(
+                    "el recordatorio de la cita recién creada %s ya estaba programado; "
+                    "no se duplica",
+                    id_cita,
+                )
+        conn.commit()
+        return (id_cita, paciente_id)
 
     id_cita, paciente_id = await _con_base(ctx, guardar)
     # El contexto deja de mentir en el mismo turno. La ficha ya está en la base, así que el
@@ -1010,9 +1060,97 @@ async def _reprogramar_cita(ctx: ContextoDaniela, id_cita: str, nuevo_inicio: st
         log.error("Calendar falló reprogramando %s; cupo nuevo liberado", id_cita)
         raise
 
+    # Fuera de la transacción, por lo mismo que en `crear_cita`: el CUÁNDO es una función
+    # pura del destino, de `ctx.ahora` y de la jornada, y nada de eso depende de que la cita
+    # se haya movido. Dentro de `aplicar` quedan solo escrituras, y así un error calculando
+    # el momento no puede deshacer un movimiento que en Google Calendar YA ocurrió.
+    cuando_recordar = seguimientos.momento_del_recordatorio(
+        inicio_cita=destino,
+        ahora=ctx.ahora,
+        jornada=ctx.jornada,
+        hora_vispera=ctx.hora_recordatorio_vispera,
+        horas_minimas=ctx.horas_minimas_para_recordar,
+    )
+
+    # La clave del recordatorio nuevo lleva TRES componentes detrás del id de la cita, y cada
+    # uno tapa un caso que los otros dos no:
+    #
+    # - `id_cita`, para que la cascada sepa de qué cita cuelga.
+    # - `destino`, para que dos horas distintas no compartan fila.
+    # - `ctx.ahora`, que es lo que separa «el mismo intento» de «otro movimiento». Es fijo
+    #   dentro de un turno, así que un reintento de esta misma tool en este mismo turno vuelve
+    #   a dar ESTA clave --idempotente, que es justo lo que queremos-- pero un A -> B -> A en
+    #   turnos distintos da una clave nueva para el regreso a A. Sin él, al volver a A la
+    #   clave acertaría la del primer movimiento, `ON CONFLICT DO NOTHING` descartaría la
+    #   inserción, y la cita quedaría movida y sin ningún recordatorio vivo.
+    #
+    # La arma `ctx.clave`, como las otras cuatro. Nunca el modelo.
+    clave_recordatorio = ctx.clave(
+        "recordatorio", id_cita, destino.isoformat(), ctx.ahora.isoformat()
+    )
+
     def aplicar(conn) -> None:
-        persistencia.mover_cita(conn, id_cita, reserva_id=reserva_nueva, inicio=destino)
-        if reserva_vieja:
+        persistencia.mover_cita(
+            conn, id_cita, reserva_id=reserva_nueva, inicio=destino, commit=False
+        )
+        # La cascada, y el ORDEN es parte de ella: primero se programa el nuevo, después se
+        # anulan los viejos perdonando el que se acaba de programar. Al revés --anular y
+        # luego insertar-- un reintento de la misma reprogramación anularía su propia fila y
+        # chocaría al reinsertarla, dejando la cita movida y SIN recordatorio: exactamente el
+        # fallo que esta tarea existe para eliminar, reintroducido por la clave.
+        #
+        # El recordatorio viejo habla de una hora de la que el paciente acaba de salir:
+        # mandarlo la víspera lo devuelve a la hora que él mismo pidió cambiar. Se anula, no
+        # se borra: el motivo es lo que permite responder «¿por qué este paciente no recibió
+        # recordatorio?». Todo dentro de la MISMA transacción que el movimiento de la cita.
+        if cuando_recordar is not None:
+            nuevo = persistencia.insertar_seguimiento(
+                conn,
+                id_conversacion=ctx.id_conversacion,
+                tipo="recordatorio_cita",
+                fecha_objetivo=cuando_recordar,
+                clave_idempotencia=clave_recordatorio,
+                cita_id=id_cita,
+                commit=False,
+            )
+            if not nuevo:
+                # Con `ctx.ahora` dentro de la clave, esto solo puede ser un reintento de esta
+                # misma tool en este mismo turno: la fila ya está ahí y sigue viva, porque
+                # `excepto_clave` la perdona. Es benigno y esperado -- por eso `info` y no
+                # `error`-- pero descartar el booleano en silencio era lo que impedía verlo.
+                log.info(
+                    "el recordatorio de la cita %s para %s ya estaba programado en este "
+                    "turno; no se duplica",
+                    id_cita,
+                    destino.isoformat(),
+                )
+        persistencia.anular_seguimientos_de_cita(
+            conn,
+            id_cita,
+            motivo="cita_reprogramada",
+            excepto_clave=clave_recordatorio,
+            commit=False,
+        )
+        conn.commit()
+        # El cupo viejo va DESPUÉS del commit, en su propia transacción, que es donde
+        # estaba antes de que esto tuviera cascada: `mover_cita` confirmaba y `liberar_cupo`
+        # venía detrás. Metido dentro, un DELETE que fallara desharía también el movimiento
+        # de la cita --que en Google Calendar YA ocurrió-- y dejaría a los dos sistemas
+        # contando cosas distintas. Un cupo que se queda sin liberar es un horario perdido;
+        # una cita que Neon y Calendar sitúan en horas distintas es un paciente en la puerta.
+        #
+        # `!= reserva_nueva` no es una defensa contra nada teórico. La clave de `tomar_cupo`
+        # --`ctx.clave("reprogramar", id_cita, destino)`-- no lleva componente de turno, así
+        # que repetir LA MISMA reprogramación al MISMO destino en un turno posterior devuelve
+        # la reserva que ya existía: `reserva_nueva == reserva_vieja`, y esta línea borraba el
+        # cupo que la cita está usando. `citas.reserva_id` es `ON DELETE SET NULL`, así que el
+        # DELETE no falla, no lanza y no registra nada: la fila queda con `reserva_id = NULL`,
+        # la hora vuelve a contarse libre, y con `capacidad_por_hora = 2` se venden tres. Eso
+        # es sobreventa de una clínica real, y la seguridad clínica gana ese empate.
+        #
+        # La causa de fondo --una clave de idempotencia sin componente de turno-- queda por
+        # arreglar aparte: tocarla es tocar `ctx.clave` y la contabilidad de cupos entera.
+        if reserva_vieja and reserva_vieja != reserva_nueva:
             persistencia.liberar_cupo(conn, reserva_vieja)
 
     await _con_base(ctx, aplicar)
@@ -1085,7 +1223,21 @@ async def _cancelar_cita(ctx: ContextoDaniela, solicitud: SolicitudCancelacion) 
             log.error("Calendar no respondió cancelando %s; se libera el cupo igual", solicitud.id_cita)
 
     def aplicar(conn) -> None:
-        persistencia.marcar_cita_cancelada(conn, solicitud.id_cita, motivo=solicitud.motivo)
+        persistencia.marcar_cita_cancelada(
+            conn, solicitud.id_cita, motivo=solicitud.motivo, commit=False
+        )
+        # La otra mitad de la cascada, y la que más se nota: sin esto, el paciente que
+        # canceló recibe la víspera un recordatorio de la cita que acaba de cancelar. Va en
+        # la MISMA transacción que la cancelación, porque una caída entre las dos deja un
+        # recordatorio vivo apuntando a una cita muerta -- y el despachador lo mandaría.
+        persistencia.anular_seguimientos_de_cita(
+            conn, solicitud.id_cita, motivo="cita_cancelada", commit=False
+        )
+        conn.commit()
+        # Fuera de la transacción, por lo mismo que en `reprogramar`: la cancelación y sus
+        # recordatorios son lo que tiene que ser atómico. Si el cupo no se libera, la
+        # clínica pierde un horario; si la cancelación se deshiciera por eso, el paciente
+        # que canceló seguiría citado.
         if cita["reserva_id"]:
             persistencia.liberar_cupo(conn, cita["reserva_id"])
 
@@ -1516,7 +1668,33 @@ async def _sincronizar_con_calendar(
             f"{_formatear_hora(evento.inicio)}. Es un hecho confirmado, no es un error del "
             "sistema: si en un mensaje anterior le dijiste la hora vieja, corrígesela."
         )
-        al_dia.append(await _con_base(ctx, partial(_mover_porque_la_movieron, ctx, cita, evento)))
+        # El CUÁNDO se calcula FUERA de la transacción, igual que en `crear_cita` y en
+        # `reprogramar_cita`: es una función pura del destino, de `ctx.ahora` y de la jornada,
+        # y nada de eso depende de que la fila se haya corregido. Dentro de
+        # `_mover_porque_la_movieron` quedan solo escrituras, así que un error calculando el
+        # momento no puede deshacer una corrección que en Google Calendar YA ocurrió.
+        #
+        # Y va envuelto porque esto es un camino de LECTURA: el paciente preguntó por sus
+        # citas. Que un fallo del recordatorio le devuelva a Daniela un error en vez de sus
+        # citas invierte el orden de importancia del proyecto -- la cita corregida vale más
+        # que el recordatorio, siempre.
+        try:
+            cuando_recordar = seguimientos.momento_del_recordatorio(
+                inicio_cita=evento.inicio,
+                ahora=ctx.ahora,
+                jornada=ctx.jornada,
+                hora_vispera=ctx.hora_recordatorio_vispera,
+                horas_minimas=ctx.horas_minimas_para_recordar,
+            )
+        except Exception:  # noqa: BLE001 -- ver arriba
+            log.exception("fallo calculando el recordatorio de la cita %s", cita["id"])
+            cuando_recordar = None
+
+        al_dia.append(
+            await _con_base(
+                ctx, partial(_mover_porque_la_movieron, ctx, cita, evento, cuando_recordar)
+            )
+        )
 
     return al_dia, novedades
 
@@ -1530,9 +1708,30 @@ def _cancelar_porque_ya_no_esta(cita: dict[str, Any], conn) -> None:
 
 
 def _mover_porque_la_movieron(
-    ctx: ContextoDaniela, cita: dict[str, Any], evento: EventoDelCalendario, conn
+    ctx: ContextoDaniela,
+    cita: dict[str, Any],
+    evento: EventoDelCalendario,
+    cuando_recordar: datetime | None,
+    conn,
 ) -> dict[str, Any]:
-    """Pone la fila donde dice Calendar. Devuelve la cita ya corregida."""
+    """Pone la fila donde dice Calendar, con su recordatorio. Devuelve la cita ya corregida.
+
+    **La cascada del recordatorio es la misma que hace `reprogramar_cita`, y tiene que estar
+    aquí por una razón concreta: G1 caza el BORRADO de una cita, no su movimiento.** Cuando el
+    doctor arrastra la cita en su calendario, el recordatorio viejo sigue vivo, apuntando a la
+    cita correcta con la hora equivocada: la fila sigue existiendo y su estado sigue siendo
+    válido, así que ninguna de las tres primeras guardas del despachador lo descarta. El
+    paciente recibía el recordatorio de una hora que ya nadie tiene apartada.
+
+    El orden es el de `reprogramar_cita` y no es negociable: primero se programa el nuevo y
+    después se anulan los viejos PERDONANDO el que se acaba de programar. Al revés, un segundo
+    paso por aquí anularía su propia fila y chocaría al reinsertarla (`ON CONFLICT DO
+    NOTHING`), dejando la cita corregida y SIN ningún recordatorio vivo.
+
+    Todo en UNA transacción, y `liberar_cupo` DESPUÉS del commit: es donde ya estaba. Metido
+    dentro, un DELETE que fallara desharía también la corrección de la cita -- que en Google
+    Calendar ya ocurrió -- y dejaría a los dos sistemas contando cosas distintas.
+    """
     cupo = persistencia.tomar_cupo(
         conn,
         inicio=evento.inicio,
@@ -1548,13 +1747,57 @@ def _mover_porque_la_movieron(
             cita["id"],
             evento.inicio,
         )
+    reserva_nueva = cupo[0] if cupo else None
+
+    # Los mismos tres componentes que la clave de `reprogramar_cita`, y por los mismos motivos:
+    # la cita para que la cascada sepa de qué cuelga, la hora destino para que dos horas no
+    # compartan fila, y `ctx.ahora` --fijo dentro del turno-- para que un A -> B -> A -> B
+    # hecho a mano en Calendar no acierte la clave de un movimiento anterior y se quede sin
+    # recordatorio. La arma el código, nunca el modelo.
+    clave_recordatorio = (
+        f"calendar:recordatorio:{cita['id']}:{evento.inicio.isoformat()}:{ctx.ahora.isoformat()}"
+    )
+
     persistencia.mover_cita(
         conn,
         cita["id"],
-        reserva_id=cupo[0] if cupo else None,
+        reserva_id=reserva_nueva,
         inicio=evento.inicio,
+        commit=False,
     )
-    if cita["reserva_id"]:
+    if cuando_recordar is not None:
+        if not persistencia.insertar_seguimiento(
+            conn,
+            id_conversacion=cita["conversacion_id"],
+            tipo="recordatorio_cita",
+            fecha_objetivo=cuando_recordar,
+            clave_idempotencia=clave_recordatorio,
+            cita_id=cita["id"],
+            commit=False,
+        ):
+            # Solo puede ser un segundo paso por aquí dentro del MISMO turno, y la fila sigue
+            # viva porque `excepto_clave` la perdona. Benigno, pero descartar el booleano en
+            # silencio era lo que impedía verlo.
+            log.info(
+                "el recordatorio de la cita %s para %s ya estaba programado en este turno",
+                cita["id"],
+                evento.inicio.isoformat(),
+            )
+    persistencia.anular_seguimientos_de_cita(
+        conn,
+        cita["id"],
+        motivo="movida_en_calendar",
+        excepto_clave=clave_recordatorio,
+        commit=False,
+    )
+    conn.commit()
+
+    # `and ... != reserva_nueva` no es defensa contra nada teórico: `tomar_cupo` devuelve la
+    # reserva que YA existía cuando la clave se repite, y liberar esa es borrarle a la cita el
+    # cupo que está usando. `citas.reserva_id` es `ON DELETE SET NULL`, así que el DELETE no
+    # falla, no lanza y no registra nada: la hora vuelve a contarse libre y la clínica vende
+    # una plaza de más. Ver el mismo guardián en `_reprogramar_cita`.
+    if cita["reserva_id"] and cita["reserva_id"] != reserva_nueva:
         persistencia.liberar_cupo(conn, cita["reserva_id"])
 
     corregida = dict(cita)

@@ -165,6 +165,63 @@ class WhatsApp:
             raise ErrorDeCanal(f"WhatsApp rechazó el envío: {r.status_code} {r.text[:300]}")
         return r.json()["messages"][0]["id"]
 
+    async def enviar_plantilla(
+        self,
+        telefono: str,
+        *,
+        plantilla: str,
+        parametros: list[str],
+        idioma: str = "es",
+    ) -> str:
+        """Manda una plantilla aprobada y devuelve el wamid.
+
+        Es la única forma de escribirle a alguien FUERA de la ventana de 24 h, que se cuenta
+        desde el último mensaje del paciente. Un recordatorio la víspera cae fuera de esa
+        ventana casi siempre, así que `enviar_texto` no sirve aquí: Meta lo rechaza.
+
+        Los parámetros van posicionales, en el orden en que aparecen los `{{1}}`, `{{2}}`... del
+        texto que Meta aprobó. Cambiar el orden aquí no cambia la plantilla: manda otro dato en
+        otro hueco, y el paciente lee una hora donde esperaba un nombre.
+
+        `idioma` tiene que coincidir EXACTAMENTE con el código de la traducción registrada en
+        el Business Manager. Meta no busca la traducción más parecida: una plantilla creada
+        como `es_CO` y llamada con `es` devuelve el error 132001 y no se manda nada. Por eso
+        el valor sale de `config` y no de aquí -- el default es el caso probable, no un hecho.
+
+        **Solo manda el componente `body`.** Para los dos quick replies del recordatorio es
+        correcto: un quick reply lleva su carga útil dentro de la plantilla aprobada y el
+        emisor no tiene nada que rellenar. Si Meta aprueba algún día un botón con carga
+        DINÁMICA --una URL con una variable, o un `flow`--, el cuerpo hay que ampliarlo con su
+        `{"type": "button", "sub_type": ..., "index": ...}`: sin él, ese botón se manda vacío.
+        """
+        cuerpo = {
+            "messaging_product": "whatsapp",
+            "recipient_type": "individual",
+            "to": telefono,
+            "type": "template",
+            "template": {
+                "name": plantilla,
+                "language": {"code": idioma},
+                "components": [
+                    {
+                        "type": "body",
+                        "parameters": [{"type": "text", "text": v} for v in parametros],
+                    }
+                ],
+            },
+        }
+        async with httpx.AsyncClient(timeout=TIMEOUT_NORMAL) as cliente:
+            r = await cliente.post(
+                f"{BASE_GRAPH}/{self._phone_number_id}/messages",
+                headers=self._cabeceras,
+                json=cuerpo,
+            )
+        if r.status_code != 200:
+            raise ErrorDeCanal(
+                f"WhatsApp rechazó la plantilla '{plantilla}': {r.status_code} {r.text[:300]}"
+            )
+        return r.json()["messages"][0]["id"]
+
     async def subir_media(self, archivo: ArchivoDescargado) -> str:
         """Sube los bytes a Meta y devuelve el `media_id`. La primera mitad del relevo.
 

@@ -62,6 +62,7 @@ from . import (
     persistencia,
     relevo,
     reseteo,
+    seguimientos,
 )
 from .calendario import CalendarioCaido, CalendarioDoble, Jornada, calendario_desde_config
 from .canales import Telegram, WhatsApp
@@ -1406,6 +1407,12 @@ def _contexto_de_prueba(quien: dict, id_conversacion: str | None) -> tuple[Conte
         # aquí. Una prueba no le hace sonar el teléfono a un doctor.
         telegram_bot_token="",
         telegram_chat_doctores="",
+        # Los dos en `None`, y no es un descuido: al chat del panel no le llega ningún
+        # recordatorio. El despachador sale por WhatsApp, y aquí no hay número al que salir.
+        # Copiar el valor de otra conversación haría que Daniela creyera que a quien escribe
+        # desde el panel le salió un recordatorio que nunca existió.
+        ultimo_recordatorio_tipo=None,
+        ultimo_recordatorio_en=None,
     )
     try:
         with persistencia.conectar(url) as conn:
@@ -1815,6 +1822,121 @@ async def _parar_barrido_de_relevos() -> None:
     _tarea_de_barrido.cancel()
     try:
         await _tarea_de_barrido
+    except (asyncio.CancelledError, Exception):  # noqa: BLE001
+        pass
+
+
+# ==========================================================================================
+# El despacho de recordatorios
+# ==========================================================================================
+
+
+def _leer_configuracion_operativa() -> dict[str, int]:
+    with persistencia.conectar(config.database_url) as conn:
+        return persistencia.leer_configuracion(conn)
+
+
+#: La referencia viva de la tarea de recordatorios. Igual que `_tarea_de_barrido`: sin
+#: guardarla, el recolector de basura se puede llevar una tarea que nadie mira y los
+#: recordatorios dejarían de salir sin un solo error en el log.
+_tarea_de_recordatorios: asyncio.Task | None = None
+
+
+async def _avisar_de_recordatorios_fallidos(fallidos: int) -> None:
+    """El escalamiento que la spec pide en §8 y §11 y que no estaba construido.
+
+    Sin esto, un recordatorio que no sale deja rastro en `seguimientos.fallo` y en un
+    `log.error`, y **nadie consulta ninguna de las dos cosas**. El precio que la spec aceptó a
+    conciencia al marcar ANTES de enviar --«un recordatorio perdido es un paciente que quizá no
+    llega, *y la clínica se entera*»-- se quedaba sin pagar: la mitad del empate que justificó
+    ese orden.
+
+    Vive aquí y no en `seguimientos.py` por lo mismo que el despachador no importa Telegram:
+    esta es la capa del transporte y aquella es la de la decisión. El bucle ya tiene el
+    recuento, así que no hace falta una consulta más.
+
+    Nunca propaga: un fallo avisando de un fallo no puede tumbar el ciclo siguiente.
+    """
+    if not config.telegram_bot_token or not config.telegram_chat_doctores:
+        # Sin Telegram el aviso no existe, pero el despacho SÍ: la tarea arranca igual (ver
+        # `_arrancar_despacho_de_recordatorios`). Queda en el log, que es lo único que hay.
+        log.error(
+            "%d recordatorio(s) no salieron y no hay Telegram configurado para avisarlo",
+            fallidos,
+        )
+        return
+    try:
+        await _telegram.enviar_mensaje(
+            f"⚠️ <b>{fallidos} recordatorio(s) no salieron</b>\n\n"
+            "WhatsApp rechazó el envío tres veces seguidas. Esos pacientes <b>no recibieron "
+            "nada</b> y no se va a reintentar: la fila ya está marcada.\n\n"
+            "Si alguno tiene cita próxima, conviene llamarlo. El detalle está en "
+            "<code>seguimientos</code>, en las filas con <code>fallo</code> escrito.",
+            tema_id=_tema_general or 0,
+        )
+    except Exception:  # noqa: BLE001 -- ver docstring
+        log.exception("no se pudo avisar a los doctores de los recordatorios fallidos")
+
+
+async def _despachar_recordatorios_sin_parar() -> None:
+    """El reloj de la cola de recordatorios.
+
+    Va en una tarea PROPIA y no dentro de `_barrer_relevos_sin_parar`, aunque el intervalo sea
+    el mismo: aquella no arranca sin Telegram --correcto, sin Telegram no hay relevos que
+    cerrar-- y los recordatorios no dependen de Telegram para nada. Compartirlas dejaría los
+    recordatorios apagados en cualquier despliegue sin grupo de doctores.
+
+    **Asume un solo worker**, igual que el barrido de relevos y que `_candados` de `atencion`.
+    Con varias réplicas el daño está acotado por `FOR UPDATE SKIP LOCKED`: cada fila la toma
+    una sola.
+    """
+    while True:
+        await asyncio.sleep(SEGUNDOS_ENTRE_BARRIDOS)
+        try:
+            operativa = await asyncio.to_thread(_leer_configuracion_operativa)
+            recuento = await seguimientos.despachar(
+                database_url=config.database_url,
+                whatsapp=_whatsapp,
+                jornada=Jornada(
+                    apertura=operativa.get("hora_apertura", 8),
+                    cierre=operativa.get("hora_cierre", 17),
+                    cierre_sabado=operativa.get("hora_cierre_sabado", 15),
+                    atiende_domingo=bool(operativa.get("atiende_domingo", 0)),
+                ),
+                plantilla=config.plantilla_recordatorio,
+                idioma=config.plantilla_recordatorio_idioma,
+            )
+            if any(recuento.values()):
+                log.info("recordatorios: %s", recuento)
+            if recuento["fallidos"]:
+                await _avisar_de_recordatorios_fallidos(recuento["fallidos"])
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 -- tiene que seguir vivo mañana
+            log.exception("el despacho de recordatorios falló; se reintenta en el ciclo siguiente")
+
+
+@app.on_event("startup")
+async def _arrancar_despacho_de_recordatorios() -> None:
+    global _tarea_de_recordatorios
+    if not config.database_url:
+        log.info("sin base configurada: no arranca el despacho de recordatorios")
+        return
+    if not config.plantilla_recordatorio:
+        log.warning(
+            "MAXICARE_PLANTILLA_RECORDATORIO vacía: el despachador decidirá y NO enviará. "
+            "Es el modo de comprobación; para enviar de verdad hace falta la plantilla de Meta."
+        )
+    _tarea_de_recordatorios = asyncio.create_task(_despachar_recordatorios_sin_parar())
+
+
+@app.on_event("shutdown")
+async def _parar_despacho_de_recordatorios() -> None:
+    if _tarea_de_recordatorios is None:
+        return
+    _tarea_de_recordatorios.cancel()
+    try:
+        await _tarea_de_recordatorios
     except (asyncio.CancelledError, Exception):  # noqa: BLE001
         pass
 

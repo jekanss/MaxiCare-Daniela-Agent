@@ -148,19 +148,21 @@ pueden mover.
   guardó—, así que la tarea sigue por detrás (`ingesta._temas_en_curso` la sostiene) y el
   hilo queda listo para el próximo archivo de esa persona.
 
-- **La ingesta NO crea filas en `pacientes`. Un desconocido no abre tema.** `asegurar_tema`
-  comprueba con `buscar_paciente_por_telefono` que el paciente ya existe ANTES de crear nada
-  —antes, no después, o quedaría el tema huérfano— y si no existe devuelve `None`: su archivo
-  va al General, exactamente como antes de 6B. La razón es de seguridad clínica, no de orden:
-  `atencion._leer_estado` deriva `identidad_verificada` de la EXISTENCIA de esa fila, y
-  `runtime._entregar` corre `procesar_mensaje` antes que `atender`. Con la ingesta creando la
-  fila —con el `nombre_perfil` que el propio desconocido escribió—, mandar una foto
-  **verificaba a un desconocido en ese mismo turno**: `revisar_identidad` y el
-  `tool_input_guardrail` `identidad_antes_de_datos` quedaban desactivados para él, y
-  `_mismo_nombre` comparaba después el nombre que él decía contra el nombre que él mismo
-  había puesto. Lo que se pierde es poco: el hilo vale por lo que CONSERVA —el historial de
-  esa persona— y un desconocido no tiene historial. En cuanto se identifique o le abran una
-  cita, su siguiente archivo le abrirá el hilo.
+- **La ingesta NO crea filas en `pacientes` — pero desde la 014 un desconocido SÍ abre tema.**
+  Las dos mitades son independientes y conviene no confundirlas. La que no cambia: la ingesta
+  nunca escribe en `pacientes`, por seguridad clínica y no por orden. `atencion._leer_estado`
+  deriva `identidad_verificada` de la EXISTENCIA de esa fila, y `runtime._entregar` corre
+  `procesar_mensaje` antes que `atender`. Con la ingesta creando la fila —con el
+  `nombre_perfil` que el propio desconocido escribió—, mandar una foto **verificaba a un
+  desconocido en ese mismo turno**: `revisar_identidad` y el `tool_input_guardrail`
+  `identidad_antes_de_datos` quedaban desactivados para él, y `_mismo_nombre` comparaba
+  después el nombre que él decía contra el nombre que él mismo había puesto. Eso sigue igual.
+  La que cambió: mientras el hilo vivía en `pacientes.telegram_topic_id`, no crear la fila
+  significaba no poder abrir tema, y `asegurar_tema` devolvía `None` para un desconocido —su
+  archivo al General—. La 014 movió el hilo a `temas_telegram`, que cuelga del TELÉFONO y no
+  de la ficha, así que **`asegurar_tema` ya no exige ficha y sigue sin crear ninguna**: un
+  lead tiene hilo desde su primer archivo sin quedar verificado por ello. El detalle de la
+  014, en `.claude/rules/relevo-telegram.md`.
 
 - **El lector corre con `run_config`, y `trace_include_sensitive_data` va en `False`.** Es la
   CUARTA salida del muro y la única que no se ve: `RunConfig()` nace con ese campo en `True`
@@ -180,6 +182,34 @@ pueden mover.
   a las 19:03:28 se entregó después de un texto recibido a las 19:03:29 — si el lector hubiera
   ido delante, Daniela habría contestado el texto sin saber todavía que había una foto. Lo que
   no llegue a tiempo se descarta con un `log.info`, nunca con una excepción que tumbe el turno.
+
+## Al General solo va lo que le pide algo al doctor
+
+El General era un vertedero: cada texto que entraba sonaba ahí. Con un solo paciente activo
+ya era ruido, y el ruido en el canal de avisos se traduce en avisos que nadie mira.
+
+La regla es por DESTINATARIO, no por tipo de mensaje: **al General va lo que le pide algo al
+doctor**. Un texto normal no le pide nada, así que va **mudo al tema de su paciente** —o a
+ninguna parte, si ese número todavía no tiene tema—. Y **nunca lo crea**: abrir hilo es del
+primer ARCHIVO, no de un texto, porque el hilo existe para colgar lo que el doctor tiene que
+ver. El aviso de archivos sí suena, pero **UNA vez por tanda**: lo decide
+`_primer_archivo_de_la_tanda` con una ventana de 24 h, para que una serie de seis
+radiografías seguidas no sean seis pitidos.
+
+**Esto INVIERTE una columna, y es la trampa de esta sección.** La migración 004 escribió que
+`telegram_message_id` NULL con `fallo` NULL significa «entró y no llegó a nadie» — una
+alarma. Después de este cambio ese estado pasó a ser **lo normal**: es exactamente lo que
+deja un texto que va mudo al tema de su paciente. Quien lo lea como antes verá una avería
+permanente donde no hay ninguna.
+
+**La señal de alarma es `reenviado_en` NULL**, que además es sobre lo que ya estaba
+construido `ix_mensajes_sin_reenviar`. El índice no hubo que tocarlo; lo que había que
+cambiar era qué se le pregunta.
+
+El SQL de las dos consultas nuevas **solo lo ejercita `tests/test_ingesta_neon.py`, con
+`-m neon`**. Offline van dobladas y degradan en silencio: `uv run pytest -q` a secas se queda
+verde con una consulta rota. Quien las toque corre
+`MAXICARE_PRUEBAS_NEON=1 uv run pytest -q -m neon`.
 
 ## `/clearstate` — resetear un número a primer contacto
 

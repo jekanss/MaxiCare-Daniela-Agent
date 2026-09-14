@@ -595,6 +595,21 @@ class ContextoDaniela:
     duracion_cita_minutos: int = 60
     cierre_relevo_minutos: int = 180
 
+    #: Las dos perillas de los recordatorios (migración 017), leídas de `configuracion`.
+    #: `crear_cita` y `reprogramar_cita` se las pasan a `seguimientos.momento_del_recordatorio`
+    #: en vez de dejar que esa función use sus propios defaults: así la clínica cambia la hora
+    #: de la víspera desde el panel y las tools obedecen sin tocar código.
+    hora_recordatorio_vispera: int = 18
+    horas_minimas_para_recordar: int = 4
+
+    #: El último recordatorio que le salió a este paciente, si lo hubo. Lo mandó el
+    #: despachador y NO la conversación, así que el historial del agente no lo contiene: sin
+    #: esto, un paciente que responde «sí, confirmo» le está diciendo que sí a algo que Daniela
+    #: no sabe que se dijo. Sale de la base y nunca del modelo, igual que
+    #: `telefono_sin_paciente`.
+    ultimo_recordatorio_tipo: str | None = None
+    ultimo_recordatorio_en: datetime | None = None
+
     #: El horario en que la clínica atiende. Lo que impide ofrecer —y agendar— la madrugada.
     #: Viaja en el contexto por lo mismo que `calendario` y `ahora`: una prueba lo fija. Ver
     #: `calendario.Jornada`, que explica el fallo de producción que lo trajo.
