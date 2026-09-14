@@ -27,6 +27,7 @@ import hashlib
 import hmac
 import json
 import os
+import time
 from datetime import datetime
 
 import pytest
@@ -779,3 +780,146 @@ def test_en_un_turno_de_verdad_el_doctor_recibe_UN_telegram_y_no_dos(monkeypatch
     assert len(telegram.enviados) == 1, (
         "el doctor recibió el mismo escalamiento dos veces; a la cuarta deja de mirarlas"
     )
+
+
+# ==========================================================================================
+# Que apagar el servidor no le mate el turno a nadie
+# ==========================================================================================
+#
+# El 13/09/2026 un despliegue recreó el contenedor con un turno a medias. Leído de
+# `mensajes_entrantes`:
+#
+#     02:50:00  RESPONDIDO     '?'
+#     02:47:22  SIN RESPUESTA  'Sabes alguna cosa de unicornios?'
+#
+# `respondido_en` NULL y `fallo_respuesta` NULL: ni respuesta ni fallo. El proceso no falló,
+# lo mataron, y un proceso muerto no escribe su motivo. Con el `stop_grace_period` por
+# defecto --10 segundos, contra un turno de 20 s de búfer más el modelo-- eso no era mala
+# suerte: pasaba en todo despliegue que pillara a alguien escribiendo.
+
+
+def test_un_turno_en_vuelo_queda_anotado_para_que_el_apagado_lo_espere(cliente, monkeypatch):
+    """Sin este registro el apagado no tiene a qué esperar, y el drenaje es decorativo."""
+    visto: list[set[str]] = []
+    empezado = asyncio.Event()
+
+    async def atender_lento(m, **_kwargs):
+        visto.append(set(runtime._EN_VUELO))
+        empezado.set()
+        return atencion.Atendido(wamid=m.wamid, id_conversacion="conv-1", respondido=True)
+
+    async def procesar_falso(m, **_kwargs):
+        return ingesta.Resultado(m.wamid, nuevo=True, reenviado=True)
+
+    monkeypatch.setattr(ingesta, "procesar_mensaje", procesar_falso)
+    monkeypatch.setattr(atencion, "atender", atender_lento)
+
+    _enviar(cliente, _mensaje_de_texto("wamid.enVuelo"))
+
+    assert visto == [{"wamid.enVuelo"}], "el turno corrió sin quedar anotado en _EN_VUELO"
+    assert runtime._EN_VUELO == set(), "el wamid quedó pegado: cada apagado esperaría en vano"
+
+
+def test_un_turno_que_revienta_tampoco_deja_el_wamid_pegado(cliente, espias):
+    """El `finally` de `_rastreado`. `_entregar` promete no propagar, y este envoltorio no
+    depende de esa promesa: un `wamid` colgado haría que TODOS los apagados siguientes se
+    quedaran los 75 segundos completos esperando a algo que ya no existe."""
+    espias.daniela_revienta = True
+
+    _enviar(cliente, _mensaje_de_texto("wamid.revienta"))
+
+    assert runtime._EN_VUELO == set()
+
+
+def test_el_apagado_espera_a_que_el_turno_termine():
+    """Lo que compra los segundos: mientras quede algo en vuelo, no se apaga."""
+    runtime._EN_VUELO.add("wamid.lento")
+
+    async def escenario():
+        async def soltarlo_despues():
+            await asyncio.sleep(0.3)
+            runtime._EN_VUELO.discard("wamid.lento")
+
+        asyncio.create_task(soltarlo_despues())
+        empezo = time.monotonic()
+        quedaron = await runtime._esperar_a_que_drenen(limite=5.0)
+        return quedaron, time.monotonic() - empezo
+
+    try:
+        quedaron, tardo = asyncio.run(escenario())
+    finally:
+        runtime._EN_VUELO.clear()
+
+    assert quedaron == 0, "se apagó dejando un turno a medias"
+    assert tardo >= 0.25, "no esperó: devolvió antes de que el turno soltara el wamid"
+
+
+def test_el_apagado_NO_espera_para_siempre():
+    """Un turno colgado no puede impedir un despliegue: se espera, se avisa y se sigue."""
+    runtime._EN_VUELO.add("wamid.colgado")
+    try:
+        quedaron = asyncio.run(runtime._esperar_a_que_drenen(limite=0.4))
+    finally:
+        runtime._EN_VUELO.clear()
+
+    assert quedaron == 1, "el apagado se habría quedado esperando indefinidamente"
+
+
+def test_el_barrido_de_arranque_NO_pasa_por_la_deduplicacion(monkeypatch):
+    """La trampa de este arreglo, y la única forma de que sea un no-op silencioso.
+
+    `_entregar` empieza por `procesar_mensaje`, que deduplica por `wamid`. Para un mensaje
+    que ya se registró devolvería `nuevo=False` --con razón-- y se iría SIN correr el turno,
+    que es justo la mitad que falta. Por eso el barrido llama a `atender` directo.
+
+    Quien "simplifique" esto reutilizando `_entregar` deja el arreglo en nada, y en
+    producción se vería igual que antes: el paciente sin respuesta.
+    """
+    atendidos: list[str] = []
+    procesados: list[str] = []
+
+    async def procesar_falso(m, **_kwargs):
+        procesados.append(m.wamid)
+        return ingesta.Resultado(m.wamid, nuevo=False, reenviado=True)
+
+    async def atender_falso(m, **_kwargs):
+        atendidos.append(m.wamid)
+        return atencion.Atendido(wamid=m.wamid, id_conversacion="conv-1", respondido=True)
+
+    monkeypatch.setattr(ingesta, "procesar_mensaje", procesar_falso)
+    monkeypatch.setattr(atencion, "atender", atender_falso)
+    monkeypatch.setattr(
+        runtime.persistencia,
+        "mensajes_sin_responder",
+        lambda conn, **_kw: [
+            {
+                "wamid": "wamid.perdido",
+                "telefono": "573001112233",
+                "nombre_perfil": "Jean",
+                "tipo": "text",
+                "texto": "Sabes alguna cosa de unicornios?",
+                "media_id": None,
+                "mime": None,
+                "recibido_en": datetime(2026, 9, 13, 21, 47),
+            }
+        ],
+    )
+
+    class ConexionFalsa:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+    monkeypatch.setattr(runtime.persistencia, "conectar", lambda *_a, **_k: ConexionFalsa())
+
+    recogidos = asyncio.run(runtime._recoger_lo_que_quedo_sin_responder())
+
+    assert recogidos == 1
+    assert atendidos == ["wamid.perdido"], "el barrido no corrió el turno que faltaba"
+    assert procesados == [], (
+        "pasó por `procesar_mensaje`: la deduplicación lo habría descartado como reintento "
+        "de Meta y el paciente seguiría sin respuesta"
+    )
+    assert runtime._EN_VUELO == set()

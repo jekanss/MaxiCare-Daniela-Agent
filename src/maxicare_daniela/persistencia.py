@@ -780,6 +780,95 @@ def marcar_respondido(conn, wamid: str, *, wamid_respuesta: str) -> None:
     conn.commit()
 
 
+#: Columnas que hacen falta para reconstruir un `ingesta.MensajeEntrante` y volver a
+#: atenderlo. `nombre_archivo` no está en la tabla y no se echa de menos: cuando se
+#: reintenta, el archivo YA llegó al doctor --eso lo hizo `procesar_mensaje` antes de morir--
+#: y lo que falta es la respuesta al paciente.
+_COLUMNAS_SIN_RESPONDER = (
+    "wamid",
+    "telefono",
+    "nombre_perfil",
+    "tipo",
+    "texto",
+    "media_id",
+    "mime",
+    "recibido_en",
+)
+
+
+def mensajes_sin_responder(
+    conn,
+    *,
+    ventana_minutos: int = 30,
+    margen_segundos: int = 90,
+    limite: int = 20,
+) -> list[dict[str, Any]]:
+    """Los mensajes que entraron y se quedaron sin respuesta Y sin fallo.
+
+    Es la consulta que `marcar_fallo_respuesta` lleva nombrando en su docstring desde la
+    migración que creó estas columnas --«¿a quién no le contestamos?»-- y que nadie había
+    escrito. Hacía falta el 13/09/2026, cuando un despliegue mató un turno en vuelo: el
+    mensaje quedó con `respondido_en` NULL y `fallo_respuesta` NULL, o sea invisible para
+    todo informe. El proceso no falló, lo mataron, y un proceso muerto no escribe su motivo.
+
+    Los dos NULL juntos son la firma exacta de esa muerte: un fallo de verdad deja motivo, y
+    una respuesta que salió deja fecha.
+
+    Tres límites, y ninguno sobra:
+
+    - `margen_segundos` descarta lo que todavía puede estar en vuelo. Un turno tarda la
+      ventana del búfer (20 s) más el modelo más el retardo humano; contar un mensaje de hace
+      diez segundos como perdido es contar el trabajo en curso.
+    - `ventana_minutos` descarta lo viejo. Contestar media hora tarde ya es raro; contestar
+      al día siguiente a alguien que se fue es peor que no contestar.
+    - `limite` impide que un incidente largo se convierta en una tormenta de turnos al
+      arrancar, cada uno con su llamada al modelo.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            f"""
+            SELECT {", ".join(_COLUMNAS_SIN_RESPONDER)}
+              FROM mensajes_entrantes
+             WHERE respondido_en  IS NULL
+               AND fallo_respuesta IS NULL
+               AND recibido_en >  now() - make_interval(mins => %s)
+               AND recibido_en <= now() - make_interval(secs => %s)
+             ORDER BY recibido_en
+             LIMIT %s
+            """,
+            (ventana_minutos, margen_segundos, limite),
+        )
+        return [dict(zip(_COLUMNAS_SIN_RESPONDER, fila)) for fila in cur.fetchall()]
+
+
+def contar_sin_responder(conn, *, margen_segundos: int = 300, ventana_horas: int = 24) -> int:
+    """Cuántos mensajes quedaron sin respuesta y sin fallo. Para `/salud`.
+
+    Dos límites, y los dos existen para que el número signifique algo:
+
+    - `margen_segundos` es más ancho que el de `mensajes_sin_responder` a propósito. Este
+      número lo mira una persona para decidir si algo va mal, y un turno en curso contado
+      como pérdida convierte el indicador en ruido. Mide «lleva cinco minutos sin respuesta y
+      nadie anotó por qué».
+    - `ventana_horas` lo hace **volver a cero solo**. Sin él arrastraría para siempre las
+      pérdidas viejas --medidas el 13/09/2026: seis, entre pruebas del webhook y `/clearstate`
+      de antes de que se anotara-- y un indicador que nunca baja es un indicador que nadie
+      mira. Lo que interesa es si está pasando AHORA.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT count(*) FROM mensajes_entrantes
+             WHERE respondido_en  IS NULL
+               AND fallo_respuesta IS NULL
+               AND recibido_en <= now() - make_interval(secs => %s)
+               AND recibido_en >  now() - make_interval(hours => %s)
+            """,
+            (margen_segundos, ventana_horas),
+        )
+        return cur.fetchone()[0]
+
+
 def marcar_fallo_respuesta(conn, wamid: str, *, motivo: str) -> None:
     """Deja el motivo del fallo al responder.
 
