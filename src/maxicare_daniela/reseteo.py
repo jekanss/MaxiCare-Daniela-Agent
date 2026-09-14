@@ -247,6 +247,9 @@ ETIQUETAS_DE_TABLA: dict[str, tuple[str, str]] = {
     "agent_sessions": ("historial de conversación", "historiales de conversación"),
     "conversaciones": ("conversación", "conversaciones"),
     "pacientes": ("ficha tuya", "fichas tuyas"),
+    # Desde la migración 014 el hilo de Telegram vive en su propia tabla y `borrar_rastro`
+    # la cuenta aparte. Sin esta entrada, el paciente recibía «1 en temas_telegram».
+    "temas_telegram": ("hilo tuyo en el grupo", "hilos tuyos en el grupo"),
 }
 
 

@@ -13,10 +13,13 @@ bytes; `ingesta.py` decide.
 
 from __future__ import annotations
 
+import logging
 import mimetypes
 from dataclasses import dataclass
 
 import httpx
+
+log = logging.getLogger(__name__)
 
 # La versión de la API de Meta va fija y explícita. Si se deja implícita, Meta puede mover
 # el comportamiento por debajo sin que nada en el repositorio lo registre.
@@ -49,6 +52,28 @@ class ArchivoDescargado:
     @property
     def tamano(self) -> int:
         return len(self.contenido)
+
+
+#: Lo que Telegram responde cuando no quiere mojarse. Ver `Telegram.descargar_archivo`.
+_SIN_DECLARAR = ("", "application/octet-stream", "binary/octet-stream")
+
+
+def _mime_de(nombre: str, cabecera: str | None) -> str:
+    """El tipo real de un archivo, con la extensión por delante de la cabecera.
+
+    Es la mitad que le faltaba a `_nombre_sugerido`: aquella construye un nombre a partir de
+    un mime, y esta deduce el mime a partir de un nombre. Hace falta porque los dos canales
+    mienten en direcciones opuestas -- WhatsApp da el mime y no el nombre, Telegram da el
+    nombre y no el mime.
+
+    El orden importa: `photos/file_1.jpg` con cabecera `application/octet-stream` tiene que
+    salir como `image/jpeg`, no como octet-stream, o Meta rechaza la subida entera.
+    """
+    limpia = (cabecera or "").split(";")[0].strip().lower()
+    if limpia and limpia not in _SIN_DECLARAR:
+        return limpia
+    adivinado, _ = mimetypes.guess_type(nombre)
+    return adivinado or "application/octet-stream"
 
 
 def _nombre_sugerido(media_id: str, mime: str, nombre_original: str | None) -> str:
@@ -300,7 +325,7 @@ class Telegram:
     def _url(self, metodo: str) -> str:
         return f"{BASE_TELEGRAM}/bot{self._token}/{metodo}"
 
-    def enlace_al_tema(self, tema_id: int) -> str:
+    def enlace_al_tema(self, tema_id: int, mensaje_id: int | None = None) -> str:
         """El enlace que abre ese hilo en la app del doctor.
 
         Un supergrupo privado no tiene `@usuario`, así que la forma que funciona es
@@ -308,12 +333,22 @@ class Telegram:
         interno del chat y que el enlace no lleva; dejarlo produce un enlace que no abre
         nada y el doctor se queda mirando un error.
 
+        **Con `mensaje_id` el enlace lleva tres tramos y esa es la forma buena.** En un foro,
+        `t.me/c/<chat>/<n>` es ambiguo: ese `<n>` es un id de MENSAJE, y que hasta hoy
+        funcionara para abrir un hilo es una casualidad --el id de un tema es el id del
+        mensaje de servicio que lo creó--. La forma de tres tramos,
+        `t.me/c/<chat>/<tema>/<mensaje>`, dice hilo y posición por separado y es la que
+        aterriza al doctor DENTRO del tema, en el mensaje que le importa, en vez de dejarlo
+        arriba del todo o en el General.
+
         Es el complemento del relevo: la NOTIFICACIÓN de escribir en el tema es la que lo
         lleva allí, y este enlace es para cuando vuelve al General y quiere entrar a mano.
         """
         interno = str(self._chat_id).lstrip("-")
         if interno.startswith("100"):
             interno = interno[3:]
+        if mensaje_id is not None:
+            return f"https://t.me/c/{interno}/{tema_id}/{mensaje_id}"
         return f"https://t.me/c/{interno}/{tema_id}"
 
     async def enviar_mensaje(
@@ -527,6 +562,125 @@ class Telegram:
         except httpx.HTTPError:
             pass
 
+    async def estado_del_tema(self, tema_id: int) -> str | None:
+        """¿Ese tema existe todavía, y sigue abierto? `None` si no se pudo averiguar.
+
+        **Telegram no emite ningún evento cuando alguien borra un tema** --al revés que
+        cerrarlo, que sí manda `forum_topic_closed`--, así que la única forma de enterarse es
+        preguntar. Sin esto, borrar el hilo de un paciente en relevo deja a Daniela callada y
+        al doctor sin hilo: el paciente escribe y no le contesta nadie.
+
+        ------------------------------------------------------------------------------------
+        POR QUÉ `reopenForumTopic` Y NO `editForumTopic`
+        ------------------------------------------------------------------------------------
+
+        La primera versión preguntaba con `editForumTopic` sin `name` ni
+        `icon_custom_emoji_id`, razonando que sin nada que cambiar la llamada no tendría
+        efecto. Es verdad que no tiene efecto, y por eso mismo **no valida el id**: contra el
+        tema 328 ya borrado, medido el 14/09/2026, devolvía `ok: true`. La sonda decía que sí
+        a todo y el agujero que venía a tapar seguía abierto entero, sin un solo error en el
+        log. Razonar sobre una API no es medirla.
+
+        Las cuatro candidatas, medidas contra un tema vivo y contra uno borrado. «Rastro» es
+        si deja mensajes de servicio en el hilo, que a un barrido por minuto lo llenarían:
+
+            sonda                          tema vivo              tema borrado       rastro
+            editForumTopic sin argumentos  ok: true               ok: true           --
+            editForumTopic name distinto   ok: true               TOPIC_ID_INVALID   sí
+            editForumTopic icon=""         ok: true               TOPIC_ID_INVALID   sí (1)
+            reopenForumTopic               TOPIC_NOT_MODIFIED     TOPIC_ID_INVALID   NO
+
+        `reopenForumTopic` es la única que distingue sin dejar rastro, y no necesita saber
+        cómo se llama el tema --pasar un nombre equivocado lo renombraría--. Sobre un tema ya
+        abierto no hace nada, que es el caso normal: durante un relevo el tema está abierto
+        siempre (no negociable 15).
+
+        **Tarda unos 3 segundos en enterarse.** Medido: justo después de `deleteForumTopic`
+        sigue contestando `TOPIC_NOT_MODIFIED` --o sea, «abierto»-- durante unos 3 s, y a
+        partir de ahí `TOPIC_ID_INVALID` ya para siempre. No afecta a nada aquí: quien
+        pregunta es el barrido, que pasa como pronto un minuto después. Sí afecta a quien
+        quiera comprobar la sonda borrando un tema y sondeando de inmediato -- ver
+        `scripts/probar_relevo.py`, que por esto sondea con espera y no de un tiro.
+
+        Devuelve:
+
+        - `"abierto"`  — existe y ya estaba abierto. Todo en orden.
+        - `"reabierto"`— existía pero estaba CERRADO, y esta llamada acaba de abrirlo. Ver
+          abajo: quien llama tiene que cerrar el relevo, no seguir.
+        - `"borrado"`  — ya no existe.
+        - `None`       — no se pudo saber. Un timeout o un 500 de Telegram no es un tema
+          borrado, y cerrar un relevo vivo por un fallo de red sería peor que esperar al
+          siguiente barrido. Quien llama no actúa ante `None`.
+
+        El `"reabierto"` no es un caso de laboratorio: si el bot está caído cuando el doctor
+        cierra el hilo, el `forum_topic_closed` se pierde --Telegram deja de reintentar-- y el
+        relevo se queda con el tema cerrado, que es justo el estado que prohíbe la 15. Esta
+        sonda es lo que lo encuentra después, y por eso no basta con un booleano.
+        """
+        cuerpo = {"chat_id": self._chat_id, "message_thread_id": tema_id}
+        try:
+            async with httpx.AsyncClient(timeout=TIMEOUT_NORMAL) as cliente:
+                r = await cliente.post(self._url("reopenForumTopic"), json=cuerpo)
+            datos = r.json()
+        except (httpx.HTTPError, ValueError):
+            return None
+        if datos.get("ok"):
+            # Existía y estaba cerrado: la llamada lo ha abierto. No se deja así.
+            return "reabierto"
+        descripcion = str(datos.get("description") or "").upper()
+        # Los dos que dicen «ese tema no está»; cualquier otro error se trata como «no sé».
+        if "TOPIC_ID_INVALID" in descripcion or "THREAD NOT FOUND" in descripcion:
+            return "borrado"
+        if "TOPIC_NOT_MODIFIED" in descripcion:
+            return "abierto"
+        log.warning("no se pudo comprobar el tema %s: %s", tema_id, datos.get("description"))
+        return None
+
+    async def anclar_mensaje(self, mensaje_id: int) -> None:
+        """Fija un mensaje arriba del hilo, donde no haya que ir a buscarlo.
+
+        Existe por una queja medida en el segundo relevo real: el botón «Listo, que siga
+        Daniela» viaja con el mensaje de bienvenida, o sea el PRIMERO del hilo, y después de
+        veinte frases el doctor tenía que subir hasta arriba del todo para devolver el
+        control. Anclado, Telegram lo deja siempre a la vista en la cabecera del tema.
+
+        En un foro no hace falta decir el tema: el anclaje se aplica al que contenga el
+        mensaje. Va en silencio porque el doctor ya está mirando ese hilo.
+
+        No propaga: un relevo sin el botón anclado sigue siendo un relevo, y el botón sigue
+        estando arriba. Requiere `can_pin_messages` --confirmado en este grupo el
+        14/09/2026--, un permiso que ningún script comprobaba hasta hoy.
+        """
+        cuerpo = {
+            "chat_id": self._chat_id,
+            "message_id": mensaje_id,
+            "disable_notification": True,
+        }
+        try:
+            async with httpx.AsyncClient(timeout=TIMEOUT_NORMAL) as cliente:
+                r = await cliente.post(self._url("pinChatMessage"), json=cuerpo)
+            if not r.json().get("ok"):
+                log.warning("no se ancló el mensaje %s: %s", mensaje_id, r.json().get("description"))
+        except httpx.HTTPError:
+            log.warning("no se ancló el mensaje %s", mensaje_id)
+
+    async def desanclar_todo_del_tema(self, tema_id: int) -> None:
+        """Quita los anclajes de un tema. Se llama al cerrar el relevo.
+
+        Un botón anclado que ya no hace nada es peor que ninguno: invita a pulsarlo y a creer
+        que el relevo sigue vivo. Va por TEMA y no por mensaje para no tener que guardar en
+        ninguna parte el id de la bienvenida -- una columna más, y otra cosa que puede
+        quedarse desincronizada, por un anclaje.
+
+        No propaga, por lo mismo que `anclar_mensaje`.
+        """
+        cuerpo = {"chat_id": self._chat_id, "message_thread_id": tema_id}
+        try:
+            async with httpx.AsyncClient(timeout=TIMEOUT_NORMAL) as cliente:
+                await cliente.post(self._url("unpinAllForumTopicMessages"), json=cuerpo)
+        except httpx.HTTPError:
+            pass
+
     async def descargar_archivo(
         self, file_id: str, *, nombre: str | None = None
     ) -> ArchivoDescargado:
@@ -538,6 +692,23 @@ class Telegram:
 
         Tope de Telegram: 20 MB por descarga de bot. Más grande no se puede bajar y el error
         lo dice, que es mejor que un archivo truncado llegando al paciente.
+
+        ------------------------------------------------------------------------------------
+        EL TIPO LO DICE LA EXTENSIÓN, NO LA CABECERA. Medido contra la API el 14/09/2026
+        ------------------------------------------------------------------------------------
+
+        El servidor de archivos de Telegram **no declara de qué tipo es lo que entrega**:
+
+            file_path      photos/file_1.jpg
+            Content-Type   application/octet-stream        <- «bytes, no sé qué son»
+
+        Pasarle eso a Meta hace que rechace la subida entera con
+        `(#100) Param file must be a file with one of the following types: ...`, y el doctor
+        ve su foto sin entregar. Pasó en el primer relevo real.
+
+        Así que el MIME sale de la extensión de `file_path`, que Telegram sí conserva, y la
+        cabecera solo se usa cuando dice algo -- si algún día empieza a declararlo bien, se
+        aprovecha sin tocar nada.
         """
         async with httpx.AsyncClient(timeout=TIMEOUT_DESCARGA) as cliente:
             r = await cliente.post(self._url("getFile"), json={"file_id": file_id})
@@ -552,11 +723,13 @@ class Telegram:
             if bajado.status_code != 200:
                 raise ErrorDeCanal(f"no se pudo bajar el archivo: {bajado.status_code}")
 
-        mime = bajado.headers.get("content-type", "application/octet-stream")
+        nombre_final = nombre or ruta.rsplit("/", 1)[-1]
         return ArchivoDescargado(
             contenido=bajado.content,
-            mime=mime,
+            # El nombre que trae el doctor manda sobre la ruta: un `remision.pdf` dice más
+            # que un `documents/file_7.pdf`, y su extensión es igual de buena.
+            mime=_mime_de(nombre_final, bajado.headers.get("content-type")),
             # El nombre real si Telegram lo trae; si no, el que da la ruta, que conserva la
             # extensión y es lo que decide con qué app lo abre el paciente.
-            nombre=nombre or ruta.rsplit("/", 1)[-1],
+            nombre=nombre_final,
         )

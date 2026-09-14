@@ -786,10 +786,13 @@ def test_un_fallo_al_responder_queda_registrado(esquema):
 
 
 def test_el_tema_de_telegram_se_persiste_y_se_recupera_por_telefono(esquema):
-    """Comprobación 11: `telegram_topic_id` se guarda y se lee por teléfono, en `pruebas`.
+    """Comprobación 11: el hilo se guarda y se lee por teléfono, en `pruebas`.
 
     Recorre el mismo SQL que `lectura.asegurar_tema` corre en producción, en el mismo orden:
-    el paciente no tiene tema → se le cuelga uno → se recupera por su número.
+    el número no tiene hilo → se le cuelga uno → se recupera por su número.
+
+    Desde la migración 014 el hilo vive en `temas_telegram` y **no depende de que haya ficha
+    en `pacientes`**: eso es lo que permite darle hilo a un lead sin regalarle una identidad.
     """
     telefono = "573009911001"
     topic_id = 990011
@@ -801,15 +804,11 @@ def test_el_tema_de_telegram_se_persiste_y_se_recupera_por_telefono(esquema):
                 "esta prueba estaría escribiendo fuera del esquema de pruebas"
             )
 
-        id_paciente = persistencia.asegurar_paciente(
-            conn, nombre_completo="Ana Del Tema", telefono=telefono
-        )
-
         # Antes del primer archivo no hay tema, y eso es lo que hace que `asegurar_tema` lo
         # cree. Si esto devolviera cualquier cosa distinta de None, no se crearía nunca.
         assert persistencia.tema_del_paciente(conn, telefono) is None
 
-        persistencia.guardar_tema(conn, id_paciente=id_paciente, topic_id=topic_id)
+        persistencia.guardar_tema(conn, telefono=telefono, topic_id=topic_id)
 
         assert persistencia.tema_del_paciente(conn, telefono) == topic_id
 
@@ -818,8 +817,7 @@ def test_el_tema_de_telegram_se_persiste_y_se_recupera_por_telefono(esquema):
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT telegram_topic_id, telegram_topic_abierto
-                  FROM pacientes WHERE telefono = %s
+                SELECT topic_id, abierto FROM temas_telegram WHERE telefono = %s
                 """,
                 (telefono,),
             )
@@ -829,11 +827,11 @@ def test_el_tema_de_telegram_se_persiste_y_se_recupera_por_telefono(esquema):
         # base tiene que decir la verdad, no la intención con la que se creó. Es la columna
         # que leerá el relevo de la fase 6C.
         persistencia.guardar_tema(
-            conn, id_paciente=id_paciente, topic_id=topic_id, abierto=True
+            conn, telefono=telefono, topic_id=topic_id, abierto=True
         )
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT telegram_topic_abierto FROM pacientes WHERE telefono = %s",
+                "SELECT abierto FROM temas_telegram WHERE telefono = %s",
                 (telefono,),
             )
             assert cur.fetchone() == (True,)

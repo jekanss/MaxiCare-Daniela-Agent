@@ -181,9 +181,9 @@ def _montar(monkeypatch, modelo: ModeloGuionizado) -> BaseFalsa:
     monkeypatch.setattr(ingesta, "_registrar", lambda url, m: True)
     monkeypatch.setattr(ingesta, "_marcar_reenviado", lambda url, w, t, s: None)
     monkeypatch.setattr(ingesta, "_marcar_fallo", lambda url, w, e: None)
-    # `_paciente_y_tema` devuelve `(id_paciente, tema)`: Ana YA es paciente de la clínica y
-    # ya tiene su hilo. Que un número que NO lo es no abra tema lo prueba `test_lectura.py`.
-    monkeypatch.setattr(lectura_mod, "_paciente_y_tema", lambda url, tel: (5, TEMA_DE_ANA))
+    # Ana ya tiene su hilo. Desde la migración 014 eso no depende de que sea paciente: el
+    # hilo va por teléfono, y que abrirlo NO verifique a nadie lo prueba `test_lectura.py`.
+    monkeypatch.setattr(lectura_mod, "_tema_de", lambda url, tel: TEMA_DE_ANA)
     monkeypatch.setattr(lectura_mod, "_guardar_tema", lambda *a, **kw: None)
     monkeypatch.setattr(conversacion, "_guardar_estado", lambda ctx, resultado: None)
 

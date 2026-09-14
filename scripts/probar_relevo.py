@@ -39,6 +39,7 @@ import argparse
 import asyncio
 import os
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -66,6 +67,23 @@ class Cuenta:
     def falla(self, etiqueta: str, error: object) -> None:
         self.fallas += 1
         print(f"  FALLA {etiqueta}: {error}")
+
+
+#: Cuanto se le da a Telegram para admitir que borro un tema. Medido: ~3 s. El margen es
+#: ancho a proposito -- lo que se prueba es que la sonda ACABA distinguiendo, no que sea veloz.
+ESPERA_MAXIMA_BORRADO = 20.0
+
+
+async def _sondear_hasta_borrado(tg: Telegram, tema: int) -> tuple[str | None, float]:
+    """`(ultimo estado visto, segundos que costo)`. Para en cuanto dice 'borrado'."""
+    inicio = time.monotonic()
+    estado: str | None = None
+    while True:
+        estado = await tg.estado_del_tema(tema)
+        transcurrido = time.monotonic() - inicio
+        if estado == "borrado" or transcurrido >= ESPERA_MAXIMA_BORRADO:
+            return estado, transcurrido
+        await asyncio.sleep(2)
 
 
 async def _ciclo(tg: Telegram, cuenta: Cuenta, dejar: bool) -> None:
@@ -99,6 +117,22 @@ async def _ciclo(tg: Telegram, cuenta: Cuenta, dejar: bool) -> None:
         except ErrorDeCanal as e:
             cuenta.falla("reabrir_tema", e)
 
+        # 2b. La sonda del tema, contra un tema que EXISTE. La otra mitad --contra uno
+        #     borrado-- va en el `finally`, porque hace falta borrarlo primero.
+        #
+        #     Esto esta aqui por un fallo medido en produccion el 14/09/2026. La primera
+        #     version preguntaba con `editForumTopic` sin argumentos, razonando que sin nada
+        #     que cambiar no tendria efecto. Cierto, y por eso mismo NO VALIDA EL ID: decia
+        #     `ok: true` para un tema ya borrado. La sonda respondia que si a todo, el agujero
+        #     que venia a tapar seguia abierto entero, y no habia un solo error en el log ni
+        #     una prueba en rojo: las offline doblan a Telegram, asi que ninguna podia verlo.
+        #     Solo lo ve una llamada de verdad contra la API. Por eso vive en este script.
+        estado = await tg.estado_del_tema(tema)
+        if estado == "abierto":
+            cuenta.paso("estado_del_tema (vivo)", "-> 'abierto'")
+        else:
+            cuenta.falla("estado_del_tema (vivo)", f"devolvio {estado!r}, se esperaba 'abierto'")
+
         # 3. El mensaje de bienvenida, con su boton. Es el que lleva al doctor al hilo:
         #    `answerCallbackQuery(url=...)` hacia un tema del propio supergrupo responde
         #    URL_INVALID, asi que la notificacion de ESTE mensaje es toda la navegacion.
@@ -118,7 +152,10 @@ async def _ciclo(tg: Telegram, cuenta: Cuenta, dejar: bool) -> None:
         # 4. Cambiar el teclado sin tocar el texto. Es lo que deja el General ordenado cuando
         #    alguien toma la conversacion.
         if mensaje is not None:
-            enlace = tg.enlace_al_tema(tema)
+            # Con el id del mensaje: la forma de tres tramos. `t.me/c/<chat>/<n>` es ambiguo
+            # en un foro --ese `<n>` es un id de MENSAJE-- y no garantiza aterrizar dentro
+            # del hilo, que es toda la queja del 14/09/2026.
+            enlace = tg.enlace_al_tema(tema, mensaje)
             try:
                 await tg.editar_teclado(
                     mensaje, relevo.teclado_ir_al_hilo(enlace, "Dra. Prueba")
@@ -134,7 +171,8 @@ async def _ciclo(tg: Telegram, cuenta: Cuenta, dejar: bool) -> None:
 
             print()
             print(f"  El enlace al hilo seria: {enlace}")
-            print("  Abrelo: tiene que llevarte a ESTE tema, no a un error.")
+            print("  Abrelo: tiene que dejarte DENTRO de este tema, en el mensaje de arriba,")
+            print("  no en el General y no en un error.")
             print()
     finally:
         if tema is not None and not dejar:
@@ -145,6 +183,28 @@ async def _ciclo(tg: Telegram, cuenta: Cuenta, dejar: bool) -> None:
                 cuenta.falla("borrar_tema", e)
                 print(f"       Borra a mano el tema «{NOMBRE}»: el bot no tiene "
                       "`can_delete_messages`.")
+            else:
+                # LA COMPROBACION QUE FALTABA. Si esto no dice 'borrado', el barrido no se
+                # entera nunca de que alguien borro un hilo, y el paciente de ese hilo se
+                # queda sin nadie que le conteste: Daniela callada porque el relevo sigue
+                # tomado, y el doctor sin sitio donde escribir.
+                #
+                # CON ESPERA, y no de un tiro. Medido el 14/09/2026: durante unos 3 segundos
+                # despues de `deleteForumTopic`, `reopenForumTopic` sigue contestando
+                # TOPIC_NOT_MODIFIED --o sea, 'abierto'-- y solo despues pasa a
+                # TOPIC_ID_INVALID, ya para siempre. En produccion da igual: el barrido pasa
+                # como pronto un minuto despues. Aqui no: sondear al instante hacia fallar
+                # esta comprobacion cada vez, y una guarda que falla siempre se acaba
+                # ignorando, que es como se pierde la unica que caza el fallo de verdad.
+                estado, tardo = await _sondear_hasta_borrado(tg, tema)
+                if estado == "borrado":
+                    cuenta.paso("estado_del_tema (borrado)", f"-> 'borrado' en {tardo:.0f}s")
+                else:
+                    cuenta.falla(
+                        "estado_del_tema (borrado)",
+                        f"devolvio {estado!r} despues de {tardo:.0f}s para un tema borrado. "
+                        "La sonda no distingue, y el barrido no cerrara ese relevo NUNCA",
+                    )
         elif tema is not None:
             print(f"  ---  el tema {tema} se queda (--dejar). Borralo tu cuando termines.")
 

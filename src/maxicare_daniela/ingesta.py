@@ -24,6 +24,9 @@ from datetime import datetime, timezone
 
 from . import lectura as lectura_mod
 from . import persistencia
+# Solo por el teclado del botón. `relevo` importa `lectura`, `persistencia` y `canales`, y
+# NUNCA `ingesta`: no hay ciclo, y `tests/test_estructura.py` vigila que siga sin haberlo.
+from . import relevo as relevo_mod
 from .canales import ErrorDeCanal, Telegram, WhatsApp
 
 log = logging.getLogger("maxicare.ingesta")
@@ -426,6 +429,11 @@ async def procesar_mensaje(
                         f"📎 {_escapar(m.nombre_perfil or m.telefono)} mandó archivos"
                         f" — están en su tema.",
                         tema_id=tema_general,
+                        # El botón va AQUÍ y no solo en el escalamiento. Un escalamiento
+                        # ocurre una vez; los archivos siguen llegando, y el doctor que ve
+                        # entrar la tercera radiografía de alguien tiene que poder tomar la
+                        # conversación sin esperar a que Daniela vuelva a escalar.
+                        teclado=relevo_mod.teclado_tomar(m.telefono),
                     )
                 except Exception:  # noqa: BLE001
                     log.exception(

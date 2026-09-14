@@ -254,7 +254,11 @@ class LecturaArchivo(BaseModel):
         max_length=4000,
         description=(
             "DESTINO EXCLUSIVO: Telegram, para los doctores. Lo que el documento dice, "
-            "citado con fidelidad, contenido clínico incluido. NO emitir hallazgos propios "
+            "citado con fidelidad, contenido clínico incluido. FORMATO: una ficha de seis "
+            "líneas como mucho — primero 'tipo · especialidad · emisor · fecha' sin rótulo, "
+            "y debajo solo las que el documento respalde, de estas: 'Motivo:', "
+            "'Hallazgos:', 'Antecedentes:', 'Piden:', 'Ojo:'. Nunca un párrafo corrido, y "
+            "nunca una línea para decir que algo no aplica. NO emitir hallazgos propios "
             "sobre una imagen: el doctor ya recibe la imagen y un hallazgo generado por "
             "máquina puede anclarle el criterio. El código nunca pasa este campo a `daniela` "
             "ni lo persiste en Neon."

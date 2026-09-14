@@ -94,6 +94,13 @@ TABLAS_CON_PACIENTES = (
     "pacientes",
 )
 
+#: `temas_telegram` va aparte de la tupla de arriba: no tiene columna `telefono`... la tiene,
+#: pero no cuelga de `conversaciones` ni de `pacientes`, así que ningún CASCADE se la lleva.
+#: Que `borrar_rastro` la borre a mano es justo lo que hay que comprobar -- una fila que
+#: sobreviviera apuntaría a un tema ya borrado en Telegram y el siguiente archivo de ese
+#: número moriría con «message thread not found».
+TABLA_DEL_HILO = "temas_telegram"
+
 
 @pytest.fixture(autouse=True)
 def limpio(esquema):
@@ -105,7 +112,8 @@ def limpio(esquema):
     """
     with persistencia.conectar(esquema) as conn, conn.cursor() as cur:
         cur.execute(
-            f"TRUNCATE {', '.join(TABLAS_CON_PACIENTES)} RESTART IDENTITY CASCADE"
+            f"TRUNCATE {', '.join((*TABLAS_CON_PACIENTES, TABLA_DEL_HILO))} "
+            "RESTART IDENTITY CASCADE"
         )
         conn.commit()
     return esquema
@@ -129,13 +137,20 @@ def _con_historia(url: str, telefono: str, *, wamids: list[str]) -> dict:
     with persistencia.conectar(url) as conn, conn.cursor() as cur:
         cur.execute(
             """
-            INSERT INTO pacientes (nombre_completo, telefono, telegram_topic_id,
-                                   telegram_topic_abierto)
-            VALUES (%s, %s, %s, FALSE) RETURNING id
+            INSERT INTO pacientes (nombre_completo, telefono)
+            VALUES (%s, %s) RETURNING id
             """,
-            (f"Paciente {marca}", telefono, 4000 + int(marca)),
+            (f"Paciente {marca}", telefono),
         )
         id_paciente = cur.fetchone()[0]
+
+        # El hilo de Telegram ya no es una columna de `pacientes`: desde la migración 014
+        # vive en `temas_telegram`, atado al teléfono. Sigue teniendo que desaparecer con el
+        # reseteo, y eso es lo que comprueba este archivo.
+        cur.execute(
+            "INSERT INTO temas_telegram (telefono, topic_id, abierto) VALUES (%s, %s, FALSE)",
+            (telefono, 4000 + int(marca)),
+        )
 
         cur.execute(
             """
@@ -306,6 +321,10 @@ def test_no_queda_una_sola_fila_del_numero(esquema):
 
     assert borradas["pacientes"] == 1
     assert borradas["conversaciones"] == 1
+    # El hilo de Telegram. Desde la migración 014 no cuelga de nada, así que si
+    # `borrar_rastro` dejara de borrarlo a mano, esta línea es lo único que lo diría.
+    assert _cuenta(esquema, "temas_telegram", "telefono", TEL) == 0
+    assert borradas["temas_telegram"] == 1
     assert borradas["mensajes_entrantes"] == 2
     assert borradas["citas"] == 1
 

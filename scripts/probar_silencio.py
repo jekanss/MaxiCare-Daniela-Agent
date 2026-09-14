@@ -34,7 +34,7 @@ EL TEMA DE UN PACIENTE, SI QUIERES PROBAR LOS DOS MUDOS
 Sin `--tema`, los mensajes 3 y 4 no se mandan: este script NO crea temas ni toca la base.
 Para sacar un id real, del paciente que prefieras:
 
-    SELECT telefono, telegram_topic_id FROM pacientes WHERE telegram_topic_id IS NOT NULL;
+    SELECT telefono, topic_id FROM temas_telegram;
 
 Escribe en un tema CERRADO sin problema: el bot es administrador, y esa asimetria -- el bot
 deposita, el doctor no puede escribir -- es la garantia dura del diseno del relevo.
@@ -98,7 +98,8 @@ async def _enviar(tg: Telegram, tema_de_paciente: int | None) -> list[int]:
              "💬 <i>me duele desde ayer</i>\n\n"
              "<b>ESTE NO DEBE SONAR.</b>"),
             ("4. lectura clínica", tema_de_paciente, True,
-             f"{MARCA}\n📄 <b>Lectura</b>\n(texto de ejemplo, sin contenido clínico real)\n\n"
+             f"{MARCA}\n📄 <b>Ejemplo · sin contenido clínico real · 14/09/2026</b>\n"
+             "<b>Motivo:</b> texto de ejemplo para comprobar el silencio.\n\n"
              "<b>ESTE NO DEBE SONAR.</b>"),
         ]
 

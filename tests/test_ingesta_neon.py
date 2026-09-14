@@ -175,11 +175,7 @@ def test_el_tema_del_paciente_se_encuentra(esquema):
         paciente_id = persistencia.asegurar_paciente(
             conn, nombre_completo="Ana Perez", telefono=TEL
         )
-        with conn.cursor() as cur:
-            cur.execute(
-                "UPDATE pacientes SET telegram_topic_id = %s WHERE id = %s", (901, paciente_id)
-            )
-        conn.commit()
+        persistencia.guardar_tema(conn, telefono=TEL, topic_id=901)
 
     assert ingesta._tema_existente(esquema, TEL) == 901
 

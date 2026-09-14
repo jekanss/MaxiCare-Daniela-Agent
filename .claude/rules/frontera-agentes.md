@@ -59,6 +59,41 @@ un video o una remisión.
 `tests/test_contratos.py::test_tratamiento_no_admite_una_frase_clinica` es la prueba
 que lo sostiene. No la debilites para que pase otra cosa.
 
+# `contexto_clinico` es una FICHA, y la forma la ponen dos sitios a la vez
+
+El esqueleto del plan solo pedía «lo que el documento dice, con fidelidad», y contra el
+modelo real eso produce un muro de prosa de veinte líneas. Lo vio el cliente en producción
+el 14/09/2026: una remisión donde «solicita valoración por medicina interna» —lo único que
+el doctor necesitaba para decidir— quedaba enterrado en el párrafo catorce.
+
+El destinatario está de pie, en el celular, entre dos pacientes. Así que la salida tiene
+formato fijo: una cabecera sin rótulo (`tipo · especialidad · emisor · fecha`) y debajo, como
+mucho, `Motivo:` · `Hallazgos:` · `Antecedentes:` · `Piden:` · `Ojo:`. **La línea que el
+documento no respalde se omite entera**: escribir «no refiere alergias» gasta el renglón que
+hacía que la ficha cupiera, y es justo lo que la vuelve ilegible otra vez.
+
+Nada de esto afloja el muro. Sigue siendo el mismo campo, con el mismo destino exclusivo, y
+la fidelidad no cambió: cambió que tiene forma.
+
+Lo que hay que saber para tocarlo:
+
+- **Son dos sitios, y tienen que estar de acuerdo.** `agentes.INSTRUCCIONES_LECTOR` dice qué
+  rótulos escribir; `lectura.ROTULOS_DE_LA_FICHA` dice cuáles resaltar. Renombrar uno solo
+  —`Piden` por `Solicitan`— no rompe nada: la ficha sale plana y en verde. Lo ata
+  `test_el_prompt_del_lector_enumera_los_MISMOS_rotulos_que_resalta_el_codigo`.
+- **Se escapa primero y se marca después**, en `lectura.formatear_para_el_doctor`. Al revés,
+  `html.escape` convertiría nuestras propias `<b>` en texto visible. Y por eso las etiquetas
+  las pone el CÓDIGO y nunca el modelo: lo que venga dentro del campo es dato, jamás marcado
+  —un `<a href>` que pasara entero sería un enlace clicable puesto por el documento—.
+- **La negrita va solo en el rótulo.** Resaltar el contenido sería decidir qué es importante
+  dentro de lo clínico, y eso lo decide el doctor.
+- **Degrada sin perder texto.** Un rótulo que el lector se invente sale sin resaltar pero
+  sale; un párrafo corrido pasa entero. El formato es una instrucción y una instrucción puede
+  desobedecerse: que la ficha salga fea es un problema de lectura, tragarse una línea es
+  clínico.
+- El `📄 <b>Lectura</b>` de la 6B ya no está: la cabecera dice qué documento es, de quién y
+  de cuándo, y eso vale más que la palabra «Lectura» por el renglón que costaba.
+
 # `identidad_antes_de_datos`: quién tiene datos que proteger
 
 El guardrail frena `crear_cita`, `reprogramar_cita` y `cancelar_cita` sin identidad

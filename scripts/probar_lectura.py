@@ -182,7 +182,7 @@ def una_fila(url: str, sql: str, parametros: tuple = ()) -> tuple:
 
 
 #: Compartido entre TODAS las instancias de `TelegramCaptura` del script, y no un contador
-#: por instancia: `telegram_topic_id` es UNICO en `pacientes` (`uq_pacientes_topic`), y cada
+#: por instancia: `topic_id` es UNICO en `temas_telegram` (migracion 014), y cada
 #: comprobacion usa un `TelegramCaptura` nuevo. Con un contador por instancia, dos
 #: comprobaciones distintas le asignan el mismo id (1001) a dos pacientes distintos y Neon
 #: rechaza el segundo INSERT con `UniqueViolation` -- que es justo lo que este contador
@@ -428,7 +428,7 @@ async def uno_dos_tres(url: str) -> None:
     )
     fila = una_fila(
         url,
-        "SELECT telegram_topic_id, telegram_topic_abierto FROM pacientes WHERE telefono = %s",
+        "SELECT topic_id, abierto FROM temas_telegram WHERE telefono = %s",
         (TEL_TEMA,),
     )
     revisar("nace cerrado tambien en Neon (comprobado por SQL)", fila == (tema1, False), str(fila))
@@ -444,9 +444,9 @@ async def uno_dos_tres(url: str) -> None:
         str(tg.temas_creados),
     )
 
-    print(f"\n3. telegram_topic_id quedo persistido en Neon (esquema {ESQUEMA})")
-    fila2 = una_fila(url, "SELECT telegram_topic_id FROM pacientes WHERE telefono = %s", (TEL_TEMA,))
-    revisar("el id del tema esta en la fila del paciente", fila2 == (tema1,), str(fila2))
+    print(f"\n3. el hilo quedo persistido en Neon (esquema {ESQUEMA})")
+    fila2 = una_fila(url, "SELECT topic_id FROM temas_telegram WHERE telefono = %s", (TEL_TEMA,))
+    revisar("el id del tema esta en temas_telegram", fila2 == (tema1,), str(fila2))
 
 
 async def cuatro(url: str) -> None:
@@ -476,7 +476,7 @@ async def cuatro(url: str) -> None:
     revisar("se reenvio a Telegram sin fallo", resultado.reenviado is True, resultado.fallo or "")
 
     tema_paciente = una_fila(
-        url, "SELECT telegram_topic_id FROM pacientes WHERE telefono = %s", (TEL_ARCHIVO,)
+        url, "SELECT topic_id FROM temas_telegram WHERE telefono = %s", (TEL_ARCHIVO,)
     )
     revisar("el paciente tiene su propio tema", bool(tema_paciente) and tema_paciente[0] is not None)
     revisar(
@@ -646,7 +646,7 @@ async def siete(chat: bool) -> None:
 
 
 async def ocho(url: str) -> None:
-    print("\n8. Un DESCONOCIDO no abre tema, y su archivo llega al General igual")
+    print("\n8. Un DESCONOCIDO SI abre hilo, pero NO queda verificado (migracion 014)")
     wa = WhatsAppDescarga(
         contenido=b"%PDF-1.4 un archivo de un numero que no es paciente",
         mime="application/pdf",
@@ -669,23 +669,32 @@ async def ocho(url: str) -> None:
         lectura.leer_archivo = _LEER_ARCHIVO_REAL
 
     revisar("el archivo del desconocido se entrego igual", resultado.reenviado is True)
+    # Hasta la migracion 014 esto afirmaba lo contrario --que un desconocido NO abria tema--
+    # y tenia razon mientras el hilo fuera una columna de `pacientes`. Ahora vive en
+    # `temas_telegram`, atado al telefono, asi que abrirle hilo a alguien ya no le da una
+    # identidad. El precio de la conducta vieja se midio en produccion el 14/09/2026: sus
+    # radiografias caian en el General y el hilo que le abria el relevo nacia vacio.
     revisar(
-        "fue al General, no a un hilo propio",
-        bool(tg.archivos) and tg.archivos[0][1] == TEMA_GENERAL,
+        "fue a SU hilo, no al General",
+        bool(tg.archivos) and tg.archivos[0][1] != TEMA_GENERAL,
         str(tg.archivos),
     )
     revisar(
-        "NO se creo ningun tema en Telegram (ni huerfano ni de nadie)",
-        tg.temas_creados == [],
+        "se le creo su tema en Telegram",
+        len(tg.temas_creados) == 1,
         str(tg.temas_creados),
     )
     fila = una_fila(url, "SELECT count(*) FROM pacientes WHERE telefono = %s", (TEL_DESCONOCIDO,))
     revisar(
-        "y sobre todo: NO se creo la fila en `pacientes`. Esa fila ES la identidad "
+        "LA QUE NO CAMBIA: NO se creo la fila en `pacientes`. Esa fila ES la identidad "
         "verificada -- mandar una foto no puede verificar a nadie",
         fila == (0,),
         str(fila),
     )
+    hilo = una_fila(
+        url, "SELECT count(*) FROM temas_telegram WHERE telefono = %s", (TEL_DESCONOCIDO,)
+    )
+    revisar("y su hilo si quedo guardado, por telefono", hilo == (1,), str(hilo))
 
 
 async def corridas(url: str, chat: bool) -> None:

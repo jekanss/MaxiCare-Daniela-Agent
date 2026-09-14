@@ -187,6 +187,13 @@ rompiéndolas:
    El lector corre *en paralelo* con la ventana del búfer, nunca delante.
 9. **No se registran cédulas ni documentos de identidad de ningún tipo.** La tabla de
    pacientes no tiene esa columna, y esa ausencia **es** la política.
+10. **El relevo tiene una sola puerta de salida.** «Daniela callada» y «hilo abierto hacia
+   el WhatsApp de alguien» son el mismo hecho escrito en dos sitios: tienen que dejar de ser
+   verdad juntas. Cuatro disparadores, un único `cerrar`.
+11. **Lo único que cruza del relevo hacia Daniela es que hubo relevo y, si la hubo, la
+   cita.** Nunca lo que escribió el doctor, ni literal ni resumido: puede ser clínico, y eso
+   entra en el contexto del agente que le habla al paciente. Por eso el cierre *pregunta* en
+   vez de resumir — decide un humano.
 
 ---
 
@@ -243,6 +250,7 @@ gastan tokens de la API; los demás, ni uno.
 | `scripts/probar_agentes.py` | los dos agentes y sus guardrails, contra la API real | **sí** |
 | `scripts/probar_atencion.py` | el turno de WhatsApp de punta a punta | solo con `--chat` |
 | `scripts/probar_lectura.py` | **el muro** y el hilo de cada paciente | solo con `--chat` |
+| `scripts/probar_relevo.py` | que el bot PUEDA relevar: permisos, webhook y la sonda del hilo | no |
 | `scripts/probar_persistencia.py` | que una conversación sobrevive a reiniciar el proceso | solo con `--chat` |
 | `scripts/probar_calendario.py` | Google Calendar; `--diagnosticar` solo lee | no |
 | `scripts/probar_panel.py` | el panel interno | solo con `--chat` |
@@ -278,7 +286,7 @@ entorno, los invariantes y el porqué de cada uno.
 ## Estado
 
 El proyecto se construye en diez fases, cada una cerrada por algo que una persona puede
-correr y mirar. Siete están cerradas, una a medias, y dos sin empezar:
+correr y mirar. Ocho están cerradas y dos sin empezar:
 
 | | Fase | |
 |---|---|---|
@@ -287,15 +295,29 @@ correr y mirar. Siete están cerradas, una a medias, y dos sin empezar:
 | ✅ | 3 · Las nueve tools | tres citas simultáneas sobre un cupo → dos |
 | ✅ | 4 · Los dos agentes y sus guardrails | |
 | ✅ | 5 · Cascarón web y chat de pruebas | |
-| 🟡 | 6 · Ingesta, **el muro** y **el relevo** | el muro sí; el relevo no |
+| ✅ | 6 · Ingesta, **el muro** y **el relevo** | un doctor toma la conversación y habla él |
 | ✅ | 7 · Persistencia y observabilidad | una conversación sobrevive al reinicio |
 | ✅ | 8 · Pantallas de operación | |
 | ⬜ | 9 · Evals y piloto real | 22 evals antes de atender pacientes |
 | ⬜ | 10 · Documento de caso de éxito | depende del piloto |
 
-**El relevo** es la mitad que le falta a la fase 6: que un doctor tome la conversación desde
-Telegram y hable él con el paciente, con cierre automático por tiempo. El andamiaje ya está
-—la columna `tomada_por`, el tema del paciente naciendo cerrado— pero nada lo escribe aún.
+**El relevo** cerró la fase 6 el 14/09/2026 y está en producción: un doctor pulsa «Hablar yo
+con el paciente» en el escalamiento, Telegram le abre el hilo de esa persona, y lo que
+escriba ahí le llega al paciente por WhatsApp tal cual —sin firma, sin pasar por ningún
+modelo, fotos y audios incluidos—. Daniela se calla mientras dura y vuelve sola.
+
+Lo que lo hace seguro no es el camino feliz, sino que **el hilo abierto es un canal en vivo
+hacia el teléfono de alguien**, y eso obliga a que solo haya una forma de cerrarlo:
+
+```
+   tomada_por puesto  ==  Daniela callada  Y  hilo abierto en Telegram
+                          └── las dos cosas dejan de ser verdad JUNTAS, o no hay cierre
+```
+
+Por eso hay cuatro disparadores y **una sola puerta** (`relevo.cerrar`): el botón «Listo»,
+el tiempo agotado, cerrar el hilo a mano, y que alguien lo borre. El último no lo avisa
+Telegram —no existe el evento— así que hay que preguntárselo, y ese es el caso que más caro
+salió (abajo).
 
 ### Lo que cerró la agenda, 13/09/2026
 
@@ -343,3 +365,56 @@ Queda un número por medir, y está marcado `PENDIENTE` a propósito: cuánto hi
 consulte el conocimiento, mire la agenda y registre el estado gasta seis o siete él solo.
 Hasta que haya conversaciones reales que contar, `scripts/medir_historial.py` no tiene sobre
 qué correr, y un número inventado hoy no se distinguiría de uno medido.
+
+### Lo que cerró el relevo, 14/09/2026
+
+El relevo se desplegó por la mañana y un doctor lo usó el mismo día. Casi todo lo que sigue
+salió de esa tarde, no del diseño:
+
+- **El hilo cuelga del teléfono, no de la ficha.** Colgaba de `pacientes`, y un número que
+  escribe por primera vez no tiene fila ahí: sus radiografías caían al canal general, sus
+  textos no se archivaban en ninguna parte, y el hilo que le abría el botón nacía vacío —el
+  doctor entró y tuvo que empezar preguntando quién era—. La migración 014 lo mueve a su
+  propia tabla y deja caer las dos columnas viejas: dos sitios donde vive el mismo hecho es
+  exactamente el bug del mes que viene.
+- **Un archivo que baja de Telegram no dice qué es.** Su servidor responde
+  `application/octet-stream` a todo, y Meta rechaza la subida entera con eso: la foto que el
+  doctor mandaba al paciente moría en un 400. El tipo sale de la extensión del `file_path`.
+- **Al doctor se le vuelca la conversación al entrar**, con horas, leída de la base. Sin
+  modelo: no cuesta nada y no cruza el muro, porque todo eso ya lo vio el paciente.
+- **Toda cita salida de un relevo se registraba como `"valoracion"`**, fijo — y
+  `"valoracion"` no es ninguna de las catorce claves de la clínica. Ahora se pregunta: de qué
+  es, cuándo, y el nombre si el número todavía no tiene. Con eso se toma el cupo, se crea el
+  evento en Google Calendar y se escribe la fila, en ese orden, igual que si la hubiera
+  agendado el paciente. Sin el nombre, la cita entraba en la agenda como «PENDIENTE ·
+  Cordales», que es el caso *normal* de una cita de relevo: el paciente nuevo con dolor es
+  justo el que más escala.
+- **Borrar un hilo no emite ningún evento** —cerrarlo sí—, así que hay que preguntarle a
+  Telegram si sigue vivo. Y ahí estuvo el peor fallo del proyecto: la primera sonda preguntó
+  con `editForumTopic` sin argumentos, razonando que sin nada que cambiar no tendría efecto.
+  Cierto, y **por eso mismo no valida el id**: devolvía `ok: true` para un hilo borrado media
+  hora antes. La sonda decía que sí a todo, el agujero que venía a tapar siguió abierto un
+  día entero —relevo tomado, Daniela callada, cuatro mensajes del paciente sin llegar a
+  nadie— y no hubo un solo error en el log ni una prueba en rojo: las offline doblan a
+  Telegram, así que ninguna podía verlo.
+
+  Se arregló midiendo cuatro candidatas contra el grupo real en dos ejes —¿distingue? ¿deja
+  mensajes de servicio?— en vez de eligiendo una por razonamiento. Gana `reopenForumTopic`.
+  Y la guarda vive donde puede funcionar: `scripts/probar_relevo.py`, contra la API de
+  verdad.
+
+  La lección no es sobre Telegram. Es que **una suite verde sobre dobles no dice nada del
+  sistema del que los dobles son copia**, y que razonar sobre una API no es medirla.
+
+- **La lectura clínica es una ficha, no un párrafo.** El doctor la lee en el móvil entre
+  paciente y paciente, y le llegaba un muro de veinte líneas de prosa. Ahora son seis como
+  mucho, con rótulo (`Motivo:`, `Hallazgos:`, `Antecedentes:`, `Piden:`, `Ojo:`), y **la
+  línea que el documento no respalde se omite entera** — nada de «no refiere» ni «sin
+  datos»: ocupar una línea con una ausencia es lo que la volvía ilegible. Se resalta solo el
+  rótulo, nunca el contenido clínico: decidir qué importa dentro del texto es del doctor.
+- **Un botón de Telegram no puede llevarte a ninguna parte.** `answerCallbackQuery` con una
+  `url` hacia un tema del propio supergrupo responde `URL_INVALID`. Lo que navega es la
+  notificación, así que el aviso del hilo lleva una **mención** al doctor que pulsó —suena
+  aunque tenga el grupo silenciado— y el enlace del canal general apunta al mensaje concreto
+  dentro del hilo, no al hilo a secas: `t.me/c/<chat>/<n>` es ambiguo en un foro, ese `<n>`
+  es un id de mensaje.

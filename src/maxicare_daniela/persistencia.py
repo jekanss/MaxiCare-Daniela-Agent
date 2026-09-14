@@ -566,6 +566,33 @@ def buscar_paciente_por_telefono(conn, telefono: str) -> tuple[int, str] | None:
     return (fila[0], fila[1]) if fila else None
 
 
+def nombrar_si_esta_pendiente(
+    conn, *, telefono: str, nombre: str, pendiente: str
+) -> bool:
+    """Le pone nombre al número que todavía no lo tenía. `True` si escribió.
+
+    Crea la ficha si no había —el mismo permiso que `relevo._ficha_para_el_relevo`: lo
+    dispara un doctor que acaba de hablar con esa persona— y, si ya había, **solo escribe
+    sobre el marcador `pendiente`**. Un nombre de verdad no se pisa nunca, por lo mismo que
+    `asegurar_paciente` no lo actualiza: si el número de la casa lo usan dos personas,
+    pisarlo haría que el historial del primero apareciera bajo el nombre del segundo.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO pacientes (nombre_completo, telefono) VALUES (%s, %s)
+            ON CONFLICT (telefono) DO UPDATE
+               SET nombre_completo = EXCLUDED.nombre_completo
+             WHERE pacientes.nombre_completo = %s
+            RETURNING id
+            """,
+            (nombre, telefono, pendiente),
+        )
+        escribio = cur.fetchone() is not None
+    conn.commit()
+    return escribio
+
+
 def asegurar_paciente(conn, *, nombre_completo: str, telefono: str) -> int:
     """Devuelve el id del paciente, creándolo si el teléfono no estaba.
 
@@ -595,52 +622,212 @@ def asegurar_paciente(conn, *, nombre_completo: str, telefono: str) -> int:
     return fila[0]
 
 
+# ==========================================================================================
+# Los hilos de Telegram -- por TELÉFONO, no por paciente
+# ==========================================================================================
+#
+# Vivían en `pacientes` hasta la migración 014, y ese era el defecto que hacía que un lead se
+# quedara sin hilo: `pacientes` es la tabla de la que sale `identidad_verificada`, así que
+# `lectura.asegurar_tema` no podía crear la fila sin regalarle una identidad a un desconocido
+# --y sin fila no había dónde colgar el tema--. El resultado, medido en producción: sus
+# textos no se archivaban en ninguna parte y sus radiografías caían en el General.
+#
+# Ahora tener hilo y estar verificado son cosas distintas. El teléfono es la clave porque es
+# lo único que se conoce del primer archivo de un desconocido, y es además la misma clave por
+# la que va la pertenencia de una cita (no negociable 13).
+
+
 def tema_del_paciente(conn, telefono: str) -> int | None:
     """El tema de Telegram de ese número, o `None` si todavía no tiene.
 
-    El tema se ata al PACIENTE, no a la conversación: una persona puede tener varios
-    episodios a lo largo del tiempo y todos comparten hilo. Lo dice la migración 002.
+    El tema se ata al TELÉFONO, no a la conversación ni a la ficha: una persona puede tener
+    varios episodios a lo largo del tiempo y todos comparten hilo --eso lo dijo la 002 y sigue
+    valiendo-- y además puede no ser paciente todavía, que es lo que arregló la 014.
     """
     with conn.cursor() as cur:
-        cur.execute(
-            "SELECT telegram_topic_id FROM pacientes WHERE telefono = %s",
-            (telefono,),
-        )
+        cur.execute("SELECT topic_id FROM temas_telegram WHERE telefono = %s", (telefono,))
         fila = cur.fetchone()
     return fila[0] if fila else None
 
 
-def guardar_tema(conn, *, id_paciente: int, topic_id: int, abierto: bool = False) -> None:
-    """Ata el tema al paciente. El tema nace cerrado, y por eso `abierto` es FALSE por
-    defecto: el relevo (6C) es quien lo abre. El parámetro existe para el caso en que
-    Telegram no dejó cerrarlo -- ahí la base tiene que decir la verdad («quedó abierto»),
-    no la intención con la que se creó."""
+def guardar_tema(conn, *, telefono: str, topic_id: int, abierto: bool = False) -> None:
+    """Ata el hilo a ese número. Nace CERRADO, y por eso `abierto` es FALSE por defecto: el
+    relevo es quien lo abre. El parámetro existe para el caso en que Telegram no dejó cerrarlo
+    -- ahí la base tiene que decir la verdad («quedó abierto»), no la intención con la que se
+    creó.
+
+    `ON CONFLICT` sobre el teléfono y no un `UPDATE`: quien llama a esto está creando el hilo
+    por primera vez, pero dos archivos del mismo número pueden llegar casi a la vez, y el
+    candado de `lectura._candados_de_tema` es de proceso -- no protege entre réplicas.
+    """
     with conn.cursor() as cur:
         cur.execute(
             """
-            UPDATE pacientes
-               SET telegram_topic_id = %s, telegram_topic_abierto = %s
-             WHERE id = %s
+            INSERT INTO temas_telegram (telefono, topic_id, abierto) VALUES (%s, %s, %s)
+            ON CONFLICT (telefono) DO UPDATE
+               SET topic_id = EXCLUDED.topic_id, abierto = EXCLUDED.abierto
             """,
-            (topic_id, abierto, id_paciente),
+            (telefono, topic_id, abierto),
         )
     conn.commit()
 
 
 def marcar_tema_abierto(conn, telefono: str, *, abierto: bool) -> None:
-    """Anota si el tema de ese número está abierto en Telegram ahora mismo.
+    """Anota si el hilo de ese número está abierto en Telegram ahora mismo.
 
-    `guardar_tema` no sirve para esto: pide el `id_paciente` y pisa el `telegram_topic_id`,
-    y lo que cambia al abrir y cerrar un relevo es solo el candado. La columna importa
-    porque es lo único que, mirando la base, distingue «expediente» de «canal en vivo hacia
-    el WhatsApp de una persona».
+    `guardar_tema` no sirve para esto: pisa el `topic_id`, y lo que cambia al abrir y cerrar
+    un relevo es solo el candado. La columna importa porque es lo único que, mirando la base,
+    distingue «expediente» de «canal en vivo hacia el WhatsApp de una persona».
     """
     with conn.cursor() as cur:
         cur.execute(
-            "UPDATE pacientes SET telegram_topic_abierto = %s WHERE telefono = %s",
-            (abierto, telefono),
+            "UPDATE temas_telegram SET abierto = %s WHERE telefono = %s", (abierto, telefono)
         )
     conn.commit()
+
+
+def olvidar_tema(conn, telefono: str) -> bool:
+    """Borra la fila del hilo de ese número. `True` si había una.
+
+    Se llama cuando se comprueba que el tema YA NO EXISTE en Telegram --alguien lo borró a
+    mano--, y sin esto el sistema no se recupera nunca: `temas_telegram` seguiría apuntando a
+    un `topic_id` muerto, `lectura.asegurar_tema` lo daría por bueno sin crear ninguno, y cada
+    archivo que mandara esa persona fallaría al depositarse. Para siempre, y en silencio.
+
+    Olvidarlo hace que el siguiente archivo le abra un hilo nuevo, que es la recuperación
+    correcta. Lo que se pierde es lo que ya se perdió al borrar el tema: el expediente
+    anterior. Por eso `relevo.cerrar` avisa en el General de que alguien lo hizo.
+    """
+    with conn.cursor() as cur:
+        cur.execute("DELETE FROM temas_telegram WHERE telefono = %s", (telefono,))
+        borradas = cur.rowcount
+    conn.commit()
+    return borradas > 0
+
+
+def transcripcion(conn, telefono: str, *, limite: int = 40) -> list[tuple[str, str, Any]]:
+    """Lo que se dijeron el paciente y Daniela, en orden. `(quien, texto, cuando)`.
+
+    Es lo que se vuelca en el hilo cuando un doctor toma la conversación, y existe porque el
+    primer relevo real lo estrenó un doctor entrando a un tema RECIÉN CREADO y vacío: sus
+    archivos estaban en el General y sus textos no se habían archivado en ninguna parte.
+
+    Sale de dos sitios porque las dos mitades viven separadas: lo que escribió el paciente
+    está en `mensajes_entrantes`, y lo que contestó Daniela solo existe dentro del historial
+    del SDK (`agent_messages`). Juntarlas por hora es la única forma de que se lea como una
+    conversación y no como dos listas.
+
+    **No cruza el muro**: todo esto es contenido que el paciente ya vio en su WhatsApp, y va
+    hacia el doctor, que es la dirección permitida. Lo que nunca puede viajar al revés es lo
+    clínico -- eso lo decide `relevo.cerrar`, no esta función.
+
+    `limite` corta por arriba: un hilo de dos meses no cabe en un mensaje de Telegram, y lo
+    que el doctor necesita para entrar en contexto es el final, no el principio.
+    """
+    parametros = {"tel": telefono}
+    lineas: list[tuple[str, str, Any]] = []
+
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT texto, recibido_en FROM mensajes_entrantes
+             WHERE telefono = %(tel)s AND texto IS NOT NULL AND texto <> ''
+            """,
+            parametros,
+        )
+        lineas += [("paciente", f[0], f[1]) for f in cur.fetchall()]
+
+        # `created_at` es TIMESTAMP **sin zona** --lo fija el SDK, no nosotros: no negociable
+        # 10-- mientras todo lo demás del esquema es TIMESTAMPTZ. Sin el `AT TIME ZONE`, las
+        # dos mitades no se pueden ordenar juntas: Python no compara un datetime con zona
+        # contra uno sin ella, revienta con TypeError.
+        cur.execute(
+            """
+            SELECT m.message_data, m.created_at AT TIME ZONE 'UTC'
+              FROM agent_messages m
+             WHERE m.session_id IN (
+                    SELECT id::text FROM conversaciones WHERE telefono = %(tel)s
+             )
+            """,
+            parametros,
+        )
+        for crudo, cuando in cur.fetchall():
+            texto = _texto_de_daniela(crudo)
+            if texto:
+                lineas.append(("daniela", texto, cuando))
+
+    lineas.sort(key=lambda l: l[2])
+    # El corte va por el FINAL: lo que el doctor necesita para entrar en contexto es lo
+    # último que se dijeron, no cómo empezó todo hace dos meses.
+    return lineas[-limite:]
+
+
+def _texto_de_daniela(crudo: str) -> str | None:
+    """Saca la frase de un item del historial del SDK, o `None` si ese item no es una frase.
+
+    **Un item NO es un mensaje** (lo dice la migración 010): una llamada a tool y su
+    resultado son dos filas más. Volcar el JSON tal cual en el hilo del paciente le pondría
+    al doctor delante los argumentos de `consultar_disponibilidad` en vez de una
+    conversación, así que aquí se queda solo lo que Daniela dijo en voz alta.
+
+    Degrada a `None` ante cualquier forma que no reconozca --el SDK puede cambiar el formato
+    en una versión-- porque una transcripción incompleta sigue siendo útil y una excepción
+    dejaría al doctor sin ninguna.
+    """
+    try:
+        item = json.loads(crudo)
+    except Exception:  # noqa: BLE001 -- ver docstring
+        return None
+    if not isinstance(item, dict) or item.get("role") != "assistant":
+        return None
+
+    contenido = item.get("content")
+    if isinstance(contenido, str):
+        return _solo_la_frase(contenido)
+    if isinstance(contenido, list):
+        trozos = [
+            t.get("text", "")
+            for t in contenido
+            if isinstance(t, dict) and isinstance(t.get("text"), str)
+        ]
+        return _solo_la_frase(" ".join(p for p in trozos if p))
+    return None
+
+
+def _solo_la_frase(contenido: str) -> str | None:
+    """Lo que Daniela DIJO, sin los cinco campos con los que ramifica el orquestador.
+
+    Hace falta un segundo desempaquetado porque `daniela` tiene `output_type`: lo que el SDK
+    guarda como contenido del item no es su frase, es el JSON entero de `RespuestaDaniela`.
+    Sin esto, el doctor que tomaba la conversación recibía en el hilo la transcripción así
+    --medido el 14/09/2026, en el segundo relevo real--:
+
+        {"mensaje_al_paciente":"Claro que sí. Ya nos llegó el archivo y el doctor lo va a
+        revisar...","estado_oportunidad":"explorando","barrera_detectada":"ninguna",
+        "requiere_escalamiento":true,"motivo_escalamiento":"archivo_recibido", ...}
+
+    Ilegible, y encima con la telemetría comercial del sistema delante de quien solo quiere
+    saber qué le dijeron a su paciente. Los otros cinco campos no son secretos --el doctor
+    puede verlos en el panel-- pero aquí son ruido que tapa la única línea que importa.
+
+    Si el contenido no es ese JSON --un guardrail que respondió en texto plano, una versión
+    del SDK que cambie el formato-- se devuelve tal cual: una frase de más es mejor que una
+    transcripción con huecos.
+    """
+    limpio = (contenido or "").strip()
+    if not limpio:
+        return None
+    try:
+        respuesta = json.loads(limpio)
+    except Exception:  # noqa: BLE001 -- no era JSON; es texto plano y vale tal cual
+        return limpio
+    if isinstance(respuesta, dict):
+        frase = respuesta.get("mensaje_al_paciente")
+        if isinstance(frase, str) and frase.strip():
+            return frase.strip()
+        # Un dict que no es una `RespuestaDaniela`: volcar su JSON sería repetir el bug.
+        return None
+    return limpio
 
 
 def telefono_de_conversacion(conn, id_conversacion: str) -> str | None:
@@ -1032,10 +1219,10 @@ def relevo_por_tema(conn, topic_id: int) -> dict[str, Any] | None:
     with conn.cursor() as cur:
         cur.execute(
             """
-            SELECT c.id, c.telefono, c.tomada_por
-              FROM pacientes p
-              JOIN conversaciones c ON c.telefono = p.telefono
-             WHERE p.telegram_topic_id = %s
+            SELECT c.id, c.telefono, c.tomada_por, c.cierre_pendiente, c.cierre_tratamiento
+              FROM temas_telegram t
+              JOIN conversaciones c ON c.telefono = t.telefono
+             WHERE t.topic_id = %s
                AND c.tomada_por IS NOT NULL
              ORDER BY c.tomada_en DESC
              LIMIT 1
@@ -1045,7 +1232,59 @@ def relevo_por_tema(conn, topic_id: int) -> dict[str, Any] | None:
         fila = cur.fetchone()
     if fila is None:
         return None
-    return {"id_conversacion": str(fila[0]), "telefono": fila[1], "doctor": fila[2]}
+    return {
+        "id_conversacion": str(fila[0]),
+        "telefono": fila[1],
+        "doctor": fila[2],
+        # Lo que decide qué SIGNIFICA el próximo mensaje del doctor en ese hilo: o es para el
+        # paciente, o es de qué es la cita, o es su fecha. Sin esto, un «15/09 10:00» se le
+        # aparecería al paciente en su WhatsApp.
+        "cierre_pendiente": fila[3],
+        # De qué es la cita, ya contestado, mientras se espera la fecha. Ver la 015.
+        "cierre_tratamiento": fila[4],
+    }
+
+
+def marcar_cierre_pendiente(conn, id_conversacion: str, estado: str | None) -> None:
+    """En qué punto va el diálogo de cierre. `None` lo apaga.
+
+    El relevo sigue TOMADO mientras esto no es `None` --Daniela tiene que seguir callada
+    mientras se le pregunta al doctor si agendó-- así que quien lo ponga tiene que
+    garantizar que algo lo va a quitar: lo hacen `relevo.cerrar` y, si el doctor abandona a
+    medias, el barrido por `tiempo_agotado`.
+
+    Los valores los cierra el CHECK, ampliado por la 015: `preguntado`,
+    `esperando_tratamiento` y `esperando_fecha`.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE conversaciones SET cierre_pendiente = %s, actualizada_en = now() "
+            " WHERE id = %s",
+            (estado, id_conversacion),
+        )
+    conn.commit()
+
+
+def guardar_tratamiento_del_cierre(conn, id_conversacion: str, tratamiento: str | None) -> None:
+    """De qué es la cita que el doctor está registrando, tal cual la escribió.
+
+    Va a la base y no a memoria por lo mismo que `cierre_pendiente`: el dato llega en la
+    pregunta anterior a la fecha, y entre las dos puede reiniciarse el proceso. Perderlo
+    significaría registrar la cita con el tratamiento de otra, o sin ninguno.
+
+    **Texto libre a propósito**, y es el único sitio del proyecto donde `citas.tratamiento`
+    no se valida contra la lista viva de `tratamientos`. Decisión explícita del cliente
+    (14/09/2026): el doctor que acaba de hablar con el paciente sabe de qué es la cita mejor
+    que un catálogo cerrado. Lo que implica, y está dicho: Daniela lee ese campo y se lo
+    repite al paciente al comprobar su cita.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE conversaciones SET cierre_tratamiento = %s, actualizada_en = now() "
+            " WHERE id = %s",
+            (tratamiento, id_conversacion),
+        )
+    conn.commit()
 
 
 def relevos_activos(conn) -> list[dict[str, Any]]:
@@ -1057,8 +1296,10 @@ def relevos_activos(conn) -> list[dict[str, Any]]:
     mitad de frase a las tres horas justas de haber empezado, que es exactamente cuando una
     conversación difícil sigue viva.
 
-    Trae el `telegram_topic_id` porque cerrar el relevo es también cerrar el tema, y el
-    barrido no puede permitirse una consulta por fila.
+    Trae el `topic_id` porque cerrar el relevo es también cerrar el tema, y el barrido no
+    puede permitirse una consulta por fila. El `LEFT JOIN` no es cosmética: si fuera un JOIN
+    normal, un relevo cuyo hilo se hubiera perdido desaparecería del barrido y no se cerraría
+    nunca -- justo el caso que el motivo `tema_perdido` existe para registrar.
     """
     with conn.cursor() as cur:
         cur.execute(
@@ -1066,13 +1307,13 @@ def relevos_activos(conn) -> list[dict[str, Any]]:
             SELECT c.id,
                    c.telefono,
                    c.tomada_por,
-                   p.telegram_topic_id,
+                   t.topic_id,
                    EXTRACT(EPOCH FROM (
                        now() - GREATEST(c.tomada_en,
                                         COALESCE(c.ultimo_mensaje_doctor_en, c.tomada_en))
                    )) / 60.0
               FROM conversaciones c
-              LEFT JOIN pacientes p ON p.telefono = c.telefono
+              LEFT JOIN temas_telegram t ON t.telefono = c.telefono
              WHERE c.tomada_por IS NOT NULL
              ORDER BY c.tomada_en
             """
@@ -1724,7 +1965,7 @@ def rastro_de(conn, telefono: str) -> dict:
         eventos = [f[0] for f in cur.fetchall()]
 
         cur.execute(
-            "SELECT telegram_topic_id FROM pacientes WHERE telefono = %(tel)s",
+            "SELECT topic_id FROM temas_telegram WHERE telefono = %(tel)s",
             {"tel": telefono},
         )
         fila = cur.fetchone()
@@ -1844,6 +2085,15 @@ def borrar_rastro(conn, telefono: str, *, conservar_wamid: str | None = None) ->
 
             cur.execute("DELETE FROM pacientes WHERE telefono = %(tel)s", parametros)
             borradas["pacientes"] = cur.rowcount
+
+            # El hilo de Telegram. Desde la migración 014 vive en su propia tabla y **no
+            # cuelga de `conversaciones` ni de `pacientes`**, así que no hay CASCADE que se lo
+            # lleve: antes desaparecía solo, al caer la fila del paciente donde era una
+            # columna. Una fila que sobreviviera apuntaría a un tema que `reseteo` acaba de
+            # borrar en Telegram, y el siguiente archivo de ese número moriría con
+            # «message thread not found» -- una radiografía perdida por una fila de más.
+            cur.execute("DELETE FROM temas_telegram WHERE telefono = %(tel)s", parametros)
+            borradas["temas_telegram"] = cur.rowcount
         conn.commit()
     except Exception:
         conn.rollback()

@@ -89,43 +89,38 @@ def nombre_del_tema(telefono: str, nombre_perfil: str | None) -> str:
 async def asegurar_tema(
     *, telefono: str, nombre_perfil: str | None, database_url: str, telegram
 ) -> int | None:
-    """El tema de ese paciente, si ya es paciente. Devuelve `None` si no se pudo.
+    """El hilo de ese número, creándolo si es el primero. `None` solo si no se pudo.
 
     Ese `None` no es un error que haya que propagar: significa «manda el archivo al tema
     General, como antes». Degradar es aceptable; perder el archivo no lo es.
 
-    **Un desconocido no abre tema.** Esta función NO crea la fila de `pacientes`: si el
-    número no está registrado, se queda sin hilo y su archivo va al General. La razón es de
-    seguridad, no de orden: `atencion._leer_estado` deriva `identidad_verificada` de la
-    EXISTENCIA de esa fila, así que crearla aquí convertía a cualquier desconocido que
-    mandara una foto en un paciente verificado —con el nombre que él mismo puso en su perfil
-    de WhatsApp de por medio—, y en el mismo turno, porque `runtime._entregar` corre
-    `procesar_mensaje` antes que `atender`. Eso desactivaba `revisar_identidad` y el
-    `tool_input_guardrail` `identidad_antes_de_datos` para él.
+    **CUALQUIER número tiene hilo, sea paciente o no.** Hasta la migración 014 no era así, y
+    la razón era buena: el hilo era una columna de `pacientes`, y `atencion._leer_estado`
+    deriva `identidad_verificada` de la EXISTENCIA de esa fila. Crearla aquí convertía a
+    cualquier desconocido que mandara una foto en un paciente verificado —con el nombre que
+    él mismo puso en su perfil de WhatsApp de por medio— y en el mismo turno, porque
+    `runtime._entregar` corre `procesar_mensaje` antes que `atender`.
 
-    Lo que se pierde es poco: el hilo por paciente vale por lo que CONSERVA —el historial de
-    esa persona— y un desconocido no tiene historial que conservar. En cuanto se identifique
-    o le abran una cita, su siguiente archivo le abrirá el hilo.
+    Lo que cambió no es el criterio, es dónde vive el hilo. Ahora está en `temas_telegram`,
+    atado al TELÉFONO, así que **abrirle un hilo a alguien ya no le da una identidad** y el
+    guardrail sigue exactamente igual de estricto.
 
-    La comprobación va ANTES de `crear_tema`, no después: al revés dejaría un tema huérfano
-    en Telegram al que nadie volvería a escribir.
+    Y el precio de no hacerlo estaba medido en producción (14/09/2026, primer relevo real):
+    un lead se quedaba sin hilo, así que sus textos no se archivaban en ninguna parte, sus
+    radiografías caían en el General —que es donde los doctores miran TODO— y el hilo que le
+    abría el botón del relevo nacía vacío. Justo la persona que más falta hace atender: la
+    que escribe por primera vez.
+
+    El `None` que devuelve ya solo significa «Telegram o la base fallaron»: manda el archivo
+    al General, como antes. Degradar es aceptable; perder el archivo no lo es.
     """
     candado = _candados_de_tema.setdefault(telefono, asyncio.Lock())
     async with candado:
         try:
-            encontrado = await asyncio.to_thread(_paciente_y_tema, database_url, telefono)
+            existente = await asyncio.to_thread(_tema_de, database_url, telefono)
         except Exception:  # noqa: BLE001
             log.exception("no se pudo consultar el tema de %s; va al General", telefono)
             return None
-        if encontrado is None:
-            log.info(
-                "+%s no está registrado como paciente: su archivo va al General y no se le "
-                "abre hilo. Tendrá uno en cuanto se identifique o le abran una cita.",
-                telefono,
-            )
-            return None
-
-        id_paciente, existente = encontrado
         if existente:
             return existente
 
@@ -156,37 +151,27 @@ async def asegurar_tema(
 
         try:
             await asyncio.to_thread(
-                _guardar_tema, database_url, id_paciente, tema, quedo_abierto
+                _guardar_tema, database_url, telefono, tema, quedo_abierto
             )
         except Exception:  # noqa: BLE001
             log.exception("el tema %s no quedó guardado; se usa igual en este turno", tema)
         return tema
 
 
-def _paciente_y_tema(database_url: str, telefono: str) -> tuple[int, int | None] | None:
-    """`(id_paciente, tema)` del número, o `None` si ese número no es paciente todavía.
+def _tema_de(database_url: str, telefono: str) -> int | None:
+    """El hilo de ese número, o `None` si todavía no tiene ninguno.
 
-    Las dos consultas van sobre la MISMA conexión: el id y el tema tienen que salir de la
-    misma foto de la fila, no de dos momentos distintos.
+    Ya no pregunta si es paciente. Desde la migración 014 el hilo vive en `temas_telegram`,
+    atado al teléfono, y tener hilo dejó de significar estar verificado -- ver `asegurar_tema`.
     """
     with persistencia.conectar(database_url) as conn:
-        paciente = persistencia.buscar_paciente_por_telefono(conn, telefono)
-        if paciente is None:
-            return None
-        return paciente[0], persistencia.tema_del_paciente(conn, telefono)
+        return persistencia.tema_del_paciente(conn, telefono)
 
 
-def _guardar_tema(
-    database_url: str,
-    id_paciente: int,
-    tema: int,
-    abierto: bool = False,
-) -> None:
-    """Cuelga el tema de una fila que YA existe. No crea pacientes -- ver `asegurar_tema`."""
+def _guardar_tema(database_url: str, telefono: str, tema: int, abierto: bool = False) -> None:
+    """Ata el hilo al número. Sigue sin crear filas en `pacientes`: ya no hace falta."""
     with persistencia.conectar(database_url) as conn:
-        persistencia.guardar_tema(
-            conn, id_paciente=id_paciente, topic_id=tema, abierto=abierto
-        )
+        persistencia.guardar_tema(conn, telefono=telefono, topic_id=tema, abierto=abierto)
 
 
 # ==========================================================================================
@@ -282,6 +267,44 @@ async def leer_archivo(
     return corrida.final_output
 
 
+#: Los rótulos con los que el lector puede abrir una línea de la ficha. Tienen que ser los
+#: mismos que enumera `INSTRUCCIONES_LECTOR`: lo que no esté aquí sale sin negrita, que es
+#: degradar bien --se lee igual, solo más plano-- pero deja de guiar el ojo.
+ROTULOS_DE_LA_FICHA = ("Motivo", "Hallazgos", "Antecedentes", "Piden", "Ojo")
+
+
+def formatear_para_el_doctor(clinico: str) -> str:
+    """Le da forma a la ficha SIN tocar una palabra de lo que dice.
+
+    Dos cosas que solo funcionan en este orden:
+
+    1. **Escapar primero, marcar después.** `canales.py` manda todo con `parse_mode: "HTML"`,
+       así que un «canal < 2 mm» sin escapar le devuelve a Telegram un 400 que se traga la
+       lectura entera. Y si se marcara antes de escapar, `html.escape` convertiría nuestras
+       propias `<b>` en texto visible. Por eso el modelo escribe texto plano y las etiquetas
+       las pone el código: el contenido nunca puede inyectar HTML.
+    2. **La negrita va SOLO en el rótulo.** Resaltar el contenido clínico sería decidir qué
+       es importante dentro de lo clínico, y eso lo decide el doctor.
+
+    El primer renglón es la cabecera --tipo · especialidad · emisor · fecha-- y va entero en
+    negrita: es el título de la ficha. Si el modelo se saltara el formato y devolviera un
+    párrafo corrido, esto lo deja pasar tal cual, solo con la primera línea resaltada.
+    """
+    lineas: list[str] = []
+    for cruda in html.escape(clinico, quote=False).splitlines():
+        linea = cruda.strip()
+        if not linea:
+            continue
+        rotulo, dos_puntos, resto = linea.partition(":")
+        if dos_puntos and rotulo in ROTULOS_DE_LA_FICHA:
+            lineas.append(f"<b>{rotulo}:</b>{resto}")
+        elif not lineas:
+            lineas.append(f"<b>{linea}</b>")
+        else:
+            lineas.append(linea)
+    return "\n".join(lineas)
+
+
 async def leer_y_repartir(
     archivo: ArchivoDescargado,
     *,
@@ -315,14 +338,18 @@ async def leer_y_repartir(
         return None
 
     clinico, no_clinica = repartir(leida)
-    # Este canal va en HTML (`canales.py` fija `parse_mode: "HTML"` siempre): un `<` o un `&`
-    # en `clinico` («canal < 2 mm») lo devuelve Telegram como 400, y ese 400 se traga la
-    # lectura entera. No se reutiliza `ingesta._escapar` --misma lógica, `html.escape`-- para
-    # no crear un import circular: `ingesta` ya importa `lectura`.
-    clinico_seguro = html.escape(clinico, quote=False)
+    # Escapado y marcado en un solo sitio, y en ese orden: ver `formatear_para_el_doctor`.
+    # No se reutiliza `ingesta._escapar` --misma lógica, `html.escape`-- para no crear un
+    # import circular: `ingesta` ya importa `lectura`.
+    #
+    # El «📄 Lectura» de la 6B se fue: la cabecera de la ficha ya dice qué es el documento,
+    # mucho mejor que la palabra «Lectura», y en un celular cada renglón de más empuja lo
+    # decisivo fuera de la pantalla.
     try:
         await telegram.enviar_mensaje(
-            f"📄 <b>Lectura</b>\n{clinico_seguro}", tema_id=tema_id, silencioso=silencioso
+            f"📄 {formatear_para_el_doctor(clinico)}",
+            tema_id=tema_id,
+            silencioso=silencioso,
         )
     except Exception:  # noqa: BLE001
         log.exception("la lectura no llegó a Telegram; el archivo sí está")

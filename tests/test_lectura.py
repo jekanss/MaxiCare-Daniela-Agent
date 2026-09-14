@@ -146,10 +146,10 @@ class BaseDeTemas:
 
         monkeypatch.setattr(persistencia, "asegurar_paciente", anotar_creacion)
 
-        def guardar(conn, *, id_paciente, topic_id, abierto=False):
+        def guardar(conn, *, telefono, topic_id, abierto=False):
             self.guardados.append(topic_id)
             self.abiertos.append(abierto)
-            self.id_guardados.append(id_paciente)
+            self.id_guardados.append(telefono)
             self.tema = topic_id
 
         monkeypatch.setattr(persistencia, "guardar_tema", guardar)
@@ -178,23 +178,29 @@ def test_el_tema_se_crea_una_vez_y_nace_cerrado(monkeypatch):
         "del grupo, que es justo lo que el relevo existe para controlar"
     )
     assert base.guardados == [901]
-    assert base.id_guardados == [42], "el tema se colgó de una fila que no es la del paciente"
+    assert base.id_guardados == ["573001112233"], "el hilo se ató a otro número"
     assert base.pacientes_creados == [], (
         "la ingesta creó una fila en `pacientes`: eso convierte a un desconocido en paciente "
         "verificado, porque `atencion._leer_estado` deriva la identidad de esa fila"
     )
 
 
-def test_un_desconocido_no_abre_tema_y_su_archivo_va_al_general(monkeypatch):
-    """CRITICO de la revisión final: mandar una foto no puede verificar a nadie.
+def test_un_desconocido_SI_abre_tema_pero_NO_queda_verificado(monkeypatch):
+    """La conducta cambió con la migración 014; la propiedad de seguridad NO.
 
-    `atencion._leer_estado` deriva `identidad_verificada` de la EXISTENCIA de la fila en
-    `pacientes`, y `runtime._entregar` corre `procesar_mensaje` ANTES que `atender`. Con
-    `asegurar_tema` creando la fila, un número desconocido que mandaba una imagen quedaba
-    verificado en ese mismo turno --con el nombre que él mismo puso en su perfil de
-    WhatsApp-- y `revisar_identidad` dejaba de protegerlo.
+    Hasta entonces esta prueba decía lo contrario --«un desconocido no abre tema»-- y tenía
+    razón mientras el hilo fuera una columna de `pacientes`: `atencion._leer_estado` deriva
+    `identidad_verificada` de la EXISTENCIA de esa fila, y `runtime._entregar` corre
+    `procesar_mensaje` ANTES que `atender`, así que abrirle hilo a alguien lo verificaba en
+    ese mismo turno, con el nombre que él mismo se puso en su perfil de WhatsApp.
 
-    El tema no se le abre, y el archivo le llega al doctor igual: al General.
+    Lo que cambió no es el criterio: es dónde vive el hilo. Ahora está en `temas_telegram`,
+    atado al teléfono, así que **abrir un hilo ya no crea una ficha ni verifica a nadie**, y
+    eso es exactamente lo que sigue comprobando la última aserción de aquí.
+
+    El precio de la conducta vieja estaba medido en producción (14/09/2026, primer relevo
+    real): las radiografías del lead caían en el General, sus textos no se archivaban en
+    ninguna parte y el hilo que le abría el botón nacía vacío.
     """
     import asyncio
 
@@ -210,15 +216,14 @@ def test_un_desconocido_no_abre_tema_y_su_archivo_va_al_general(monkeypatch):
         )
     )
 
-    assert tema is None, "un número sin fila en `pacientes` no tiene hilo propio"
-    assert tg.creados == [], (
-        "se creó el tema ANTES de comprobar que el paciente existe: eso deja un tema "
-        "huérfano en Telegram al que nadie volverá a escribir"
-    )
+    assert tema == 901, "un lead sin ficha se quedó sin hilo: sus archivos irían al General"
+    assert tg.cerrados == [901], "el hilo de un desconocido tiene que nacer cerrado igual"
+    assert base.guardados == [901]
+    # LA QUE NO SE PUEDE TOCAR. Si esto cae, mandar una foto vuelve a verificar a un
+    # desconocido y `identidad_antes_de_datos` deja de protegerlo.
     assert base.pacientes_creados == [], (
-        "la ingesta creó la fila del desconocido: esa fila ES la identidad verificada"
+        "abrir el hilo creó la fila del desconocido: esa fila ES la identidad verificada"
     )
-    assert base.guardados == []
 
 
 def test_el_camino_de_la_ingesta_no_nombra_asegurar_paciente():
@@ -264,9 +269,9 @@ def test_el_segundo_archivo_reusa_el_tema(monkeypatch):
 def test_dos_archivos_simultaneos_de_un_numero_nuevo_crean_un_solo_tema(monkeypatch):
     """La carrera que el indice unico NO atrapa.
 
-    `uq_pacientes_topic` es unico sobre `telegram_topic_id`, y dos temas distintos tienen
-    ids distintos: el segundo UPDATE pisa al primero y deja un tema huerfano en Telegram.
-    Lo que lo impide es el candado por telefono.
+    `temas_telegram.topic_id` es UNIQUE, y dos temas distintos tienen ids distintos: el
+    segundo `ON CONFLICT` pisa al primero y deja un tema huerfano en Telegram, al que nadie
+    volvera a escribir. Lo que lo impide es el candado por telefono, no la base.
     """
     import asyncio
 
@@ -665,3 +670,131 @@ def test_una_lectura_fallida_avisa_al_tema_del_paciente_tambien():
 
     assert salida is None
     assert [tema for _, tema in tg.mensajes] == [777]
+
+
+# ==========================================================================================
+# 6H · La ficha: el doctor lee esto de pie, entre dos pacientes
+# ==========================================================================================
+#
+# El cliente vio en produccion lo que el esqueleto del plan producia: veinte lineas de prosa
+# clinica corrida, con lo decisivo --que le piden, que antecedente frena-- enterrado en la
+# mitad. La forma la ponen dos sitios a la vez, y tienen que estar de acuerdo:
+#
+#     INSTRUCCIONES_LECTOR      dice que rotulos escribir
+#     ROTULOS_DE_LA_FICHA       dice cuales resaltar
+#
+# Si se separan, la ficha sale plana y NADA se rompe: por eso hay una prueba que los ata.
+
+
+FICHA = (
+    "Remision externa · Medicina interna · Clinica Dental Norte · 12/09/2026\n"
+    "Motivo: fatiga, cefalea y mareo recurrentes hace tres semanas.\n"
+    "Hallazgos: estable en la valoracion inicial.\n"
+    "Antecedentes: apendicectomia 2012. Sin alergias conocidas.\n"
+    "Piden: valoracion por medicina interna y estudios complementarios.\n"
+    "Ojo: el documento se declara borrador, sin validez medica."
+)
+
+
+def test_la_ficha_resalta_el_rotulo_y_NO_el_contenido_clinico():
+    """Poner en negrita el contenido seria decidir que es importante dentro de lo clinico, y
+    eso lo decide el doctor. El codigo solo marca los cinco rotulos, que son suyos."""
+    salida = lectura.formatear_para_el_doctor(FICHA)
+
+    for rotulo in lectura.ROTULOS_DE_LA_FICHA:
+        assert f"<b>{rotulo}:</b>" in salida, f"el rotulo {rotulo!r} salio sin resaltar"
+
+    # Y lo que sigue al rotulo va tal cual, fuera de la negrita.
+    assert "<b>Motivo:</b> fatiga, cefalea y mareo recurrentes hace tres semanas." in salida
+    assert "<b>Piden:</b> valoracion por medicina interna" in salida
+
+
+def test_la_cabecera_va_entera_en_negrita_y_hace_de_titulo():
+    """Sustituye al «📄 Lectura» de la 6B: dice que clase de documento es, de quien y de
+    cuando, que es infinitamente mas util que la palabra «Lectura» -- y no gasta el renglon
+    extra que en un celular empuja lo decisivo fuera de la pantalla."""
+    salida = lectura.formatear_para_el_doctor(FICHA)
+
+    assert salida.startswith(
+        "<b>Remision externa · Medicina interna · Clinica Dental Norte · 12/09/2026</b>"
+    )
+
+
+def test_el_resaltado_va_DESPUES_de_escapar():
+    """El unico orden que funciona. Al reves, `html.escape` convertiria nuestras propias
+    etiquetas en texto visible (`&lt;b&gt;Motivo:&lt;/b&gt;`) y el doctor leeria el HTML."""
+    salida = lectura.formatear_para_el_doctor("Cabecera\nHallazgos: canal < 2 mm & pieza #46")
+
+    assert "<b>Hallazgos:</b> canal &lt; 2 mm &amp; pieza #46" in salida
+
+
+def test_el_contenido_clinico_NO_puede_inyectar_HTML():
+    """La otra mitad de ese orden, y la razon de que las etiquetas las ponga el CODIGO y no
+    el modelo: lo que venga dentro del campo es dato, nunca marcado. Un `<a href>` que pasara
+    entero convertiria la ficha de un paciente en un enlace clicable puesto por el documento.
+    """
+    salida = lectura.formatear_para_el_doctor(
+        'Cabecera\nMotivo: <a href="http://ejemplo.invalido">mira esto</a>'
+    )
+
+    assert "<a" not in salida
+    assert "&lt;a href=" in salida
+
+
+def test_un_rotulo_que_el_lector_se_invente_no_se_resalta_pero_TAMPOCO_se_pierde():
+    """Degradar bien: la linea se lee igual, solo mas plana. Tragarsela seria perder texto
+    clinico porque el modelo eligio otra palabra."""
+    salida = lectura.formatear_para_el_doctor("Cabecera\nDiagnostico presuntivo: bruxismo")
+
+    assert "<b>Diagnostico presuntivo:</b>" not in salida
+    assert "Diagnostico presuntivo: bruxismo" in salida
+
+
+def test_un_parrafo_corrido_pasa_ENTERO_aunque_el_modelo_ignore_el_formato():
+    """El formato es una instruccion, y una instruccion puede desobedecerse. Cuando eso pase
+    la ficha sale fea, que es un problema de lectura; tragarse el texto seria clinico."""
+    corrido = "Documento identificado como BORRADOR FICTICIO. Remision para valoracion."
+    salida = lectura.formatear_para_el_doctor(corrido)
+
+    assert corrido in salida
+
+
+def test_las_lineas_en_blanco_se_caen():
+    """Una ficha de seis lineas separadas por blancos ocupa once y deja de caber."""
+    salida = lectura.formatear_para_el_doctor("Cabecera\n\n\nMotivo: dolor\n   \nPiden: cita")
+
+    assert salida == "<b>Cabecera</b>\n<b>Motivo:</b> dolor\n<b>Piden:</b> cita"
+
+
+def test_el_prompt_del_lector_enumera_los_MISMOS_rotulos_que_resalta_el_codigo():
+    """Lo que ata los dos sitios. Renombrar un rotulo en el prompt --«Piden» por
+    «Solicitan»-- deja la ficha funcionando y sin resaltar, o sea que el sintoma es que se
+    ve fea: nadie lo relacionaria nunca con este cambio.
+    """
+    for rotulo in lectura.ROTULOS_DE_LA_FICHA:
+        assert f"{rotulo}:" in agentes.INSTRUCCIONES_LECTOR, (
+            f"el codigo resalta {rotulo!r} pero el prompt ya no se lo pide al lector"
+        )
+
+
+def test_la_lectura_que_sale_a_telegram_va_formateada_y_conserva_el_emoji():
+    """La integracion de las dos piezas: `leer_y_repartir` tiene que llamar al formateador,
+    no mandar el campo crudo."""
+    import asyncio
+    from types import SimpleNamespace
+
+    async def correr(*a, **kw):
+        return SimpleNamespace(final_output=_lectura(contexto_clinico=FICHA))
+
+    tg = TelegramQueCaptura()
+
+    asyncio.run(
+        lectura.leer_y_repartir(
+            _archivo(), tipo="image", telegram=tg, tema_id=777, correr=correr
+        )
+    )
+
+    texto, tema = tg.mensajes[0]
+    assert tema == 777
+    assert texto.startswith("📄 <b>Remision externa · Medicina interna")
+    assert "<b>Piden:</b>" in texto

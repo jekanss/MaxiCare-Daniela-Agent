@@ -133,6 +133,55 @@ una —qué se midió, qué costó— está en la regla que cubre ese archivo.
    de la 14: un mensaje que entra durante un relevo se anota con `fallo_respuesta` empezando
    por `relevo:` **sin ser un fallo**; sin eso, `mensajes_sin_responder` se lo entregaría a
    Daniela media hora después y contestaría por encima del doctor.
+16. **El hilo de Telegram va por TELÉFONO (`temas_telegram`), no por ficha, y tener hilo NO
+   es estar verificado.** La 014 lo sacó de `pacientes` y dejó caer las dos columnas viejas.
+   Eso es lo que permite que un lead tenga hilo desde su primer archivo —antes sus
+   radiografías caían al General, sus textos no se archivaban en ninguna parte y el hilo que
+   le abría el relevo nacía vacío— **sin** tocar el guardrail de identidad, que sigue
+   derivando de la EXISTENCIA de la fila en `pacientes`. `lectura.asegurar_tema` ya no exige
+   ficha y sigue sin crear ninguna.
+17. **Lo único que cruza del relevo hacia Daniela es que hubo relevo y, si la hubo, una
+   CITA.** Nunca lo que escribió el doctor, ni literal ni resumido: eso puede ser clínico, y
+   `relevo._avisar_a_daniela` escribe en el contexto del agente que le habla al paciente. Por
+   eso el cierre PREGUNTA («¿quedó agendada una cita?») en vez de resumir — decide un humano.
+   La cita se crea de verdad (cupo → Calendar → fila, ese orden), y `tomar_cupo` puede decir
+   que no: es lo único que impide que la clínica le dé esa hora a otro. El estado de esa
+   pregunta vive en `conversaciones.cierre_pendiente`, **en la base y no en memoria**: un
+   reinicio a mitad le mandaría al PACIENTE el «15/09 14:30» que el doctor estaba escribiendo.
+   Y el MIME de un archivo que baja de Telegram sale de la EXTENSIÓN: su servidor responde
+   `application/octet-stream` siempre, y Meta rechaza la subida entera con eso.
+18. **El relevo tiene CUATRO salidas, y la cuarta es cerrar el hilo a mano.** Es el gesto que
+   sale natural al terminar, y dejaba el estado que prohíbe la 15: tema cerrado con
+   `tomada_por` puesto. Lo atiende `relevo.cerrar_por_tema_cerrado` desde el evento
+   `forum_topic_closed`, con motivo `devuelto_por_doctor` —el CHECK de la 003 sigue cerrado
+   con tres— y **sin** preguntar por la cita: preguntar deja el relevo tomado, y con el tema
+   cerrado eso es el estado prohibido otra vez. Es idempotente porque `cerrar` también
+   dispara ese evento al cerrar el tema. El botón «Listo» va **anclado** (`can_pin_messages`)
+   porque viaja en el primer mensaje del hilo, y la despedida lleva el de volver a entrar.
+   Y lo que el doctor lee como transcripción es la FRASE: `daniela` tiene `output_type`, así
+   que el contenido del item es el JSON entero de `RespuestaDaniela` y hay que desempaquetar
+   DOS niveles (`persistencia._solo_la_frase`).
+19. **Borrar un tema NO emite ningún evento, y el `tratamiento` del relevo lo escribe el
+   doctor.** Lo primero hacía el peor de los agujeros —relevo tomado, Daniela callada y el
+   paciente sin nadie que le conteste durante 3 h—, y lo detecta el barrido con
+   `telegram.estado_del_tema`, que pregunta con **`reopenForumTopic`**: `editForumTopic` sin
+   argumentos no cambia nada y **por eso mismo no valida el id** —devolvía `ok: true` para un
+   tema borrado, así que la sonda decía que sí a todo y el agujero siguió abierto un día
+   entero, con la suite en verde—. Ninguna prueba offline puede cazar eso, porque todas
+   doblan a Telegram: lo caza `scripts/probar_relevo.py` contra la API de verdad, y quien
+   toque la sonda lo corre. Devuelve TRES estados y no un booleano: `"reabierto"` significa
+   que el tema existía pero estaba cerrado —un `forum_topic_closed` perdido con el bot
+   caído— y se cierra como `devuelto_por_doctor`; su `None` es «no se pudo saber» y **no**
+   cierra nada, porque un timeout no es un tema borrado. Al cerrar por
+   `tema_perdido` el hilo se OLVIDA (`persistencia.olvidar_tema`), no se marca cerrado: una
+   fila apuntando a un `topic_id` muerto deja a ese número sin poder recibir archivos nunca
+   más. Y lo segundo: la 015 sustituyó el `tratamiento="valoracion"` fijo —que ni siquiera
+   era una de las catorce claves— por lo que el doctor escriba, **sin validar contra la lista
+   viva**; es la única excepción del proyecto, decidida por el cliente sabiendo que Daniela
+   lee ese campo y se lo repite al paciente. La 016 añadió delante el paso del NOMBRE, y solo
+   se dispara cuando la ficha dice `PENDIENTE`: sin él la cita entraba en la agenda de la
+   clínica como «PENDIENTE · Cordales», que es el caso normal de una cita salida de un relevo
+   —el paciente nuevo es el que más escala—. Nunca pisa un nombre de verdad.
 
 # Dónde está el resto
 
@@ -158,8 +207,10 @@ El detalle de cada área se carga solo cuando tocas sus archivos:
 - `uv run` avisa de que `VIRTUAL_ENV` no coincide. Es ruido, se ignora.
 - Es un repositorio git desde el commit `7e12d6b`, que congela las fases 1 a 5. Las
   búsquedas respetan `.gitignore`: `.venv/`, `web/node_modules/`, `web/dist/`, `.env` y
-  `.superpowers/` no aparecen. El remoto es `origin`, y **`main` va muy por delante de
-  `origin/main`**: nadie ha empujado desde hace decenas de commits. No empujes sin pedirlo.
+  `.superpowers/` no aparecen. El remoto es `origin` y **se empuja a `main`**, pero solo
+  cuando el usuario lo pide: no empujes por tu cuenta. (Esta nota decía que `main` iba
+  «decenas de commits» por delante de `origin/main`; el 14/09/2026 la diferencia era de UNO
+  y se empujó. Si vuelves a citarla, compruébala con `git rev-list --left-right --count`.)
 - **El pooler de Neon rechaza `options` como parámetro de arranque** (`unsupported startup
   parameter in options: search_path`). Para fijar un `search_path` —o para una prueba de
   concurrencia de verdad— hay que usar la conexión directa: quitarle el `-pooler.` al host.

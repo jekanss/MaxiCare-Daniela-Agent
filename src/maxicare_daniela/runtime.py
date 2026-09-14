@@ -525,18 +525,53 @@ async def _atender_update_telegram(payload: dict) -> None:
         # corregir, lo escribe otra vez.
         mensaje = payload.get("message")
         if mensaje and _es_nuestro_grupo(mensaje.get("chat")):
+            # Cerrar el tema a mano ES devolver el control, y es el gesto que sale natural:
+            # el doctor termina de hablar y cierra el hilo. Sin esto, el tema quedaba cerrado
+            # --o sea, sin canal hacia el paciente-- pero `tomada_por` seguía puesto y Daniela
+            # seguía callada hasta que el barrido lo cortara tres horas después. Es
+            # exactamente el estado que el no negociable 15 prohíbe: las dos cosas tienen que
+            # dejar de ser verdad juntas.
+            if "forum_topic_closed" in mensaje:
+                await relevo.cerrar_por_tema_cerrado(
+                    mensaje,
+                    telegram=_telegram,
+                    database_url=config.database_url,
+                    tema_general=_tema_general or 0,
+                )
+                return
+
             await relevo.relevar_mensaje(
                 mensaje,
                 telegram=_telegram,
                 whatsapp=_whatsapp,
                 database_url=config.database_url,
+                # Para cuando ese mensaje resulta ser la fecha de una cita que el doctor
+                # acordó de viva voz. `None` solo si el calendario no arrancó: ahí se le dice
+                # y no se registra nada, nunca un `CalendarioDoble` -- no negociable 1.
+                calendario=_calendario,
+                tema_general=_tema_general or 0,
             )
     except Exception:  # noqa: BLE001 -- ver docstring
         log.exception("no se pudo atender un update de Telegram")
 
 
+async def _quitar_botones(mensaje: dict, id_conversacion: str) -> None:
+    """Deja el mensaje sin teclado. Falla en silencio: el trabajo ya se hizo.
+
+    Un botón que sigue puesto después de pulsarlo invita a pulsarlo otra vez, y la segunda
+    pulsación de «Sí, quedó agendada» le pediría al doctor una segunda fecha para una cita
+    que ya existe.
+    """
+    if not mensaje.get("message_id"):
+        return
+    try:
+        await _telegram.editar_teclado(mensaje["message_id"], None)
+    except Exception:  # noqa: BLE001
+        log.warning("los botones de cierre quedaron puestos en %s", id_conversacion)
+
+
 async def _atender_callback(callback: dict) -> None:
-    """Los dos botones del relevo: el que la toma y el que la devuelve."""
+    """Los botones del relevo: tomar la conversación, devolverla, y el cierre conversado."""
     datos = callback.get("data") or ""
     callback_id = callback.get("id") or ""
     mensaje = callback.get("message") or {}
@@ -547,12 +582,17 @@ async def _atender_callback(callback: dict) -> None:
         return
 
     doctor = relevo.nombre_de_quien_pulsa(callback.get("from"))
+    # Su id de Telegram, para que la bienvenida del hilo sea una MENCIÓN y no un nombre. Es
+    # lo que hace que el aviso le suene aunque tenga el grupo silenciado, y tocarlo es lo
+    # único que lo lleva al hilo: el botón no puede (`relevo._mencion`).
+    doctor_id = (callback.get("from") or {}).get("id")
     general = _tema_general or 0
 
     if datos.startswith(relevo.PREFIJO_TOMAR):
         await relevo.activar(
             id_conversacion=datos[len(relevo.PREFIJO_TOMAR):],
             doctor=doctor,
+            doctor_id=doctor_id,
             callback_id=callback_id,
             # El mensaje del que cuelga el botón: el escalamiento del General, que hay que
             # dejar marcado como atendido para que otro doctor no lo pulse.
@@ -564,23 +604,92 @@ async def _atender_callback(callback: dict) -> None:
         )
         return
 
-    if datos.startswith(relevo.PREFIJO_DEVOLVER):
-        id_conversacion = datos[len(relevo.PREFIJO_DEVOLVER):]
-        await _telegram.responder_callback(callback_id, "Listo, Daniela retoma.")
-        cerrado = await relevo.cerrar(
-            id_conversacion,
-            motivo="devuelto_por_doctor",
+    if datos.startswith(relevo.PREFIJO_TOMAR_TEL):
+        # El botón del aviso de archivos. Viaja con el teléfono porque cuando ese aviso se
+        # manda todavía no hay conversación -- ver `relevo.PREFIJO_TOMAR_TEL`.
+        telefono = datos[len(relevo.PREFIJO_TOMAR_TEL):]
+        try:
+            id_conversacion = await asyncio.to_thread(
+                relevo._conversacion_de, config.database_url, telefono
+            )
+        except Exception:  # noqa: BLE001
+            log.exception("no se pudo resolver la conversación de +%s", telefono)
+            await _telegram.responder_callback(
+                callback_id, "No pude abrir esa conversación.", alerta=True
+            )
+            return
+        await relevo.activar(
+            id_conversacion=id_conversacion,
+            doctor=doctor,
+            doctor_id=doctor_id,
+            callback_id=callback_id,
+            mensaje_id=mensaje.get("message_id"),
             telegram=_telegram,
             database_url=config.database_url,
+            cierre_relevo_minutos=_relevo_minutos["cierre_relevo_minutos"],
             tema_general=general,
         )
-        if cerrado and mensaje.get("message_id"):
-            # Quitar el botón del hilo: pulsar «Listo» dos veces no puede parecer que hace
-            # algo la segunda.
+        return
+
+    if datos.startswith(relevo.PREFIJO_DEVOLVER):
+        # Ya NO cierra de golpe: primero pregunta si quedó agendada una cita. El relevo sigue
+        # tomado mientras dura esa pregunta, así que Daniela sigue callada.
+        id_conversacion = datos[len(relevo.PREFIJO_DEVOLVER):]
+        await _telegram.responder_callback(callback_id, "Un momento…")
+        if mensaje.get("message_id"):
+            # Quitar el botón: pulsar «Listo» dos veces no puede parecer que hace algo.
             try:
                 await _telegram.editar_teclado(mensaje["message_id"], None)
             except Exception:  # noqa: BLE001
                 log.warning("el botón de devolver quedó puesto en %s", id_conversacion)
+        await relevo.iniciar_cierre(
+            id_conversacion,
+            telegram=_telegram,
+            database_url=config.database_url,
+            tema_id=mensaje.get("message_thread_id"),
+        )
+        return
+
+    if datos.startswith(relevo.PREFIJO_NO_AGENDO):
+        id_conversacion = datos[len(relevo.PREFIJO_NO_AGENDO):]
+        await _telegram.responder_callback(callback_id, "Listo, Daniela retoma.")
+        await _quitar_botones(mensaje, id_conversacion)
+        await relevo.cerrar(
+            id_conversacion,
+            motivo="devuelto_por_doctor",
+            telegram=_telegram,
+            database_url=config.database_url,
+            tema_id=mensaje.get("message_thread_id"),
+            tema_general=general,
+            doctor=doctor,
+        )
+        return
+
+    if datos.startswith(relevo.PREFIJO_SI_AGENDO):
+        id_conversacion = datos[len(relevo.PREFIJO_SI_AGENDO):]
+        tema_id = mensaje.get("message_thread_id")
+        await _telegram.responder_callback(callback_id, "Dime de qué es.")
+        await _quitar_botones(mensaje, id_conversacion)
+        if tema_id is None:
+            log.warning("«sí agendó» desde fuera de un hilo; se cierra sin cita")
+            await relevo.cerrar(
+                id_conversacion,
+                motivo="devuelto_por_doctor",
+                telegram=_telegram,
+                database_url=config.database_url,
+                tema_general=general,
+                doctor=doctor,
+            )
+            return
+        # Los datos primero y la cita al final: así se crea de una vez, con todo, en vez de
+        # insertarla y corregirla. Empieza por el que falte -- si el número no tiene nombre,
+        # ese; si lo tiene, de qué es. Ver `relevo.pedir_los_datos_de_la_cita`.
+        await relevo.pedir_los_datos_de_la_cita(
+            id_conversacion,
+            telegram=_telegram,
+            database_url=config.database_url,
+            tema_id=tema_id,
+        )
         return
 
     log.info("callback_query con datos que no reconozco: %r", datos[:64])

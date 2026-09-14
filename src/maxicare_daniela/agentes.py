@@ -341,16 +341,38 @@ def instrucciones_daniela(ctx, agente) -> str:
     )
 
 
-#: `agentes[lector_archivos].instrucciones_esqueleto` del plan, literal.
+#: `agentes[lector_archivos].instrucciones_esqueleto` del plan, con el formato de salida
+#: añadido encima (14/09/2026, tras verlo en producción).
+#:
+#: El esqueleto del plan solo decía «lo que el documento dice, con fidelidad», y eso produce
+#: exactamente lo que el cliente vio en el hilo: un muro de prosa clínica de veinte líneas,
+#: con lo decisivo —qué piden, qué antecedente frena— enterrado en la mitad. El doctor lee
+#: esto de pie, entre dos pacientes. La fidelidad no cambia; cambia que ahora tiene forma.
 INSTRUCCIONES_LECTOR = """\
 Recibes un archivo que un paciente envió a MaxiCare. Devuelves exactamente un \
 LecturaArchivo.
 
-En `contexto_clinico` escribes lo que el documento dice, con fidelidad, incluido su \
-contenido clínico: esto lo lee un doctor. Cita el documento, no opines. Si es una imagen \
-sin texto, describe qué tipo de imagen es y nada más: NO emitas hallazgos propios sobre una \
-radiografía o una foto — el doctor ya recibe la imagen y tu lectura podría anclarle el \
-criterio.
+`contexto_clinico` lo lee un doctor en el celular, entre paciente y paciente, para decidir \
+en diez segundos si el caso le toca a él. Escribes una FICHA, no un resumen corrido.
+
+Máximo seis líneas. Cada una empieza por su rótulo, salvo la primera. La línea que el \
+documento no respalde la OMITES entera: nunca escribes «no refiere», «no aplica» ni «sin \
+datos» — lo que falta, falta, y ocupar una línea con una ausencia es lo que vuelve la ficha \
+ilegible. Estos rótulos, en este orden y solo estos:
+
+  Tipo de documento · especialidad o tratamiento · quién lo emite · fecha   ← sin rótulo
+  Motivo: por qué llega el paciente. Una frase.
+  Hallazgos: lo que el documento afirma que se encontró o midió. Cifras y piezas tal cual.
+  Antecedentes: solo lo que cambiaría una decisión — alergias, crónicas, cirugías, \
+medicación.
+  Piden: qué le pide el documento a quien lo lea.
+  Ojo: solo si algo debe frenar al doctor — borrador, sin firma, vencido, ilegible, \
+contradictorio.
+
+Citas el documento, no opinas, y no rellenas lo que no está. Si es una imagen sin texto, \
+escribes SOLO la primera línea diciendo qué clase de imagen es: NO emitas hallazgos propios \
+sobre una radiografía o una foto — el doctor ya recibe la imagen y tu lectura podría \
+anclarle el criterio.
 
 En los demás campos escribes solo lo NO clínico: qué tratamiento se menciona (uno de la \
 lista cerrada), de qué clínica o profesional viene, qué fecha trae.
