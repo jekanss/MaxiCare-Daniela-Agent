@@ -290,18 +290,25 @@ async def leer_y_repartir(
     tema_id: int | None,
     correr=None,
     group_id: str | None = None,
+    silencioso: bool = False,
 ) -> LecturaNoClinica | None:
     """Lee, manda lo clínico al tema del paciente y devuelve SOLO la mitad no clínica.
 
     Aquí es donde el muro se ejerce: `repartir` devuelve dos cosas, una sale por Telegram y
     la otra es el valor de retorno. La clínica no se guarda en ninguna variable que
     sobreviva a esta función.
+
+    `silencioso` lo fija quien llama y vale lo mismo que valió para el archivo: la lectura
+    acompaña al archivo y suena exactamente donde sonó él. Si notificara por su cuenta,
+    haber callado el archivo no habría servido de nada. Ver NOTA DEL SILENCIO en `canales`.
     """
     leida = await leer_archivo(archivo, tipo=tipo, correr=correr, group_id=group_id)
     if leida is None:
         try:
             await telegram.enviar_mensaje(
-                "⚠️ No se pudo leer este archivo automáticamente.", tema_id=tema_id
+                "⚠️ No se pudo leer este archivo automáticamente.",
+                tema_id=tema_id,
+                silencioso=silencioso,
             )
         except Exception:  # noqa: BLE001
             log.exception("no se pudo avisar de la lectura fallida")
@@ -314,7 +321,9 @@ async def leer_y_repartir(
     # no crear un import circular: `ingesta` ya importa `lectura`.
     clinico_seguro = html.escape(clinico, quote=False)
     try:
-        await telegram.enviar_mensaje(f"📄 <b>Lectura</b>\n{clinico_seguro}", tema_id=tema_id)
+        await telegram.enviar_mensaje(
+            f"📄 <b>Lectura</b>\n{clinico_seguro}", tema_id=tema_id, silencioso=silencioso
+        )
     except Exception:  # noqa: BLE001
         log.exception("la lectura no llegó a Telegram; el archivo sí está")
     return no_clinica

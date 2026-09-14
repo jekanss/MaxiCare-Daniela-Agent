@@ -627,6 +627,35 @@ def guardar_tema(conn, *, id_paciente: int, topic_id: int, abierto: bool = False
     conn.commit()
 
 
+def marcar_tema_abierto(conn, telefono: str, *, abierto: bool) -> None:
+    """Anota si el tema de ese número está abierto en Telegram ahora mismo.
+
+    `guardar_tema` no sirve para esto: pide el `id_paciente` y pisa el `telegram_topic_id`,
+    y lo que cambia al abrir y cerrar un relevo es solo el candado. La columna importa
+    porque es lo único que, mirando la base, distingue «expediente» de «canal en vivo hacia
+    el WhatsApp de una persona».
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE pacientes SET telegram_topic_abierto = %s WHERE telefono = %s",
+            (abierto, telefono),
+        )
+    conn.commit()
+
+
+def telefono_de_conversacion(conn, id_conversacion: str) -> str | None:
+    """El número de esa conversación. Lo que el `callback_data` del botón no puede llevar.
+
+    El botón viaja con el id de la conversación --y no con el teléfono-- a propósito: el
+    `callback_data` de Telegram es visible para cualquiera del grupo y cabe en 64 bytes. Un
+    UUID no le dice nada a nadie; un teléfono, sí.
+    """
+    with conn.cursor() as cur:
+        cur.execute("SELECT telefono FROM conversaciones WHERE id = %s", (id_conversacion,))
+        fila = cur.fetchone()
+    return fila[0] if fila else None
+
+
 def asegurar_conversacion(
     conn, *, telefono: str, paciente_id: int | None = None, canal: str = "whatsapp"
 ) -> str:
@@ -901,6 +930,215 @@ def conversacion_tomada(conn, id_conversacion: str) -> str | None:
         )
         fila = cur.fetchone()
     return fila[0] if fila and fila[0] else None
+
+
+# ==========================================================================================
+# El relevo -- quién tiene la conversación, y hasta cuándo
+# ==========================================================================================
+#
+# Todo lo de aquí escribe columnas que las migraciones 002 y 003 dejaron puestas y que nadie
+# había llegado a usar. No hace falta migración para la 6C: hace falta cablearla.
+#
+# La regla que sostiene el resto: `tomada_por` distinto de NULL significa que DANIELA ESTÁ
+# CALLADA y que el tema de ese paciente está ABIERTO en Telegram. Las dos cosas tienen que
+# dejar de ser verdad a la vez, y por eso el cierre tiene una sola puerta (`relevo.cerrar`).
+
+
+def activar_relevo(conn, *, id_conversacion: str, doctor: str) -> str | None:
+    """Le da la conversación a un doctor. Devuelve `None` si se la quedó, o el nombre del
+    que ya la tenía.
+
+    El `WHERE tomada_por IS NULL` es lo que decide la carrera, y la carrera es real: el
+    escalamiento llega al General de TODOS los doctores a la vez, y dos pulsando el botón con
+    segundos de diferencia es el caso normal, no el raro. Sin esa condición el segundo
+    pisaría al primero, el `UPDATE` diría que sí a los dos y ambos creerían tener el hilo
+    -- con el paciente recibiendo dos conversaciones distintas por el mismo WhatsApp.
+
+    Limpia el cierre anterior a propósito: un mismo paciente puede volver meses después y su
+    conversación nueva no puede arrastrar el motivo por el que se cerró la de antes.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE conversaciones
+               SET tomada_por               = %s,
+                   tomada_en                = now(),
+                   ultimo_mensaje_doctor_en = NULL,
+                   relevo_activado_por      = %s,
+                   relevo_activado_en       = now(),
+                   relevo_cerrado_en        = NULL,
+                   relevo_motivo_cierre     = NULL,
+                   actualizada_en           = now()
+             WHERE id = %s AND tomada_por IS NULL
+            RETURNING id
+            """,
+            (doctor, doctor, id_conversacion),
+        )
+        gano = cur.fetchone() is not None
+        if gano:
+            conn.commit()
+            return None
+        # No la ganó: o ya la tiene alguien, o la conversación no existe.
+        cur.execute("SELECT tomada_por FROM conversaciones WHERE id = %s", (id_conversacion,))
+        fila = cur.fetchone()
+    conn.rollback()
+    return (fila[0] if fila and fila[0] else "alguien más")
+
+
+def cerrar_relevo(conn, id_conversacion: str, *, motivo: str) -> bool:
+    """Se la devuelve a Daniela. `False` si ya estaba cerrado -- y eso no es un error.
+
+    Es idempotente porque las tres salidas pueden solaparse: el doctor pulsa «Listo» en el
+    mismo minuto en que el barrido lo da por vencido. Con un `False` claro, la segunda no
+    vuelve a cerrar el tema ni a escribir la nota, y el hilo no queda con dos despedidas.
+
+    `motivo` tiene que ser uno de los tres del CHECK de la migración 003
+    (`devuelto_por_doctor`, `tiempo_agotado`, `tema_perdido`). Un motivo inventado revienta
+    aquí, que es donde se quiere que reviente: el CHECK cerrado existe para que un estado
+    nuevo pase por una migración y no se cuele como un string cualquiera.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE conversaciones
+               SET tomada_por           = NULL,
+                   relevo_cerrado_en    = now(),
+                   relevo_motivo_cierre = %s,
+                   actualizada_en       = now()
+             WHERE id = %s AND tomada_por IS NOT NULL
+            RETURNING id
+            """,
+            (motivo, id_conversacion),
+        )
+        cerrado = cur.fetchone() is not None
+    conn.commit()
+    return cerrado
+
+
+def relevo_por_tema(conn, topic_id: int) -> dict[str, Any] | None:
+    """De un tema de Telegram al relevo vivo que hay dentro, o `None` si no hay ninguno.
+
+    Es la consulta del camino doctor -> paciente: llega un mensaje en un hilo y lo único que
+    lo acompaña es el `message_thread_id`. De ahí hay que sacar a quién se le reenvía.
+
+    Ese `None` es una respuesta legítima y frecuente, no un fallo: significa que alguien
+    escribió en el expediente de un paciente sin tener el relevo, y lo que hay que hacer
+    entonces es NO reenviar nada y decírselo. Es el hueco conocido del creador del grupo, al
+    que Telegram no le puede quitar permisos.
+
+    `conversacion_viva` no sirve aquí --va por teléfono y por ventana de horas-- porque lo
+    que decide no es que la conversación esté fresca sino que esté TOMADA.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT c.id, c.telefono, c.tomada_por
+              FROM pacientes p
+              JOIN conversaciones c ON c.telefono = p.telefono
+             WHERE p.telegram_topic_id = %s
+               AND c.tomada_por IS NOT NULL
+             ORDER BY c.tomada_en DESC
+             LIMIT 1
+            """,
+            (topic_id,),
+        )
+        fila = cur.fetchone()
+    if fila is None:
+        return None
+    return {"id_conversacion": str(fila[0]), "telefono": fila[1], "doctor": fila[2]}
+
+
+def relevos_activos(conn) -> list[dict[str, Any]]:
+    """Los relevos abiertos ahora mismo, con cuántos minutos llevan CALLADOS.
+
+    El reloj no cuenta desde que se activó el relevo sino desde la última señal de vida del
+    doctor, y por eso existe `ultimo_mensaje_doctor_en` desde la migración 001 -- una columna
+    que hasta la 6C no escribía nadie. Contar desde la activación cortaría a un doctor a
+    mitad de frase a las tres horas justas de haber empezado, que es exactamente cuando una
+    conversación difícil sigue viva.
+
+    Trae el `telegram_topic_id` porque cerrar el relevo es también cerrar el tema, y el
+    barrido no puede permitirse una consulta por fila.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT c.id,
+                   c.telefono,
+                   c.tomada_por,
+                   p.telegram_topic_id,
+                   EXTRACT(EPOCH FROM (
+                       now() - GREATEST(c.tomada_en,
+                                        COALESCE(c.ultimo_mensaje_doctor_en, c.tomada_en))
+                   )) / 60.0
+              FROM conversaciones c
+              LEFT JOIN pacientes p ON p.telefono = c.telefono
+             WHERE c.tomada_por IS NOT NULL
+             ORDER BY c.tomada_en
+            """
+        )
+        filas = cur.fetchall()
+    return [
+        {
+            "id_conversacion": str(f[0]),
+            "telefono": f[1],
+            "doctor": f[2],
+            "topic_id": f[3],
+            "minutos_callado": float(f[4] or 0.0),
+        }
+        for f in filas
+    ]
+
+
+def contar_relevos_abiertos(conn) -> int:
+    """Cuántas conversaciones tiene un doctor ahora mismo. Para `/salud`.
+
+    Aparte de `relevos_activos` a propósito: aquel trae cinco columnas por fila para que el
+    barrido pueda cerrar sin volver a preguntar, y un indicador de salud no necesita nada de
+    eso -- solo el número. Contar `len()` de una lista de diccionarios sería pagar el join y
+    el `GREATEST` de todos ellos para tirarlos.
+
+    Es el número que delata un relevo atascado: mientras esté por encima de cero hay
+    pacientes a los que Daniela NO está contestando y temas abiertos de par en par.
+    """
+    with conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM conversaciones WHERE tomada_por IS NOT NULL")
+        fila = cur.fetchone()
+    return fila[0] if fila else 0
+
+
+def tocar_mensaje_doctor(conn, id_conversacion: str) -> None:
+    """Empuja el reloj de cierre. Se llama por cada cosa que el doctor manda al tema.
+
+    Sin esto, `relevos_activos` mediría siempre desde la activación y el cierre por tiempo
+    sería un cronómetro y no un detector de inactividad.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE conversaciones
+               SET ultimo_mensaje_doctor_en = now(), actualizada_en = now()
+             WHERE id = %s
+            """,
+            (id_conversacion,),
+        )
+    conn.commit()
+
+
+def marcar_relevo_activado(conn, telegram_message_id: int) -> None:
+    """Deja constancia de que ESE escalamiento fue el que abrió el relevo.
+
+    Va por `telegram_message_id` porque es lo único que trae el `callback_query`: el doctor
+    pulsó un botón que cuelga de un mensaje concreto. Es lo que permite, más adelante,
+    separar los escalamientos que alguien atendió de los que nadie tocó -- que es la métrica
+    que dice si el grupo de doctores está funcionando.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE escalamientos SET relevo_activado = TRUE WHERE telegram_message_id = %s",
+            (telegram_message_id,),
+        )
+    conn.commit()
 
 
 def marcar_intento_identificacion(conn, id_conversacion: str, *, verificada: bool) -> int:

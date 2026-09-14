@@ -45,6 +45,21 @@ _temas_en_curso: set[asyncio.Task] = set()
 #: un texto vacío y se perdiera el registro.
 TIPOS_CON_ARCHIVO = frozenset({"image", "document", "audio", "voice", "video", "sticker"})
 
+#: Cada cuánto puede volver a SONAR el aviso de «mandó archivos» en el General.
+#:
+#: Las mismas 24 horas que `persistencia.conversacion_viva`, y no es una coincidencia que
+#: convenga documentar: la tanda de archivos de un paciente ES su conversación. Quien manda
+#: la radiografía y a los dos minutos la foto de la encía está contando UNA cosa, y merece
+#: un aviso, no dos.
+#:
+#: No se ata a la fila de `conversaciones` justamente porque en el primer archivo de una
+#: conversación nueva esa fila TODAVÍA NO EXISTE: `runtime._entregar` corre
+#: `procesar_mensaje` antes que `atencion.atender`, que es quien la crea. Atarlo ahí haría
+#: sonar el primero (sin fila que marcar) y otra vez el segundo (fila recién creada, sin
+#: marca) — exactamente los dos timbrazos que esto existe para evitar. `mensajes_entrantes`
+#: sí está escrita: la escribe `_registrar` en la primera línea de `procesar_mensaje`.
+VENTANA_AVISO_ARCHIVO_HORAS = 24
+
 #: Cómo se le nombra a cada tipo delante de un doctor. Un «mandó un image» no lo lee nadie.
 NOMBRE_HUMANO = {
     "image": "una imagen",
@@ -273,6 +288,41 @@ async def _tema_o_general(
         return None
 
 
+# ══════════════════════════════════════════════════════════════════════════════════════════
+# NOTA DEL TEXTO SIN TEMA — por qué un mensaje puede no llegar a Telegram y no ser un fallo
+# ══════════════════════════════════════════════════════════════════════════════════════════
+#
+# Hasta el 13/09/2026 CADA mensaje entrante se reenviaba al General. Se escribió en la fase 2,
+# cuando Daniela NO EXISTÍA y el sistema entero era «recibir y reenviar»; la fase 6A conectó
+# al agente y nadie recortó el reenvío. El resultado medido en producción: el doctor recibía
+# siete notificaciones por una conversación que Daniela resolvió sola, y el ESCALAMIENTO
+# --lo único que le pedía algo-- llegaba enterrado entre las otras seis.
+#
+# Ahora un texto va al tema de su paciente, en silencio, y NO va a ninguna otra parte:
+#
+#   tiene tema  -> se deposita ahí, mudo. El hilo queda completo para quien lo abra.
+#   no tiene    -> no se manda nada a Telegram. Queda en `mensajes_entrantes` y en el
+#                  historial del agente, que es donde de verdad vive la conversación.
+#
+# Un texto NUNCA crea el tema (`_tema_existente` es una consulta, no `lectura.asegurar_tema`).
+# Es la regla que cerró la fase 6: si cada «buenas tardes» abriera un hilo, el grupo sería
+# inservible en una semana. El hilo lo abre el primer ARCHIVO del paciente.
+#
+# ─── Lo que esto le hace a `mensajes_entrantes`, y hay que saberlo ───────────────────────
+#
+# La migración 004 dejó escrito que «si `telegram_message_id` es NULL y `fallo` también, el
+# mensaje entró y nunca llegó a los doctores: es el estado que hay que vigilar». Ese estado
+# acaba de dejar de ser anómalo: es lo normal para el texto de un número sin tema. La señal
+# de alarma pasa a ser la columna de al lado, que es justo sobre la que ya está construido
+# el índice `ix_mensajes_sin_reenviar`:
+#
+#   reenviado_en NULL  + fallo NULL  -> entró y NADIE lo procesó. Esto sí se vigila.
+#   reenviado_en PUESTA + telegram_message_id NULL -> se decidió no reenviarlo. Normal.
+#   fallo PUESTO                     -> Telegram lo rechazó.
+#
+# `_marcar_reenviado` es quien sostiene esa distinción y por eso acepta un id nulo.
+
+
 async def procesar_mensaje(
     m: MensajeEntrante,
     *,
@@ -305,8 +355,20 @@ async def procesar_mensaje(
             tema = await _tema_o_general(m, database_url=database_url, telegram=telegram)
             destino = tema or tema_general
             pie = componer_aviso(m, tamano=archivo.tamano)
+            # Durante un relevo el hilo está en vivo y todo lo del paciente suena ahí. Fuera
+            # del relevo es un expediente y no suena nunca. Ver `_en_relevo`.
+            en_relevo = bool(tema) and await asyncio.to_thread(
+                _en_relevo, database_url, m.telefono
+            )
+            # Silencioso SOLO si cae en el tema del paciente. Si no hay tema, el archivo va
+            # al General --es el caso del número que todavía no es paciente-- y ahí tiene
+            # que sonar: nadie va a abrir un hilo que no existe para encontrarlo.
             telegram_id = await telegram.enviar_archivo(
-                archivo, tipo_whatsapp=m.tipo, pie=pie, tema_id=destino
+                archivo,
+                tipo_whatsapp=m.tipo,
+                pie=pie,
+                tema_id=destino,
+                silencioso=bool(tema) and not en_relevo,
             )
             # A partir de aquí el archivo YA está entregado. Nada de lo que sigue —el aviso
             # al General, el arranque del lector— puede convertir esta entrega en un fallo,
@@ -333,6 +395,10 @@ async def procesar_mensaje(
                         telegram=telegram,
                         tema_id=destino,
                         group_id=grupo,
+                        # Misma regla que el archivo: la lectura acompaña al archivo, así que
+                        # suena exactamente donde sonó él. Si notificara aparte, callar el
+                        # archivo no habría servido de nada.
+                        silencioso=bool(tema) and not en_relevo,
                     )
 
                 tarea = asyncio.create_task(_leer_con_grupo())
@@ -340,14 +406,25 @@ async def procesar_mensaje(
                 # medias en cuanto el turno de Daniela suelte la suya.
                 _lectores_vivos.add(tarea)
                 tarea.add_done_callback(_lectores_vivos.discard)
-            if tema:
-                # El archivo ya no cae en el General, así que el General tiene que enterarse
+            # `not en_relevo`: durante un relevo el doctor YA tiene el archivo sonándole en
+            # el hilo donde está conversando. El aviso al General sería el mismo timbrazo por
+            # segunda vez, en el sitio donde menos falta hace.
+            if tema and not en_relevo and await asyncio.to_thread(
+                _primer_archivo_de_la_tanda, database_url, m.telefono, m.wamid
+            ):
+                # El archivo no cae en el General, así que el General tiene que enterarse
                 # igual: es donde los doctores miran. Degradación, no entrega: si esto falla,
                 # el archivo sigue estando donde ya quedó.
+                #
+                # UNA vez por tanda, no una por archivo. Quien manda la radiografía y a los
+                # dos minutos la foto de la encía dispararía dos timbrazos por una sola cosa,
+                # y a base de timbrazos que no piden nada el doctor deja de mirar el grupo --
+                # que es como se pierde el escalamiento que sí importaba. El plural del texto
+                # es deliberado: avisa de la tanda, no del archivo que la abrió.
                 try:
                     await telegram.enviar_mensaje(
-                        f"📎 Llegó un archivo de {_escapar(m.nombre_perfil or m.telefono)}"
-                        f" — está en su tema.",
+                        f"📎 {_escapar(m.nombre_perfil or m.telefono)} mandó archivos"
+                        f" — están en su tema.",
                         tema_id=tema_general,
                     )
                 except Exception:  # noqa: BLE001
@@ -357,9 +434,17 @@ async def procesar_mensaje(
                     )
             tamano = archivo.tamano
         else:
-            telegram_id = await telegram.enviar_mensaje(
-                componer_aviso(m), tema_id=tema_general
-            )
+            # Un texto NO va al General. Ver NOTA DEL TEXTO SIN TEMA, abajo.
+            tema = await asyncio.to_thread(_tema_existente, database_url, m.telefono)
+            telegram_id = None
+            if tema:
+                # Mudo, salvo durante un relevo: ahí el doctor está esperando justo esto.
+                # `_en_relevo` solo se consulta si hay tema; sin tema no hay dónde sonar y
+                # la consulta sería una ida a Neon para no usar el resultado.
+                en_relevo = await asyncio.to_thread(_en_relevo, database_url, m.telefono)
+                telegram_id = await telegram.enviar_mensaje(
+                    componer_aviso(m), tema_id=tema, silencioso=not en_relevo
+                )
             tamano = None
 
     except ErrorDeCanal as e:
@@ -368,8 +453,13 @@ async def procesar_mensaje(
         return Resultado(m.wamid, nuevo=True, reenviado=False, fallo=str(e))
 
     await asyncio.to_thread(_marcar_reenviado, database_url, m.wamid, telegram_id, tamano)
-    log.info("%s entregado a los doctores (telegram message_id=%s)", m.wamid, telegram_id)
-    return Resultado(m.wamid, nuevo=True, reenviado=True, lectura=tarea)
+    if telegram_id is None:
+        log.info("%s se procesó sin reenviar: es un texto y su número no tiene tema", m.wamid)
+    else:
+        log.info("%s entregado a los doctores (telegram message_id=%s)", m.wamid, telegram_id)
+    return Resultado(
+        m.wamid, nuevo=True, reenviado=telegram_id is not None, lectura=tarea
+    )
 
 
 # ── Acceso a la base ──────────────────────────────────────────────────────────────────────
@@ -413,8 +503,87 @@ def _conversacion_viva(database_url: str, telefono: str) -> str | None:
     return viva[0] if viva else None
 
 
+def _tema_existente(database_url: str, telefono: str) -> int | None:
+    """El tema del paciente, o `None`. Consulta pura: NO lo crea.
+
+    Es deliberado que no sea `lectura.asegurar_tema`, que sí crearía uno: un texto suelto no
+    abre hilo. Ver NOTA DEL TEXTO SIN TEMA.
+
+    Si la base no responde, devuelve `None` en vez de propagar: el coste de fallar aquí sería
+    perder el turno entero de un paciente por no haber podido archivar un «buenas tardes».
+    """
+    try:
+        with persistencia.conectar(database_url) as conn:
+            return persistencia.tema_del_paciente(conn, telefono)
+    except Exception:  # noqa: BLE001
+        log.exception("no se pudo consultar el tema de %s; su texto no se archiva", telefono)
+        return None
+
+
+def _en_relevo(database_url: str, telefono: str) -> bool:
+    """¿Tiene un doctor la conversación de este número ahora mismo? (Fase 6C.)
+
+    Decide UNA cosa: si lo que el paciente manda suena en el hilo o entra mudo. Fuera del
+    relevo el tema es un expediente y no suena nunca; durante el relevo es una conversación
+    en vivo, y un doctor que no oye la respuesta del paciente es un doctor hablando solo.
+    Es la excepción que la NOTA DEL SILENCIO de `canales.py` ya dejaba prevista, y la única.
+
+    **Degrada a `False`, o sea a mudo.** Si Neon no responde, lo que no se puede hacer es
+    suponer que hay relevo: casi nunca lo hay, y equivocarse hacia el ruido devolvería el
+    grupo al estado que el no negociable 14 acaba de arreglar --cada «buenas tardes» de cada
+    paciente vibrando en el teléfono de todos--. Al revés, el peor caso es un doctor que
+    tiene el hilo abierto delante y ve entrar el mensaje sin que le suene.
+    """
+    try:
+        with persistencia.conectar(database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT 1 FROM conversaciones "
+                    " WHERE telefono = %s AND tomada_por IS NOT NULL LIMIT 1",
+                    (telefono,),
+                )
+                return cur.fetchone() is not None
+    except Exception:  # noqa: BLE001 -- ver docstring
+        log.warning("no se pudo saber si +%s está en relevo; entra mudo", telefono)
+        return False
+
+
+def _primer_archivo_de_la_tanda(database_url: str, telefono: str, wamid: str) -> bool:
+    """¿Es el primer archivo ENTREGADO de este número en la ventana? Decide si el General
+    suena o no.
+
+    `reenviado_en IS NOT NULL` no es un detalle: si el archivo anterior se quedó por el
+    camino --Telegram caído, un 429-- el doctor nunca lo vio, así que este no puede heredar
+    un aviso que no llegó a existir. Ese mismo filtro excluye de paso la fila de ESTE mensaje,
+    que `_registrar` acaba de insertar sin reenviar todavía; el `wamid <>` se queda igual
+    para que la consulta siga siendo correcta lea quien la lea.
+
+    Ante un fallo de la base devuelve `True` --avisa--. Un timbrazo de más es ruido; uno de
+    menos es una radiografía que nadie mira.
+    """
+    try:
+        with persistencia.conectar(database_url) as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT 1
+                  FROM mensajes_entrantes
+                 WHERE telefono = %s
+                   AND wamid <> %s
+                   AND tipo = ANY(%s)
+                   AND reenviado_en IS NOT NULL
+                   AND recibido_en > now() - make_interval(hours => %s)
+                 LIMIT 1
+                """,
+                (telefono, wamid, sorted(TIPOS_CON_ARCHIVO), VENTANA_AVISO_ARCHIVO_HORAS),
+            )
+            return cur.fetchone() is None
+    except Exception:  # noqa: BLE001
+        log.exception("no se pudo saber si %s ya tenía archivos; se avisa igual", telefono)
+        return True
+
+
 def _marcar_reenviado(
-    database_url: str, wamid: str, telegram_message_id: int, tamano: int | None
+    database_url: str, wamid: str, telegram_message_id: int | None, tamano: int | None
 ) -> None:
     with persistencia.conectar(database_url) as conn, conn.cursor() as cur:
         cur.execute(

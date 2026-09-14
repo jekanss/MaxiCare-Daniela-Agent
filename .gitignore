@@ -22,3 +22,6 @@ web/dist/
 # de odontologos ni tarifas.
 datos/base_conocimiento.json
 docs/conocimiento/documento-maestro-tratamientos-y-politicas.md
+
+# Rastro de scripts/probar_silencio.py: ids de mensajes de Telegram de una corrida suelta.
+scripts/.silencio_enviado.json

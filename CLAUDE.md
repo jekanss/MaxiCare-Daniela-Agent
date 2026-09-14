@@ -24,6 +24,13 @@ llegue a la cita correcta.
 - Desplegar en el VPS: `bash scripts/desplegar.sh`
 - Usuarios del panel: `uv run python scripts/crear_usuario.py` (`--listar`, `--quitar-acceso`)
 - Revisar el grupo de Telegram: `uv run python scripts/obtener_chat_telegram.py`
+- **Encender el relevo** (6C): `uv run python scripts/configurar_webhook_telegram.py --url
+  https://daniela.maxicarecol.com/webhook/telegram`. Telegram NO valida la URL como hace
+  Meta: hasta que alguien llame a `setWebhook`, el botón «Hablar yo con el paciente» no hace
+  nada y no hay error en ningún log. `--estado` mira qué hay; `--quitar` lo apaga. **Poner
+  webhook rompe el `getUpdates` de `obtener_chat_telegram.py`**: son excluyentes.
+- Comprobar que el relevo puede funcionar: `uv run python scripts/probar_relevo.py` (no
+  gasta, no toca la base; crea y borra un tema de usar y tirar).
 - Resetear a primer contacto: escribir `/clearstate`. **Es irreversible** y borra el rastro
   entero, historial del agente incluido. **Por WhatsApp** solo funciona si el número está en
   `MAXICARE_TELEFONOS_PRUEBA`; con esa variable vacía —su default— el comando no existe para
@@ -39,6 +46,7 @@ Entregables por fase. **Los marcados gastan tokens**; los demás, ni uno:
 | `scripts/probar_web.py` | el cascarón web (fase 5) | solo con `--chat` |
 | `scripts/probar_atencion.py` | el turno de WhatsApp de punta a punta (fase 6A) | solo con `--chat` |
 | `scripts/probar_lectura.py` | el muro y el tema del paciente (fase 6B) | solo con `--chat` |
+| `scripts/probar_relevo.py` | que el bot PUEDA relevar: permisos y webhook (fase 6C) | no |
 | `scripts/probar_persistencia.py` | que una conversación sobrevive a reiniciar (fase 7) | solo con `--chat` |
 | `scripts/probar_panel.py` | el panel de tratamientos (fase 8) | solo con `--chat` |
 | `scripts/probar_calendario.py` | `CalendarioGoogle` contra el calendario real | no |
@@ -103,6 +111,28 @@ una —qué se midió, qué costó— está en la regla que cubre ese archivo.
    cita es un UUID que el sistema le mandó al paciente: no es un control de acceso. Y si la
    hora no queda autorizada, `sin_hora_no_verificada` bloquea la confirmación de una escritura
    **que ya ocurrió**: la cita movida y el paciente yendo a la hora vieja.
+14. **Al General solo va lo que le pide algo al doctor, y `telegram_message_id` NULL ya no es
+   una alarma.** Un texto va mudo al tema de su paciente, o a ninguna parte si no tiene tema
+   —nunca lo crea: eso es del primer archivo—. El aviso de archivos suena UNA vez por tanda
+   (`_primer_archivo_de_la_tanda`, ventana de 24 h). Lo que invierte: la migración 004 dice
+   que `telegram_message_id` NULL + `fallo` NULL es «entró y no llegó a nadie», y eso pasó a
+   ser lo normal; **la señal de alarma es `reenviado_en` NULL**, que es sobre lo que ya está
+   construido `ix_mensajes_sin_reenviar`. El SQL de las dos consultas nuevas solo lo ejercita
+   `tests/test_ingesta_neon.py`, con `-m neon`: offline van dobladas y degradan en silencio.
+15. **El relevo tiene UNA puerta de salida, y `/webhook/telegram` se cierra cuando falta el
+   secreto.** `conversaciones.tomada_por` puesto significa dos cosas a la vez: a Daniela **no
+   se la llama** (`atencion.atender` corta antes del modelo) y el tema de ese paciente está
+   **abierto** en Telegram, o sea que es un canal en vivo hacia su WhatsApp. Las dos tienen
+   que dejar de ser verdad juntas, y por eso los tres motivos del CHECK de la 003
+   —`devuelto_por_doctor`, `tiempo_agotado`, `tema_perdido`— salen todos por `relevo.cerrar`.
+   El reloj de cierre cuenta desde `GREATEST(tomada_en, ultimo_mensaje_doctor_en)`: desde la
+   activación sería un cronómetro que corta a un doctor a mitad de frase. `/webhook/telegram`
+   **sin `MAXICARE_TELEGRAM_WEBHOOK_SECRET` responde 403 a todo** —degrada al revés que el
+   resto del proyecto, porque es la única puerta por la que algo de fuera puede hacer que el
+   bot le escriba al WhatsApp de un paciente—. Y la segunda inversión de una columna, después
+   de la 14: un mensaje que entra durante un relevo se anota con `fallo_respuesta` empezando
+   por `relevo:` **sin ser un fallo**; sin eso, `mensajes_sin_responder` se lo entregaría a
+   Daniela media hora después y contestaría por encima del doctor.
 
 # Dónde está el resto
 
@@ -112,6 +142,7 @@ El detalle de cada área se carga solo cuando tocas sus archivos:
 |---|---|
 | `web/CLAUDE.md` | la interfaz del panel, y la trampa `public` vs `pruebas_web` |
 | `.claude/rules/atencion-whatsapp.md` | el turno de WhatsApp: candado, búfer, idempotencia |
+| `.claude/rules/relevo-telegram.md` | el relevo: el botón, el webhook y las tres salidas |
 | `.claude/rules/calendario.md` | Google Calendar y la cuenta de servicio |
 | `.claude/rules/despliegue.md` | `desplegar.sh`, el Dockerfile y el `.env` del VPS |
 | `.claude/rules/scripts-entregables.md` | qué dobla cada script de `scripts/` y su trampa |

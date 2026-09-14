@@ -209,11 +209,11 @@ class TelegramCaptura:
     async def cerrar_tema(self, tema_id: int) -> None:
         self.temas_cerrados.append(tema_id)
 
-    async def enviar_archivo(self, archivo, *, tipo_whatsapp, pie, tema_id=None) -> int:
+    async def enviar_archivo(self, archivo, *, tipo_whatsapp, pie, tema_id=None, silencioso=False) -> int:
         self.archivos.append((archivo.nombre, tema_id, pie))
         return 100 + len(self.archivos)
 
-    async def enviar_mensaje(self, texto: str, *, tema_id=None, teclado=None) -> int:
+    async def enviar_mensaje(self, texto: str, *, tema_id=None, teclado=None, silencioso=False) -> int:
         self.mensajes.append((tema_id, texto))
         return 200 + len(self.mensajes)
 
@@ -487,8 +487,10 @@ async def cuatro(url: str) -> None:
 
     avisos_al_general = [texto for (tema, texto) in tg.mensajes if tema == TEMA_GENERAL]
     revisar(
-        "el General recibio el aviso de que llego un archivo",
-        any("Llegó un archivo" in texto for texto in avisos_al_general),
+        "el General recibio el aviso de que llegaron archivos",
+        # Plural desde el 13/09/2026: el aviso suena UNA vez por tanda, no una por archivo.
+        # Ver NOTA DEL TEXTO SIN TEMA en `ingesta.py`.
+        any("mandó archivos" in texto for texto in avisos_al_general),
         str(tg.mensajes),
     )
     revisar(

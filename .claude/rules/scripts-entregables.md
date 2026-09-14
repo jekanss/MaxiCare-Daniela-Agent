@@ -35,6 +35,21 @@ argument 'group_id'`). **Quien cambie una de esas firmas corre los cinco que no 
   pierde el reenganche al reiniciar por diseño (ver `runtime._conversaciones_de_prueba`) y
   probaría lo contrario. Y comprueba que el nombre NO está en `pacientes`: si estuviera, el
   segundo turno acertaría con el historial borrado.
+- `probar_relevo.py` **no toca la base en absoluto** —ni un esquema de pruebas— y no crea
+  ningún paciente ni ningún relevo: abre un tema de usar y tirar en el grupo REAL, lo cierra,
+  lo reabre, le manda un mensaje con teclado, le cambia el teclado, reacciona y lo borra. Lo
+  que prueba es lo que ninguna suite puede: que el bot tenga `can_manage_topics` y
+  `can_delete_messages` **en este grupo concreto**. Sin ellos, `pytest -q` pasa entero en
+  verde y el relevo se activa en la base con el hilo sin abrir. Si sale `FALLA borrar_tema`,
+  el tema `[PRUEBA DE RELEVO] borrar` se queda en el grupo y hay que quitarlo a mano.
+- `configurar_webhook_telegram.py` **no es una prueba: es un interruptor**, y el único que
+  enciende el relevo. Telegram no valida la URL como hace Meta, así que sin llamarlo el botón
+  no hace nada y no hay error en ningún log. `--url` genera el secreto si el `.env` no lo
+  tiene y lo imprime UNA vez para pegarlo; pasa `drop_pending_updates` para que al encender
+  no entre de golpe todo lo que el grupo acumuló. **Y pone en conflicto a
+  `obtener_chat_telegram.py`**: con webhook activo, su `getUpdates` devuelve 409 (`getChat`,
+  `getChatMember` y `getChatAdministrators` siguen bien). Para usarlo, `--quitar`, y volver a
+  ponerlo después.
 - `probar_panel.py` MITAD A cambia un precio por HTTP contra `public`, la base real de la
   clínica, y **lo restaura en un `finally` comprobando la restauración con una aserción**.
 - `probar_calendario.py --diagnosticar` **solo lee**: es lo primero que hay que correr

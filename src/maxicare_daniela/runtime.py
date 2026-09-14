@@ -37,6 +37,7 @@ interruptor `MAXICARE_DANIELA_RESPONDE`, que lo lee `atender`.
 from __future__ import annotations
 
 import asyncio
+import hmac
 import html
 import logging
 import time
@@ -51,7 +52,17 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from starlette.exceptions import HTTPException as HTTPExceptionStarlette
 
-from . import atencion, autenticacion, contratos, conversacion, ingesta, panel, persistencia, reseteo
+from . import (
+    atencion,
+    autenticacion,
+    contratos,
+    conversacion,
+    ingesta,
+    panel,
+    persistencia,
+    relevo,
+    reseteo,
+)
 from .calendario import CalendarioCaido, CalendarioDoble, Jornada, calendario_desde_config
 from .canales import Telegram, WhatsApp
 from .config import Config, cargar_dotenv, descartar_vacias_de_terceros
@@ -175,6 +186,11 @@ _telegram = Telegram(config.telegram_bot_token, config.telegram_chat_doctores)
 #: configuración operativa que cambia cuando alguien la cambia, no cada segundo.
 _tema_general: int | None = None
 
+#: Las dos perillas del relevo, con los mismos defaults que `persistencia.CONFIGURACION`.
+#: Se releen al arrancar como el tema General, y por la misma razón: la clínica las cambia
+#: desde el panel de vez en cuando, no cada segundo.
+_relevo_minutos: dict[str, int] = {"cierre_relevo_minutos": 180, "aviso_relevo_minutos": 120}
+
 
 @app.on_event("startup")
 def _cargar_configuracion_operativa() -> None:
@@ -183,7 +199,15 @@ def _cargar_configuracion_operativa() -> None:
         with persistencia.conectar(config.database_url) as conn:
             operativa = persistencia.leer_configuracion(conn)
         _tema_general = int(operativa.get("telegram_topic_general", 1))
-        log.info("configuración operativa cargada · tema General = %s", _tema_general)
+        for clave in _relevo_minutos:
+            _relevo_minutos[clave] = int(operativa.get(clave, _relevo_minutos[clave]))
+        log.info(
+            "configuración operativa cargada · tema General = %s · relevo: aviso a los %s "
+            "min, cierre a los %s min",
+            _tema_general,
+            _relevo_minutos["aviso_relevo_minutos"],
+            _relevo_minutos["cierre_relevo_minutos"],
+        )
     except Exception as e:  # noqa: BLE001 — arrancar sin base es peor que arrancar a ciegas
         # Dejarlo en None manda los mensajes al General por omisión, que es exactamente
         # donde deben ir. Un fallo de base no puede impedir que un archivo llegue al doctor.
@@ -409,6 +433,158 @@ async def recibir(request: Request, tareas: BackgroundTasks) -> Response:
         tareas.add_task(_rastreado, m)
 
     return Response(status_code=200, content="ok", media_type="text/plain")
+
+
+# ==========================================================================================
+# El webhook de Telegram — la puerta del relevo (6C)
+# ==========================================================================================
+
+
+#: Ruta del webhook de Telegram. La registra `scripts/configurar_webhook_telegram.py`.
+#:
+#: **No hay `GET` aquí.** Telegram no valida la URL como hace Meta: se la das con `setWebhook`
+#: y empieza a mandar `POST`. Un `GET` en esta ruta cae en `servir_frontend` y devuelve el
+#: `index.html` del panel, que es lo correcto: esta dirección no es una página.
+RUTA_WEBHOOK_TELEGRAM = "/webhook/telegram"
+
+
+@app.post(RUTA_WEBHOOK_TELEGRAM)
+async def recibir_telegram(request: Request, tareas: BackgroundTasks) -> Response:
+    """Los `callback_query` de los botones y lo que los doctores escriben en los temas.
+
+    ------------------------------------------------------------------------------------
+    Vacío significa CERRADO, y es la decisión de seguridad de esta fase
+    ------------------------------------------------------------------------------------
+
+    Esta URL es pública y es la única puerta del sistema por la que algo de fuera puede hacer
+    que el bot **le escriba al WhatsApp de un paciente**. El webhook de Meta se defiende con
+    una firma HMAC del cuerpo; Telegram no firma nada: manda una cabecera con un secreto
+    compartido que tú mismo elegiste al llamar a `setWebhook`.
+
+    Por eso, sin `MAXICARE_TELEGRAM_WEBHOOK_SECRET` configurado esto devuelve 403 a todo.
+    Es al revés de como degrada el resto del proyecto --normalmente se sigue adelante para no
+    perder el mensaje de un paciente-- y tiene que ser al revés: aquí lo que se pierde por
+    degradar no es un mensaje, es el control de a quién le habla la clínica.
+
+    `compare_digest` y no `==`: comparar secretos con `==` sale antes en el primer byte que
+    no coincide, y eso se puede medir.
+
+    Siempre 200 cuando el secreto es bueno, y el trabajo en `BackgroundTasks`. Telegram
+    reintenta lo que no conteste rápido, y un reintento de un `callback_query` de relevo es
+    otro doctor tomando la conversación.
+    """
+    esperado = config.telegram_webhook_secret
+    if not esperado:
+        log.warning(
+            "llegó un update de Telegram pero MAXICARE_TELEGRAM_WEBHOOK_SECRET está vacío: "
+            "el relevo está apagado. Corre scripts/configurar_webhook_telegram.py"
+        )
+        return Response(status_code=403, content="forbidden", media_type="text/plain")
+
+    recibido = request.headers.get("x-telegram-bot-api-secret-token", "")
+    if not hmac.compare_digest(recibido, esperado):
+        log.warning(
+            "POST a %s con secreto inválido desde %s",
+            RUTA_WEBHOOK_TELEGRAM,
+            request.client.host if request.client else "?",
+        )
+        return Response(status_code=403, content="forbidden", media_type="text/plain")
+
+    try:
+        payload = await request.json()
+    except Exception:  # noqa: BLE001
+        log.warning("update de Telegram que no es JSON; se acepta para que no reintente")
+        return Response(status_code=200, content="ok", media_type="text/plain")
+
+    tareas.add_task(_atender_update_telegram, payload)
+    return Response(status_code=200, content="ok", media_type="text/plain")
+
+
+def _es_nuestro_grupo(chat: dict | None) -> bool:
+    """Que el update venga del supergrupo de los doctores y no de otro chat.
+
+    El mismo bot puede estar en más grupos --o alguien puede escribirle por privado-- y sin
+    esta comprobación un `callback_data` copiado a mano en cualquier chat activaría un relevo
+    de verdad sobre un paciente de verdad. El secreto de la cabecera prueba que el update
+    viene de Telegram; esto prueba que viene de DONDE tiene que venir.
+    """
+    return str((chat or {}).get("id", "")) == str(config.telegram_chat_doctores)
+
+
+async def _atender_update_telegram(payload: dict) -> None:
+    """Reparte el update. Nunca propaga: el 200 ya salió y esto corre en segundo plano."""
+    try:
+        callback = payload.get("callback_query")
+        if callback:
+            await _atender_callback(callback)
+            return
+
+        # `edited_message` NO se atiende a propósito: editar en Telegram un mensaje que ya
+        # salió hacia WhatsApp no puede deshacerlo --Meta no tiene edición-- y reenviar la
+        # versión corregida le dejaría al paciente las dos. Lo que el doctor tenga que
+        # corregir, lo escribe otra vez.
+        mensaje = payload.get("message")
+        if mensaje and _es_nuestro_grupo(mensaje.get("chat")):
+            await relevo.relevar_mensaje(
+                mensaje,
+                telegram=_telegram,
+                whatsapp=_whatsapp,
+                database_url=config.database_url,
+            )
+    except Exception:  # noqa: BLE001 -- ver docstring
+        log.exception("no se pudo atender un update de Telegram")
+
+
+async def _atender_callback(callback: dict) -> None:
+    """Los dos botones del relevo: el que la toma y el que la devuelve."""
+    datos = callback.get("data") or ""
+    callback_id = callback.get("id") or ""
+    mensaje = callback.get("message") or {}
+
+    if not _es_nuestro_grupo(mensaje.get("chat")):
+        log.warning("callback_query desde un chat que no es el de los doctores; se ignora")
+        await _telegram.responder_callback(callback_id, "No puedo hacer eso desde aquí.")
+        return
+
+    doctor = relevo.nombre_de_quien_pulsa(callback.get("from"))
+    general = _tema_general or 0
+
+    if datos.startswith(relevo.PREFIJO_TOMAR):
+        await relevo.activar(
+            id_conversacion=datos[len(relevo.PREFIJO_TOMAR):],
+            doctor=doctor,
+            callback_id=callback_id,
+            # El mensaje del que cuelga el botón: el escalamiento del General, que hay que
+            # dejar marcado como atendido para que otro doctor no lo pulse.
+            mensaje_id=mensaje.get("message_id"),
+            telegram=_telegram,
+            database_url=config.database_url,
+            cierre_relevo_minutos=_relevo_minutos["cierre_relevo_minutos"],
+            tema_general=general,
+        )
+        return
+
+    if datos.startswith(relevo.PREFIJO_DEVOLVER):
+        id_conversacion = datos[len(relevo.PREFIJO_DEVOLVER):]
+        await _telegram.responder_callback(callback_id, "Listo, Daniela retoma.")
+        cerrado = await relevo.cerrar(
+            id_conversacion,
+            motivo="devuelto_por_doctor",
+            telegram=_telegram,
+            database_url=config.database_url,
+            tema_general=general,
+        )
+        if cerrado and mensaje.get("message_id"):
+            # Quitar el botón del hilo: pulsar «Listo» dos veces no puede parecer que hace
+            # algo la segunda.
+            try:
+                await _telegram.editar_teclado(mensaje["message_id"], None)
+            except Exception:  # noqa: BLE001
+                log.warning("el botón de devolver quedó puesto en %s", id_conversacion)
+        return
+
+    log.info("callback_query con datos que no reconozco: %r", datos[:64])
+    await _telegram.responder_callback(callback_id, "Ese botón ya no hace nada.")
 
 
 def _escapar(texto: str) -> str:
@@ -779,6 +955,11 @@ async def salud() -> dict:
             # `base_de_datos: "FALLA: the connection is closed"` -- el indicador de salud
             # mintiendo sobre la salud. Lo caza `test_salud_cuenta_los_mensajes_sin_responder`.
             estado["sin_responder"] = persistencia.contar_sin_responder(conn)
+            # Cuántas conversaciones tiene un doctor ahora mismo. Es el número que delata un
+            # relevo atascado: mientras esté por encima de cero, hay pacientes a los que
+            # Daniela NO está contestando y temas abiertos de par en par. Si no baja en todo
+            # un día, el barrido de `_barrer_relevos_sin_parar` dejó de correr.
+            estado["relevos_abiertos"] = persistencia.contar_relevos_abiertos(conn)
         estado["base_de_datos"] = "ok"
     except Exception as e:  # noqa: BLE001
         estado["base_de_datos"] = f"FALLA: {e}"
@@ -811,6 +992,14 @@ async def salud() -> dict:
     # Sin esto no hay forma de saber desde fuera si Daniela está callada. Un `0` en el `.env`
     # del VPS y un reinicio la apagan sin dejar rastro en ninguna respuesta de este endpoint.
     estado["daniela_responde"] = config.daniela_responde
+    # Encendido o apagado, sin término medio: sin secreto, `/webhook/telegram` responde 403 a
+    # todo y el botón «Hablar yo con el paciente» no hace nada. Va aquí y no en
+    # `configuracion` porque no tenerlo es un estado legítimo --el sistema entero funciona sin
+    # relevo-- pero es invisible: no llega ni la petición, así que no hay error que mirar.
+    estado["relevo"] = (
+        "activo" if config.telegram_webhook_secret
+        else "apagado (falta MAXICARE_TELEGRAM_WEBHOOK_SECRET)"
+    )
     return estado
 
 
@@ -1434,6 +1623,76 @@ async def _recoger_al_arrancar() -> None:
     empezar a mandar tráfico --que es justo lo que hace falta para que no se pierda el
     siguiente mensaje mientras se recoge el anterior."""
     asyncio.create_task(_recoger_lo_que_quedo_sin_responder())
+
+
+# ==========================================================================================
+# El cierre por tiempo de los relevos
+# ==========================================================================================
+
+
+#: Cada cuánto se mira si algún relevo se quedó solo. Un minuto es de sobra: lo que se mide
+#: son horas, y el coste es una consulta a una tabla pequeña filtrada por `tomada_por IS NOT
+#: NULL`, que es casi siempre cero filas.
+SEGUNDOS_ENTRE_BARRIDOS = 60.0
+
+#: La referencia viva de la tarea. Sin guardarla, el recolector de basura de Python se puede
+#: llevar una tarea que nadie mira --`create_task` solo devuelve una referencia débil desde
+#: el bucle-- y el cierre por tiempo dejaría de ocurrir sin un solo error en el log.
+_tarea_de_barrido: asyncio.Task | None = None
+
+
+async def _barrer_relevos_sin_parar() -> None:
+    """El reloj del relevo. Es lo que impide que un tema se quede abierto para siempre.
+
+    Un relevo que nadie cierra no es un detalle de orden: es un hilo por el que cualquiera
+    del grupo le escribe al WhatsApp de un paciente, con Daniela callada al otro lado. Por
+    eso esto corre aunque no haya pasado nada más en el servidor.
+
+    **Asume un solo worker**, igual que `_candados` de `atencion.py`. Con varias réplicas
+    cada una barrería por su cuenta; el daño estaría acotado --`cerrar_relevo` es idempotente
+    y la segunda obtiene `False` sin escribir nada-- pero el aviso previo, que se recuerda en
+    memoria, sí saldría repetido.
+    """
+    while True:
+        await asyncio.sleep(SEGUNDOS_ENTRE_BARRIDOS)
+        try:
+            cerrados = await relevo.barrer(
+                telegram=_telegram,
+                database_url=config.database_url,
+                cierre_minutos=_relevo_minutos["cierre_relevo_minutos"],
+                aviso_minutos=_relevo_minutos["aviso_relevo_minutos"],
+                tema_general=_tema_general or 0,
+            )
+            if cerrados:
+                log.info("el barrido cerró %d relevo(s) por inactividad", cerrados)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 -- tiene que seguir vivo mañana
+            log.exception("el barrido de relevos falló; se reintenta en el siguiente ciclo")
+
+
+@app.on_event("startup")
+async def _arrancar_barrido_de_relevos() -> None:
+    global _tarea_de_barrido
+    if not config.telegram_bot_token or not config.telegram_chat_doctores:
+        # Sin Telegram no hay relevos que cerrar. Es el caso de las pruebas y el del chat web.
+        log.info("sin Telegram configurado: no arranca el barrido de relevos")
+        return
+    _tarea_de_barrido = asyncio.create_task(_barrer_relevos_sin_parar())
+
+
+@app.on_event("shutdown")
+async def _parar_barrido_de_relevos() -> None:
+    """Se cancela y se espera. Sin el `await`, el bucle muere a mitad de un `cerrar()` y
+    puede dejar la base cerrada y el tema de Telegram abierto -- el peor de los dos estados
+    intermedios, porque Daniela vuelve a hablar con el hilo todavía en vivo."""
+    if _tarea_de_barrido is None:
+        return
+    _tarea_de_barrido.cancel()
+    try:
+        await _tarea_de_barrido
+    except (asyncio.CancelledError, Exception):  # noqa: BLE001
+        pass
 
 
 # ------------------------------------------------------------------------------------------

@@ -107,7 +107,7 @@ class TelegramFalso:
     def __init__(self) -> None:
         self.mensajes: list[str] = []
 
-    async def enviar_mensaje(self, texto: str, *, tema_id=None, teclado=None) -> int:
+    async def enviar_mensaje(self, texto: str, *, tema_id=None, teclado=None, silencioso=False) -> int:
         self.mensajes.append(texto)
         return len(self.mensajes)
 
@@ -1936,3 +1936,64 @@ def test_la_lectura_se_ata_al_mensaje_que_traia_el_archivo(monkeypatch):
     posicion_lectura = entrada.index("ortodoncia")
     posicion_texto = entrada.index("¿esto qué es?")
     assert posicion_lectura < posicion_texto
+
+
+# ==========================================================================================
+# El relevo (6C) · con la conversación tomada, Daniela no corre
+# ==========================================================================================
+
+
+def test_con_un_doctor_en_relevo_no_se_llama_al_modelo(monkeypatch):
+    """No es que se le pida a Daniela que no conteste: es que no se la llama.
+
+    La alternativa --dejarla correr y tirar su respuesta-- gastaría un turno de contexto por
+    cada frase que el paciente escriba durante el relevo, y se encontraría ese historial
+    entero al retomar, como si hubiera estado hablando ella.
+    """
+    base, turnos = preparar(
+        monkeypatch, base=BaseFalsa(viva=("conv-viva", 4, True, 0), tomada="Dra. Ruiz")
+    )
+    wa = WhatsAppFalso()
+
+    resultado = atender(mensaje_texto("me sigue doliendo"), whatsapp=wa)
+
+    assert turnos.llamadas == [], "se llamó al modelo con la conversación tomada"
+    assert wa.enviados == [], "Daniela le habló por encima del doctor"
+    assert resultado.respondido is False
+    assert resultado.motivo and "Dra. Ruiz" in resultado.motivo
+
+
+def test_el_mensaje_del_relevo_no_vuelve_a_manos_de_daniela_media_hora_despues(monkeypatch):
+    """`persistencia.mensajes_sin_responder` busca «`respondido_en` NULL Y `fallo_respuesta`
+    NULL», que es la firma de «entró y nadie lo procesó». Un mensaje de relevo tiene esa
+    misma forma --nadie le contestó por WhatsApp-- así que sin marcarlo, el barrido de
+    arranque se lo entregaría a Daniela y le contestaría por encima del doctor.
+
+    El prefijo `relevo:` es lo que permite separarlo de un fallo de verdad con un `LIKE`.
+    """
+    base, _ = preparar(
+        monkeypatch, base=BaseFalsa(viva=("conv-viva", 4, True, 0), tomada="Dra. Ruiz")
+    )
+
+    atender(mensaje_texto("me sigue doliendo"))
+
+    _, motivo = base.argumentos("marcar_fallo_respuesta")
+    assert motivo.startswith("relevo:")
+    assert "marcar_respondido" not in base.nombres
+
+
+def test_el_relevo_mantiene_viva_la_conversacion(monkeypatch):
+    """Sin `tocar_conversacion`, tres horas de charla con el doctor dejarían la conversación
+    caducada para `conversacion_viva` y el paciente volvería a ser un primer contacto en
+    cuanto Daniela retomara -- sin identidad verificada y sin una palabra de lo hablado.
+
+    Y el turno NO avanza: no hubo turno que contar.
+    """
+    base, _ = preparar(
+        monkeypatch, base=BaseFalsa(viva=("conv-viva", 4, True, 0), tomada="Dra. Ruiz")
+    )
+
+    resultado = atender(mensaje_texto("gracias"))
+
+    assert base.argumentos("tocar_conversacion") == ("conv-viva", 4)
+    assert resultado.turno == 4

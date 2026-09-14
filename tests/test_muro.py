@@ -109,11 +109,11 @@ class TelegramDeDoctores:
         """Solo el texto, para las aserciones que no miran el destino."""
         return [texto for texto, _ in self.mensajes]
 
-    async def enviar_archivo(self, archivo, *, tipo_whatsapp, pie, tema_id=None) -> int:
+    async def enviar_archivo(self, archivo, *, tipo_whatsapp, pie, tema_id=None, silencioso=False) -> int:
         self.archivos.append((archivo.nombre, tema_id, pie))
         return 10 + len(self.archivos)
 
-    async def enviar_mensaje(self, texto, *, tema_id=None, teclado=None) -> int:
+    async def enviar_mensaje(self, texto, *, tema_id=None, teclado=None, silencioso=False) -> int:
         self.mensajes.append((texto, tema_id))
         return 20 + len(self.mensajes)
 
@@ -387,7 +387,9 @@ def test_el_archivo_y_su_lectura_van_al_tema_del_paciente(monkeypatch):
         "el contenido clínico de un paciente quedaría mezclado con el de todos los demás"
     )
     # El aviso al General existe --es donde miran los doctores-- pero no lleva nada clínico.
-    avisos = [(texto, tema) for texto, tema in tg.mensajes if "Llegó un archivo" in texto]
+    # Desde el 13/09/2026 suena UNA vez por tanda y su texto va en plural: avisa de que esa
+    # persona mandó archivos, no de cada archivo. Ver NOTA DEL TEXTO SIN TEMA en `ingesta.py`.
+    avisos = [(texto, tema) for texto, tema in tg.mensajes if "mandó archivos" in texto]
     assert avisos and CENTINELA not in "\n".join(t for t, _ in avisos)
     assert [tema for _, tema in avisos] == [TEMA_GENERAL], (
         "el aviso tiene que ir al General: es el único sitio donde los doctores miran"

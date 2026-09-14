@@ -59,8 +59,10 @@ Cuatro límites conocidos, y ninguno es un descuido
    `conversacion_viva`: pasada esa ventana la conversación ya está muerta para la base, así
    que serializarla ya no tiene sentido. Sin la poda, el diccionario crece con cada número
    que escriba a la clínica y no baja nunca.
-4. **`tomada_por` siempre será `None` hasta la entrega 6C**, que es la que trae el relevo a
-   los doctores. Se lee desde ya porque no cuesta una consulta aparte y evita volver aquí.
+4. **`tomada_por` distinto de `None` significa que aquí no se llama al modelo.** Es el
+   relevo (6C): un doctor tiene la conversación y Daniela calla hasta que la devuelva. El
+   corte está dentro del candado, justo después de `_leer_estado`, y su comentario explica
+   por qué el mensaje se anota con un `fallo_respuesta` que no es un fallo.
 """
 
 from __future__ import annotations
@@ -863,6 +865,65 @@ async def atender(
                 True,
                 texto_enviado=conversacion.MENSAJE_SEGURO,
                 motivo=f"sin base: {e}",
+                mensajes_agrupados=len(mensajes),
+            )
+
+        if estado.tomada_por:
+            # ==========================================================================
+            # EL RELEVO: aquí Daniela CALLA. Fase 6C.
+            # ==========================================================================
+            #
+            # No es que se le pida que no conteste: es que no se la llama. Ni al modelo, ni
+            # a los guardrails, ni a una sola tool. La alternativa --dejarla correr y tirar
+            # su respuesta-- gastaría un turno de contexto por cada frase que el paciente
+            # escriba durante el relevo, y ese historial se lo encontraría entero al
+            # retomar, como si hubiera estado hablando ella.
+            #
+            # El mensaje del paciente YA le llegó al doctor: `ingesta.procesar_mensaje`
+            # corre antes que esto en `runtime._entregar` y lo deposita en su tema, que
+            # durante un relevo además suena.
+            #
+            # --------------------------------------------------------------------------
+            # Por qué esto se anota como `fallo_respuesta` sin ser un fallo
+            # --------------------------------------------------------------------------
+            #
+            # `persistencia.mensajes_sin_responder` busca la firma «`respondido_en` NULL Y
+            # `fallo_respuesta` NULL», que significa «entró y nadie lo procesó». Un mensaje
+            # de relevo tiene esa misma forma --nadie le contestó por WhatsApp-- así que sin
+            # marcarlo, el barrido de arranque se lo entregaría a Daniela media hora después
+            # y le contestaría por encima del doctor.
+            #
+            # No hay columna para un tercer estado y añadir una costaría una migración por
+            # un matiz de informe. El motivo empieza por `relevo:` para que se pueda separar
+            # de un fallo de verdad con un `LIKE`, y por eso se escribe así y no de otra
+            # forma. Mismo criterio que el no negociable 14: antes invertir el significado
+            # de una columna y documentarlo que inventarse otra.
+            motivo_relevo = f"relevo: la tiene {estado.tomada_por}"
+            await asyncio.to_thread(
+                _anotar_resultado,
+                config.database_url,
+                estado.id_conversacion,
+                wamids,
+                wamid_respuesta=None,
+                motivo=motivo_relevo,
+                # El turno NO avanza: no hubo turno. Y `_anotar_resultado` llama igualmente a
+                # `tocar_conversacion`, que es lo que mantiene la conversación viva mientras
+                # dure el relevo -- sin eso, tres horas de charla con el doctor la dejarían
+                # caducada para `conversacion_viva` y el paciente volvería a ser un primer
+                # contacto en cuanto Daniela retomara.
+                turno=estado.turno_actual,
+            )
+            log.info(
+                "%s está en relevo con %s; Daniela no contesta este mensaje",
+                mensaje.telefono,
+                estado.tomada_por,
+            )
+            return Atendido(
+                mensaje.wamid,
+                estado.id_conversacion,
+                False,
+                motivo=motivo_relevo,
+                turno=estado.turno_actual,
                 mensajes_agrupados=len(mensajes),
             )
 

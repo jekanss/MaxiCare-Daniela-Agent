@@ -220,7 +220,7 @@ class TelegramFalso:
     def __init__(self) -> None:
         self.mensajes: list[str] = []
 
-    async def enviar_mensaje(self, texto: str, *, tema_id=None, teclado=None) -> int:
+    async def enviar_mensaje(self, texto: str, *, tema_id=None, teclado=None, silencioso=False) -> int:
         self.mensajes.append(texto)
         return len(self.mensajes)
 

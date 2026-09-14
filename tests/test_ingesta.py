@@ -424,13 +424,21 @@ class TelegramConTemas:
     def __init__(self) -> None:
         self.archivos: list[tuple[str, int | None]] = []
         self.mensajes: list[tuple[str, int | None]] = []
+        #: Lo mismo que `mensajes`/`archivos` pero con el `silencioso` de cada envío. Van en
+        #: listas aparte para no tocar las aserciones que ya existían.
+        self.mensajes_con_silencio: list[tuple[str, int | None, bool]] = []
+        self.archivos_con_silencio: list[tuple[str, int | None, bool]] = []
 
-    async def enviar_archivo(self, archivo, *, tipo_whatsapp, pie, tema_id=None) -> int:
+    async def enviar_archivo(
+        self, archivo, *, tipo_whatsapp, pie, tema_id=None, silencioso=False
+    ) -> int:
         self.archivos.append((archivo.nombre, tema_id))
+        self.archivos_con_silencio.append((archivo.nombre, tema_id, silencioso))
         return 10 + len(self.archivos)
 
-    async def enviar_mensaje(self, texto, *, tema_id=None, teclado=None) -> int:
+    async def enviar_mensaje(self, texto, *, tema_id=None, teclado=None, silencioso=False) -> int:
         self.mensajes.append((texto, tema_id))
+        self.mensajes_con_silencio.append((texto, tema_id, silencioso))
         return 20 + len(self.mensajes)
 
 
@@ -474,6 +482,15 @@ def _sin_base(monkeypatch):
     monkeypatch.setattr(mod, "_marcar_reenviado", lambda url, w, t, s: None)
     monkeypatch.setattr(mod, "_marcar_fallo", lambda url, w, e: None)
     monkeypatch.setattr(mod, "_conversacion_viva", lambda url, telefono: None)
+    # Por defecto: el número no tiene tema, y cada archivo es el primero de su tanda. Las
+    # pruebas que miden lo contrario lo sobrescriben.
+    monkeypatch.setattr(mod, "_tema_existente", lambda url, telefono: None)
+    monkeypatch.setattr(mod, "_primer_archivo_de_la_tanda", lambda url, tel, wamid: True)
+    # Y nadie está en relevo (6C), que es el caso normal. Sin doblarla, `_en_relevo` abre
+    # una conexión de verdad a `postgresql://x` -- exactamente el coste que describe el
+    # docstring de arriba, y que ya hizo caer a
+    # `test_el_lector_no_retrasa_la_entrega_del_archivo` con 2.78 s de espera.
+    monkeypatch.setattr(mod, "_en_relevo", lambda url, telefono: False)
 
 
 def _mensaje_con_foto(**cambios):
@@ -525,22 +542,36 @@ def test_el_archivo_va_al_tema_del_paciente_y_el_aviso_al_general(monkeypatch):
     assert "Ana Perez" in texto
 
 
-def test_un_texto_suelto_sigue_yendo_al_general(monkeypatch):
-    """Lo único que se muda al tema del paciente es el ARCHIVO."""
+# ==========================================================================================
+# El General se queda solo con lo que pide algo del doctor (13/09/2026)
+# ==========================================================================================
+#
+# Ver NOTA DEL TEXTO SIN TEMA en `ingesta.py`. Estas cinco pruebas son el contrato entero:
+# lo que suena, lo que se archiva mudo y lo que no se manda.
+
+
+def _texto(**cambios):
+    from maxicare_daniela.ingesta import MensajeEntrante
+
+    campos = dict(
+        wamid="w-1",
+        telefono="573001112233",
+        nombre_perfil="Ana",
+        tipo="text",
+        texto="Hola",
+    )
+    campos.update(cambios)
+    return MensajeEntrante(**campos)
+
+
+def _correr_texto(tg, monkeypatch, **cambios):
     import asyncio
 
     from maxicare_daniela import ingesta
-    from maxicare_daniela.ingesta import MensajeEntrante
 
-    _sin_base(monkeypatch)
-    tg = TelegramConTemas()
-
-    asyncio.run(
+    return asyncio.run(
         ingesta.procesar_mensaje(
-            MensajeEntrante(
-                wamid="w-1", telefono="573001112233", nombre_perfil="Ana",
-                tipo="text", texto="Hola",
-            ),
+            _texto(**cambios),
             whatsapp=WhatsAppConArchivo(),
             telegram=tg,
             database_url="postgresql://x",
@@ -548,8 +579,135 @@ def test_un_texto_suelto_sigue_yendo_al_general(monkeypatch):
         )
     )
 
+
+def test_un_texto_no_llega_nunca_al_general(monkeypatch):
+    """El ruido que el doctor vio en producción: siete notificaciones por una conversación
+    que Daniela resolvió sola, con el escalamiento enterrado entre ellas.
+
+    Con tema, el texto se archiva en el hilo del paciente. Al General, NADA.
+    """
+    from maxicare_daniela import ingesta
+
+    _sin_base(monkeypatch)
+    monkeypatch.setattr(ingesta, "_tema_existente", lambda url, tel: TEMA_DE_ANA)
+    tg = TelegramConTemas()
+
+    _correr_texto(tg, monkeypatch)
+
     assert tg.archivos == []
-    assert tg.mensajes[0][1] == TEMA_GENERAL
+    assert [tema for _, tema in tg.mensajes] == [TEMA_DE_ANA]
+    assert TEMA_GENERAL not in [tema for _, tema in tg.mensajes]
+
+
+def test_el_texto_archivado_no_notifica(monkeypatch):
+    """Mudarlo de sitio sin callarlo habría cambiado el ruido de sitio, no quitado."""
+    from maxicare_daniela import ingesta
+
+    _sin_base(monkeypatch)
+    monkeypatch.setattr(ingesta, "_tema_existente", lambda url, tel: TEMA_DE_ANA)
+    tg = TelegramConTemas()
+
+    _correr_texto(tg, monkeypatch)
+
+    _, _, silencioso = tg.mensajes_con_silencio[0]
+    assert silencioso is True
+
+
+def test_un_texto_sin_tema_no_se_manda_a_ninguna_parte(monkeypatch):
+    """El número que todavía no tiene hilo no estrena uno por escribir «buenas tardes».
+
+    Es la regla que cerró la fase 6: si cada saludo abriera un tema, el grupo sería
+    inservible en una semana. Y como no hay hilo donde archivarlo, no se manda nada: la
+    conversación vive en `mensajes_entrantes` y en el historial del agente.
+    """
+    _sin_base(monkeypatch)  # el default ya es «sin tema»
+    tg = TelegramConTemas()
+
+    resultado = _correr_texto(tg, monkeypatch)
+
+    assert tg.mensajes == []
+    assert tg.archivos == []
+    # No reenviado, pero tampoco un fallo: son dos cosas distintas y la base las distingue.
+    assert resultado.reenviado is False
+    assert resultado.fallo is None
+
+
+def test_un_texto_nunca_crea_el_tema(monkeypatch):
+    """`_tema_existente` es una CONSULTA. Si alguien la cambia por `lectura.asegurar_tema`,
+    cada saludo abriría un hilo y esta prueba cae."""
+    from maxicare_daniela import ingesta, lectura
+
+    _sin_base(monkeypatch)
+
+    async def _revienta(*a, **kw):
+        raise AssertionError("un texto suelto no puede abrir el tema de nadie")
+
+    monkeypatch.setattr(lectura, "asegurar_tema", _revienta)
+    monkeypatch.setattr(lectura, "crear_tema", _revienta, raising=False)
+    tg = TelegramConTemas()
+
+    _correr_texto(tg, monkeypatch)
+
+    assert tg.mensajes == []
+
+
+def test_el_segundo_archivo_de_la_tanda_no_vuelve_a_avisar(monkeypatch):
+    """La radiografía y, dos minutos después, la foto de la encía son UNA cosa.
+
+    El archivo se deposita igual --eso no se negocia-- pero el General ya se enteró.
+    """
+    import asyncio
+
+    from maxicare_daniela import ingesta, lectura
+
+    _sin_base(monkeypatch)
+    monkeypatch.setattr(ingesta, "_primer_archivo_de_la_tanda", lambda url, t, w: False)
+    monkeypatch.setattr(lectura, "asegurar_tema", _devuelve_async(TEMA_DE_ANA))
+    monkeypatch.setattr(lectura, "leer_y_repartir", _devuelve_async(None))
+    tg = TelegramConTemas()
+
+    asyncio.run(
+        ingesta.procesar_mensaje(
+            _mensaje_con_foto(wamid="wamid-foto-2"),
+            whatsapp=WhatsAppConArchivo(),
+            telegram=tg,
+            database_url="postgresql://x",
+            tema_general=TEMA_GENERAL,
+        )
+    )
+
+    assert tg.archivos == [("radio.jpg", TEMA_DE_ANA)]
+    assert tg.mensajes == []
+
+
+def test_el_archivo_que_cae_en_un_tema_no_notifica_pero_el_del_general_si(monkeypatch):
+    """La asimetría entera en una prueba.
+
+    Con tema: el archivo entra mudo y lo que suena es el aviso del General. Sin tema, el
+    archivo ES lo que llega al General, así que tiene que sonar — nadie va a abrir un hilo
+    que no existe para encontrarlo.
+    """
+    import asyncio
+
+    from maxicare_daniela import ingesta, lectura
+
+    for tema, silencio_esperado in ((TEMA_DE_ANA, True), (None, False)):
+        _sin_base(monkeypatch)
+        monkeypatch.setattr(lectura, "asegurar_tema", _devuelve_async(tema))
+        monkeypatch.setattr(lectura, "leer_y_repartir", _devuelve_async(None))
+        tg = TelegramConTemas()
+
+        asyncio.run(
+            ingesta.procesar_mensaje(
+                _mensaje_con_foto(),
+                whatsapp=WhatsAppConArchivo(),
+                telegram=tg,
+                database_url="postgresql://x",
+                tema_general=TEMA_GENERAL,
+            )
+        )
+
+        assert tg.archivos_con_silencio[0][2] is silencio_esperado
 
 
 def test_el_lector_no_retrasa_la_entrega_del_archivo(monkeypatch):
@@ -759,7 +917,7 @@ def test_el_aviso_al_general_no_invalida_una_entrega_que_ya_ocurrio(monkeypatch)
     monkeypatch.setattr(lectura, "leer_y_repartir", _devuelve_async(None))
 
     class TelegramQueFallaElAviso(TelegramConTemas):
-        async def enviar_mensaje(self, texto, *, tema_id=None, teclado=None) -> int:
+        async def enviar_mensaje(self, texto, *, tema_id=None, teclado=None, silencioso=False) -> int:
             raise ErrorDeCanal("Telegram no respondio")
 
     tg = TelegramQueFallaElAviso()
@@ -869,3 +1027,103 @@ def test_sin_conversacion_viva_el_lector_no_recibe_un_grupo_inventado(monkeypatc
     asyncio.run(corrida())
 
     assert capturado["group_id"] is None
+
+
+# ==========================================================================================
+# El relevo (6C): la única excepción al silencio del hilo
+# ==========================================================================================
+#
+# Fuera del relevo, el tema de un paciente es su expediente y no suena NUNCA -- es el no
+# negociable 14. Durante un relevo deja de ser un expediente: es una conversación en vivo, y
+# un doctor que no oye la respuesta del paciente es un doctor hablando solo.
+
+
+def _correr_archivo(tg, **cambios):
+    import asyncio
+
+    from maxicare_daniela import ingesta
+
+    return asyncio.run(
+        ingesta.procesar_mensaje(
+            _mensaje_con_foto(**cambios),
+            whatsapp=WhatsAppConArchivo(),
+            telegram=tg,
+            database_url="postgresql://x",
+            tema_general=TEMA_GENERAL,
+        )
+    )
+
+
+def test_durante_un_relevo_el_texto_del_paciente_suena_en_su_hilo(monkeypatch):
+    from maxicare_daniela import ingesta
+
+    _sin_base(monkeypatch)
+    monkeypatch.setattr(ingesta, "_tema_existente", lambda url, tel: TEMA_DE_ANA)
+    monkeypatch.setattr(ingesta, "_en_relevo", lambda url, tel: True)
+    tg = TelegramConTemas()
+
+    _correr_texto(tg, monkeypatch)
+
+    assert [(destino, silencio) for _, destino, silencio in tg.mensajes_con_silencio] == [
+        (TEMA_DE_ANA, False)
+    ]
+
+
+def test_sin_relevo_el_texto_sigue_entrando_mudo(monkeypatch):
+    """La otra mitad: que abrir esta puerta no haya reabierto el ruido que cerró la 14."""
+    from maxicare_daniela import ingesta
+
+    _sin_base(monkeypatch)
+    monkeypatch.setattr(ingesta, "_tema_existente", lambda url, tel: TEMA_DE_ANA)
+    tg = TelegramConTemas()
+
+    _correr_texto(tg, monkeypatch)
+
+    assert tg.mensajes_con_silencio[0][2] is True
+
+
+def test_sin_tema_no_se_pregunta_siquiera_por_el_relevo(monkeypatch):
+    """Sin hilo no hay dónde sonar, así que la consulta sería una ida a Neon para no usar el
+    resultado -- delante de la entrega de un mensaje de un paciente."""
+    from maxicare_daniela import ingesta
+
+    _sin_base(monkeypatch)
+    preguntas: list[str] = []
+    monkeypatch.setattr(
+        ingesta, "_en_relevo", lambda url, tel: preguntas.append(tel) or False
+    )
+    tg = TelegramConTemas()
+
+    _correr_texto(tg, monkeypatch)  # el default de `_sin_base` es «sin tema»
+
+    assert preguntas == []
+
+
+def test_durante_un_relevo_el_archivo_tambien_suena(monkeypatch):
+    from maxicare_daniela import ingesta, lectura
+
+    _sin_base(monkeypatch)
+    monkeypatch.setattr(lectura, "asegurar_tema", _devuelve_async(TEMA_DE_ANA))
+    monkeypatch.setattr(lectura, "leer_y_repartir", _devuelve_async(None))
+    monkeypatch.setattr(ingesta, "_en_relevo", lambda url, tel: True)
+    tg = TelegramConTemas()
+
+    _correr_archivo(tg)
+
+    assert tg.archivos_con_silencio[0][2] is False
+
+
+def test_durante_un_relevo_el_general_no_recibe_el_aviso_de_archivos(monkeypatch):
+    """El doctor YA tiene el archivo sonándole en el hilo donde está conversando. El aviso al
+    General sería el mismo timbrazo por segunda vez, en el sitio donde menos falta hace."""
+    from maxicare_daniela import ingesta, lectura
+
+    _sin_base(monkeypatch)
+    monkeypatch.setattr(lectura, "asegurar_tema", _devuelve_async(TEMA_DE_ANA))
+    monkeypatch.setattr(lectura, "leer_y_repartir", _devuelve_async(None))
+    monkeypatch.setattr(ingesta, "_en_relevo", lambda url, tel: True)
+    tg = TelegramConTemas()
+
+    _correr_archivo(tg)
+
+    assert [m for m in tg.mensajes if m[1] == TEMA_GENERAL] == []

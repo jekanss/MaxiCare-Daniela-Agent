@@ -583,7 +583,7 @@ class TelegramQueCaptura:
         #: (texto, tema_id)
         self.mensajes: list[tuple[str, int | None]] = []
 
-    async def enviar_mensaje(self, texto, *, tema_id=None, teclado=None) -> int:
+    async def enviar_mensaje(self, texto, *, tema_id=None, teclado=None, silencioso=False) -> int:
         self.mensajes.append((texto, tema_id))
         return 1
 

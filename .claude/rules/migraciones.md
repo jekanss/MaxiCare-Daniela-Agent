@@ -10,7 +10,15 @@ cada vez que se corre. De ahí las dos reglas:
 
 1. **Toda migración es idempotente.** `CREATE TABLE IF NOT EXISTS`,
    `ADD COLUMN IF NOT EXISTS`, `ON CONFLICT DO NOTHING`, y para un constraint el
-   bloque `DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = ...)`.
+   bloque `DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = ...
+   AND conrelid = 'la_tabla'::regclass)`.
+
+   **Ese `conrelid` no es opcional.** `pg_constraint.conname` es único por TABLA, no en
+   toda la base: sin filtrar, el `IF NOT EXISTS` encuentra el constraint de `public` desde
+   cualquier otro esquema y se salta la creación. La 003 lo hizo sin él y el CHECK de
+   `relevo_motivo_cierre` no llegó a existir en `pruebas`, `pruebas_ingesta` ni
+   `pruebas_web` — o sea que ninguna prueba contra Neon podía demostrar que la lista
+   cerrada seguía cerrada. Lo arregla la 013.
 2. **Una migración ya aplicada no se edita.** Se añade la siguiente con el número
    que sigue: `004_...sql`.
 

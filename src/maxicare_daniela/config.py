@@ -373,6 +373,19 @@ class Config:
     #: `573001234567` son el mismo número.
     telefonos_prueba: tuple[str, ...] = ()
 
+    #: Lo que Telegram pone en la cabecera `X-Telegram-Bot-Api-Secret-Token` de cada update.
+    #: Es a `/webhook/telegram` lo que `whatsapp_app_secret` es al webhook de Meta, con una
+    #: diferencia que decide el comportamiento: **vacío significa CERRADO, no abierto**. Ese
+    #: endpoint es la única puerta por la que algo de fuera puede hacer que el bot le escriba
+    #: al WhatsApp de un paciente, así que sin secreto responde 403 a todo y el relevo
+    #: simplemente no funciona. Lo genera y lo registra
+    #: `scripts/configurar_webhook_telegram.py`.
+    #:
+    #: Va con default --y por eso al final del dataclass, donde los campos con default
+    #: tienen que ir-- porque no configurarlo es un estado legítimo: el resto del sistema
+    #: funciona entero sin relevo, igual que funcionaba antes de la 6C.
+    telegram_webhook_secret: str = ""
+
     @classmethod
     def desde_entorno(cls) -> Config:
         return cls(
@@ -385,6 +398,7 @@ class Config:
             whatsapp_app_secret=_opcional("WHATSAPP_APP_SECRET"),
             telegram_bot_token=_opcional("MAXICARE_TELEGRAM_BOT_TOKEN"),
             telegram_chat_doctores=_opcional("MAXICARE_TELEGRAM_CHAT_DOCTORES"),
+            telegram_webhook_secret=_opcional("MAXICARE_TELEGRAM_WEBHOOK_SECRET"),
             google_sa_b64=_opcional("MAXICARE_GOOGLE_SA_B64"),
             google_calendar_id=_opcional("MAXICARE_GOOGLE_CALENDAR_ID"),
             modelo_daniela=_opcional("MAXICARE_MODELO_DANIELA", MODELO_DANIELA),

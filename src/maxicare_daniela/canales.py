@@ -140,6 +140,66 @@ class WhatsApp:
             raise ErrorDeCanal(f"WhatsApp rechazó el envío: {r.status_code} {r.text[:300]}")
         return r.json()["messages"][0]["id"]
 
+    async def subir_media(self, archivo: ArchivoDescargado) -> str:
+        """Sube los bytes a Meta y devuelve el `media_id`. La primera mitad del relevo.
+
+        Hasta la 6C este proyecto solo bajaba archivos de WhatsApp; esta es la ruta contraria
+        y solo la usa el relevo, cuando un doctor manda una foto dentro del tema.
+
+        Son DOS llamadas y no una, igual que al bajar: Meta no acepta los bytes dentro del
+        `messages`. El `media_id` que sale de aquí caduca a los 30 días, pero lo que importa
+        es que caduca AL USARSE una vez -- si `enviar_archivo` falla, hay que volver a subir.
+        """
+        datos_form = {"messaging_product": "whatsapp", "type": archivo.mime}
+        archivos = {"file": (archivo.nombre, archivo.contenido, archivo.mime)}
+        async with httpx.AsyncClient(timeout=TIMEOUT_DESCARGA) as cliente:
+            r = await cliente.post(
+                f"{BASE_GRAPH}/{self._phone_number_id}/media",
+                headers=self._cabeceras,
+                data=datos_form,
+                files=archivos,
+            )
+        if r.status_code != 200:
+            raise ErrorDeCanal(f"WhatsApp no aceptó el archivo: {r.status_code} {r.text[:300]}")
+        media_id = r.json().get("id")
+        if not media_id:
+            raise ErrorDeCanal(f"la subida no devolvió 'id': {r.text[:200]}")
+        return media_id
+
+    async def enviar_archivo(
+        self, telefono: str, media_id: str, *, tipo: str, pie: str | None = None,
+        nombre: str | None = None,
+    ) -> str:
+        """Manda un archivo ya subido. Devuelve el wamid.
+
+        El `pie` NO viaja en un audio: Meta rechaza el mensaje entero si se lo pone, y el
+        doctor se quedaría sin saber que su nota de voz no salió. En un documento va además
+        el `filename`, que es lo que el paciente ve en su teléfono -- sin él aparece un
+        nombre inventado por WhatsApp.
+        """
+        contenido: dict[str, str] = {"id": media_id}
+        if pie and tipo != "audio":
+            contenido["caption"] = pie[:1024]
+        if nombre and tipo == "document":
+            contenido["filename"] = nombre
+
+        cuerpo = {
+            "messaging_product": "whatsapp",
+            "recipient_type": "individual",
+            "to": telefono,
+            "type": tipo,
+            tipo: contenido,
+        }
+        async with httpx.AsyncClient(timeout=TIMEOUT_NORMAL) as cliente:
+            r = await cliente.post(
+                f"{BASE_GRAPH}/{self._phone_number_id}/messages",
+                headers=self._cabeceras,
+                json=cuerpo,
+            )
+        if r.status_code != 200:
+            raise ErrorDeCanal(f"WhatsApp rechazó el archivo: {r.status_code} {r.text[:300]}")
+        return r.json()["messages"][0]["id"]
+
     async def marcar_leido(self, wamid: str) -> None:
         """El doble check azul. Falla en silencio a propósito: es cortesía, no correo.
 
@@ -175,6 +235,24 @@ _ENVIO_POR_TIPO = {
     "sticker": ("sendDocument", "document"),
 }
 
+#: El camino de vuelta, que solo existe desde el relevo (6C): qué manda un doctor dentro del
+#: tema y en qué tipo de WhatsApp se convierte.
+#:
+#: `voice` -> `audio` no es un descuido: WhatsApp NO tiene un tipo `voice` al enviar, y
+#: mandarlo así hace que Meta rechace el mensaje entero. La nota de voz del doctor le llega
+#: al paciente como audio, que es lo mismo que oye.
+#:
+#: `photo` -> `image` sí recomprime, y aquí da igual: lo que va en esa dirección es una
+#: indicación del doctor, no una radiografía que alguien tenga que diagnosticar.
+_TIPO_WHATSAPP_DE_TELEGRAM = {
+    "photo": "image",
+    "document": "document",
+    "voice": "audio",
+    "audio": "audio",
+    "video": "video",
+    "video_note": "video",
+}
+
 
 # ══════════════════════════════════════════════════════════════════════════════════════════
 # NOTA DEL TEMA GENERAL — comprobado contra la API, no deducido
@@ -191,6 +269,27 @@ _ENVIO_POR_TIPO = {
 # El fallo importa porque es silencioso en el peor momento: el 200 ya se le devolvió a Meta,
 # así que WhatsApp da el mensaje por entregado mientras el archivo no llegó a nadie. Lo único
 # que lo delata es la columna `fallo` de `mensajes_entrantes`.
+#
+# ══════════════════════════════════════════════════════════════════════════════════════════
+# NOTA DEL SILENCIO — para qué existe `silencioso=`
+# ══════════════════════════════════════════════════════════════════════════════════════════
+#
+# El grupo tiene dos clases de sitio y NO se notifican igual:
+#
+#   General          -> es la bandeja de entrada de los doctores. Suena.
+#   Tema de paciente -> es el expediente de esa persona. NO suena nunca.
+#
+# La razón es que el tema se consulta, no se vigila: dentro caen sus archivos, la lectura
+# clínica de cada uno y lo que va escribiendo por WhatsApp mientras Daniela lo atiende sola.
+# Si cada «buenas tardes» vibrara, los doctores apagarían las notificaciones del grupo entero
+# y con ellas los escalamientos, que son lo único que de verdad les pide algo.
+#
+# `silencioso` es `disable_notification` de Telegram: el mensaje entra y queda en el hilo,
+# pero no genera aviso. No es lo mismo que no mandarlo — el historial sigue completo.
+#
+# El interruptor lo decide QUIEN LLAMA, no este módulo, porque hay un caso en que el tema sí
+# tiene que sonar: durante un relevo (fase 6C) el doctor está conversando por ese hilo y
+# necesita enterarse. Ese es el único sitio que pasará `silencioso=False` a un tema.
 
 
 class Telegram:
@@ -201,8 +300,29 @@ class Telegram:
     def _url(self, metodo: str) -> str:
         return f"{BASE_TELEGRAM}/bot{self._token}/{metodo}"
 
+    def enlace_al_tema(self, tema_id: int) -> str:
+        """El enlace que abre ese hilo en la app del doctor.
+
+        Un supergrupo privado no tiene `@usuario`, así que la forma que funciona es
+        `t.me/c/<id sin el -100>/<tema>`. El `-100` es un prefijo que Telegram le pone al id
+        interno del chat y que el enlace no lleva; dejarlo produce un enlace que no abre
+        nada y el doctor se queda mirando un error.
+
+        Es el complemento del relevo: la NOTIFICACIÓN de escribir en el tema es la que lo
+        lleva allí, y este enlace es para cuando vuelve al General y quiere entrar a mano.
+        """
+        interno = str(self._chat_id).lstrip("-")
+        if interno.startswith("100"):
+            interno = interno[3:]
+        return f"https://t.me/c/{interno}/{tema_id}"
+
     async def enviar_mensaje(
-        self, texto: str, *, tema_id: int | None = None, teclado: dict | None = None
+        self,
+        texto: str,
+        *,
+        tema_id: int | None = None,
+        teclado: dict | None = None,
+        silencioso: bool = False,
     ) -> int:
         cuerpo: dict = {"chat_id": self._chat_id, "text": texto, "parse_mode": "HTML"}
         # `if tema_id:` y no `is not None` a propósito — ver NOTA DEL TEMA GENERAL abajo.
@@ -210,6 +330,10 @@ class Telegram:
             cuerpo["message_thread_id"] = tema_id
         if teclado is not None:
             cuerpo["reply_markup"] = teclado
+        # Ver NOTA DEL SILENCIO abajo: el depósito en el tema de un paciente entra sin
+        # vibrar el celular de nadie; lo que suena es el General.
+        if silencioso:
+            cuerpo["disable_notification"] = True
         async with httpx.AsyncClient(timeout=TIMEOUT_NORMAL) as cliente:
             r = await cliente.post(self._url("sendMessage"), json=cuerpo)
         datos = r.json()
@@ -224,6 +348,7 @@ class Telegram:
         tipo_whatsapp: str,
         pie: str,
         tema_id: int | None = None,
+        silencioso: bool = False,
     ) -> int:
         """Sube los bytes a Telegram. Devuelve el `message_id`, que es la prueba de entrega."""
         metodo, campo = _ENVIO_POR_TIPO.get(tipo_whatsapp, ("sendDocument", "document"))
@@ -233,6 +358,10 @@ class Telegram:
         datos_form["caption"] = pie[:1024]
         if tema_id:
             datos_form["message_thread_id"] = str(tema_id)
+        # Este va como `data` de un multipart, así que el booleano tiene que ir en el texto
+        # que Telegram acepta ("true"), no como el `True` de Python.
+        if silencioso:
+            datos_form["disable_notification"] = "true"
 
         archivos = {campo: (archivo.nombre, archivo.contenido, archivo.mime)}
         async with httpx.AsyncClient(timeout=TIMEOUT_DESCARGA) as cliente:
@@ -304,3 +433,130 @@ class Telegram:
         datos = r.json()
         if not datos.get("ok"):
             raise ErrorDeCanal(f"Telegram no borró el mensaje: {datos.get('description')}")
+
+    # ======================================================================================
+    # El relevo (6C) -- todo lo que hace falta para que el botón deje de ser decorativo
+    # ======================================================================================
+
+    async def reabrir_tema(self, tema_id: int) -> None:
+        """Lo contrario de `cerrar_tema`: quita el candado que pone Telegram.
+
+        Mientras está abierto, cualquiera del grupo puede escribir en él y lo que escriba
+        LLEGA AL PACIENTE. Por eso el relevo tiene una sola salida y tres disparadores: un
+        tema que se queda abierto es un canal hacia el WhatsApp de alguien que nadie vigila.
+        """
+        cuerpo = {"chat_id": self._chat_id, "message_thread_id": tema_id}
+        async with httpx.AsyncClient(timeout=TIMEOUT_NORMAL) as cliente:
+            r = await cliente.post(self._url("reopenForumTopic"), json=cuerpo)
+        datos = r.json()
+        if not datos.get("ok"):
+            raise ErrorDeCanal(f"Telegram no reabrió el tema: {datos.get('description')}")
+
+    async def responder_callback(
+        self, callback_id: str, texto: str = "", *, alerta: bool = False
+    ) -> None:
+        """Le quita el relojito al botón. Telegram da DIEZ SEGUNDOS y luego lo da por muerto.
+
+        Va siempre lo primero, antes de tocar la base o de reabrir nada: si se responde
+        después del trabajo, el doctor ve el botón girando y lo pulsa otra vez.
+
+        **Sin `url=`.** Es la tentación evidente --llevar al doctor a su hilo de un salto--
+        y está comprobado contra la API que no se puede: `answerCallbackQuery` con una `url`
+        hacia un tema del propio supergrupo responde `URL_INVALID`. De ahí que el relevo
+        ESCRIBA en el tema: esa notificación es lo que de verdad lleva al doctor allí.
+
+        No propaga: un acuse perdido no puede impedir que el relevo se active.
+        """
+        cuerpo: dict = {"callback_query_id": callback_id}
+        if texto:
+            # Telegram corta en 200 y rechaza la llamada entera si se pasa.
+            cuerpo["text"] = texto[:200]
+        if alerta:
+            cuerpo["show_alert"] = True
+        try:
+            async with httpx.AsyncClient(timeout=TIMEOUT_NORMAL) as cliente:
+                await cliente.post(self._url("answerCallbackQuery"), json=cuerpo)
+        except httpx.HTTPError:
+            pass
+
+    async def editar_teclado(self, mensaje_id: int, teclado: dict | None = None) -> None:
+        """Cambia los botones de un mensaje ya enviado, SIN tocar su texto.
+
+        Es lo que mantiene el General ordenado. Sin esto, un escalamiento tomado sigue
+        mostrando «Hablar yo con el paciente» para siempre y el segundo doctor que pase lo
+        pulsa creyendo que nadie lo ha visto.
+
+        `editMessageReplyMarkup` y no `editMessageText` a propósito: reescribir el texto
+        obligaría a recomponer el aviso entero --que lo escribió un modelo, con su formato y
+        con todo lo ajeno ya escapado-- a partir de lo que trae el callback, que viene en
+        texto plano. El resultado sería un escalamiento que pierde las negritas justo cuando
+        deja de poder leerse de un vistazo. El teclado es lo único que cambió; se cambia solo
+        el teclado.
+
+        `teclado=None` deja el mensaje sin botones.
+        """
+        cuerpo: dict = {
+            "chat_id": self._chat_id,
+            "message_id": mensaje_id,
+            # `{}` y no la ausencia del campo: omitirlo CONSERVA el teclado que ya tenía.
+            "reply_markup": teclado if teclado is not None else {},
+        }
+        async with httpx.AsyncClient(timeout=TIMEOUT_NORMAL) as cliente:
+            r = await cliente.post(self._url("editMessageReplyMarkup"), json=cuerpo)
+        datos = r.json()
+        if not datos.get("ok"):
+            raise ErrorDeCanal(f"Telegram no editó el teclado: {datos.get('description')}")
+
+    async def reaccionar(self, mensaje_id: int, emoji: str = "👍") -> None:
+        """El acuse de que lo que escribió el doctor SÍ salió hacia el paciente.
+
+        Una reacción y no una respuesta a propósito: un «entregado» por cada frase llenaría
+        el hilo de ruido y el expediente dejaría de poder leerse. Lo que sí merece un mensaje
+        visible es el fallo -- ahí el doctor tiene que enterarse sin buscar.
+
+        No propaga: quedarse sin el visto bueno no puede deshacer un mensaje ya entregado.
+        """
+        cuerpo = {
+            "chat_id": self._chat_id,
+            "message_id": mensaje_id,
+            "reaction": [{"type": "emoji", "emoji": emoji}],
+        }
+        try:
+            async with httpx.AsyncClient(timeout=TIMEOUT_NORMAL) as cliente:
+                await cliente.post(self._url("setMessageReaction"), json=cuerpo)
+        except httpx.HTTPError:
+            pass
+
+    async def descargar_archivo(
+        self, file_id: str, *, nombre: str | None = None
+    ) -> ArchivoDescargado:
+        """Baja un archivo que mandó un doctor. Dos llamadas, como en WhatsApp.
+
+        La primera canjea el `file_id` por un `file_path`; la segunda baja los bytes de
+        `/file/bot<token>/<path>`, que es una URL DISTINTA de la de la API y lleva el token
+        en la ruta -- escribirla a mano en un log filtraría el token del bot.
+
+        Tope de Telegram: 20 MB por descarga de bot. Más grande no se puede bajar y el error
+        lo dice, que es mejor que un archivo truncado llegando al paciente.
+        """
+        async with httpx.AsyncClient(timeout=TIMEOUT_DESCARGA) as cliente:
+            r = await cliente.post(self._url("getFile"), json={"file_id": file_id})
+            datos = r.json()
+            if not datos.get("ok"):
+                raise ErrorDeCanal(f"Telegram no entregó el archivo: {datos.get('description')}")
+            ruta = datos["result"].get("file_path")
+            if not ruta:
+                raise ErrorDeCanal(f"getFile no trae 'file_path': {datos}")
+
+            bajado = await cliente.get(f"{BASE_TELEGRAM}/file/bot{self._token}/{ruta}")
+            if bajado.status_code != 200:
+                raise ErrorDeCanal(f"no se pudo bajar el archivo: {bajado.status_code}")
+
+        mime = bajado.headers.get("content-type", "application/octet-stream")
+        return ArchivoDescargado(
+            contenido=bajado.content,
+            mime=mime,
+            # El nombre real si Telegram lo trae; si no, el que da la ruta, que conserva la
+            # extensión y es lo que decide con qué app lo abre el paciente.
+            nombre=nombre or ruta.rsplit("/", 1)[-1],
+        )
