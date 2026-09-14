@@ -100,6 +100,12 @@ clínica libere el cupo al día siguiente.
 La hora vive en `configuracion` como `hora_recordatorio_vispera`, no como constante en el
 código: es una perilla de la clínica, como las tres de la fase 8.
 
+**Y la víspera retrocede al día hábil anterior cuando está cerrada.** La víspera de un lunes es
+siempre domingo, y la clínica no abre: el recordatorio se adelanta al sábado, a la hora de
+cierre. No es un caso raro — es **toda cita de lunes agendada con más de 24 h de antelación**, un
+quinto de la semana. Esto era implícito y es lo que hace imposible cualquier palabra relativa al
+día en el texto de la sección 6.
+
 **El choque entre «2 h antes» y la jornada.** Una cita a las 8:00 a. m. agendada la víspera a
 las 10:00 a. m. tiene 22 h de antelación, cae en la banda de las 2 h, y su recordatorio sale a
 las 6:00 a. m. — con la clínica cerrada. G5 lo aplazaría a la apertura, que son las 8:00 a. m.:
