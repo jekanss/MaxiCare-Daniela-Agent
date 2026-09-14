@@ -255,8 +255,14 @@ def _huecos_libres(
     hasta: datetime,
     *,
     maximo: int = 6,
+    repartir: bool = False,
 ) -> list[datetime]:
     """Los bloques realmente libres: existen, no llegaron al tope, y nadie los bloqueó.
+
+    `repartir` decide QUÉ seis de todos los libres se devuelven, y son dos preguntas
+    distintas: «¿qué tienes el miércoles?» pide un panorama del día y lo quiere repartido;
+    «esa hora está llena» pide lo más parecido a la hora que el paciente ya eligió, y ahí
+    repartir le ofrecería las cinco de la tarde a quien acaba de pedir las nueve.
 
     Los tres filtros son distintos y ninguno sobra. Un bloque puede existir en la rejilla,
     tener cupo en Neon, y aun así estar bloqueado porque un doctor apartó esa hora en su
@@ -285,9 +291,34 @@ def _huecos_libres(
         if any(b.solapa(bloque, bloque + paso) for b in bloqueos):
             continue
         libres.append(bloque)
-        if len(libres) >= maximo:
+        # Sin reparto se corta en cuanto hay suficientes: son las MÁS CERCANAS a lo pedido,
+        # que es lo que quiere quien preguntó por una hora concreta.
+        if not repartir and len(libres) >= maximo:
             break
-    return libres
+    return _repartidas(libres, maximo) if repartir else libres
+
+
+def _repartidas(libres: list[datetime], maximo: int) -> list[datetime]:
+    """Reduce a `maximo` bloques SIN quedarse con el principio del día.
+
+    Visto en producción el 13/09/2026, con el miércoles 16 entero libre:
+
+        «Sí, tengo disponibilidad el miércoles 16 a las 8:00 am, 9:00 am o 10:00 am.»
+
+    El corte era `libres[:6]` sobre una rejilla ordenada, así que un día completo devolvía
+    08:00 a 13:00 y la tarde **no le llegaba al modelo**: no es que la descartara, es que no
+    existía para él. Quien solo puede después de almorzar se iba creyendo que no había nada.
+
+    Se conservan siempre el primero y el último, y el resto se reparte a pasos iguales entre
+    ellos: la oferta abarca la jornada en vez de amontonarse al principio. Ordenada, porque
+    una lista de horas salteadas para que parezca variada es exactamente lo que un paciente
+    lee como desorden.
+    """
+    if len(libres) <= maximo or maximo < 2:
+        return libres
+    ultimo = len(libres) - 1
+    indices = sorted({round(i * ultimo / (maximo - 1)) for i in range(maximo)})
+    return [libres[i] for i in indices]
 
 
 def _texto_alternativas(libres: list[datetime]) -> str:
@@ -451,7 +482,9 @@ async def _consultar_disponibilidad(ctx: ContextoDaniela, desde: str, hasta: str
     fin_efectivo = inicio + paso if ventana_corta else fin
 
     def trabajo(conn) -> str:
-        libres = _huecos_libres(conn, ctx, inicio, fin_efectivo)
+        # `repartir`: esta es la pregunta «¿qué tienes ese día?», y la respuesta tiene que
+        # abarcar la jornada. Ver `_repartidas`.
+        libres = _huecos_libres(conn, ctx, inicio, fin_efectivo, repartir=True)
         if libres:
             return _texto_alternativas(libres)
         # «Cerrado» y «lleno» son opuestos y hasta el 13/09/2026 decían lo mismo. Si NINGÚN
