@@ -184,9 +184,10 @@ export type CasoSinResolver = {
 }
 
 /** La ventana de «sin resolver»: lo que Daniela no pudo resolver en los últimos 30 días,
- *  agrupado por huella. `es_admin` decide si la pantalla enseña la huella cruda -- el
- *  detalle técnico no es para la clínica. Pantalla de solo lectura, sin ninguna escritura
- *  que doble esta función. */
+ *  agrupado por huella. La `huella` llega SIEMPRE, con cualquier rol: `titulo()` la parsea
+ *  para componer el título legible, y sin ella la clínica se quedaría sin títulos. Lo que
+ *  `es_admin` decide es si la pantalla la enseña CRUDA -- el detalle técnico no es para la
+ *  clínica. Pantalla de solo lectura, sin ninguna escritura que doble esta función. */
 export async function listarSinResolver(): Promise<{
   casos: CasoSinResolver[]
   es_admin: boolean

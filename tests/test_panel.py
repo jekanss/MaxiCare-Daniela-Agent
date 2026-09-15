@@ -497,8 +497,9 @@ def test_sin_resolver_sin_casos_no_revienta(monkeypatch):
 def test_es_admin_sale_de_quien_pregunta_no_del_caso():
     """`es_admin` lo calcula el servidor a partir del rol de la sesión -- nunca del front.
 
-    Es lo único que decide si el navegador recibe la huella cruda: un no-admin no puede
-    quedar viendo el detalle técnico por un descuido en la pantalla."""
+    La `huella` viaja a todos los roles --la pantalla la necesita para componer el título
+    legible-- y lo que `es_admin` decide es si se MUESTRA cruda: un no-admin no puede quedar
+    viendo el detalle técnico por un descuido en la pantalla."""
     for rol, esperado in [("admin", True), ("doctor", False), ("recepcion", False)]:
         runtime.app.dependency_overrides[runtime.usuario_actual] = _como(rol)
         try:

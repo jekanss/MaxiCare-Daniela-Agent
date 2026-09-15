@@ -1657,9 +1657,11 @@ async def api_historial(quien: dict = Depends(usuario_actual)) -> dict:
 async def api_sin_resolver(quien: dict = Depends(usuario_actual)) -> dict:
     """La ventana del informe. Solo lectura: esta pantalla no tiene ninguna escritura.
 
-    `es_admin` es lo que decide si el navegador recibe el detalle tecnico. Se calcula aqui y
-    no en el front: un error crudo en la pantalla de una clinica genera una llamada de
-    soporte que no deberia existir.
+    `es_admin` NO recorta el payload: la `huella` viaja a todos los roles porque la pantalla
+    la necesita para componer el titulo legible --`titulo()` la parsea-- y sin ella la
+    clinica se quedaria sin titulos. Lo que `es_admin` decide es si la pantalla MUESTRA la
+    huella cruda, que es el detalle tecnico. Se calcula aqui y no en el front: un error crudo
+    en la pantalla de una clinica genera una llamada de soporte que no deberia existir.
     """
     with persistencia.conectar(config.database_url) as conn:
         casos = persistencia.casos_recientes(conn)

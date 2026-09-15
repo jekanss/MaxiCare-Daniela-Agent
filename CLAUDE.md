@@ -50,7 +50,7 @@ Entregables por fase. **Los marcados gastan tokens**; los demás, ni uno:
 | `scripts/probar_persistencia.py` | que una conversación sobrevive a reiniciar (fase 7) | solo con `--chat` |
 | `scripts/probar_panel.py` | el panel de tratamientos (fase 8) | solo con `--chat` |
 | `scripts/probar_recordatorios.py` | la cola de recordatorios y su despachador | no |
-| `scripts/probar_sin_resolver.py` | el informe de lo que Daniela no pudo (fase 6D) | no |
+| `scripts/probar_sin_resolver.py` | el informe de lo que Daniela no pudo (fase PENDIENTE) | no |
 | `scripts/probar_calendario.py` | `CalendarioGoogle` contra el calendario real | no |
 | `scripts/probar_webhook.py <url>` | el webhook en producción | **sí** (despierta a Daniela) |
 

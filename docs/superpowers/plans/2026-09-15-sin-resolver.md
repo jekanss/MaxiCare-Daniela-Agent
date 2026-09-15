@@ -1961,7 +1961,7 @@ Expected: `TODO OK` y `Esquema de pruebas borrado.`
 Añadir a la tabla de entregables por fase:
 
 ```
-| `scripts/probar_sin_resolver.py` | el informe de lo que Daniela no pudo (fase 6D) | no |
+| `scripts/probar_sin_resolver.py` | el informe de lo que Daniela no pudo (fase PENDIENTE) | no |
 ```
 
 Y el no negociable **22**, redactado como los otros — una línea que sobreviva a una

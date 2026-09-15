@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { listarSinResolver, SesionCaducada, type CasoSinResolver } from '../api'
+import { listarSinResolver, SesionCaducada, type CasoSinResolver } from '@/api'
 
 const SP = "'Space Grotesk', sans-serif"
 

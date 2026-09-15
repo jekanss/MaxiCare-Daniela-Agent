@@ -76,8 +76,9 @@ def config_de_corrida(
 ):
     """El `RunConfig` que lleva TODA llamada al modelo de este proyecto.
 
-    Hay tres consumidores de modelo --Daniela en `conversacion.py`, el lector en `lectura.py`
-    y los evaluadores de guardrail en `guardrails.py`-- y los tres tienen que pasar por aquí.
+    Hay cuatro consumidores de modelo --Daniela en `conversacion.py`, el lector en
+    `lectura.py`, los evaluadores de guardrail en `guardrails.py` y el analista de «sin
+    resolver» en `analista.py`-- y los cuatro tienen que pasar por aquí.
     Cada uno construía (o no construía) el suyo, y así fue como el proyecto acabó con la
     misma fuga abierta en dos sitios distintos durante meses: `RunConfig()` nace en la 0.22.2
     con `trace_include_sensitive_data=True`, de modo que omitirlo sube al dashboard de OpenAI
@@ -98,13 +99,16 @@ def config_de_corrida(
 
     `group_id` agrupa las trazas de un mismo EPISODIO. Es el UUID de la conversación, no el
     teléfono: un teléfono agrupa a una persona para siempre; una conversación agrupa lo que
-    alguien va a querer leer entero cuando llegue un reclamo. Los TRES consumidores de modelo
-    tienen que pasar el mismo, o el trace agrupado tendrá un agujero justo en los turnos con
-    archivo, que son los más interesantes de leer.
+    alguien va a querer leer entero cuando llegue un reclamo. Los TRES consumidores que viven
+    dentro del turno de un paciente --Daniela, el lector y los evaluadores-- tienen que pasar
+    el mismo, o el trace agrupado tendrá un agujero justo en los turnos con archivo, que son
+    los más interesantes de leer. El cuarto, el analista de `analista.py`, no pasa ninguno a
+    propósito: corre fuera de todo turno, sobre un caso YA agrupado que junta a muchos
+    pacientes, y no hay una conversación suya que leer entera.
 
     `version_prompt` se omite a propósito cuando quien llama no es Daniela ni el lector: los
-    evaluadores de guardrail tienen su propio prompt, y poner el de Daniela ahí sería un dato
-    plausible y falso.
+    evaluadores de guardrail y el analista tienen su propio prompt, y poner el de Daniela ahí
+    sería un dato plausible y falso.
     """
     from agents import RunConfig
 
