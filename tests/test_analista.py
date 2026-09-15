@@ -6,6 +6,9 @@ dura, no lo que un modelo real conteste.
 
 from __future__ import annotations
 
+import asyncio
+from dataclasses import replace
+
 import pytest
 
 from maxicare_daniela.analista import InformeDelCaso, texto_del_caso
@@ -55,3 +58,64 @@ def test_las_instrucciones_prohiben_proponer_cifras():
 
     assert "prohibido" in instrucciones
     assert "cifra" in instrucciones or "precio" in instrucciones
+
+
+def test_MAXICARE_ANALIZAR_SIN_RESOLVER_en_0_no_arranca_la_tarea(monkeypatch):
+    """El interruptor de `config.analizar_sin_resolver`, igual que
+    `test_el_despachador_arranca_aunque_no_haya_telegram` para los recordatorios: si alguien
+    invierte o borra el `if` de `_arrancar_analisis`, la suite offline tiene que caer aquí, no
+    quedarse en verde mientras la clinica paga llamadas al modelo que creia apagadas.
+    """
+    from maxicare_daniela import runtime
+
+    async def escenario():
+        monkeypatch.setattr(
+            runtime,
+            "config",
+            replace(
+                runtime.config,
+                database_url="postgresql://no-se-usa",
+                analizar_sin_resolver=False,
+            ),
+        )
+        monkeypatch.setattr(runtime, "_tarea_de_analisis", None)
+
+        await runtime._arrancar_analisis()
+
+        assert runtime._tarea_de_analisis is None, (
+            "MAXICARE_ANALIZAR_SIN_RESOLVER=0 y la tarea arrancó igual"
+        )
+
+    asyncio.run(escenario())
+
+
+def test_MAXICARE_ANALIZAR_SIN_RESOLVER_en_1_si_arranca_la_tarea(monkeypatch):
+    """La otra dirección: con el interruptor encendido y base configurada, la tarea sí nace."""
+    from maxicare_daniela import runtime
+
+    async def escenario():
+        monkeypatch.setattr(
+            runtime,
+            "config",
+            replace(
+                runtime.config,
+                database_url="postgresql://no-se-usa",
+                analizar_sin_resolver=True,
+            ),
+        )
+        monkeypatch.setattr(runtime, "_tarea_de_analisis", None)
+
+        await runtime._arrancar_analisis()
+
+        tarea = runtime._tarea_de_analisis
+        assert tarea is not None, "el interruptor estaba encendido y la tarea no arrancó"
+        assert not tarea.done()
+        # Lo primero que hace el bucle es dormir el ciclo entero: cancelarlo aquí no
+        # interrumpe ningún análisis a medias y evita dejar una tarea viva entre pruebas.
+        tarea.cancel()
+        try:
+            await tarea
+        except asyncio.CancelledError:
+            pass
+
+    asyncio.run(escenario())

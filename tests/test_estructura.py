@@ -60,6 +60,11 @@ MODULOS_SIN_TRANSPORTE = (
     # los va a serializar como JSON detrás de una cookie, y por eso sus pruebas pueden
     # comprobar que la bitácora es atómica sin levantar un servidor.
     "panel.py",
+    # `analista.py` (tarea 3 de «sin resolver») corre en su propia tarea de fondo, no en un
+    # turno de paciente, y aun así no sabe que existe un reloj ni un `@app.on_event`: recibe
+    # un `database_url` y un límite, y devuelve cuántos informes escribió. Eso es lo que
+    # permite probar `analizar_pendientes` sin levantar `runtime.py` ni su bucle.
+    "analista.py",
 )
 
 #: Solo `runtime.py` importa el framework web. Si FastAPI aparece en cualquier otro módulo,

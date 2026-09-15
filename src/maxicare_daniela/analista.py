@@ -13,6 +13,7 @@ atras -- exactamente lo que `sin_cifra_no_documentada` existe para impedir.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from agents import Agent, Runner
@@ -78,10 +79,22 @@ async def analizar_pendientes(*, database_url: str, limite: int = 5) -> int:
     Falla ABIERTO, como `_preguntar` en `guardrails.py`: un caso sin informe se muestra igual
     --con su contador y sus ejemplos-- y se reintenta en el ciclo siguiente. Un analista
     caido no puede dejar la pantalla vacia.
+
+    `persistencia.conectar`/`casos_sin_informe`/`guardar_informe` son psycopg SINCRONO, y esta
+    tarea corre en el mismo bucle de eventos que atiende los webhooks de WhatsApp --un solo
+    worker, a proposito (`.claude/rules/despliegue.md`)--. Sin `to_thread` cada vuelta congela
+    el proceso entero mientras Neon responde. Sigue el mismo patron que
+    `seguimientos.despachar`: abrir y cerrar la conexion tambien van por `to_thread`, como todo
+    lo demas -- `psycopg.connect` contra Neon es un handshake TLS completo y el cierre hace
+    commit o rollback antes de soltar el socket, los dos bloqueantes. `Runner.run` SI es un
+    `await` de verdad y no entra en ningun `to_thread`: lo que se manda al hilo es solo lo
+    sincrono de psycopg.
     """
     escritos = 0
-    with persistencia.conectar(database_url) as conn:
-        for caso in persistencia.casos_sin_informe(conn, limite=limite):
+    conn = await asyncio.to_thread(persistencia.conectar, database_url)
+    try:
+        casos = await asyncio.to_thread(persistencia.casos_sin_informe, conn, limite=limite)
+        for caso in casos:
             try:
                 corrida = await Runner.run(
                     _analista,
@@ -94,10 +107,22 @@ async def analizar_pendientes(*, database_url: str, limite: int = 5) -> int:
                 log.error("el analista fallo en %s (%s); se reintenta", caso["huella"], e)
                 continue
 
-            persistencia.guardar_informe(
+            await asyncio.to_thread(
+                persistencia.guardar_informe,
                 conn, huella=caso["huella"], informe=informe.model_dump(),
                 sobre=caso["contador"],
             )
             escritos += 1
+    finally:
+        await asyncio.to_thread(_cerrar, conn)
 
     return escritos
+
+
+def _cerrar(conn) -> None:
+    """Cierra la conexion del ciclo. Un fallo cerrandola no se lleva por delante el recuento
+    de informes ya escritos -- cada `guardar_informe` confirma por su cuenta."""
+    try:
+        conn.close()
+    except Exception:  # noqa: BLE001 -- el ciclo ya hizo su trabajo; esto es limpieza
+        log.warning("no se pudo cerrar la conexion del analisis de «sin resolver»", exc_info=True)

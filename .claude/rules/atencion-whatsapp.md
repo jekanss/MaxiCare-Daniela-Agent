@@ -324,7 +324,7 @@ Medido sobre el turno real que falló, con el modelo de verdad: antes, escalaba 
 después de los tres arreglos, cinco corridas de cinco sin un solo tripwire. La ruta de
 escalamiento por doble disparo sigue existiendo, y tiene que seguir existiendo.
 
-## El tracing: tres consumidores de modelo, una sola puerta
+## El tracing: cuatro consumidores de modelo, una sola puerta
 
 **Toda llamada al modelo pasa por `config.config_de_corrida()`.** No hay ninguna excepción y
 no debe haberla: `RunConfig()` nace en la 0.22.2 con `trace_include_sensitive_data=True`, así
@@ -332,36 +332,45 @@ que cualquier llamada que lo omita sube al dashboard de OpenAI —que se exporta
 clínica— lo que escribe el paciente, lo que responde Daniela y las entradas y salidas de las
 tools, con su nombre, su teléfono y sus citas dentro.
 
-Los consumidores son **tres**, y esa cuenta es lo que hay que recordar:
+Los consumidores son **cuatro**, y esa cuenta es lo que hay que recordar:
 
 | Quién llama al modelo | Dónde |
 |---|---|
 | Daniela, cada turno | `conversacion._config_de_corrida` |
 | El lector de archivos | `lectura._config_de_corrida` |
-| **Los evaluadores de guardrail** | `guardrails._preguntar` |
+| Los evaluadores de guardrail | `guardrails._preguntar` |
+| **El analista de «sin resolver»** (tarea 3, fuera del turno del paciente) | `analista.analizar_pendientes` |
 
-El tercero es el que se olvida, y de hecho se olvidó: nadie piensa en un freno como en algo
-que habla con OpenAI. `uso_indebido` recibe el mensaje del paciente y `sin_lectura_clinica`
-recibe la respuesta de Daniela antes de enviarla, así que su traza llevaba exactamente lo
-mismo que las otras dos. Estuvo abierto desde la fase 4 hasta el 13/09/2026, mientras
-`lectura.py` ya tenía el suyo cerrado desde 6B.
+El de los evaluadores de guardrail es el que se olvidó una vez: nadie piensa en un freno como
+en algo que habla con OpenAI. `uso_indebido` recibe el mensaje del paciente y
+`sin_lectura_clinica` recibe la respuesta de Daniela antes de enviarla, así que su traza
+llevaba exactamente lo mismo que las otras dos. Estuvo abierto desde la fase 4 hasta el
+13/09/2026, mientras `lectura.py` ya tenía el suyo cerrado desde 6B.
 
 **La construcción vive en UN sitio** (`config.config_de_corrida`) precisamente por eso:
 estaba duplicada entre dos módulos, y la duplicación es cómo la misma fuga siguió abierta en
 un tercero. Cada módulo conserva su envoltorio con el docstring de qué fuga cierra, pero
-ninguno construye su propio `RunConfig`.
+ninguno construye su propio `RunConfig`. `analista.py` no tiene ni envoltorio propio: llama
+a `config_de_corrida(canal="informe")` directo, igual que `guardrails._preguntar`.
 
 Va en código y no en `OPENAI_AGENTS_TRACE_INCLUDE_SENSITIVE_DATA` a propósito: una variable
-de entorno se olvida en el siguiente servidor. Tres pruebas lo sostienen —una por consumidor—
-y las tres caen al quitar el campo.
+de entorno se olvida en el siguiente servidor. Los tres primeros consumidores tienen, cada
+uno, una prueba que captura el `run_config` real que reciben y comprueba
+`trace_include_sensitive_data is False` (`test_conversacion.py`, `test_lectura.py`,
+`test_guardrails.py`); esas tres caen al quitar el campo. El cuarto (`analista.py`) no
+duplica esa prueba —sus pruebas offline no invocan `Runner.run`, por la misma regla que
+prohíbe gastar tokens en la suite— y queda cubierto solo por las pruebas genéricas de
+`test_trazas.py` sobre la función compartida, no por una captura en el sitio de la llamada.
 
 **Lo que esto NO arregla:** lo ya subido sigue en el dashboard de OpenAI. Cerrar la fuga
 detiene la hemorragia; no borra lo que salió entre la fase 6A y hoy.
 
 **La otra mitad del entregable de la fase 7 —agrupar las trazas por `group_id`— YA ESTÁ
 HECHA** (`1dd75bd`, integrada en `a0e922d`). El `group_id` es el UUID de la conversación en
-los dos carriles, nunca el teléfono, y lo pasan los tres consumidores de modelo. Hay prueba
-por consumidor y caen las tres desde la única puerta.
+los dos carriles, nunca el teléfono, y lo pasan los tres consumidores del turno del paciente.
+`analista.py` no tiene conversación que agrupar —corre sobre un caso ya agregado de muchos
+pacientes— y por eso llama a `config_de_corrida` sin `group_id`, con `canal="informe"` en su
+lugar.
 
 ## Lo que la suite offline NO caza
 
