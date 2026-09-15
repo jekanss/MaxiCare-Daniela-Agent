@@ -53,6 +53,7 @@ from pydantic import BaseModel, Field
 from starlette.exceptions import HTTPException as HTTPExceptionStarlette
 
 from . import (
+    analista,
     atencion,
     autenticacion,
     contratos,
@@ -1937,6 +1938,58 @@ async def _parar_despacho_de_recordatorios() -> None:
     _tarea_de_recordatorios.cancel()
     try:
         await _tarea_de_recordatorios
+    except (asyncio.CancelledError, Exception):  # noqa: BLE001
+        pass
+
+
+# ==========================================================================================
+# El analisis de "sin resolver"
+# ==========================================================================================
+
+
+#: Cada cinco minutos. El informe no es urgente: lo lee un humano una vez por semana. Con
+#: sesenta segundos se gastarian llamadas para que nadie las mire antes.
+SEGUNDOS_ENTRE_ANALISIS = 300.0
+
+#: La referencia viva, igual que las otras dos tareas: sin guardarla, el recolector de basura
+#: se puede llevar una tarea que nadie mira y el informe dejaria de escribirse sin un solo
+#: error en el log.
+_tarea_de_analisis: asyncio.Task | None = None
+
+
+async def _analizar_sin_parar() -> None:
+    """El reloj del informe. Fuera del turno del paciente, en su propia tarea."""
+    while True:
+        await asyncio.sleep(SEGUNDOS_ENTRE_ANALISIS)
+        try:
+            escritos = await analista.analizar_pendientes(database_url=config.database_url)
+            if escritos:
+                log.info("sin resolver: %s informes escritos", escritos)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 -- tiene que seguir vivo manana
+            log.exception("el analisis de «sin resolver» fallo; se reintenta en el siguiente ciclo")
+
+
+@app.on_event("startup")
+async def _arrancar_analisis() -> None:
+    global _tarea_de_analisis
+    if not config.database_url:
+        log.info("sin base configurada: no arranca el analisis de «sin resolver»")
+        return
+    if not config.analizar_sin_resolver:
+        log.info("MAXICARE_ANALIZAR_SIN_RESOLVER=0: se capturan casos, no se escriben informes")
+        return
+    _tarea_de_analisis = asyncio.create_task(_analizar_sin_parar())
+
+
+@app.on_event("shutdown")
+async def _parar_analisis() -> None:
+    if _tarea_de_analisis is None:
+        return
+    _tarea_de_analisis.cancel()
+    try:
+        await _tarea_de_analisis
     except (asyncio.CancelledError, Exception):  # noqa: BLE001
         pass
 

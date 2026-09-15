@@ -362,6 +362,10 @@ class Config:
     #: los doctores sin recibir radiografías -- que es lo que pasaría apagando el servicio.
     daniela_responde: bool
 
+    #: `!= "0"` y no `== "1"`: el default es analizar. Apagarlo NO apaga la captura -- los
+    #: casos se siguen agrupando, solo se quedan sin las tres frases.
+    analizar_sin_resolver: bool = True
+
     #: Los números que pueden resetearse a sí mismos con `/clearstate` (ver `reseteo.py`).
     #:
     #: **Vacía por defecto, y eso es la política, no un descuido**: con la tupla vacía el
@@ -434,6 +438,7 @@ class Config:
             # de otra forma la apagaría sin que nadie lo hubiera pedido, y el fallo sería
             # silencioso: pacientes escribiendo y nadie contestando.
             daniela_responde=_opcional("MAXICARE_DANIELA_RESPONDE", "1") != "0",
+            analizar_sin_resolver=_opcional("MAXICARE_ANALIZAR_SIN_RESOLVER", "1") != "0",
             telefonos_prueba=_lista("MAXICARE_TELEFONOS_PRUEBA"),
         )
 
