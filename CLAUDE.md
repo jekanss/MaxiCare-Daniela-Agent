@@ -152,8 +152,11 @@ una —qué se midió, qué costó— está en la regla que cubre ese archivo.
    se pierde un caso, nunca un turno. Con huellas del modelo, dos casos iguales salen
    distintos y la agrupación —que es todo el valor— se rompe sin un solo error en el log. El
    `ROTO` agrupa por `type(e).__name__`, **nunca** por el mensaje: con el mensaje cada error
-   es único. Un `fallo_respuesta` que empieza por `relevo:` no entra: no es un fallo. Y
-   `/clearstate` borra los ejemplos **sin** bajar el contador.
+   es único. Un `fallo_respuesta` que empieza por `relevo:` no entra: contarlo inundaría el
+   informe con un caso por cada relevo y ahogaría los fallos de verdad bajo ruido que no lo
+   es. Y `/clearstate` borra los ejemplos **sin** bajar el contador: bajarlo borraría de la
+   cuenta a un paciente real cada vez que alguien resetea su número, y «doce personas
+   preguntaron por ortodoncia» dejaría de ser cierto.
 
 # Dónde está el resto
 

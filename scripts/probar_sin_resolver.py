@@ -22,11 +22,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-from maxicare_daniela import persistencia, sin_resolver  # noqa: E402
+from maxicare_daniela import persistencia, reseteo, sin_resolver  # noqa: E402
 from maxicare_daniela.config import cargar_dotenv  # noqa: E402
 from maxicare_daniela.sin_resolver import Senal  # noqa: E402
 
-ESQUEMA = "pruebas"
+# Propio, no compartido con `probar_tools.py` ni con `probar_recordatorios.py`: los tres
+# escriben con `DROP SCHEMA ... CASCADE` al montar y al limpiar, y correrlos a la vez sobre
+# el mismo nombre hace que uno le borre el esquema al otro a mitad de corrida --se midio: 22
+# "FALLA" de `UndefinedTable` que no eran ninguna regresion, solo dos scripts pisandose.
+ESQUEMA = "pruebas_sin_resolver"
 fallos = 0
 
 
@@ -169,18 +173,37 @@ def main() -> int:
                 propago = True
             finally:
                 persistencia.registrar_caso = original
-            print(f"{marca(propago)} 7. el fallo SI sale de `volcar` "
-                  f"(quien lo traga es el try de _anotar_resultado, no esta funcion)")
+            print(f"{marca(propago)} 7. el fallo SI sale de `volcar`, el doble local de "
+                  f"este script (el `try` real de `_anotar_resultado` lo cubre "
+                  f"`test_atencion.py::test_un_caso_que_revienta_no_le_quita_la_respuesta_"
+                  f"a_nadie`)")
 
-            # 8
+            # 8 -- por el camino REAL de /clearstate: `persistencia.borrar_rastro`, no el
+            # `olvidar_ejemplos_de` suelto que la propia funcion dice que /clearstate NO usa.
             f_antes = fila(conn, "falta_dato:ortodoncia:precio")
-            persistencia.olvidar_ejemplos_de(conn, "+573001112233")
+            borrado = persistencia.borrar_rastro(conn, "+573001112233")
             f_despues = fila(conn, "falta_dato:ortodoncia:precio")
-            ok = (f_despues["contador"] == f_antes["contador"]
-                  and not any(e.get("telefono") == "+573001112233"
-                              for e in f_despues["ejemplos"]))
-            print(f"{marca(ok)} 8. /clearstate borra la frase y el contador NO baja "
-                  f"({f_antes['contador']} -> {f_despues['contador']})")
+            etiqueta = reseteo.ETIQUETAS_DE_TABLA.get("casos_sin_resolver")
+            ok = (
+                f_despues["contador"] == f_antes["contador"]
+                and not any(e.get("telefono") == "+573001112233"
+                            for e in f_despues["ejemplos"])
+                # La clave tiene que estar EN el dict que borrar_rastro le devuelve a
+                # /clearstate, o el paciente no se entera de que se le borro una frase.
+                and "casos_sin_resolver" in borrado
+                and borrado["casos_sin_resolver"] >= 1
+                # Y esa clave tiene que tener etiqueta legible en ETIQUETAS_DE_TABLA, sin
+                # guion bajo: sin ella el paciente recibe "1 en casos_sin_resolver" por
+                # WhatsApp, el nombre interno de una tabla de la clinica, no suya.
+                and etiqueta is not None
+                and "_" not in etiqueta[0]
+                and "_" not in etiqueta[1]
+            )
+            print(f"{marca(ok)} 8. borrar_rastro (el camino real de /clearstate) borra la "
+                  f"frase, NO baja el contador, y trae etiqueta legible "
+                  f"({f_antes['contador']} -> {f_despues['contador']}, "
+                  f"casos_sin_resolver={borrado.get('casos_sin_resolver')}, "
+                  f"etiqueta={etiqueta})")
     finally:
         limpiar(directa)
 
