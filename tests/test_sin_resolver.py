@@ -1,7 +1,9 @@
 """Pruebas de la logica pura de `sin_resolver`.
 
-No necesitan base de datos: la huella y el recorte de ejemplos son funciones puras,
-precisamente para que se puedan probar sin levantar nada.
+No necesitan base de datos: la huella es una funcion pura, precisamente para que se pueda
+probar sin levantar nada. El recorte a `MAX_EJEMPLOS` NO vive aqui: lo hace el SQL de
+`persistencia.registrar_caso`, a proposito, y lo cubre `tests/test_sin_resolver_neon.py`
+(`test_siete_turnos_iguales_dejan_una_fila_con_contador_siete`).
 """
 
 from __future__ import annotations
@@ -125,7 +127,10 @@ def test_el_motivo_sin_dos_puntos_tambien_agrupa():
 
 
 # ==========================================================================================
-# Los ejemplos: cinco como maximo, y el telefono nunca sale
+# Los ejemplos: el telefono nunca sale hacia la pantalla
+#
+# El recorte a MAX_EJEMPLOS no esta aqui -- vive en el SQL de `persistencia.registrar_caso`
+# y lo cubre la suite de Neon. Lo unico puro que queda de los ejemplos es `sin_telefonos`.
 # ==========================================================================================
 
 

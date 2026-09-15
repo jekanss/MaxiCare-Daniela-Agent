@@ -17,6 +17,7 @@ import os
 import threading
 import time
 
+import psycopg
 import pytest
 
 from maxicare_daniela import persistencia
@@ -96,10 +97,40 @@ def test_la_migracion_crea_la_tabla(esquema):
 
 
 def test_un_tipo_invalido_lo_rechaza_la_base(esquema):
-    """El CHECK tiene que vivir en el esquema de pruebas, no solo en `public`."""
+    """El CHECK tiene que vivir en el esquema de pruebas, no solo en `public`.
+
+    `CheckViolation` y no `Exception` a secas: un `Exception` ancho pasaria igual si
+    `registrar_caso` reventara con un `TypeError` por un cambio de firma, sin que el CHECK
+    tuviera nada que ver.
+    """
     with persistencia.conectar(esquema) as conn:
-        with pytest.raises(Exception):
+        with pytest.raises(psycopg.errors.CheckViolation):
             persistencia.registrar_caso(conn, huella="x:y", tipo="INVENTADO")
+
+
+def test_un_registro_que_falla_no_envenena_la_conexion_del_llamador(esquema):
+    """La regresion que importa de verdad.
+
+    `registrar_caso` es instrumentacion: se llama desde una conexion que ya trae escrituras
+    clinicas encima (`atencion._anotar_resultado`, `relevo.activar`, tarea 2). Si el fallo de
+    un caso deja la transaccion de esa conexion abortada, toda sentencia posterior sobre ELLA
+    --incluida una escritura clinica que no tiene nada que ver con este caso-- muere con
+    «current transaction is aborted», aunque el `INSERT` fallido no importara para nada.
+
+    Sin el `rollback` dentro de `registrar_caso`, este intento de escribir un caso VALIDO en
+    la misma conexion, justo despues del invalido, revienta igual que el primero.
+    """
+    with persistencia.conectar(esquema) as conn:
+        with pytest.raises(psycopg.errors.CheckViolation):
+            persistencia.registrar_caso(conn, huella="x:y", tipo="INVENTADO")
+
+        # La MISMA conexion, sin abrir otra, tiene que poder seguir escribiendo.
+        persistencia.registrar_caso(
+            conn, huella="falta_dato:sobrevive:precio", tipo="FALTA_DATO"
+        )
+        fila = _fila(conn, "falta_dato:sobrevive:precio")
+
+    assert fila["contador"] == 1
 
 
 def test_siete_turnos_iguales_dejan_una_fila_con_contador_siete(esquema):

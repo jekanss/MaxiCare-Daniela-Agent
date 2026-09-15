@@ -2397,6 +2397,13 @@ def registrar_caso(
 
     `escalo` se SUMA, no se pisa: es la metrica que le dice a la clinica cuanto le costo en
     interrupciones al doctor la ficha que falta.
+
+    Es INSTRUMENTACION: no puede tumbar nada del turno clinico que la llama. Si el `INSERT`
+    revienta -- un `tipo` fuera del CHECK, lo que sea -- se hace `rollback` antes de dejar
+    subir la excepcion. Sin eso, la conexion del llamador (`atencion._anotar_resultado`,
+    `relevo.activar`, las dos con escrituras clinicas ya hechas en esa misma conexion) queda
+    con la transaccion abortada, y toda sentencia posterior sobre ella muere con «current
+    transaction is aborted», aunque no tenga nada que ver con este caso.
     """
     from .sin_resolver import MAX_EJEMPLOS
 
@@ -2405,38 +2412,42 @@ def registrar_caso(
         if ejemplo and ejemplo.strip()
         else "[]"
     )
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            INSERT INTO casos_sin_resolver (huella, tipo, escalo, ejemplos)
-            VALUES (%s, %s, %s, %s)
-            ON CONFLICT (huella) DO UPDATE SET
-                contador   = casos_sin_resolver.contador + 1,
-                escalo     = casos_sin_resolver.escalo + EXCLUDED.escalo,
-                ultima_vez = now(),
-                ejemplos   = (
-                    -- La concatenacion `||` de arreglos solo existe para `jsonb`, no para
-                    -- `json` (Postgres: "operator does not exist: json || json"). La columna
-                    -- sigue siendo TEXT -- el cast a `jsonb` es solo para esta cuenta, y el
-                    -- resultado vuelve a `::text` antes de guardarse.
-                    SELECT coalesce(jsonb_agg(e.v ORDER BY e.n)::text, '[]')
-                      FROM (
-                        SELECT v, row_number() OVER () AS n
-                          FROM jsonb_array_elements(
-                            casos_sin_resolver.ejemplos::jsonb || EXCLUDED.ejemplos::jsonb
-                          ) AS v
-                      ) e
-                     WHERE e.n > greatest(
-                        0,
-                        jsonb_array_length(
-                            casos_sin_resolver.ejemplos::jsonb || EXCLUDED.ejemplos::jsonb
-                        ) - %s
-                     )
-                )
-            """,
-            (huella, tipo, escalo, nuevo, MAX_EJEMPLOS),
-        )
-    conn.commit()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO casos_sin_resolver (huella, tipo, escalo, ejemplos)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (huella) DO UPDATE SET
+                    contador   = casos_sin_resolver.contador + 1,
+                    escalo     = casos_sin_resolver.escalo + EXCLUDED.escalo,
+                    ultima_vez = now(),
+                    ejemplos   = (
+                        -- La concatenacion `||` de arreglos solo existe para `jsonb`, no
+                        -- para `json` (Postgres: "operator does not exist: json || json").
+                        -- La columna sigue siendo TEXT -- el cast a `jsonb` es solo para
+                        -- esta cuenta, y el resultado vuelve a `::text` antes de guardarse.
+                        SELECT coalesce(jsonb_agg(e.v ORDER BY e.n)::text, '[]')
+                          FROM (
+                            SELECT v, row_number() OVER () AS n
+                              FROM jsonb_array_elements(
+                                casos_sin_resolver.ejemplos::jsonb || EXCLUDED.ejemplos::jsonb
+                              ) AS v
+                          ) e
+                         WHERE e.n > greatest(
+                            0,
+                            jsonb_array_length(
+                                casos_sin_resolver.ejemplos::jsonb || EXCLUDED.ejemplos::jsonb
+                            ) - %s
+                         )
+                    )
+                """,
+                (huella, tipo, escalo, nuevo, MAX_EJEMPLOS),
+            )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
 
 
 def casos_recientes(conn, *, dias: int = 30, limite: int = 50) -> list[dict[str, Any]]:
@@ -2447,27 +2458,37 @@ def casos_recientes(conn, *, dias: int = 30, limite: int = 50) -> list[dict[str,
     no tiene botones: no le hacen falta.
 
     El telefono se filtra AQUI y no en la pantalla, para que ni siquiera viaje al navegador.
+
+    De solo lectura, pero con el mismo `rollback` que la escritura: un `SELECT` que revienta
+    deja la transaccion de la conexion tan abortada como un `INSERT`, y esta funcion puede
+    correr sobre una conexion que el llamador siga usando despues.
     """
     from .sin_resolver import sin_telefonos
 
-    with conn.cursor() as cur:
-        cur.execute(
-            "SELECT huella, tipo, contador, escalo, primera_vez, ultima_vez, ejemplos, informe "
-            "  FROM casos_sin_resolver "
-            " WHERE ultima_vez > now() - make_interval(days => %s) "
-            " ORDER BY contador DESC, ultima_vez DESC "
-            " LIMIT %s",
-            (max(1, min(dias, 365)), max(1, min(limite, 200))),
-        )
-        return [
-            {
-                "huella": huella, "tipo": tipo, "contador": contador, "escalo": escalo,
-                "primera_vez": primera.isoformat(), "ultima_vez": ultima.isoformat(),
-                "ejemplos": sin_telefonos(json.loads(ejemplos)),
-                "informe": json.loads(informe) if informe else None,
-            }
-            for huella, tipo, contador, escalo, primera, ultima, ejemplos, informe in cur.fetchall()
-        ]
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT huella, tipo, contador, escalo, primera_vez, ultima_vez, ejemplos, "
+                "       informe "
+                "  FROM casos_sin_resolver "
+                " WHERE ultima_vez > now() - make_interval(days => %s) "
+                " ORDER BY contador DESC, ultima_vez DESC "
+                " LIMIT %s",
+                (max(1, min(dias, 365)), max(1, min(limite, 200))),
+            )
+            return [
+                {
+                    "huella": huella, "tipo": tipo, "contador": contador, "escalo": escalo,
+                    "primera_vez": primera.isoformat(), "ultima_vez": ultima.isoformat(),
+                    "ejemplos": sin_telefonos(json.loads(ejemplos)),
+                    "informe": json.loads(informe) if informe else None,
+                }
+                for huella, tipo, contador, escalo, primera, ultima, ejemplos, informe
+                in cur.fetchall()
+            ]
+    except Exception:
+        conn.rollback()
+        raise
 
 
 def casos_sin_informe(conn, *, limite: int = 5) -> list[dict[str, Any]]:
@@ -2475,68 +2496,94 @@ def casos_sin_informe(conn, *, limite: int = 5) -> list[dict[str, Any]]:
 
     Se re-analiza solo si crecio por cinco Y pasaron siete dias: que el contador suba de 12 a
     40 no tiene por que costar otra llamada, porque el informe seguiria diciendo lo mismo.
+
+    De solo lectura, pero con el mismo `rollback` que la escritura: ver `casos_recientes`.
     """
     from .sin_resolver import sin_telefonos
 
-    with conn.cursor() as cur:
-        cur.execute(
-            "SELECT huella, tipo, contador, escalo, primera_vez, ultima_vez, ejemplos "
-            "  FROM casos_sin_resolver "
-            " WHERE informe IS NULL "
-            "    OR (contador >= informe_sobre * 5 AND informe_en < now() - interval '7 days') "
-            " ORDER BY contador DESC "
-            " LIMIT %s",
-            (max(1, min(limite, 50)),),
-        )
-        return [
-            {
-                "huella": huella, "tipo": tipo, "contador": contador, "escalo": escalo,
-                "primera_vez": primera.isoformat(), "ultima_vez": ultima.isoformat(),
-                "ejemplos": sin_telefonos(json.loads(ejemplos)),
-            }
-            for huella, tipo, contador, escalo, primera, ultima, ejemplos in cur.fetchall()
-        ]
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT huella, tipo, contador, escalo, primera_vez, ultima_vez, ejemplos "
+                "  FROM casos_sin_resolver "
+                " WHERE informe IS NULL "
+                "    OR (contador >= informe_sobre * 5 AND informe_en < now() - interval "
+                "        '7 days') "
+                " ORDER BY contador DESC "
+                " LIMIT %s",
+                (max(1, min(limite, 50)),),
+            )
+            return [
+                {
+                    "huella": huella, "tipo": tipo, "contador": contador, "escalo": escalo,
+                    "primera_vez": primera.isoformat(), "ultima_vez": ultima.isoformat(),
+                    "ejemplos": sin_telefonos(json.loads(ejemplos)),
+                }
+                for huella, tipo, contador, escalo, primera, ultima, ejemplos in cur.fetchall()
+            ]
+    except Exception:
+        conn.rollback()
+        raise
 
 
 def guardar_informe(conn, *, huella: str, informe: dict[str, Any], sobre: int) -> None:
-    """Deja el informe y el contador sobre el que se escribio."""
-    with conn.cursor() as cur:
-        cur.execute(
-            "UPDATE casos_sin_resolver "
-            "   SET informe = %s, informe_en = now(), informe_sobre = %s "
-            " WHERE huella = %s",
-            (json.dumps(informe, ensure_ascii=False), sobre, huella),
-        )
-        if cur.rowcount == 0:
-            log.warning("guardar_informe: la huella %s ya no existe", huella)
-    conn.commit()
+    """Deja el informe y el contador sobre el que se escribio.
+
+    Instrumentacion, igual que `registrar_caso`: si el `UPDATE` revienta, `rollback` antes de
+    dejar subir la excepcion, para no dejar la conexion del llamador con la transaccion
+    abortada.
+    """
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE casos_sin_resolver "
+                "   SET informe = %s, informe_en = now(), informe_sobre = %s "
+                " WHERE huella = %s",
+                (json.dumps(informe, ensure_ascii=False), sobre, huella),
+            )
+            if cur.rowcount == 0:
+                log.warning("guardar_informe: la huella %s ya no existe", huella)
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
 
 
 def olvidar_ejemplos_de(conn, telefono: str) -> int:
     """Quita las frases de ese telefono de todos los casos. Devuelve cuantos toco.
 
-    Lo llama `/clearstate`, y va ANTES del `DELETE FROM conversaciones` por la misma razon
-    que el historial del agente (no negociable 9): despues, ya no hay de donde saber que
-    borrar.
+    PENDIENTE: lo llamara `/clearstate` (tarea 2 del plan); hoy no tiene llamador. Cuando lo
+    tenga, va ANTES del `DELETE FROM conversaciones` por la misma razon que el historial del
+    agente (no negociable 9): despues, ya no hay de donde saber que borrar.
 
     El contador NO baja, a proposito. El conteo es historia de la clinica, no dato del
     paciente: «doce personas preguntaron por ortodoncia» sigue siendo cierto aunque se borre
     una de esas conversaciones.
+
+    Instrumentacion tambien, igual que `registrar_caso`: `rollback` si el `UPDATE` revienta.
     """
     if not telefono:
         return 0
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            UPDATE casos_sin_resolver SET ejemplos = (
-                SELECT coalesce(json_agg(v)::text, '[]')
-                  FROM json_array_elements(ejemplos::json) AS v
-                 WHERE v ->> 'telefono' IS DISTINCT FROM %s
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE casos_sin_resolver SET ejemplos = (
+                    -- `WITH ORDINALITY` numera cada elemento en el orden en que salio del
+                    -- arreglo, y el `ORDER BY` sobre esa columna es lo que garantiza que el
+                    -- reagrupado despues del filtro conserva el orden cronologico -- la
+                    -- unica escritura de la tabla que antes no lo garantizaba.
+                    SELECT coalesce(json_agg(v.elem ORDER BY v.n)::text, '[]')
+                      FROM json_array_elements(ejemplos::json) WITH ORDINALITY AS v(elem, n)
+                     WHERE v.elem ->> 'telefono' IS DISTINCT FROM %s
+                )
+                WHERE ejemplos LIKE %s
+                """,
+                (telefono, f"%{telefono}%"),
             )
-            WHERE ejemplos LIKE %s
-            """,
-            (telefono, f"%{telefono}%"),
-        )
-        tocadas = cur.rowcount
-    conn.commit()
+            tocadas = cur.rowcount
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
     return tocadas

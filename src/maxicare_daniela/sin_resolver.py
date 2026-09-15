@@ -20,10 +20,6 @@ from dataclasses import dataclass
 #: de este modulo: entre un SELECT y un UPDATE en Python cabe el turno de otro paciente.
 MAX_EJEMPLOS = 5
 
-#: Los cuatro tipos. `FALTA_DATO` y `GUARDRAIL` nutren conocimiento y comportamiento;
-#: `ROTO` es operacion; `HUMANO` mide cuanto le cuesta a la clinica lo que falta.
-TIPOS = ("FALTA_DATO", "GUARDRAIL", "ROTO", "HUMANO")
-
 #: Un `fallo_respuesta` que empieza asi NO es un fallo: es un mensaje que entro durante un
 #: relevo (no negociable 15). Sin este filtro, cada relevo ensucia el informe.
 PREFIJO_RELEVO = "relevo:"
