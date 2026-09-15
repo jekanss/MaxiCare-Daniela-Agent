@@ -50,6 +50,7 @@ Entregables por fase. **Los marcados gastan tokens**; los demás, ni uno:
 | `scripts/probar_persistencia.py` | que una conversación sobrevive a reiniciar (fase 7) | solo con `--chat` |
 | `scripts/probar_panel.py` | el panel de tratamientos (fase 8) | solo con `--chat` |
 | `scripts/probar_recordatorios.py` | la cola de recordatorios y su despachador | no |
+| `scripts/probar_sin_resolver.py` | el informe de lo que Daniela no pudo (fase 6D) | no |
 | `scripts/probar_calendario.py` | `CalendarioGoogle` contra el calendario real | no |
 | `scripts/probar_webhook.py <url>` | el webhook en producción | **sí** (despierta a Daniela) |
 
@@ -146,6 +147,13 @@ una —qué se midió, qué costó— está en la regla que cubre ese archivo.
    conversación: sin eso, reprogramar deja vivo un recordatorio de una cita que ya no existe.
    El despacho vive en su **propia** tarea de `runtime.py`, no en la de relevos, que no arranca
    sin Telegram.
+22. **El informe de «sin resolver» se escribe DESPUÉS de responderle al paciente, y su huella
+   la arma el código.** Va dentro del `try` de `_anotar_resultado` que ya traga: si revienta
+   se pierde un caso, nunca un turno. Con huellas del modelo, dos casos iguales salen
+   distintos y la agrupación —que es todo el valor— se rompe sin un solo error en el log. El
+   `ROTO` agrupa por `type(e).__name__`, **nunca** por el mensaje: con el mensaje cada error
+   es único. Un `fallo_respuesta` que empieza por `relevo:` no entra: no es un fallo. Y
+   `/clearstate` borra los ejemplos **sin** bajar el contador.
 
 # Dónde está el resto
 
