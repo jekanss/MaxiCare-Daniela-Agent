@@ -185,6 +185,12 @@ def casos_del_turno(
     #    tenido dato o no: es lo que convierte «salto 4 veces» en «las 4 eran por limpieza
     #    dental», que es la mitad del valor del informe. Y si no hubo hueco, el escalamiento
     #    se cuenta aqui en vez de abrir un `HUMANO` que contaria lo mismo.
+    #
+    #    Con la frase, como los otros tres. Sin ella, el analista recibe un nombre de
+    #    tripwire y un contador, y con eso no puede escribir ni «que paso» ni «recomiendo»
+    #    -- justo para la senal que hoy se pierde entera, que es por la que existe esta
+    #    tabla. Lo que vale del informe es poder notar que cinco de los siete ejemplos
+    #    preguntan por la cuota mensual, y eso solo se ve con las frases delante.
     tratamiento = senales[-1].tratamiento if senales else None
     for i, nombre in enumerate(nombres):
         casos.append(
@@ -192,6 +198,7 @@ def casos_del_turno(
                 huella=huella_guardrail(nombre, tratamiento),
                 tipo="GUARDRAIL",
                 escalo=1 if (hubo_escalamiento and not huecos and i == 0) else 0,
+                ejemplo=frase,
             )
         )
 

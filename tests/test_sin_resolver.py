@@ -83,6 +83,22 @@ def test_un_tripwire_regenerado_deja_caso():
     assert casos[0].huella == "guardrail:sin_cifra_no_documentada:profilaxis"
 
 
+def test_el_caso_de_un_guardrail_TAMBIEN_guarda_la_frase():
+    """Sin ejemplo, el analista de la tarea 3 recibe un nombre de tripwire y un contador, y
+    con eso no puede escribir ni «que paso» ni «recomiendo». Y el `GUARDRAIL` es justo la
+    senal que hoy se pierde entera --la razon de ser de toda esta tabla--, asi que es la peor
+    para dejar muda. El valor esta en poder notar que cinco de los siete ejemplos preguntan
+    por la cuota mensual, y eso solo se ve con las frases delante.
+    """
+    casos = casos_del_turno(
+        senales=[Senal("profilaxis", "precio", hubo_dato=True)],
+        tripwires=["sin_cifra_no_documentada"], escalado_por=None, motivo=None,
+        frase="y cuanto me quedaria la cuota?",
+    )
+
+    assert casos[0].ejemplo == "y cuanto me quedaria la cuota?"
+
+
 def test_un_tripwire_sin_tratamiento_consultado_cae_en_general():
     casos = casos_del_turno(
         senales=[], tripwires=["uso_indebido"], escalado_por=None, motivo=None,
