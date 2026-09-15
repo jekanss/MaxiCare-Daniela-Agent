@@ -1078,6 +1078,8 @@ async def atender(
             # Se saca del `resultado` aquí y no en la llamada de abajo porque el camino del
             # envío fallido lo necesita igual, y ahí `resultado` puede no existir.
             tripwires = resultado.tripwires
+            # Aquí el escalamiento sí ocurrió: `al_escalar` corrió y el doctor está avisado.
+            escalamiento_real = escalado_por
         except Exception as e:  # noqa: BLE001
             # `responder` ya traduce lo que lanza el SDK, pero no lo que lanza una tool con un
             # bug ni un fallo de red a mitad de turno. El silencio es la única respuesta que
@@ -1088,6 +1090,14 @@ async def atender(
             # No hubo `Resultado` que preguntar. Las señales sí sobreviven: viven en el
             # contexto, y una consulta sin dato que ocurrió antes del reventón ocurrió igual.
             tripwires = []
+            # Y el escalamiento NO ocurrió. Ese `"dato_faltante"` es un marcador sintético de
+            # este camino --lo lee `Atendido` y el log-- pero `conversacion.responder` lanzó
+            # antes de llegar a `al_escalar`: ningún doctor fue avisado. Pasárselo al informe
+            # abría un `humano:dato_faltante` con `escalo=1` ADEMÁS del `roto:X` --dos
+            # tarjetas para una historia, que es la regla que esta tabla existe para no
+            # romper-- y la pantalla imprimía «se interrumpió al doctor 1 de N veces» sobre
+            # una interrupción que no existió: un número falso en la pantalla del cliente.
+            escalamiento_real = None
 
         # `limites.latencia_maxima`: nunca instantánea, nunca más de un minuto. Se descuenta
         # lo que ya tardó el turno; sumarlo daría respuestas de minuto y medio y el paciente
@@ -1121,7 +1131,7 @@ async def atender(
                 # un caso `ROTO` por el envío -- que es justo lo que hay que poder contar.
                 senales=ctx.turno.senales,
                 tripwires=tripwires,
-                escalado_por=escalado_por,
+                escalado_por=escalamiento_real,
                 frase=frase_del_paciente,
                 telefono=mensaje.telefono,
             )
@@ -1148,7 +1158,7 @@ async def atender(
             # secas, y la pregunta estar en el anterior.
             senales=ctx.turno.senales,
             tripwires=tripwires,
-            escalado_por=escalado_por,
+            escalado_por=escalamiento_real,
             frase=frase_del_paciente,
             telefono=mensaje.telefono,
         )

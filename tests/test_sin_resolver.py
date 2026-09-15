@@ -119,8 +119,53 @@ def test_la_huella_de_roto_usa_el_tipo_de_error_no_el_mensaje():
         motivo="ModelBehaviorError: invalid tool call zzz-999 at 11:47", frase=None,
     )
 
-    assert uno[0].huella == "roto:ModelBehaviorError"
+    assert uno[0].huella == "roto:modelbehaviorerror"
     assert uno[0].huella == otro[0].huella, "dos fallos del mismo tipo tienen que agrupar"
+
+
+def test_cuatro_variantes_tipograficas_del_mismo_hueco_son_UNA_huella():
+    """Las dos mitades de esta huella las escribe el LLM como texto libre, y la busqueda en
+    la base es por igualdad exacta: el unico caso que llega a producir fila es justo aquel en
+    que esos valores NO pertenecen a ningun vocabulario. Sin normalizar, `Precio`, `precio`,
+    ` precio` y `Precio ` eran CUATRO filas de contador uno donde la clinica tenia que ver
+    una de contador cuatro -- y la agrupacion es todo el valor de la tabla."""
+    from maxicare_daniela.sin_resolver import huella_falta_dato
+
+    variantes = {
+        huella_falta_dato("Ortodoncia", "Precio"),
+        huella_falta_dato("ortodoncia", "precio"),
+        huella_falta_dato(" ortodoncia ", " precio"),
+        huella_falta_dato("ortodoncia", "Precio "),
+    }
+
+    assert variantes == {"falta_dato:ortodoncia:precio"}, f"salieron {len(variantes)} filas"
+
+
+def test_los_espacios_de_DENTRO_tambien_se_colapsan():
+    """«cuota  mensual» con dos espacios y «cuota mensual» con uno son el mismo concepto."""
+    from maxicare_daniela.sin_resolver import huella_falta_dato
+
+    assert huella_falta_dato("ortodoncia", "cuota  mensual") == (
+        huella_falta_dato("ortodoncia", "Cuota Mensual")
+    )
+
+
+def test_un_concepto_que_es_solo_espacios_cae_en_general():
+    """Normalizar no puede dejar una huella terminada en dos puntos y nada."""
+    from maxicare_daniela.sin_resolver import huella_falta_dato
+
+    assert huella_falta_dato("ortodoncia", "   ") == "falta_dato:ortodoncia:_general"
+
+
+def test_las_otras_tres_huellas_tambien_normalizan():
+    """Por simetria, aunque vengan de vocabularios cerrados: una huella que se normaliza a
+    veces es una huella que nadie puede razonar de memoria."""
+    from maxicare_daniela.sin_resolver import huella_guardrail, huella_humano, huella_roto
+
+    assert huella_guardrail("Uso_Indebido", " Limpieza ") == "guardrail:uso_indebido:limpieza"
+    assert huella_guardrail("uso_indebido", "   ") == "guardrail:uso_indebido:_general"
+    assert huella_roto(" TimeoutError : algo") == "roto:timeouterror"
+    assert huella_humano(" Dato_Faltante ") == "humano:dato_faltante"
 
 
 def test_un_fallo_que_empieza_por_relevo_no_es_un_fallo():
@@ -139,7 +184,7 @@ def test_el_motivo_sin_dos_puntos_tambien_agrupa():
         senales=[], tripwires=[], escalado_por=None, motivo="TimeoutError", frase=None
     )
 
-    assert casos[0].huella == "roto:TimeoutError"
+    assert casos[0].huella == "roto:timeouterror"
 
 
 # ==========================================================================================
@@ -195,6 +240,35 @@ def test_el_mismo_guardrail_dos_veces_en_un_turno_es_UNA_tarjeta():
     )
 
     assert len(casos) == 1
+
+
+def test_dos_tripwires_DISTINTOS_en_un_turno_SI_son_dos_tarjetas():
+    """La otra mitad de la de arriba: deduplicar no puede tragarse el turno donde saltaron
+    dos guardrails distintos. Son dos historias y la clinica tiene que ver las dos."""
+    casos = casos_del_turno(
+        senales=[], tripwires=["sin_cifra_no_documentada", "sin_hora_no_verificada"],
+        escalado_por=None, motivo=None, frase="me confirmas el precio y la hora?",
+    )
+
+    assert [c.huella for c in casos] == [
+        "guardrail:sin_cifra_no_documentada:_general",
+        "guardrail:sin_hora_no_verificada:_general",
+    ]
+
+
+def test_el_caso_ROTO_TAMBIEN_guarda_la_frase():
+    """La huella se queda con el TIPO del error y tira el mensaje --tiene que tirarlo, o nada
+    agruparia jamas--, asi que lo unico que le queda al desarrollador para saber que estaba
+    pasando cuando reventó es lo que el paciente habia escrito. Sin ella el analista recibe
+    «lo que escribieron los pacientes: (ninguno)» en la tarjeta que mas contexto necesita."""
+    casos = casos_del_turno(
+        senales=[], tripwires=[], escalado_por=None,
+        motivo="ModelBehaviorError: invalid tool call",
+        frase="quiero mover mi cita del martes",
+    )
+
+    assert casos[0].tipo == "ROTO"
+    assert casos[0].ejemplo == "quiero mover mi cita del martes"
 
 
 def test_un_tripwire_no_es_ademas_un_ROTO():
@@ -272,6 +346,43 @@ def test_la_frase_se_recorta():
 
     assert salida is not None
     assert len(salida) == MAX_FRASE + 3 and salida.endswith("...")
+
+
+def test_una_cedula_NO_entra_a_la_base_con_la_frase():
+    """Regla dura 4: «no se registran cedulas ni documentos de identidad de ningun tipo»,
+    prohibicion expresa del cliente.
+
+    Esta frase (a) se guarda en una tabla, (b) se pinta en la pantalla del panel para TODOS
+    los roles y (c) viaja a OpenAI en la llamada del analista. `atencion` ya invoca esa misma
+    regla para el nombre de un archivo adjunto; el texto del paciente es el sitio mucho mas
+    probable donde aparece una.
+    """
+    from maxicare_daniela.sin_resolver import OMITIDO, frase_para_el_informe
+
+    salida = frase_para_el_informe(["hola, mi cedula es 1.020.345.678, cuanto vale?"])
+
+    assert salida is not None
+    assert "1.020.345.678" not in salida
+    assert "1020345678" not in salida
+    assert OMITIDO in salida
+
+
+def test_se_redacta_el_numero_y_NO_se_tira_la_frase_entera():
+    """La frase es todo el valor de la tarjeta --es lo que deja ver que cinco de siete
+    preguntan por la cuota mensual--, asi que descartarla completa por un numero dentro
+    convierte un caso util en una fila muda."""
+    from maxicare_daniela.sin_resolver import frase_para_el_informe
+
+    salida = frase_para_el_informe(["mi documento 1020345678 y quiero brackets"])
+
+    assert salida is not None
+    assert "quiero brackets" in salida
+
+
+def test_una_frase_sin_numeros_no_la_toca_nadie():
+    from maxicare_daniela.sin_resolver import frase_para_el_informe
+
+    assert frase_para_el_informe(["cuanto vale la ortodoncia?"]) == "cuanto vale la ortodoncia?"
 
 
 def test_una_frase_justo_en_el_tope_no_se_recorta():
@@ -361,6 +472,88 @@ def test_la_tool_de_conocimiento_anota_la_senal(monkeypatch):
     asyncio.run(h._consultar_base_conocimiento(ctx, "ortodoncia", "precio"))
 
     assert ctx.turno.senales == [Senal("ortodoncia", "precio", hubo_dato=False)]
+
+
+def test_un_concepto_que_falta_en_un_tratamiento_CON_fichas_deja_FALTA_DATO(monkeypatch):
+    """EL HUECO QUE NO SE PODIA MEDIR.
+
+    `hubo_dato` se calculaba sobre el texto de DESPUES del respaldo por tratamiento, asi que
+    si el tratamiento tenia cualquier ficha --y los doce de `datos/base_conocimiento.json`
+    tienen entre tres y ocho conceptos cada uno-- un hueco de CONCEPTO era invisible:
+    `falta_dato:ortodoncia:cuota_mensual` no podia existir. Lo unico que llegaba a producir
+    `FALTA_DATO` era un tratamiento con cero filas o un nombre que el modelo se invento, y el
+    ejemplo bandera del informe --«falta el precio de ORTODONCIA, y 5 de los 7 preguntan por
+    la CUOTA MENSUAL»-- era literalmente inalcanzable.
+
+    La otra mitad, la que mantiene la propiedad de OBSERVADOR: lo que el modelo ve no cambia
+    ni un caracter. El respaldo sigue devolviendose igual.
+    """
+    import asyncio
+
+    from maxicare_daniela import herramientas as h
+    from maxicare_daniela.contratos import DatosDelTurno
+
+    class _Ctx:
+        turno = DatosDelTurno()
+        id_conversacion = "c1"
+        canal = "whatsapp"
+        database_url = "postgresql://no-se-usa"
+
+    ctx = _Ctx()
+    respaldo = "ORTODONCIA -- duracion: 18 a 24 meses. garantia: 6 meses de retenedor."
+
+    def _conocimiento(conn, tratamiento, concepto=None):
+        if concepto:
+            return f"SIN DATO DOCUMENTADO para {tratamiento}/{concepto}. Si te lo piden, escala."
+        return respaldo
+
+    async def _corre(_ctx, trabajo):
+        return trabajo(None)
+
+    monkeypatch.setattr(h.persistencia, "consultar_conocimiento", _conocimiento)
+    monkeypatch.setattr(h, "_con_base", _corre)
+
+    texto = asyncio.run(h._consultar_base_conocimiento(ctx, "ortodoncia", "cuota_mensual"))
+
+    assert texto == respaldo, "el modelo tiene que seguir viendo el respaldo, intacto"
+    assert ctx.turno.senales == [Senal("ortodoncia", "cuota_mensual", hubo_dato=False)]
+
+    casos = casos_del_turno(
+        senales=ctx.turno.senales, tripwires=[], escalado_por=None, motivo=None,
+        frase="y cuanto me quedaria la cuota?",
+    )
+    assert [(c.huella, c.tipo) for c in casos] == [
+        ("falta_dato:ortodoncia:cuota_mensual", "FALTA_DATO")
+    ]
+
+
+def test_un_concepto_que_SI_existe_no_deja_caso_aunque_haya_respaldo(monkeypatch):
+    """La otra direccion: si la consulta exacta trae dato, no hay hueco que medir."""
+    import asyncio
+
+    from maxicare_daniela import herramientas as h
+    from maxicare_daniela.contratos import DatosDelTurno
+
+    class _Ctx:
+        turno = DatosDelTurno()
+        id_conversacion = "c1"
+        canal = "whatsapp"
+        database_url = "postgresql://no-se-usa"
+
+    ctx = _Ctx()
+
+    def _conocimiento(conn, tratamiento, concepto=None):
+        return "La limpieza dental cuesta $150.000."
+
+    async def _corre(_ctx, trabajo):
+        return trabajo(None)
+
+    monkeypatch.setattr(h.persistencia, "consultar_conocimiento", _conocimiento)
+    monkeypatch.setattr(h, "_con_base", _corre)
+
+    asyncio.run(h._consultar_base_conocimiento(ctx, "limpieza", "precio"))
+
+    assert ctx.turno.senales == [Senal("limpieza", "precio", hubo_dato=True)]
 
 
 def test_la_tool_anota_tambien_cuando_SI_hubo_dato(monkeypatch):

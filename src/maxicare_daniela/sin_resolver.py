@@ -3,6 +3,11 @@
 Todo lo de aqui es PURO: ni una conexion, ni una llamada al modelo, ni un reloj. La
 escritura vive en `persistencia`, el informe en `analista`, y el volcado en `atencion`.
 
+Y NADA se importa del paquete en la cabecera, a proposito: `contratos` importa `Senal` de
+aqui, asi que un import suyo arriba cerraria el ciclo y el paquete no arrancaria. El unico
+import del paquete esta DENTRO de `_sin_documentos`, diferido, y esta explicado alli.
+
+
 La pieza central es la HUELLA. Es lo que hace que doce pacientes preguntando el precio de
 ortodoncia sean UNA linea con contador 12 y no doce renglones que nadie termina de leer.
 La arma el codigo, nunca el modelo: si el modelo pudiera escribirla, dos casos identicos
@@ -43,6 +48,9 @@ PREFIJO_TRIPWIRE = "tripwire"
 #: Cuando salta un guardrail y en el turno no se consulto ningun tratamiento.
 GENERAL = "_general"
 
+#: Lo que queda en el ejemplo donde habia algo con forma de documento de identidad.
+OMITIDO = "[omitido]"
+
 
 @dataclass(frozen=True)
 class Senal:
@@ -73,12 +81,30 @@ class Caso:
 # ==========================================================================================
 
 
+def _normalizar(valor: str) -> str:
+    """Los espacios de sobra fuera, los internos colapsados, todo en minusculas.
+
+    Es lo que hace que la agrupacion sea de verdad. Las dos mitades de una huella de
+    `FALTA_DATO` --el tratamiento y el concepto-- las escribe el LLM como texto libre, y la
+    busqueda en la base es por igualdad exacta: el unico caso que llega a producir fila es
+    justo aquel en que esos valores NO pertenecen a ningun vocabulario. Sin normalizar,
+    `Precio`, `precio`, ` precio` y `Precio ` son CUATRO filas de contador uno donde la
+    clinica tenia que ver una de contador cuatro, y la tabla se degrada precisamente donde
+    mas se usa.
+
+    Se aplica a las cuatro huellas por simetria, aunque `huella_roto` y `huella_humano`
+    vengan de vocabularios cerrados: una huella que se normaliza a veces es una huella que
+    nadie puede razonar de memoria.
+    """
+    return " ".join(valor.split()).casefold()
+
+
 def huella_falta_dato(tratamiento: str, concepto: str) -> str:
-    return f"falta_dato:{tratamiento}:{concepto or GENERAL}"
+    return f"falta_dato:{_normalizar(tratamiento)}:{_normalizar(concepto) or GENERAL}"
 
 
 def huella_guardrail(nombre: str, tratamiento: str | None) -> str:
-    return f"guardrail:{nombre}:{tratamiento or GENERAL}"
+    return f"guardrail:{_normalizar(nombre)}:{_normalizar(tratamiento or '') or GENERAL}"
 
 
 def huella_roto(motivo: str) -> str:
@@ -88,11 +114,11 @@ def huella_roto(motivo: str) -> str:
     variables. Con el mensaje completo cada error seria unico y la tabla no agruparia jamas:
     tendrias cuatrocientas filas diciendo lo mismo.
     """
-    return f"roto:{motivo.split(':', 1)[0].strip()}"
+    return f"roto:{_normalizar(motivo.split(':', 1)[0])}"
 
 
 def huella_humano(motivo: str) -> str:
-    return f"humano:{motivo}"
+    return f"humano:{_normalizar(motivo)}"
 
 
 # ==========================================================================================
@@ -117,11 +143,41 @@ def frase_para_el_informe(textos: list[str | None]) -> str | None:
 
     Un turno sin una sola palabra --una radiografia sola-- no deja ejemplo. Guardar algo
     ahi obligaria a inventarselo.
+
+    Y lo que parezca un documento de identidad NO entra. La regla dura 4 del proyecto --«no
+    se registran cedulas ni documentos de identidad de ningun tipo», prohibicion expresa del
+    cliente-- se aplica aqui porque este texto (a) se guarda en una tabla, (b) se pinta en la
+    pantalla del panel para TODOS los roles y (c) viaja a OpenAI en la llamada del analista.
+    `atencion` ya invoca esa misma regla para no dejar entrar el nombre de un archivo
+    adjunto; el texto del paciente --«mi cedula es 1.020.xxx»-- es el sitio mucho mas probable
+    donde aparece una.
+
+    Se REDACTA la parte que parece documento en vez de descartar la frase entera: la frase es
+    todo el valor de la tarjeta --es lo que deja ver que cinco de siete preguntan por la cuota
+    mensual-- y tirarla completa por un numero convierte un caso util en una fila muda. Que
+    el patron se lleve por delante algun precio que el paciente escriba es el precio a pagar,
+    y es el mismo que ya paga `identificar_paciente`.
     """
     frase = "\n".join(t.strip() for t in textos if t and t.strip())
     if not frase:
         return None
+    frase = _sin_documentos(frase)
     return frase if len(frase) <= MAX_FRASE else frase[:MAX_FRASE] + "..."
+
+
+def _sin_documentos(frase: str) -> str:
+    """El control de forma de la regla dura 4, aplicado al texto del paciente.
+
+    El import va DENTRO a proposito y no arriba: `contratos` importa `Senal` de este modulo
+    en su cabecera, asi que un import de `contratos` aqui arriba cerraria el ciclo y el
+    paquete no arrancaria. Diferido, el ciclo no existe --cuando esta funcion corre,
+    `contratos` lleva rato importado-- y el patron sigue viviendo en UN solo sitio, que es lo
+    que impide que dos copias de la misma regla se separen con el tiempo. Es el mismo patron
+    que usa `persistencia.registrar_caso` con `MAX_EJEMPLOS`.
+    """
+    from .contratos import redactar_documento_de_identidad
+
+    return redactar_documento_de_identidad(frase, OMITIDO)
 
 
 # ==========================================================================================
@@ -210,7 +266,13 @@ def casos_del_turno(
 
     # 4. Lo que se rompio de verdad. Se filtran los dos motivos que no son un fallo: el del
     #    relevo, y el del tripwire que ya tiene su tarjeta arriba.
+    #
+    #    Con la frase, por la misma razon que el `GUARDRAIL`: la huella se queda con el TIPO
+    #    del error y tira el mensaje --tiene que tirarlo, o nada agruparia jamas--, asi que lo
+    #    unico que le queda al desarrollador para saber que estaba pasando cuando reventó es
+    #    lo que el paciente habia escrito. Sin ella el analista recibe «lo que escribieron los
+    #    pacientes: (ninguno)» justo en la tarjeta que mas contexto necesita.
     if motivo and not motivo.startswith((PREFIJO_RELEVO, PREFIJO_TRIPWIRE)):
-        casos.append(Caso(huella=huella_roto(motivo), tipo="ROTO"))
+        casos.append(Caso(huella=huella_roto(motivo), tipo="ROTO", ejemplo=frase))
 
     return casos

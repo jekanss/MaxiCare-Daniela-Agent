@@ -426,8 +426,22 @@ def _fallo_escalamiento(ctx: RunContextWrapper[Any], error: Exception) -> str:
 async def _consultar_base_conocimiento(
     ctx: ContextoDaniela, tratamiento: str, pregunta: str
 ) -> str:
+    # Lo que dijo la consulta EXACTA, antes del respaldo por tratamiento. Es una lista y no
+    # un `bool` para poder distinguir «no se consultó» de «se consultó y no había»: si
+    # `_con_base` no llega a correr `trabajo` --una prueba que lo dobla, un fallo abriendo la
+    # conexión-- queda vacía, y la señal cae al criterio de siempre.
+    hubo_dato_exacto: list[bool] = []
+
     def trabajo(conn) -> str:
         texto = persistencia.consultar_conocimiento(conn, tratamiento, pregunta)
+        # ESTO, y no el texto de abajo, es lo que alimenta la señal de «sin resolver». El
+        # respaldo tapa el hueco para el modelo --a propósito-- pero taparlo también para la
+        # medición hacía `FALTA_DATO` inalcanzable: los doce tratamientos de la base tienen
+        # fichas, así que un hueco de CONCEPTO («la cuota mensual de ortodoncia») se volvía
+        # invisible y lo único que llegaba a producir caso era un tratamiento entero vacío.
+        # El ejemplo bandera del informe --«falta el precio de ORTODONCIA, 7 veces, y 5 de
+        # los 7 preguntan por la cuota»-- es justo un hueco de concepto.
+        hubo_dato_exacto.append(not texto.startswith("SIN DATO DOCUMENTADO"))
         if texto.startswith("SIN DATO DOCUMENTADO") and pregunta:
             # El concepto exacto no existía. Antes de declarar que no hay dato, se mira si
             # el tratamiento tiene algo documentado: devolver más información aprobada es
@@ -441,11 +455,22 @@ async def _consultar_base_conocimiento(
     # produce nada, pero deja el tratamiento con el que se enriquece la huella de un guardrail
     # que salte después en este mismo turno. Solo memoria: la escritura ocurre al final, en
     # `atencion._anotar_resultado`, cuando el paciente ya recibió su respuesta.
+    #
+    # `hubo_dato` sale de la consulta EXACTA. Lo que el modelo ve --`texto`-- no cambia ni un
+    # carácter por esto: esta tool sigue siendo un observador y Daniela responde igual con la
+    # medición encendida o apagada. Efecto lateral aceptado: también abren caso los conceptos
+    # que el modelo se invente. Está bien, y no lleva lista blanca: la ventana de 30 días
+    # ordenada por frecuencia los hunde sola, y un modelo que inventa el mismo concepto una y
+    # otra vez ES una señal que vale la pena ver.
     ctx.turno.senales.append(
         Senal(
             tratamiento=tratamiento,
             concepto=pregunta,
-            hubo_dato=not texto.startswith("SIN DATO DOCUMENTADO"),
+            hubo_dato=(
+                hubo_dato_exacto[0]
+                if hubo_dato_exacto
+                else not texto.startswith("SIN DATO DOCUMENTADO")
+            ),
         )
     )
 

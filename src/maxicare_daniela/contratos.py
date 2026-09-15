@@ -206,6 +206,21 @@ def _rechazar_documento_de_identidad(valor: str, campo: str) -> str:
 rechazar_documento_de_identidad = _rechazar_documento_de_identidad
 
 
+def redactar_documento_de_identidad(valor: str, marca: str = "[omitido]") -> str:
+    """El mismo control de forma, pero para texto que NO se puede rechazar entero.
+
+    `rechazar_...` sirve cuando el valor es un campo que el modelo envía y que puede
+    devolverse con un error. No sirve para el texto que un PACIENTE escribió: ese texto ya
+    existe, ya se le respondió, y tirarlo entero por un número dentro perdería la única
+    señal que tenía (`sin_resolver.frase_para_el_informe`). Aquí se quita la parte que
+    parece documento y se deja el resto.
+
+    El patrón es el mismo y vive en un solo sitio a propósito: dos copias de esta regla se
+    separan con el tiempo, y la que se quede corta es la que deja entrar la cédula.
+    """
+    return _PARECE_DOCUMENTO.sub(marca, valor)
+
+
 # ---------------------------------------------------------------------------------------
 # output_type de los agentes
 # ---------------------------------------------------------------------------------------

@@ -2118,8 +2118,14 @@ def test_un_guardrail_que_salto_deja_su_caso_con_el_tratamiento_del_turno(monkey
 
 def test_un_turno_que_revento_deja_un_caso_ROTO_con_el_tipo_y_no_con_el_mensaje(monkeypatch):
     """El mensaje de una excepción lleva ids y horas: con él dentro, cada error sería único y
-    la tabla no agruparía jamás. Y el turno reventado escala, así que además hay un `HUMANO`
-    --el hueco no existe aquí, porque no se llegó a consultar nada."""
+    la tabla no agruparía jamás.
+
+    Y UNA sola tarjeta. El turno reventado NO escala: ese `escalado_por = "dato_faltante"`
+    del camino de reventón es un marcador sintético --`conversacion.responder` lanzó, así que
+    `al_escalar` no corrió y ningún doctor fue avisado--, y pasárselo al informe abría un
+    `humano:dato_faltante` con `escalo=1` además del `ROTO`. Dos daños: dos tarjetas para una
+    historia, y la pantalla imprimiendo «se interrumpió al doctor 1 de N veces» sobre una
+    interrupción que no existió."""
     base, _ = preparar(
         monkeypatch,
         base=BaseFalsa(viva=("conv-viva", 4, True, 0)),
@@ -2129,8 +2135,7 @@ def test_un_turno_que_revento_deja_un_caso_ROTO_con_el_tipo_y_no_con_el_mensaje(
     atender(mensaje_texto("me duele"))
 
     assert [(c["huella"], c["tipo"], c["escalo"]) for c in base.casos] == [
-        ("humano:dato_faltante", "HUMANO", 1),
-        ("roto:RuntimeError", "ROTO", 0),
+        ("roto:runtimeerror", "ROTO", 0),
     ]
 
 
@@ -2148,7 +2153,7 @@ def test_si_el_envio_falla_el_hueco_de_conocimiento_se_cuenta_igual(monkeypatch)
 
     assert [(c["huella"], c["tipo"]) for c in base.casos] == [
         ("falta_dato:ortodoncia:precio", "FALTA_DATO"),
-        ("roto:ConnectError", "ROTO"),
+        ("roto:connecterror", "ROTO"),
     ]
 
 
