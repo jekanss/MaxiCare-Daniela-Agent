@@ -2216,6 +2216,25 @@ _CONVERSACIONES_DEL_TELEFONO = """
         OR paciente_id IN (SELECT id FROM pacientes WHERE telefono = %(tel)s)
 """
 
+#: Cuántas FRASES de ese teléfono hay guardadas. Va con el `UPDATE` de abajo y siempre
+#: ANTES: después, el teléfono ya no está en ninguna parte y la cuenta daría cero.
+#:
+#: Existe porque el número que devuelve el borrado sale por WhatsApp diciendo «frases», y el
+#: `rowcount` del `UPDATE` cuenta FILAS. Un paciente que preguntó dos veces lo mismo deja dos
+#: entradas en `ejemplos` del MISMO caso: se le borraban dos y se le decía «1 frase tuya».
+#:
+#: Dos sentencias y no una sola con CTE, a propósito: en un `UPDATE ... FROM cte`, el valor
+#: nuevo se calcula con la instantánea de la consulta, así que un `registrar_caso` de otro
+#: turno que entrara entre medias se perdería. La forma de abajo --el `SET` que se lee a sí
+#: mismo-- la vuelve a evaluar sobre la fila que acaba de bloquear, y no pierde nada. Entre
+#: las dos sentencias cabe una desviación de la CUENTA, nunca del borrado; y las dos van en
+#: la misma transacción.
+_CONTAR_EJEMPLOS_DEL_TELEFONO = """
+    SELECT count(*)::int
+      FROM casos_sin_resolver c, json_array_elements(c.ejemplos::json) AS e
+     WHERE e ->> 'telefono' = %(tel)s
+"""
+
 #: Quitar las frases de un teléfono de `casos_sin_resolver`, sin tocar el contador.
 #:
 #: Vive en una constante y no dentro de una función porque lo usan DOS: `borrar_rastro`, que
@@ -2394,8 +2413,10 @@ def borrar_rastro(conn, telefono: str, *, conservar_wamid: str | None = None) ->
             # Lo que no se puede es dejarlo fuera: un `UPDATE` en su propia transacción
             # triunfaría mientras la purga revienta y se deshace, y el reseteo quedaría a
             # medias justo por la mitad que nadie mira.
+            cur.execute(_CONTAR_EJEMPLOS_DEL_TELEFONO, parametros)
+            fila = cur.fetchone()
+            borradas["casos_sin_resolver"] = fila[0] if fila else 0
             cur.execute(_OLVIDAR_EJEMPLOS_DEL_TELEFONO, parametros)
-            borradas["casos_sin_resolver"] = cur.rowcount
 
             cur.execute(
                 f"DELETE FROM conversaciones WHERE id IN ({_CONVERSACIONES_DEL_TELEFONO})",
@@ -2593,7 +2614,7 @@ def guardar_informe(conn, *, huella: str, informe: dict[str, Any], sobre: int) -
 
 
 def olvidar_ejemplos_de(conn, telefono: str) -> int:
-    """Quita las frases de ese telefono de todos los casos. Devuelve cuantos toco.
+    """Quita las frases de ese telefono de todos los casos. Devuelve cuantas FRASES quito.
 
     `/clearstate` NO pasa por aqui: corre el mismo SQL --`_OLVIDAR_EJEMPLOS_DEL_TELEFONO`,
     la constante que las dos comparten-- desde dentro de `borrar_rastro`, para que el olvido
@@ -2610,10 +2631,12 @@ def olvidar_ejemplos_de(conn, telefono: str) -> int:
         return 0
     try:
         with conn.cursor() as cur:
+            cur.execute(_CONTAR_EJEMPLOS_DEL_TELEFONO, {"tel": telefono})
+            fila = cur.fetchone()
+            cuantas = fila[0] if fila else 0
             cur.execute(_OLVIDAR_EJEMPLOS_DEL_TELEFONO, {"tel": telefono})
-            tocadas = cur.rowcount
         conn.commit()
     except Exception:
         conn.rollback()
         raise
-    return tocadas
+    return cuantas

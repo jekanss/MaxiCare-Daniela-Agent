@@ -25,7 +25,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from maxicare_daniela import atencion, persistencia
+from maxicare_daniela import atencion, persistencia, reseteo
 from maxicare_daniela.config import cargar_dotenv
 
 pytestmark = pytest.mark.neon
@@ -507,6 +507,30 @@ def test_clearstate_se_lleva_la_frase_del_numero_y_deja_la_del_vecino(esquema):
     quedo = _caso(esquema, huella)
     assert [e["texto"] for e in quedo["ejemplos"]] == ["y en cuotas?"]
     assert [e["telefono"] for e in quedo["ejemplos"]] == [TEL_VECINO]
+
+
+@pytest.mark.neon
+def test_dos_frases_del_mismo_telefono_en_un_caso_se_cuentan_las_DOS(esquema):
+    """El número sale por WhatsApp diciendo «frases», así que tiene que contar frases. El
+    `rowcount` del `UPDATE` cuenta FILAS: un paciente que preguntó dos veces lo mismo deja
+    dos entradas en `ejemplos` del MISMO caso, y se le decía «1 frase tuya» habiéndole
+    borrado dos."""
+    huella = "falta_dato:cordales:precio"
+    _caso_con_ejemplos(
+        esquema,
+        huella,
+        [("cuanto vale sacarme una cordal", TEL), ("y las cuatro?", TEL),
+         ("a mi tambien me interesa", TEL_VECINO)],
+    )
+
+    with persistencia.conectar(esquema) as conn:
+        borradas = persistencia.borrar_rastro(conn, TEL)
+
+    assert borradas["casos_sin_resolver"] == 2
+    assert reseteo.confirmacion(reseteo.Borrado(filas=borradas)).count("2 frases tuyas") == 1
+    assert [e["texto"] for e in _caso(esquema, huella)["ejemplos"]] == [
+        "a mi tambien me interesa"
+    ]
 
 
 @pytest.mark.neon

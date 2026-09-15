@@ -219,8 +219,17 @@ def test_el_olvido_de_frases_y_clearstate_comparten_EL_MISMO_sql():
     dentro = _ConexionQueRegistra()
     persistencia.borrar_rastro(dentro, TEL)
 
-    assert sola.ejecutadas == [persistencia._OLVIDAR_EJEMPLOS_DEL_TELEFONO]
+    assert sola.ejecutadas == [
+        persistencia._CONTAR_EJEMPLOS_DEL_TELEFONO,
+        persistencia._OLVIDAR_EJEMPLOS_DEL_TELEFONO,
+    ]
+    assert persistencia._CONTAR_EJEMPLOS_DEL_TELEFONO in dentro.ejecutadas
     assert persistencia._OLVIDAR_EJEMPLOS_DEL_TELEFONO in dentro.ejecutadas
+    # Contar ANTES: después del `UPDATE` el teléfono ya no está en ninguna parte y la cuenta
+    # daría cero siempre.
+    assert dentro.ejecutadas.index(
+        persistencia._CONTAR_EJEMPLOS_DEL_TELEFONO
+    ) < dentro.ejecutadas.index(persistencia._OLVIDAR_EJEMPLOS_DEL_TELEFONO)
 
 
 def test_la_confirmacion_habla_de_frases_y_no_de_casos():

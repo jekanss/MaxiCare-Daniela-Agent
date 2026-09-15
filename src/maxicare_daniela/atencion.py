@@ -423,14 +423,22 @@ def _anotar_resultado(
                 motivo=motivo,
                 frase=frase,
             ):
-                persistencia.registrar_caso(
-                    conn,
-                    huella=caso.huella,
-                    tipo=caso.tipo,
-                    escalo=caso.escalo,
-                    ejemplo=caso.ejemplo,
-                    telefono=telefono,
-                )
+                # Uno por uno, y cada uno con su red. `registrar_caso` hace `rollback` y
+                # propaga, así que sin este `try` el primero que falla mata el bucle: un
+                # turno con hueco Y guardrail perdía el guardrail por culpa del hueco. Y el
+                # `log.exception` de abajo diría «no se pudo anotar el resultado», que suena
+                # a turno reventado cuando lo único perdido es instrumentación.
+                try:
+                    persistencia.registrar_caso(
+                        conn,
+                        huella=caso.huella,
+                        tipo=caso.tipo,
+                        escalo=caso.escalo,
+                        ejemplo=caso.ejemplo,
+                        telefono=telefono,
+                    )
+                except Exception:  # noqa: BLE001 -- instrumentación, nunca el turno
+                    log.warning("no se pudo registrar el caso %s", caso.huella)
     except Exception:  # noqa: BLE001 -- ver docstring
         log.exception("no se pudo anotar el resultado de %s", ", ".join(wamids))
 
@@ -884,6 +892,12 @@ async def atender(
     if len(mensajes) > 1:
         log.info("%s: %d mensajes en un solo turno", mensaje.telefono, len(mensajes))
     texto = _entrada_del_grupo(mensajes, leidas)
+    # Y aparte, lo que el paciente escribió de verdad. NO es `texto`: esa es la entrada que
+    # se le arma al modelo, con la cabecera de «esto vino en varios mensajes» y, si hubo
+    # archivo, un aviso que lleva el NOMBRE del archivo dentro. Eso acaba en la pantalla de
+    # la clínica y en el informe, donde no pinta nada -- y un nombre de archivo puede ser una
+    # cédula (regla dura 4). Ver `sin_resolver.frase_para_el_informe`.
+    frase_del_paciente = sin_resolver.frase_para_el_informe([m.texto for m in mensajes])
 
     # El candado se coge ANTES de leer la base, y ese orden es el arreglo entero.
     #
@@ -1108,7 +1122,7 @@ async def atender(
                 senales=ctx.turno.senales,
                 tripwires=tripwires,
                 escalado_por=escalado_por,
-                frase=texto,
+                frase=frase_del_paciente,
                 telefono=mensaje.telefono,
             )
             return Atendido(
@@ -1130,12 +1144,12 @@ async def atender(
             motivo=fallo,
             turno=turno,
             # El turno normal: el paciente ya tiene su respuesta y esto solo deja el rastro.
-            # `texto` es el del GRUPO entero, el mismo que leyó Daniela, y por eso es el que
-            # vale como ejemplo: el último mensaje suelto puede ser «?» a secas.
+            # La frase es la del GRUPO entero, no la del último mensaje: ese puede ser «?» a
+            # secas, y la pregunta estar en el anterior.
             senales=ctx.turno.senales,
             tripwires=tripwires,
             escalado_por=escalado_por,
-            frase=texto,
+            frase=frase_del_paciente,
             telefono=mensaje.telefono,
         )
         return Atendido(

@@ -2179,6 +2179,98 @@ def test_un_turno_limpio_no_escribe_nada(monkeypatch):
     assert base.casos == []
 
 
+def test_el_ejemplo_guardado_es_lo_QUE_ESCRIBIO_el_paciente_y_no_el_prompt(monkeypatch):
+    """Con dos mensajes, `_entrada_del_grupo` antepone una cabecera de instrucción para el
+    modelo. Esa cabecera acaba en la pantalla de la clínica y en el informe que lee el
+    modelo de la tarea 3: el ejemplo deja de leerse como la pregunta de un paciente."""
+    base, _ = preparar(
+        monkeypatch,
+        base=BaseFalsa(viva=("conv-1", 4, True, 0)),
+        turnos=Turnos(antes=_consulto),
+    )
+    whatsapp = WhatsAppFalso()
+
+    async def escena():
+        lider = asyncio.create_task(
+            _atender(
+                mensaje_texto("cuanto vale la ortodoncia?", wamid="w1"),
+                whatsapp=whatsapp, **_en_grupo(),
+            )
+        )
+        await asyncio.sleep(0.02)
+        assert atencion._buferes, "el líder no abrió el grupo; la prueba no prueba nada"
+        await _atender(
+            mensaje_texto("y se puede en cuotas?", wamid="w2"),
+            whatsapp=whatsapp, **_en_grupo(),
+        )
+        await lider
+
+    asyncio.run(escena())
+
+    assert [c["ejemplo"] for c in base.casos] == [
+        "cuanto vale la ortodoncia?\ny se puede en cuotas?"
+    ]
+    assert "varios mensajes seguidos" not in base.casos[0]["ejemplo"], (
+        "el andamiaje que se le arma al modelo no es la frase del paciente"
+    )
+
+
+def test_el_NOMBRE_DEL_ARCHIVO_no_se_guarda_como_frase_del_paciente(monkeypatch):
+    """`_entrada_para_el_modelo` mete el nombre del archivo dentro del aviso que le arma al
+    modelo. Guardarlo como ejemplo lo saca a una pantalla donde nadie lo pidió, y un nombre
+    de archivo puede ser `cedula_1032....jpg`: regla dura 4, no se registran documentos de
+    identidad de ningún tipo."""
+    base, _ = preparar(
+        monkeypatch,
+        base=BaseFalsa(viva=("conv-1", 4, True, 0)),
+        turnos=Turnos(antes=_consulto),
+    )
+
+    atender(
+        mensaje_texto(
+            tipo="image",
+            texto="esto me lo tomaron ayer, cuanto vale arreglarlo?",
+            media_id="media-1",
+            mime="image/jpeg",
+            nombre_archivo="cedula_1032456789.jpg",
+        )
+    )
+
+    ejemplo = base.casos[0]["ejemplo"]
+    assert ejemplo == "esto me lo tomaron ayer, cuanto vale arreglarlo?"
+    assert "cedula" not in ejemplo and ".jpg" not in ejemplo
+
+
+def test_un_turno_sin_texto_no_deja_ejemplo(monkeypatch):
+    """Una radiografía sola no es una frase. El caso se cuenta igual; el ejemplo es `None`,
+    y `registrar_caso` guarda `[]`."""
+    base, _ = preparar(
+        monkeypatch,
+        base=BaseFalsa(viva=("conv-1", 4, True, 0)),
+        turnos=Turnos(antes=_consulto),
+    )
+
+    atender(mensaje_texto(tipo="image", texto=None, media_id="m-1", mime="image/jpeg"))
+
+    assert base.casos[0]["ejemplo"] is None
+
+
+def test_un_caso_que_revienta_no_se_lleva_por_delante_a_los_demas(monkeypatch):
+    """Sin un `try` por caso, el primero que falla mata el bucle y el turno pierde el resto
+    -- un turno con hueco Y guardrail se quedaba sin el guardrail."""
+    base, _ = preparar(
+        monkeypatch,
+        base=BaseFalsa(viva=("conv-1", 4, True, 0), caso_revienta=RuntimeError("tabla rota")),
+        turnos=Turnos(antes=_consulto, tripwires=["sin_cifra_no_documentada"]),
+    )
+
+    atender(mensaje_texto("cuanto vale?"))
+
+    assert [c["tipo"] for c in base.casos] == ["FALTA_DATO", "GUARDRAIL"], (
+        "el segundo caso ni se intentó"
+    )
+
+
 def test_un_caso_que_revienta_no_le_quita_la_respuesta_a_nadie(monkeypatch):
     """La razón por la que esto va al final de `_anotar_resultado` y dentro de su `try`. Un
     `tipo` fuera del CHECK, la tabla sin migrar, Neon cayéndose justo ahí: el paciente ya
