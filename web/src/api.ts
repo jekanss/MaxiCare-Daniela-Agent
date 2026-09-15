@@ -171,3 +171,25 @@ export async function listarHistorial(): Promise<CambioFila[]> {
   const r = await pedir<{ cambios: CambioFila[] }>('/api/historial')
   return r.cambios
 }
+
+export type CasoSinResolver = {
+  huella: string
+  tipo: 'FALTA_DATO' | 'GUARDRAIL' | 'ROTO' | 'HUMANO'
+  contador: number
+  escalo: number
+  primera_vez: string
+  ultima_vez: string
+  ejemplos: string[]
+  informe: { que_paso: string; por_que: string; recomiendo: string } | null
+}
+
+/** La ventana de «sin resolver»: lo que Daniela no pudo resolver en los últimos 30 días,
+ *  agrupado por huella. `es_admin` decide si la pantalla enseña la huella cruda -- el
+ *  detalle técnico no es para la clínica. Pantalla de solo lectura, sin ninguna escritura
+ *  que doble esta función. */
+export async function listarSinResolver(): Promise<{
+  casos: CasoSinResolver[]
+  es_admin: boolean
+}> {
+  return pedir<{ casos: CasoSinResolver[]; es_admin: boolean }>('/api/sin-resolver')
+}

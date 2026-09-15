@@ -4,6 +4,7 @@ import Ingreso from '@/pantallas/Ingreso'
 import Agenda from '@/pantallas/Agenda'
 import Pruebas from '@/pantallas/Pruebas'
 import Tratamientos from '@/pantallas/Tratamientos'
+import SinResolver from '@/pantallas/SinResolver'
 import PantallaPendiente from '@/pantallas/Pendiente'
 import { salir, sesionActual, type Sesion } from '@/api'
 
@@ -75,6 +76,11 @@ export default function App() {
         // de la tarde. Devolverla al ingreso se hace desde aquí y no allí: `sesion` vive en
         // este estado, y con `null` la rama de arriba ya renderiza `<Ingreso />` sola.
         <Tratamientos sesion={sesion} alCaducarSesion={() => setSesion(null)} />
+      ) : activa === 'bandeja' ? (
+        // Pantalla puramente informativa: sin sesion no hay nada que mostrar mas que el
+        // ingreso, y con sesion caducada a mitad de lectura vuelve a el desde aqui, igual
+        // que Tratamientos.
+        <SinResolver alCaducarSesion={() => setSesion(null)} />
       ) : (
         <PantallaPendiente seccion={seccion} />
       )}

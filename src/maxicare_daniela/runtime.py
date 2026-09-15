@@ -1653,6 +1653,19 @@ async def api_historial(quien: dict = Depends(usuario_actual)) -> dict:
         return {"cambios": panel.historial(conn)}
 
 
+@app.get("/api/sin-resolver")
+async def api_sin_resolver(quien: dict = Depends(usuario_actual)) -> dict:
+    """La ventana del informe. Solo lectura: esta pantalla no tiene ninguna escritura.
+
+    `es_admin` es lo que decide si el navegador recibe el detalle tecnico. Se calcula aqui y
+    no en el front: un error crudo en la pantalla de una clinica genera una llamada de
+    soporte que no deberia existir.
+    """
+    with persistencia.conectar(config.database_url) as conn:
+        casos = persistencia.casos_recientes(conn)
+    return {"casos": casos, "es_admin": quien["rol"] == "admin"}
+
+
 @app.on_event("startup")
 def _cargar_vocabulario_de_tratamientos() -> None:
     """Reemplaza los catorce del `Literal` por los tratamientos activos de la tabla, para que

@@ -430,3 +430,85 @@ def test_el_general_del_frontend_y_el_del_servidor_son_el_mismo():
     encontrado = re.search(r"const GENERAL = '([^']+)'", pantalla)
     assert encontrado, "la pantalla ya no declara `const GENERAL`"
     assert encontrado.group(1) == panel.GENERAL
+
+
+# ==========================================================================================
+# «Sin resolver» -- GET /api/sin-resolver
+# ==========================================================================================
+#
+# Offline: doblan `persistencia.conectar` y `persistencia.casos_recientes`, así que no tocan
+# Neon. Que la ruta EXIGE sesión ya lo cubre, sin necesidad de repetirlo aquí,
+# `test_ninguna_ruta_del_panel_responde_sin_sesion` de `test_web.py` -- recorre todas las
+# rutas de `/api/` leyéndolas de la propia aplicación, y esta cae dentro sola.
+
+
+class _ConexionFalsaSinResolver:
+    """Sirve para el `with persistencia.conectar(...)` del endpoint y nada más."""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+
+_CASO = {
+    "huella": "falta_dato:ortodoncia:precio",
+    "tipo": "FALTA_DATO",
+    "contador": 3,
+    "escalo": 1,
+    "primera_vez": "2026-09-01T10:00:00+00:00",
+    "ultima_vez": "2026-09-10T10:00:00+00:00",
+    "ejemplos": ["¿Cuánto vale la ortodoncia?"],
+    "informe": {"que_paso": "x", "por_que": "y", "recomiendo": "z"},
+}
+
+
+def test_sin_resolver_responde_con_la_forma_pactada(monkeypatch):
+    """`{"casos": [...], "es_admin": bool}`, con las ocho claves de cada caso intactas -- ni
+    una de más (el teléfono no viaja) ni una de menos."""
+    monkeypatch.setattr(persistencia, "conectar", lambda url: _ConexionFalsaSinResolver())
+    monkeypatch.setattr(persistencia, "casos_recientes", lambda conn: [dict(_CASO)])
+    runtime.app.dependency_overrides[runtime.usuario_actual] = _como("doctor")
+    try:
+        r = TestClient(runtime.app).get("/api/sin-resolver")
+        assert r.status_code == 200
+        cuerpo = r.json()
+        assert set(cuerpo) == {"casos", "es_admin"}
+        assert len(cuerpo["casos"]) == 1
+        assert set(cuerpo["casos"][0]) == set(_CASO)
+        assert cuerpo["casos"][0] == _CASO
+    finally:
+        runtime.app.dependency_overrides.clear()
+
+
+def test_sin_resolver_sin_casos_no_revienta(monkeypatch):
+    monkeypatch.setattr(persistencia, "conectar", lambda url: _ConexionFalsaSinResolver())
+    monkeypatch.setattr(persistencia, "casos_recientes", lambda conn: [])
+    runtime.app.dependency_overrides[runtime.usuario_actual] = _como("admin")
+    try:
+        r = TestClient(runtime.app).get("/api/sin-resolver")
+        assert r.status_code == 200
+        assert r.json() == {"casos": [], "es_admin": True}
+    finally:
+        runtime.app.dependency_overrides.clear()
+
+
+def test_es_admin_sale_de_quien_pregunta_no_del_caso():
+    """`es_admin` lo calcula el servidor a partir del rol de la sesión -- nunca del front.
+
+    Es lo único que decide si el navegador recibe la huella cruda: un no-admin no puede
+    quedar viendo el detalle técnico por un descuido en la pantalla."""
+    for rol, esperado in [("admin", True), ("doctor", False), ("recepcion", False)]:
+        runtime.app.dependency_overrides[runtime.usuario_actual] = _como(rol)
+        try:
+            with (
+                pytest.MonkeyPatch.context() as mp,
+            ):
+                mp.setattr(persistencia, "conectar", lambda url: _ConexionFalsaSinResolver())
+                mp.setattr(persistencia, "casos_recientes", lambda conn: [])
+                r = TestClient(runtime.app).get("/api/sin-resolver")
+            assert r.status_code == 200, f"{rol} obtuvo {r.status_code}"
+            assert r.json()["es_admin"] is esperado, f"{rol} -> es_admin debía ser {esperado}"
+        finally:
+            runtime.app.dependency_overrides.clear()
