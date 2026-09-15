@@ -2491,13 +2491,16 @@ def registrar_caso(
                         -- para `json` (Postgres: "operator does not exist: json || json").
                         -- La columna sigue siendo TEXT -- el cast a `jsonb` es solo para
                         -- esta cuenta, y el resultado vuelve a `::text` antes de guardarse.
+                        -- `WITH ORDINALITY` y no `row_number() OVER ()`: el segundo no
+                        -- lleva `ORDER BY` y su orden no lo garantiza nada por contrato,
+                        -- justo en la cuenta que decide QUE cinco ejemplos sobreviven.
+                        -- `WITH ORDINALITY` numera en el orden en que salieron del arreglo,
+                        -- que es el cronologico. Es el mismo mecanismo que usa
+                        -- `_OLVIDAR_EJEMPLOS_DEL_TELEFONO`.
                         SELECT coalesce(jsonb_agg(e.v ORDER BY e.n)::text, '[]')
-                          FROM (
-                            SELECT v, row_number() OVER () AS n
-                              FROM jsonb_array_elements(
+                          FROM jsonb_array_elements(
                                 casos_sin_resolver.ejemplos::jsonb || EXCLUDED.ejemplos::jsonb
-                              ) AS v
-                          ) e
+                               ) WITH ORDINALITY AS e(v, n)
                          WHERE e.n > greatest(
                             0,
                             jsonb_array_length(
@@ -2555,11 +2558,16 @@ def casos_recientes(conn, *, dias: int = 30, limite: int = 50) -> list[dict[str,
         raise
 
 
-def casos_sin_informe(conn, *, limite: int = 5) -> list[dict[str, Any]]:
+def casos_sin_informe(conn, *, limite: int = 5, dias: int = 30) -> list[dict[str, Any]]:
     """Los que esperan informe. Un caso se analiza UNA vez.
 
     Se re-analiza solo si crecio por cinco Y pasaron siete dias: que el contador suba de 12 a
     40 no tiene por que costar otra llamada, porque el informe seguiria diciendo lo mismo.
+
+    Y solo dentro de la MISMA ventana que ve la pantalla. Un caso de hace noventa dias con
+    `informe IS NULL` pagaba su llamada al modelo para un informe que `casos_recientes` no va
+    a mostrar nunca. La ventana es la que hunde lo que dejo de pasar; analizarlo era pagar
+    por escribirle un informe a algo que ya se hundio.
 
     De solo lectura, pero con el mismo `rollback` que la escritura: ver `casos_recientes`.
     """
@@ -2570,12 +2578,13 @@ def casos_sin_informe(conn, *, limite: int = 5) -> list[dict[str, Any]]:
             cur.execute(
                 "SELECT huella, tipo, contador, escalo, primera_vez, ultima_vez, ejemplos "
                 "  FROM casos_sin_resolver "
-                " WHERE informe IS NULL "
-                "    OR (contador >= informe_sobre * 5 AND informe_en < now() - interval "
-                "        '7 days') "
+                " WHERE ultima_vez > now() - make_interval(days => %s) "
+                "   AND (informe IS NULL "
+                "        OR (contador >= informe_sobre * 5 AND informe_en < now() - interval "
+                "            '7 days')) "
                 " ORDER BY contador DESC "
                 " LIMIT %s",
-                (max(1, min(limite, 50)),),
+                (max(1, min(dias, 365)), max(1, min(limite, 50))),
             )
             return [
                 {

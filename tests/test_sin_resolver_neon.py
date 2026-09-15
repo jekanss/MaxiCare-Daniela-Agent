@@ -252,6 +252,56 @@ def test_clearstate_borra_la_frase_y_el_contador_no_baja(esquema):
     assert [e["texto"] for e in fila["ejemplos"]] == ["la de otro"]
 
 
+def test_un_borrado_que_deja_VARIOS_ejemplos_conserva_su_orden(esquema):
+    """El de arriba deja UNO solo, y con uno el orden es indistinguible: ese test pasaria
+    igual con un reagrupado que baraje. Este deja tres, que es donde se ve.
+
+    El `WITH ORDINALITY` de `_OLVIDAR_EJEMPLOS_DEL_TELEFONO` --y el de `registrar_caso`--
+    existe justo para esto: `row_number() OVER ()` sin `ORDER BY` no garantiza nada por
+    contrato, y el orden cronologico es lo que hace legible la lista de la pantalla.
+    """
+    huella = "falta_dato:ordenado:precio"
+    with persistencia.conectar(esquema) as conn:
+        for texto, tel in [
+            ("la primera", "+573001110001"),
+            ("la del que se borra", "+573009998877"),
+            ("la segunda", "+573001110002"),
+            ("la tercera", "+573001110003"),
+        ]:
+            persistencia.registrar_caso(
+                conn, huella=huella, tipo="FALTA_DATO", ejemplo=texto, telefono=tel
+            )
+
+        persistencia.olvidar_ejemplos_de(conn, "+573009998877")
+        fila = _fila(conn, huella)
+
+    assert [e["texto"] for e in fila["ejemplos"]] == [
+        "la primera", "la segunda", "la tercera",
+    ], "el reagrupado despues del filtro tiene que conservar el orden cronologico"
+
+
+def test_un_caso_viejo_sin_informe_no_se_analiza(esquema):
+    """`casos_sin_informe` comparte la ventana con `casos_recientes`. Un caso de hace noventa
+    dias pagaba su llamada al modelo para un informe que la pantalla no va a mostrar nunca.
+    """
+    huella = "falta_dato:antiguo:precio"
+    with persistencia.conectar(esquema) as conn:
+        persistencia.registrar_caso(conn, huella=huella, tipo="FALTA_DATO")
+        assert any(c["huella"] == huella for c in persistencia.casos_sin_informe(conn, limite=50))
+
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE casos_sin_resolver SET ultima_vez = now() - interval '90 days' "
+                " WHERE huella = %s",
+                (huella,),
+            )
+        conn.commit()
+
+        pendientes = [c["huella"] for c in persistencia.casos_sin_informe(conn, limite=50)]
+
+    assert huella not in pendientes, "lo que la ventana ya hundio no se analiza"
+
+
 def test_guardar_informe_y_dejar_de_estar_pendiente(esquema):
     huella = "falta_dato:coninforme:precio"
     with persistencia.conectar(esquema) as conn:

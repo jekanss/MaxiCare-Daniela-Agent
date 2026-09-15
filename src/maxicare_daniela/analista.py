@@ -21,8 +21,43 @@ from pydantic import BaseModel, Field
 
 from . import persistencia
 from .config import MODELO_EVALUADOR, config_de_corrida
+from .guardrails import cifras_de
 
 log = logging.getLogger(__name__)
+
+#: Cuantos fallos SEGUIDOS aguanta una huella antes de que el ciclo deje de pedirla.
+#:
+#: `casos_sin_informe` ordena por contador y corta en `limite`, asi que cinco casos que
+#: fallan de forma reproducible --un caso que revienta el contrato, uno que el control de
+#: cifras rechaza siempre-- ocupan la seleccion entera y ningun caso nuevo se analiza jamas.
+#: Fallar ABIERTO esta bien y no se toca; atascarse no. Tres intentos son quince minutos de
+#: reintentos al ciclo de cinco: suficiente para un fallo pasajero de red, poco para un fallo
+#: reproducible.
+MAX_FALLOS_SEGUIDOS = 3
+
+#: Cuantas huellas fallidas se recuerdan antes de olvidarlas todas. Es una red contra el
+#: crecimiento sin fin de un `dict` de modulo, no una politica: olvidar solo significa que el
+#: ciclo las vuelve a intentar.
+_MAX_HUELLAS_RECORDADAS = 500
+
+#: Fallos consecutivos por huella. En MEMORIA y no en una columna nueva a proposito: no vale
+#: una migracion, y que un reinicio lo olvide es la conducta correcta --un despliegue que
+#: arregla el fallo tiene que poder reintentar sin que nadie limpie nada--.
+_fallos: dict[str, int] = {}
+
+
+def _anotar_fallo(huella: str) -> None:
+    """Un intento fallido mas para esa huella, y el aviso cuando deja de intentarse."""
+    _fallos[huella] = _fallos.get(huella, 0) + 1
+    if _fallos[huella] == MAX_FALLOS_SEGUIDOS:
+        log.error(
+            "«sin resolver»: %s fallo %s veces seguidas; el ciclo deja de pedirla hasta el "
+            "proximo reinicio. El caso se sigue viendo en la pantalla, sin informe.",
+            huella, MAX_FALLOS_SEGUIDOS,
+        )
+    if len(_fallos) > _MAX_HUELLAS_RECORDADAS:
+        log.warning("«sin resolver»: demasiadas huellas fallidas recordadas; se reintentan todas")
+        _fallos.clear()
 
 
 class InformeDelCaso(BaseModel):
@@ -59,6 +94,21 @@ _analista = Agent(
 )
 
 
+def _con_cifra(informe: InformeDelCaso) -> set[str]:
+    """Las cifras de dinero que el informe trae dentro. Vacio es lo normal.
+
+    Control DETERMINISTA, sin una segunda llamada al modelo: hoy lo unico que impide que el
+    nano invente un precio de ortodoncia es el texto de sus instrucciones, y un informe con
+    un precio dentro es exactamente lo que alguien podria aprobar de un clic hacia la base de
+    conocimiento. Es el mismo mecanismo que sostiene `sin_cifra_no_documentada`, reutilizado.
+
+    `cifras_de` solo caza cifras con forma de DINERO, asi que los contadores del informe
+    pasan limpios: «doce personas preguntaron por ortodoncia», «12 pacientes en 7 dias» y «se
+    molesto al doctor 4 de 12 veces» devuelven todos el conjunto vacio. Solo salta un precio.
+    """
+    return cifras_de(" ".join(informe.model_dump().values()))
+
+
 def texto_del_caso(caso: dict) -> str:
     """Lo que ve el modelo. Corto a proposito: la entrada tambien cuesta."""
     ejemplos = "\n".join(f"  - {e}" for e in caso.get("ejemplos") or []) or "  (ninguno)"
@@ -80,6 +130,10 @@ async def analizar_pendientes(*, database_url: str, limite: int = 5) -> int:
     --con su contador y sus ejemplos-- y se reintenta en el ciclo siguiente. Un analista
     caido no puede dejar la pantalla vacia.
 
+    Pero el reintento esta ACOTADO (`MAX_FALLOS_SEGUIDOS`). Fallar abierto sin tope es
+    atascarse: la consulta ordena por contador y corta, asi que cinco casos que fallan de
+    forma reproducible se quedan con los cinco cupos y ningun caso nuevo se analiza nunca.
+
     `persistencia.conectar`/`casos_sin_informe`/`guardar_informe` son psycopg SINCRONO, y esta
     tarea corre en el mismo bucle de eventos que atiende los webhooks de WhatsApp --un solo
     worker, a proposito (`.claude/rules/despliegue.md`)--. Sin `to_thread` cada vuelta congela
@@ -93,7 +147,17 @@ async def analizar_pendientes(*, database_url: str, limite: int = 5) -> int:
     escritos = 0
     conn = await asyncio.to_thread(persistencia.conectar, database_url)
     try:
-        casos = await asyncio.to_thread(persistencia.casos_sin_informe, conn, limite=limite)
+        # Se piden TRES veces los que caben y se filtran los atascados aqui. Asi una huella
+        # que falla siempre deja de ocupar uno de los cinco cupos en vez de bloquearlos: la
+        # consulta ordena por contador y sin esto los mismos cinco volvian cada cinco
+        # minutos, para siempre, con `escritos` en 0 y el `log.info` de `runtime` mudo --el
+        # fallo era silencioso justo en la metrica que uno miraria--.
+        candidatos = await asyncio.to_thread(
+            persistencia.casos_sin_informe, conn, limite=limite * 3
+        )
+        casos = [
+            c for c in candidatos if _fallos.get(c["huella"], 0) < MAX_FALLOS_SEGUIDOS
+        ][:limite]
         for caso in casos:
             try:
                 corrida = await Runner.run(
@@ -105,6 +169,20 @@ async def analizar_pendientes(*, database_url: str, limite: int = 5) -> int:
                 informe: InformeDelCaso = corrida.final_output
             except Exception as e:  # noqa: BLE001 -- se reintenta en el ciclo siguiente
                 log.error("el analista fallo en %s (%s); se reintenta", caso["huella"], e)
+                _anotar_fallo(caso["huella"])
+                continue
+
+            # El control determinista contra una cifra inventada. No se guarda: el caso se
+            # queda con `informe IS NULL`, la pantalla lo muestra igual --con su contador y
+            # sus ejemplos-- y el ciclo lo reintenta. Y cuenta como fallo, porque un modelo
+            # que insiste en poner un precio ahi insistiria para siempre.
+            cifras = _con_cifra(informe)
+            if cifras:
+                log.error(
+                    "el analista propuso una cifra (%s) en %s; el informe NO se guarda",
+                    sorted(cifras), caso["huella"],
+                )
+                _anotar_fallo(caso["huella"])
                 continue
 
             await asyncio.to_thread(
@@ -112,6 +190,7 @@ async def analizar_pendientes(*, database_url: str, limite: int = 5) -> int:
                 conn, huella=caso["huella"], informe=informe.model_dump(),
                 sobre=caso["contador"],
             )
+            _fallos.pop(caso["huella"], None)
             escritos += 1
     finally:
         await asyncio.to_thread(_cerrar, conn)
