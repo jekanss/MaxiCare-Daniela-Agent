@@ -273,6 +273,19 @@ def _marcar_escalamiento(database_url: str, mensaje_id: int) -> None:
         persistencia.marcar_relevo_activado(conn, mensaje_id)
 
 
+def _registrar_relevo(database_url: str) -> None:
+    """Un doctor dejó lo que hacía para atender a un paciente. Es la señal más cara que
+    produce el sistema y la ÚNICA que no pasa por ningún turno: el relevo se abre desde
+    Telegram, así que no hay `ctx.turno` donde acumularla ni `_anotar_resultado` que la
+    vuelque. Sin esto, la única que no queda contada sería justo esa.
+
+    Sin frase de ejemplo a propósito: lo que se habló antes ya está en el hilo del paciente,
+    y lo que importa aquí es el conteo.
+    """
+    with persistencia.conectar(database_url) as conn:
+        persistencia.registrar_caso(conn, huella="humano:relevo", tipo="HUMANO", escalo=1)
+
+
 def _transcripcion(database_url: str, telefono: str) -> list:
     with persistencia.conectar(database_url) as conn:
         return persistencia.transcripcion(conn, telefono)
@@ -597,6 +610,15 @@ async def activar(
         # la conversación es suya y que lo que escriba SALE, no un muro de texto. Y después
         # del enlace, porque esto lee la base y es lo único lento del camino.
         await _volcar_contexto(telegram, tema, telefono, database_url)
+
+        # Con su propio `try` aunque todo esto ya corra dentro de uno: el de fuera registra
+        # «falló la activación del relevo», y a estas alturas el relevo ESTÁ activo. Un fallo
+        # escribiendo el informe no puede mentir en el log ni saltarse las dos líneas de
+        # abajo, y mucho menos impedir que un doctor tome una conversación.
+        try:
+            await asyncio.to_thread(_registrar_relevo, database_url)
+        except Exception:  # noqa: BLE001
+            log.warning("el relevo de %s no quedó contado en el informe", id_conversacion)
 
         _avisados.discard(id_conversacion)
         log.info("%s tomó la conversación %s (+%s)", doctor, id_conversacion, telefono)

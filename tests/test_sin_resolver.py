@@ -144,3 +144,91 @@ def test_el_telefono_nunca_sale_hacia_la_pantalla():
 
     assert salida == ["cuanto vale", "y en cuotas?"]
     assert not any("+57" in t for t in salida)
+
+
+# ==========================================================================================
+# El acumulador del turno
+#
+# La clase se llama `DatosDelTurno` (`contratos.py`), no `TurnoEnCurso`: el plan la nombro
+# asi en prosa y el codigo nunca uso ese nombre.
+# ==========================================================================================
+
+
+def test_el_turno_arranca_sin_senales_y_reiniciar_las_vacia():
+    """`reiniciar()` se llama una vez por turno, ANTES de la regeneracion por tripwire
+    (conversacion.py), asi que lo que se acumule sobrevive al reintento."""
+    from maxicare_daniela.contratos import DatosDelTurno
+
+    turno = DatosDelTurno()
+    assert turno.senales == []
+
+    turno.senales.append(Senal("ortodoncia", "precio", hubo_dato=False))
+    assert len(turno.senales) == 1
+
+    turno.reiniciar()
+    assert turno.senales == [], "las senales del turno anterior no pueden colarse en este"
+
+
+def test_el_turno_de_whatsapp_tampoco_arrastra_senales():
+    """`atencion._DatosDelMensaje` repone `hubo_adjunto` y `menciona_sintomas` despues de
+    `reiniciar()` --son hechos del mensaje que ya entro-- y las senales NO: una consulta a
+    la base de conocimiento es un hecho del turno, y el turno se esta reiniciando."""
+    from maxicare_daniela.atencion import _DatosDelMensaje
+
+    turno = _DatosDelMensaje(adjunto_del_mensaje=True, sintomas_del_mensaje=True)
+    turno.senales.append(Senal("implantes", "precio", hubo_dato=False))
+
+    turno.reiniciar()
+
+    assert turno.senales == []
+    assert turno.hubo_adjunto is True, "lo que trajo el mensaje sigue siendo cierto"
+    assert turno.menciona_sintomas is True
+
+
+def test_la_tool_de_conocimiento_anota_la_senal(monkeypatch):
+    """La tool se prueba por su funcion interna, nunca por el `FunctionTool` que produce el
+    decorador. Ver `.claude/rules/pruebas.md`."""
+    import asyncio
+
+    from maxicare_daniela import herramientas as h
+    from maxicare_daniela.contratos import DatosDelTurno
+
+    class _Ctx:
+        turno = DatosDelTurno()
+        id_conversacion = "c1"
+        canal = "whatsapp"
+
+    ctx = _Ctx()
+
+    async def _sin_base(_ctx, trabajo):
+        return "SIN DATO DOCUMENTADO para ortodoncia. Si te lo piden, escala."
+
+    monkeypatch.setattr(h, "_con_base", _sin_base)
+    asyncio.run(h._consultar_base_conocimiento(ctx, "ortodoncia", "precio"))
+
+    assert ctx.turno.senales == [Senal("ortodoncia", "precio", hubo_dato=False)]
+
+
+def test_la_tool_anota_tambien_cuando_SI_hubo_dato(monkeypatch):
+    """La senal con dato no produce caso, pero es la que le pone tratamiento a la huella de
+    un guardrail que salte despues en el mismo turno. Sin anotarla, el informe diria «salto
+    4 veces» en vez de «las 4 eran por limpieza dental»."""
+    import asyncio
+
+    from maxicare_daniela import herramientas as h
+    from maxicare_daniela.contratos import DatosDelTurno
+
+    class _Ctx:
+        turno = DatosDelTurno()
+        id_conversacion = "c1"
+        canal = "whatsapp"
+
+    ctx = _Ctx()
+
+    async def _con_dato(_ctx, trabajo):
+        return "La limpieza dental cuesta $150.000."
+
+    monkeypatch.setattr(h, "_con_base", _con_dato)
+    asyncio.run(h._consultar_base_conocimiento(ctx, "limpieza", "precio"))
+
+    assert ctx.turno.senales == [Senal("limpieza", "precio", hubo_dato=True)]

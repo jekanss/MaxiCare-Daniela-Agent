@@ -23,6 +23,9 @@ CONV = "11111111-2222-3333-4444-555555555555"
 
 #: Lo que se le inyectó a Daniela en la prueba en curso. Lo llena el doble de `_sin_base`.
 avisos: list[tuple[str, str]] = []
+
+#: Cada vez que un relevo activado queda contado en el informe de «sin resolver».
+relevos_contados: list[str] = []
 TEL = "573001110101"
 TEMA = 777
 MENSAJE_DEL_GENERAL = 4242
@@ -159,6 +162,12 @@ def _sin_base(monkeypatch):
     monkeypatch.setattr(relevo, "_marcar_abierto", lambda url, tel, abierto: None)
     monkeypatch.setattr(relevo, "_tocar", lambda url, conv: None)
     monkeypatch.setattr(relevo, "_marcar_escalamiento", lambda url, mid: None)
+    # El caso «humano:relevo» del informe. Es la unica escritura de `casos_sin_resolver` que
+    # no sale de un turno, asi que tampoco sale de `atencion._anotar_resultado`.
+    relevos_contados.clear()
+    monkeypatch.setattr(
+        relevo, "_registrar_relevo", lambda url: relevos_contados.append(url)
+    )
     monkeypatch.setattr(
         relevo,
         "_relevo_de_tema",
@@ -248,6 +257,34 @@ def test_el_boton_abre_el_hilo_y_lo_hace_sonar():
     # El volcado de contexto va DEBAJO y mudo: lo primero que el doctor tiene que ver al
     # abrir la notificación es que la conversación es suya, no un muro de texto.
     assert len(en_el_tema) == 2 and en_el_tema[1][2] is True
+
+
+def test_un_relevo_activado_queda_contado_en_el_informe():
+    """Un doctor dejando lo que hacía es la señal más cara que produce el sistema, y la
+    ÚNICA que no pasa por ningún turno: el relevo se abre desde Telegram, así que no hay
+    `ctx.turno` donde acumularla ni `_anotar_resultado` que la vuelque. Sin esta escritura
+    sería la única que no queda contada."""
+    _activar(TelegramFalso())
+
+    assert relevos_contados == [URL]
+
+
+def test_si_el_informe_falla_el_doctor_se_queda_con_la_conversacion_igual(monkeypatch):
+    """La instrumentación no puede impedir un relevo. Y va en su propio `try` aunque todo
+    `activar` corra dentro de uno: el de fuera registra «falló la activación», y a estas
+    alturas el relevo ESTÁ activo -- diría una falsedad en el log y se saltaría el
+    `_avisados.discard` de después."""
+    def revienta(url):
+        raise RuntimeError("tabla sin migrar")
+
+    monkeypatch.setattr(relevo, "_registrar_relevo", revienta)
+    relevo._avisados.add(CONV)
+    tg = TelegramFalso()
+
+    _activar(tg)
+
+    assert [m for m in tg.mensajes if m[1] == TEMA], "el hilo tiene que haberse abierto"
+    assert CONV not in relevo._avisados, "el aviso previo se olvida igual"
 
 
 def test_el_acuse_del_boton_sale_antes_de_que_telegram_lo_de_por_muerto():

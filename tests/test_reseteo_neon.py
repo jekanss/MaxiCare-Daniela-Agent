@@ -18,6 +18,7 @@ viven los pacientes reales de la clínica, y un borrado mal escrito no se deshac
 
 from __future__ import annotations
 
+import json
 import os
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -101,6 +102,11 @@ TABLAS_CON_PACIENTES = (
 #: número moriría con «message thread not found».
 TABLA_DEL_HILO = "temas_telegram"
 
+#: Tampoco cuelga de un teléfono: un caso es historia de la clínica y sobrevive al reseteo.
+#: Lo único que `/clearstate` le quita son las frases de ese número, dentro de `ejemplos`.
+#: Se trunca aquí igual, para que una prueba no herede los casos de la anterior.
+TABLA_DE_CASOS = "casos_sin_resolver"
+
 
 @pytest.fixture(autouse=True)
 def limpio(esquema):
@@ -112,7 +118,7 @@ def limpio(esquema):
     """
     with persistencia.conectar(esquema) as conn, conn.cursor() as cur:
         cur.execute(
-            f"TRUNCATE {', '.join((*TABLAS_CON_PACIENTES, TABLA_DEL_HILO))} "
+            f"TRUNCATE {', '.join((*TABLAS_CON_PACIENTES, TABLA_DEL_HILO, TABLA_DE_CASOS))} "
             "RESTART IDENTITY CASCADE"
         )
         conn.commit()
@@ -453,3 +459,99 @@ def test_el_rastro_dice_que_hay_que_borrar_afuera(esquema):
     assert rastro["topic_id"] == 4001
     assert 9001 in rastro["mensajes_telegram"]
     assert 500 in rastro["mensajes_telegram"]
+
+
+# ==========================================================================================
+# El informe de «sin resolver»: la frase se va, el caso se queda
+#
+# `casos_sin_resolver` es la única tabla que `/clearstate` NO vacía: un caso es historia de
+# la clínica --«doce personas preguntaron el precio de la ortodoncia»-- y sigue siendo cierto
+# aunque una de esas doce se borre. Lo que se va es la frase textual del paciente, que es lo
+# único suyo que hay ahí dentro.
+# ==========================================================================================
+
+
+def _caso_con_ejemplos(url: str, huella: str, ejemplos: list[tuple[str, str]]) -> None:
+    """Deja un caso con esas `(frase, telefono)`, una por llamada, como en producción."""
+    with persistencia.conectar(url) as conn:
+        for texto, telefono in ejemplos:
+            persistencia.registrar_caso(
+                conn, huella=huella, tipo="FALTA_DATO", ejemplo=texto, telefono=telefono
+            )
+
+
+def _caso(url: str, huella: str) -> dict:
+    with persistencia.conectar(url) as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT contador, ejemplos FROM casos_sin_resolver WHERE huella = %s", (huella,)
+        )
+        contador, ejemplos = cur.fetchone()
+    return {"contador": contador, "ejemplos": json.loads(ejemplos)}
+
+
+@pytest.mark.neon
+def test_clearstate_se_lleva_la_frase_del_numero_y_deja_la_del_vecino(esquema):
+    """Es lo único del caso que es del paciente. Si sobreviviera, `/clearstate` prometería un
+    borrado completo mientras una frase suya sigue viéndose en la pantalla de la clínica."""
+    huella = "falta_dato:ortodoncia:precio"
+    _caso_con_ejemplos(
+        esquema,
+        huella,
+        [("cuanto me sale la ortodoncia", TEL), ("y en cuotas?", TEL_VECINO)],
+    )
+
+    with persistencia.conectar(esquema) as conn:
+        borradas = persistencia.borrar_rastro(conn, TEL)
+
+    assert borradas["casos_sin_resolver"] == 1
+    quedo = _caso(esquema, huella)
+    assert [e["texto"] for e in quedo["ejemplos"]] == ["y en cuotas?"]
+    assert [e["telefono"] for e in quedo["ejemplos"]] == [TEL_VECINO]
+
+
+@pytest.mark.neon
+def test_el_contador_del_caso_no_baja_al_resetear(esquema):
+    """El conteo es historia de la clínica, no dato del paciente. Bajarlo convertiría
+    `/clearstate` --un comando de pruebas-- en una forma de falsear el informe."""
+    huella = "falta_dato:blanqueamiento:garantia"
+    _caso_con_ejemplos(
+        esquema, huella, [("la garantia?", TEL), ("cuanto dura?", TEL_VECINO)]
+    )
+    antes = _caso(esquema, huella)["contador"]
+
+    with persistencia.conectar(esquema) as conn:
+        persistencia.borrar_rastro(conn, TEL)
+
+    assert _caso(esquema, huella)["contador"] == antes == 2
+
+
+@pytest.mark.neon
+def test_el_conteo_de_frases_no_lo_infla_un_telefono_que_es_prefijo_de_otro(esquema):
+    """Este número lo lee una persona en su WhatsApp, así que tiene que ser el de las filas
+    que CAMBIARON. El filtro por `LIKE` contaba las que COINCIDÍAN: `5730011` es prefijo de
+    `573001110001`, y el paciente recibía «1 frase tuya» sin que se hubiera borrado ninguna.
+    """
+    huella = "falta_dato:coronas:precio"
+    _caso_con_ejemplos(esquema, huella, [("cuanto vale una corona", TEL)])
+
+    with persistencia.conectar(esquema) as conn:
+        borradas = persistencia.borrar_rastro(conn, TEL[:7])
+
+    assert TEL.startswith(TEL[:7]), "el montaje de la prueba solo vale si es prefijo"
+    assert borradas["casos_sin_resolver"] == 0
+    assert len(_caso(esquema, huella)["ejemplos"]) == 1, "no se podía tocar nada"
+
+
+@pytest.mark.neon
+def test_un_telefono_escrito_DENTRO_de_la_frase_no_cuenta_como_frase_suya(esquema):
+    """El `LIKE` miraba el JSON entero, campo `texto` incluido. Un paciente que escribe un
+    número de teléfono en su mensaje hacía que el reseteo de ESE número dijera haber borrado
+    una frase que no era suya y que sigue ahí."""
+    huella = "falta_dato:_general:sede"
+    _caso_con_ejemplos(esquema, huella, [(f"me dijeron que llamara al {TEL}", TEL_VECINO)])
+
+    with persistencia.conectar(esquema) as conn:
+        borradas = persistencia.borrar_rastro(conn, TEL)
+
+    assert borradas["casos_sin_resolver"] == 0
+    assert len(_caso(esquema, huella)["ejemplos"]) == 1

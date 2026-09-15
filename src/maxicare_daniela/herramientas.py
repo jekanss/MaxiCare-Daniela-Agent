@@ -77,6 +77,7 @@ from .contratos import (
     SolicitudEscalamiento,
     rechazar_documento_de_identidad,
 )
+from .sin_resolver import Senal
 
 log = logging.getLogger("maxicare.herramientas")
 
@@ -435,6 +436,18 @@ async def _consultar_base_conocimiento(
         return texto
 
     texto = await _con_base(ctx, trabajo)
+
+    # Se anota SIEMPRE, con dato o sin él. Sin dato produce un caso `FALTA_DATO`; con dato no
+    # produce nada, pero deja el tratamiento con el que se enriquece la huella de un guardrail
+    # que salte después en este mismo turno. Solo memoria: la escritura ocurre al final, en
+    # `atencion._anotar_resultado`, cuando el paciente ya recibió su respuesta.
+    ctx.turno.senales.append(
+        Senal(
+            tratamiento=tratamiento,
+            concepto=pregunta,
+            hubo_dato=not texto.startswith("SIN DATO DOCUMENTADO"),
+        )
+    )
 
     # Lo que esta consulta autoriza a decir en este turno. `sin_cifra_no_documentada` exige
     # que toda cifra del mensaje al paciente esté aquí: si Daniela dice un precio que esta

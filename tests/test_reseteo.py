@@ -186,6 +186,54 @@ def test_el_historial_se_borra_antes_que_las_conversaciones():
     assert posicion_historial < posicion_conversaciones
 
 
+def test_las_frases_del_informe_se_olvidan_antes_que_las_conversaciones():
+    """Va en el MISMO bloque de cursor que todo lo demás, y por eso va antes: lo que decide
+    la posición no es de dónde sale el teléfono --en `casos_sin_resolver` viaja dentro del
+    propio JSON de `ejemplos`, así que se sabría igual después-- sino que el olvido caiga en
+    la ÚNICA transacción del borrado. Una llamada aparte podría triunfar mientras la purga
+    revienta, y dejaría un reseteo a medias en la mitad que nadie mira.
+    """
+    conn = _ConexionQueRegistra()
+
+    borradas = persistencia.borrar_rastro(conn, TEL)
+
+    sentencias = [s.lower() for s in conn.ejecutadas]
+    posicion_frases = next(
+        i for i, s in enumerate(sentencias) if "update casos_sin_resolver" in s
+    )
+    posicion_conversaciones = next(
+        i for i, s in enumerate(sentencias) if "delete from conversaciones" in s
+    )
+
+    assert posicion_frases < posicion_conversaciones
+    assert "casos_sin_resolver" in borradas, "el conteo tiene que salir en la confirmación"
+
+
+def test_el_olvido_de_frases_y_clearstate_comparten_EL_MISMO_sql():
+    """Dos copias del mismo `UPDATE` divergen: alguien afina el filtro en una y la otra se
+    queda contando filas que no cambió. El SQL vive en una constante y se usa en los dos
+    sitios."""
+    sola = _ConexionQueRegistra()
+    persistencia.olvidar_ejemplos_de(sola, TEL)
+
+    dentro = _ConexionQueRegistra()
+    persistencia.borrar_rastro(dentro, TEL)
+
+    assert sola.ejecutadas == [persistencia._OLVIDAR_EJEMPLOS_DEL_TELEFONO]
+    assert persistencia._OLVIDAR_EJEMPLOS_DEL_TELEFONO in dentro.ejecutadas
+
+
+def test_la_confirmacion_habla_de_frases_y_no_de_casos():
+    """El contador del caso NO baja --«doce personas preguntaron por ortodoncia» sigue siendo
+    cierto-- así que decirle al paciente «1 caso sin resolver» sería mentirle sobre lo que se
+    borró, además de contarle de una tabla interna de la clínica."""
+    texto = reseteo.confirmacion(reseteo.Borrado(filas={"casos_sin_resolver": 1}))
+
+    assert "1 frase tuya" in texto
+    assert "_" not in texto
+    assert "caso" not in texto.lower()
+
+
 def test_olvidar_saca_el_bufer_del_numero():
     """Un bufer que sobreviviera al reseteo metería los mensajes de la conversacion anterior
     en el primer turno de la nueva, y la garantia se caeria por el unico sitio que no es la

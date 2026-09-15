@@ -46,6 +46,10 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 # zona son dos sitios donde arreglar el día que Colombia adopte horario de verano.
 from .calendario import ZONA_BOGOTA, Jornada
 
+# `sin_resolver` es lógica pura --ni una conexión, ni un import del paquete-- así que esto
+# tampoco cierra ningún ciclo.
+from .sin_resolver import Senal
+
 # ---------------------------------------------------------------------------------------
 # Vocabularios cerrados
 # ---------------------------------------------------------------------------------------
@@ -519,6 +523,14 @@ class DatosDelTurno:
     horas_autorizadas: set[str] = field(default_factory=set)
     hubo_adjunto: bool = False
     menciona_sintomas: bool = False
+    #: Lo que se consultó a la base de conocimiento en este turno, con dato o sin él. De aquí
+    #: salen los casos `FALTA_DATO`, y el tratamiento con el que se enriquece la huella de un
+    #: guardrail. Mismo ciclo de vida que `cifras_autorizadas`: se vacía cada turno, porque
+    #: un hueco de hace diez mensajes no es un hueco de hoy.
+    #:
+    #: Es lo único de esta clase que nadie lee DURANTE el turno: se vuelca al final, cuando
+    #: el paciente ya tiene su respuesta. Ver `atencion._anotar_resultado`.
+    senales: list[Senal] = field(default_factory=list)
 
     def reiniciar(self) -> None:
         """Lo llama el orquestador al empezar cada turno, antes de `Runner.run`."""
@@ -526,6 +538,7 @@ class DatosDelTurno:
         self.horas_autorizadas = set()
         self.hubo_adjunto = False
         self.menciona_sintomas = False
+        self.senales = []
 
 
 @dataclass

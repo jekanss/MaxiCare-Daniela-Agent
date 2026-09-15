@@ -2216,6 +2216,33 @@ _CONVERSACIONES_DEL_TELEFONO = """
         OR paciente_id IN (SELECT id FROM pacientes WHERE telefono = %(tel)s)
 """
 
+#: Quitar las frases de un teléfono de `casos_sin_resolver`, sin tocar el contador.
+#:
+#: Vive en una constante y no dentro de una función porque lo usan DOS: `borrar_rastro`, que
+#: es `/clearstate`, y `olvidar_ejemplos_de`, que lo expone suelto para el mantenimiento.
+#: Con dos copias, afinar el filtro en una deja a la otra contando filas que no cambió.
+#:
+#: **El `WHERE` es un EXISTS y no un `LIKE`, y esa diferencia la lee un paciente.** El
+#: conteo que devuelve esto sale por WhatsApp en la confirmación del reseteo, así que tiene
+#: que ser el de las filas que CAMBIARON. `ejemplos LIKE '%573001110001%'` cuenta las que
+#: COINCIDEN, que es otra cosa: casa con un número del que este es prefijo, y casa con un
+#: número escrito DENTRO del `texto` de la frase de otro paciente. En los dos casos el
+#: `UPDATE` no cambiaba nada y el paciente recibía «1 frase tuya» igual.
+_OLVIDAR_EJEMPLOS_DEL_TELEFONO = """
+    UPDATE casos_sin_resolver SET ejemplos = (
+        -- `WITH ORDINALITY` numera cada elemento en el orden en que salió del arreglo, y el
+        -- `ORDER BY` sobre esa columna es lo que garantiza que el reagrupado después del
+        -- filtro conserva el orden cronológico.
+        SELECT coalesce(json_agg(v.elem ORDER BY v.n)::text, '[]')
+          FROM json_array_elements(ejemplos::json) WITH ORDINALITY AS v(elem, n)
+         WHERE v.elem ->> 'telefono' IS DISTINCT FROM %(tel)s
+    )
+    WHERE EXISTS (
+        SELECT 1 FROM json_array_elements(ejemplos::json) AS e
+         WHERE e ->> 'telefono' = %(tel)s
+    )
+"""
+
 
 def rastro_de(conn, telefono: str) -> dict:
     """Qué hay que borrar fuera de Postgres: eventos de Calendar y mensajes de Telegram.
@@ -2353,6 +2380,22 @@ def borrar_rastro(conn, telefono: str, *, conservar_wamid: str | None = None) ->
                 parametros,
             )
             borradas["agent_sessions"] = cur.rowcount
+
+            # Las frases que este número dejó en el informe de «sin resolver». Es el único
+            # sitio del borrado que NO borra una fila: el caso vive --«doce personas
+            # preguntaron el precio de la ortodoncia» sigue siendo cierto-- y lo que se va es
+            # la frase textual, que es lo único suyo que hay ahí dentro. Por eso el contador
+            # no baja: es historia de la clínica, no dato del paciente.
+            #
+            # Va aquí dentro y no en una llamada aparte por la TRANSACCIÓN, no por el orden:
+            # el teléfono de una frase viaja dentro del propio JSON de `ejemplos`, así que
+            # después del DELETE de `conversaciones` se seguiría sabiendo cuáles borrar --a
+            # diferencia de `agent_sessions`, aquí arriba, donde el orden sí es obligatorio.
+            # Lo que no se puede es dejarlo fuera: un `UPDATE` en su propia transacción
+            # triunfaría mientras la purga revienta y se deshace, y el reseteo quedaría a
+            # medias justo por la mitad que nadie mira.
+            cur.execute(_OLVIDAR_EJEMPLOS_DEL_TELEFONO, parametros)
+            borradas["casos_sin_resolver"] = cur.rowcount
 
             cur.execute(
                 f"DELETE FROM conversaciones WHERE id IN ({_CONVERSACIONES_DEL_TELEFONO})",
@@ -2552,9 +2595,10 @@ def guardar_informe(conn, *, huella: str, informe: dict[str, Any], sobre: int) -
 def olvidar_ejemplos_de(conn, telefono: str) -> int:
     """Quita las frases de ese telefono de todos los casos. Devuelve cuantos toco.
 
-    PENDIENTE: lo llamara `/clearstate` (tarea 2 del plan); hoy no tiene llamador. Cuando lo
-    tenga, va ANTES del `DELETE FROM conversaciones` por la misma razon que el historial del
-    agente (no negociable 9): despues, ya no hay de donde saber que borrar.
+    `/clearstate` NO pasa por aqui: corre el mismo SQL --`_OLVIDAR_EJEMPLOS_DEL_TELEFONO`,
+    la constante que las dos comparten-- desde dentro de `borrar_rastro`, para que el olvido
+    caiga en la unica transaccion del borrado. Esta funcion sobrevive suelta para el
+    mantenimiento: quitar las frases de un numero sin desmontarle la conversacion.
 
     El contador NO baja, a proposito. El conteo es historia de la clinica, no dato del
     paciente: «doce personas preguntaron por ortodoncia» sigue siendo cierto aunque se borre
@@ -2566,21 +2610,7 @@ def olvidar_ejemplos_de(conn, telefono: str) -> int:
         return 0
     try:
         with conn.cursor() as cur:
-            cur.execute(
-                """
-                UPDATE casos_sin_resolver SET ejemplos = (
-                    -- `WITH ORDINALITY` numera cada elemento en el orden en que salio del
-                    -- arreglo, y el `ORDER BY` sobre esa columna es lo que garantiza que el
-                    -- reagrupado despues del filtro conserva el orden cronologico -- la
-                    -- unica escritura de la tabla que antes no lo garantizaba.
-                    SELECT coalesce(json_agg(v.elem ORDER BY v.n)::text, '[]')
-                      FROM json_array_elements(ejemplos::json) WITH ORDINALITY AS v(elem, n)
-                     WHERE v.elem ->> 'telefono' IS DISTINCT FROM %s
-                )
-                WHERE ejemplos LIKE %s
-                """,
-                (telefono, f"%{telefono}%"),
-            )
+            cur.execute(_OLVIDAR_EJEMPLOS_DEL_TELEFONO, {"tel": telefono})
             tocadas = cur.rowcount
         conn.commit()
     except Exception:
