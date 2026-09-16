@@ -25,6 +25,7 @@ import pytest
 from maxicare_daniela import contratos
 from maxicare_daniela import herramientas as h
 from maxicare_daniela import persistencia
+from maxicare_daniela import seguimientos
 from maxicare_daniela.calendario import Bloqueo, CalendarioDoble, Jornada, bloques_del_dia
 from maxicare_daniela.contratos import (
     ContextoDaniela,
@@ -2449,6 +2450,52 @@ def test_no_se_programa_un_seguimiento_hacia_atras():
     texto = asyncio.run(h._programar_seguimiento(ctx, "reactivacion", pasado))
 
     assert "ya pasó" in texto
+
+
+def test_con_la_baja_puesta_lo_comercial_NO_LLEGA_A_INSERTARSE(monkeypatch):
+    """La guarda va en el código, no solo en el prompt.
+
+    `seguimientos.decidir` ya anula esto con G0 al despachar, así que sin esta comprobación
+    tampoco saldría nada. Pero entonces lo único que impide escribir la fila es que el modelo
+    obedezca una instrucción, y en este proyecto lo demostrable lo escribe el código (no
+    negociables 2, 12, 22). Que `_con_base` reviente si alguien la llama es justamente lo que
+    prueba que no se llega a la base.
+    """
+    ctx = contexto(pidio_no_contacto=True)
+
+    async def base_prohibida(_ctx, trabajo):
+        raise AssertionError("no se puede tocar la base con la baja puesta")
+
+    monkeypatch.setattr(h, "_con_base", base_prohibida)
+
+    futuro = (ctx.ahora + timedelta(days=2)).isoformat()
+    texto = asyncio.run(h._programar_seguimiento(ctx, "reactivacion", futuro))
+
+    assert "no le escribieran más" in texto
+    assert "no se programó nada comercial" in texto
+
+
+def test_con_la_baja_puesta_el_recordatorio_de_una_cita_SI_se_programa(monkeypatch):
+    """La otra mitad, y la que importa: pedir que no te manden publicidad no es renunciar a
+    que te avisen de tu propia cita. Las dos van juntas porque el fallo que interesa es que
+    alguien las una (no negociable 25)."""
+    ctx = contexto(pidio_no_contacto=True)
+
+    async def base_falsa(_ctx, trabajo):
+        return (None, True)
+
+    monkeypatch.setattr(h, "_con_base", base_falsa)
+
+    futuro = (ctx.ahora + timedelta(days=2)).isoformat()
+    texto = asyncio.run(h._programar_seguimiento(ctx, "recordatorio_cita", futuro))
+
+    assert "programado" in texto
+
+
+def test_la_guarda_de_la_baja_usa_LA_MISMA_lista_blanca_que_el_despachador():
+    """Dos listas para el mismo hecho acaban divergiendo, y divergir aquí significa que la
+    tool programa lo que el despachador anula --o, peor, al revés--."""
+    assert "recordatorio_cita" in seguimientos.TIPOS_NO_COMERCIALES
 
 
 # ==========================================================================================

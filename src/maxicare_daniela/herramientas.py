@@ -423,7 +423,16 @@ def _fallo_privacidad(ctx: RunContextWrapper[ContextoDaniela], error: Exception)
     # `revocar_baja` hacen su propio commit -- una excepción antes de eso deja la
     # transacción en rollback -- así que un fallo aquí significa que NO quedó anotado, y
     # decirle lo contrario es justo el error que ese no negociable prohíbe.
-    log.error("no se pudo registrar la decisión de privacidad: %s", error)
+    # `log.exception` y no `log.error` como sus hermanas de arriba, y la diferencia es
+    # deliberada: este es el ÚNICO `_fallo_*` cuya salida le pide a un humano que vaya a
+    # anotar la baja a mano, y sin el traceback nadie sabe contra qué --si fue el pooler, el
+    # esquema o la fila-- cuando llegue a hacerlo.
+    #
+    # Comprobado contra el SDK instalado (0.22.2): `failure_error_function` se invoca DENTRO
+    # del `except` de `tool.__call__`, así que hay excepción viva y `exception()` adjunta el
+    # traceback entero. El `%s` se queda para que la primera línea siga diciendo qué pasó sin
+    # tener que bajar a leerlo.
+    log.exception("no se pudo registrar la decisión de privacidad: %s", error)
     return (
         "No se pudo registrar todavía. NO le digas al paciente que quedó anotado: no es "
         "cierto. Dile que lo estás resolviendo y escala a los doctores para que alguien lo "
@@ -1398,6 +1407,23 @@ async def registrar_estado_oportunidad(
 async def _programar_seguimiento(
     ctx: ContextoDaniela, tipo: str, fecha_objetivo: str
 ) -> str:
+    # La baja comercial, EN CÓDIGO y no solo en el prompt. `seguimientos.decidir` ya la
+    # recoge con G0 al despachar, así que sin esto no sale nada -- pero entonces lo único
+    # que impide INSERTAR la fila es que el modelo obedezca una instrucción, y en este
+    # proyecto lo que tiene que ser cierto lo escribe el código (no negociables 2, 12, 22).
+    # Se devuelve texto en vez de lanzar: el modelo tiene que saber por qué no se programó,
+    # o lo intentará otra vez con otra fecha.
+    #
+    # `ctx.pidio_no_contacto` sale de `contactos`, nunca del modelo, y el tipo se mira contra
+    # la MISMA lista blanca del despachador: un recordatorio de cita se programa igual, que
+    # es justo lo que la baja no puede apagar (no negociable 25).
+    if ctx.pidio_no_contacto and tipo not in seguimientos.TIPOS_NO_COMERCIALES:
+        return (
+            "Este paciente pidió que no le escribieran más, así que no se programó nada "
+            "comercial. No se lo ofrezcas ni se lo menciones. El recordatorio de una cita "
+            "suya sí se sigue programando: eso no es publicidad."
+        )
+
     objetivo = _a_fecha(fecha_objetivo, "fecha_objetivo")
     # `ctx.ahora` y no `_ahora()`: el instante del turno, que una prueba puede fijar. Es la
     # regla que el propio docstring de `ContextoDaniela.ahora` declara, y esta tool era la
@@ -1440,10 +1466,14 @@ async def _programar_seguimiento(
 async def programar_seguimiento(
     wrapper: RunContextWrapper[ContextoDaniela], tipo: str, fecha_objetivo: str
 ) -> str:
-    """Deja programado un recordatorio o una reactivación para más adelante.
+    """Deja programado un seguimiento comercial para más adelante.
+
+    Si el paciente pidió que no le escribieran más, no se programa nada y te lo dice: no
+    insistas ni lo intentes con otra fecha. Los recordatorios de una cita NO se piden por
+    aquí — los programa el sistema solo al crear o mover la cita.
 
     Args:
-        tipo: qué clase de seguimiento, por ejemplo 'recordatorio_cita' o 'reactivacion'.
+        tipo: qué clase de seguimiento, por ejemplo 'reactivacion'.
         fecha_objetivo: cuándo debe salir, en ISO y hora de Bogotá.
     """
     return await _programar_seguimiento(wrapper.context, tipo, fecha_objetivo)

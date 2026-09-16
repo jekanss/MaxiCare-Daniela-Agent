@@ -156,6 +156,17 @@ MINUTOS_DE_CONTACTO_RECIENTE = 60
 #:
 #: Acotar `tipo` con un `Literal` y un CHECK es trabajo del sub-proyecto D, y entonces esto se
 #: podrá derivar de esa lista en vez de mantenerse a mano.
+#:
+#: **El portillo que esta lista tiene abierto, dicho y no escondido:** el tipo lo escribe el
+#: modelo, así que un `tipo='recordatorio_cita'` salido de `programar_seguimiento` atraviesa
+#: G0 sin mirarla aunque el paciente esté de baja. Hoy no sale nada por ahí --esa tool nunca
+#: pone `cita_id`, y el despachador anula con `sin_plantilla` todo lo que llegue sin
+#: `cita_inicio`--, así que el portillo está abierto pero no da a ninguna parte. Lo que lo
+#: abriría de par en par es el sub-proyecto D, que añade plantillas para los tipos sin cita:
+#: ese día, cerrar `tipo` deja de ser una mejora y pasa a ser la condición para que esta
+#: guarda siga siendo cierta. Mientras tanto lo estrecha `herramientas._programar_seguimiento`,
+#: que comprueba `ctx.pidio_no_contacto` contra esta misma lista antes de insertar, y el
+#: docstring de la tool, que ya no le ofrece al modelo `'recordatorio_cita'` como ejemplo.
 TIPOS_NO_COMERCIALES = frozenset({"recordatorio_cita"})
 
 
@@ -190,9 +201,10 @@ def decidir(
     # G0. La baja comercial, antes que las siete. Es el orden que pidió MaxiCare por escrito:
     # privacidad -> canal -> criterio -> contacto.
     #
-    # Va DENTRO de la bifurcación por tipo, no fuera: un recordatorio de cita atraviesa esta
-    # guarda sin mirarla. Pedir que no te manden publicidad no es renunciar a que te avisen de
-    # tu propia cita, y si se mezclan, el que pierde es el paciente que SÍ iba a ir.
+    # El tipo se mira DENTRO de la condición, y no en un `if` anterior que anule por baja sin
+    # más: un recordatorio de cita cruza esta guarda sin que la baja le aplique. Pedir que no
+    # te manden publicidad no es renunciar a que te avisen de tu propia cita, y si se mezclan,
+    # el que pierde es el paciente que SÍ iba a ir.
     if fila.get("tipo") not in TIPOS_NO_COMERCIALES and fila.get("no_contactar"):
         return Decision("anular", "baja_solicitada")
 
