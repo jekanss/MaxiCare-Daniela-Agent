@@ -25,7 +25,7 @@ import itertools
 import random
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 
 import httpx
 import pytest
@@ -46,6 +46,11 @@ CONFIGURACION_OPERATIVA = {
     "cierre_relevo_minutos": 120,
     "telegram_topic_general": 7,
 }
+
+#: `contactos.creado_en`/`actualizado_en` son `TIMESTAMPTZ NOT NULL DEFAULT now()` (migración
+#: 019): la base nunca los devuelve en `None`. Un doble que sí lo hiciera certificaría en
+#: verde código que revienta contra una fila real -- lo que sí lee la Tarea 3.
+FECHA_CONTACTO = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
 
 
 # ==========================================================================================
@@ -170,7 +175,7 @@ class BaseFalsa:
         nueva: str = "conv-nueva",
         recordatorio: tuple[str, datetime] | None = None,
         caso_revienta: Exception | None = None,
-        contacto: dict | None = None,
+        contacto: dict | Exception | None = None,
     ) -> None:
         self.viva = viva
         #: Lo que `_anotar_resultado` dejó en `casos_sin_resolver`, en orden. Cada elemento
@@ -186,7 +191,8 @@ class BaseFalsa:
         self.configuracion = CONFIGURACION_OPERATIVA if configuracion is None else configuracion
         #: Lo que devuelve `persistencia.asegurar_contacto`: por defecto, un contacto recién
         #: nacido -- contactable y sin el aviso mostrado, que es lo que produce la fila en
-        #: blanco de verdad.
+        #: blanco de verdad. Una `Exception` simula el error de SQL que `_leer_estado`
+        #: tiene que degradar.
         self.contacto = contacto
         self.nueva = nueva
         self.llamadas: list[tuple] = []
@@ -234,12 +240,18 @@ class BaseFalsa:
         def asegurar_contacto(conn, telefono):
             conn.comprobar()
             anotar("asegurar_contacto", telefono)
+            if isinstance(self.contacto, Exception):
+                # Un error de SQL de verdad aborta la transacción -- igual que
+                # `leer_configuracion` unas líneas abajo. Sin este `abortar()`, la prueba de
+                # la degradación pasaría por la razón equivocada.
+                conn.abortar()
+                raise self.contacto
             if self.contacto is not None:
                 return dict(self.contacto)
             return {
                 "telefono": telefono,
-                "creado_en": None,
-                "actualizado_en": None,
+                "creado_en": FECHA_CONTACTO,
+                "actualizado_en": FECHA_CONTACTO,
                 "aviso_mostrado_en": None,
                 "politica_version": None,
                 "no_contactar": False,
@@ -2382,8 +2394,23 @@ def test_el_estado_lleva_la_senal_de_la_baja():
     )
 
     assert estado.pidio_no_contacto is True
-    # El default es contactable: la baja es algo que el paciente pide.
     assert estado.aviso_visto is False
+
+
+def test_el_estado_por_defecto_no_tiene_la_senal_de_la_baja():
+    """El default es contactable: la baja es algo que el paciente pide."""
+    estado = atencion._Estado(
+        id_conversacion="c-1",
+        turno_actual=0,
+        identidad_verificada=False,
+        intentos_identificacion=0,
+        id_paciente=None,
+        nombre_paciente=None,
+        telefono_sin_paciente=True,
+        tomada_por=None,
+    )
+
+    assert estado.pidio_no_contacto is False
 
 
 def test_el_contexto_recibe_la_senal_de_la_baja():
@@ -2411,3 +2438,75 @@ def test_el_contexto_por_defecto_no_tiene_baja():
     )
 
     assert ctx.pidio_no_contacto is False
+
+
+def test_un_no_contactar_de_la_fila_de_verdad_llega_hasta_el_contexto(monkeypatch):
+    """Extremo a extremo, con `_leer_estado` corriendo de verdad -- no un dataclass montado
+    a mano. Las pruebas de arriba comprueban que `_Estado` y `ContextoDaniela` ACEPTAN el
+    campo; ninguna comprueba que `_leer_estado` lo LEA de `contactos` ni que `atender` lo
+    COPIE al contexto. Pasarían en verde con `_leer_estado` sin tocar y con `atender` sin
+    pasar la señal -- exactamente lo que esta prueba existe para no dejar pasar."""
+    _, turnos = preparar(
+        monkeypatch,
+        base=BaseFalsa(
+            contacto={
+                "telefono": TELEFONO,
+                "creado_en": FECHA_CONTACTO,
+                "actualizado_en": FECHA_CONTACTO,
+                "aviso_mostrado_en": None,
+                "politica_version": None,
+                "no_contactar": True,
+                "no_contactar_en": FECHA_CONTACTO,
+                "no_contactar_origen": "paciente",
+            }
+        ),
+    )
+
+    atender(mensaje_texto())
+
+    assert turnos.ctx.pidio_no_contacto is True
+
+
+def test_si_asegurar_contacto_revienta_el_turno_responde_igual_y_calla_lo_comercial(
+    monkeypatch,
+):
+    """`asegurar_contacto` es una escritura nueva y no esencial para el turno: nadie
+    consume `pidio_no_contacto` todavía. Dejar que su excepción tumbe `_leer_estado` entero
+    cambiaría un turno clínico completo -- Daniela sin contestar -- por una señal de
+    consentimiento que hoy no hace nada, justo el empate que el principio del proyecto
+    decide a favor de lo clínico.
+
+    Se degrada hacia el lado seguro con `pidio_no_contacto=True`: no ofrecer nada comercial
+    nunca es un daño. Y, como `leer_configuracion`, tiene que dejar la transacción limpia
+    para las lecturas que siguen dentro del mismo `with`.
+    """
+    base, turnos = preparar(
+        monkeypatch,
+        base=BaseFalsa(contacto=RuntimeError("statement timeout")),
+    )
+    whatsapp = WhatsAppFalso()
+
+    resultado = atender(mensaje_texto(), whatsapp=whatsapp)
+
+    assert resultado.respondido is True
+    assert whatsapp.textos and whatsapp.textos[0] != conversacion.MENSAJE_SEGURO, (
+        "cayó al camino de «sin base»: la lectura entera se fue al suelo"
+    )
+    assert base.conexiones[0].rollbacks == 1, "la transacción quedó abortada y nadie la limpió"
+    assert "conversacion_tomada" in base.nombres
+    assert "ligar_mensaje_a_conversacion" in base.nombres
+    assert turnos.ctx.pidio_no_contacto is True
+
+
+def test_si_asegurar_contacto_revienta_tambien_se_degrada_a_aviso_no_visto(monkeypatch):
+    """El otro lado de la misma degradación, a nivel de `_Estado` -- `ContextoDaniela` no
+    lleva `aviso_visto` todavía (Tarea 3), así que esto no se puede ver desde `ctx`. Volver
+    a enseñar un aviso ya visto es inocuo: por eso el lado seguro aquí es `False`, no `True`.
+    """
+    base = BaseFalsa(contacto=RuntimeError("statement timeout")).instalar(monkeypatch)
+
+    estado = atencion._leer_estado("postgres://nada", TELEFONO, [])
+
+    assert estado.pidio_no_contacto is True
+    assert estado.aviso_visto is False
+    assert base.conexiones[0].rollbacks == 1

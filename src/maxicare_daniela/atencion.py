@@ -281,7 +281,36 @@ def _leer_estado(database_url: str, telefono: str, wamids: list[str]) -> _Estado
         # La fila nace aquí, con el primer mensaje que entra, y no cuando alguien agenda: los
         # que preguntan y no agendan son justo los que hay que poder recordar. `asegurar_`
         # porque puede existir desde hace meses; es idempotente.
-        contacto = persistencia.asegurar_contacto(conn, telefono)
+        try:
+            contacto = persistencia.asegurar_contacto(conn, telefono)
+            pidio_no_contacto = bool(contacto["no_contactar"])
+            aviso_visto = contacto["aviso_mostrado_en"] is not None
+        except Exception:  # noqa: BLE001 -- degradar hacia el lado seguro, nunca tumbar el turno
+            # El mismo mecanismo de `leer_configuracion`, un poco más abajo: `conectar` abre
+            # con `autocommit=False`, así que un `statement_timeout` o un esquema a medio
+            # migrar aquí deja la transacción ABORTADA y las lecturas que siguen dentro de
+            # este mismo `with` --paciente, conversación, configuración-- revientan en
+            # cadena con `InFailedSqlTransaction` si nadie hace `rollback()`.
+            #
+            # A diferencia de `leer_configuracion`, esta es una ESCRITURA nueva que no es
+            # esencial para el turno: hoy nadie consume `pidio_no_contacto` ni `aviso_visto`
+            # más allá de guardarlos en el contexto -- la Tarea 3 es quien los usa de
+            # verdad. Dejar que la excepción se propague cambiaría un turno clínico entero
+            # (Daniela sin contestar, `MENSAJE_SEGURO` de emergencia) por una señal de
+            # consentimiento que todavía no hace nada: exactamente el empate que decide el
+            # principio del proyecto, a favor de lo clínico y nunca de lo comercial.
+            #
+            # Se degrada hacia el lado seguro en las DOS direcciones: `pidio_no_contacto=True`
+            # porque no ofrecer nada comercial nunca es un daño, y `aviso_visto=False` porque
+            # volver a enseñar un aviso ya visto es inocuo. Y no dura más que este mensaje:
+            # `asegurar_contacto` es idempotente, así que la fila nace sola en el turno
+            # siguiente en cuanto la base vuelva a responder.
+            conn.rollback()
+            log.warning(
+                "no se pudo asegurar el contacto de %s; se degrada a no-contactar", telefono
+            )
+            pidio_no_contacto = True
+            aviso_visto = False
 
         if viva is None:
             id_conversacion = persistencia.asegurar_conversacion(
@@ -351,8 +380,8 @@ def _leer_estado(database_url: str, telefono: str, wamids: list[str]) -> _Estado
         ultimo_recordatorio_tipo=recordatorio[0] if recordatorio else None,
         ultimo_recordatorio_en=recordatorio[1] if recordatorio else None,
         operativa=operativa,
-        pidio_no_contacto=bool(contacto["no_contactar"]),
-        aviso_visto=contacto["aviso_mostrado_en"] is not None,
+        pidio_no_contacto=pidio_no_contacto,
+        aviso_visto=aviso_visto,
     )
 
 
