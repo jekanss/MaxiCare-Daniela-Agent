@@ -149,6 +149,41 @@ class WhatsAppFalso:
         return "wamid.archivo"
 
 
+class ConexionFalsa:
+    """Una conexión que no habla con Postgres: solo apunta el SQL que le mandan.
+
+    Existe para UN caso concreto, y es el que costó el bug del hilo del paciente sin archivo:
+    dejar correr de verdad una de las funciones que `_sin_base` dobla. Un doble no ejecuta ni
+    la llamada que hay dentro, así que tapaba un `TypeError` garantizado en producción.
+
+    No valida nada ni imita a `psycopg`. Si algún día hace falta comprobar lo que el SQL
+    DEVUELVE, esto no sirve: eso es de `tests/test_relevo_neon.py`.
+    """
+
+    def __init__(self, escrituras: list[tuple[str, tuple | None]]) -> None:
+        self.escrituras = escrituras
+
+    def __enter__(self) -> "ConexionFalsa":
+        return self
+
+    def __exit__(self, *_) -> bool:
+        return False
+
+    def cursor(self) -> "ConexionFalsa":
+        return self
+
+    def execute(self, sql: str, parametros: tuple | None = None) -> None:
+        self.escrituras.append((sql, parametros))
+
+    def commit(self) -> None:
+        pass
+
+
+#: La función DE VERDAD, capturada al importar el módulo --antes de que ningún `monkeypatch`
+#: la tape--. La prueba del hilo del paciente sin archivo la vuelve a poner en su sitio.
+_GUARDAR_TEMA_ABIERTO_REAL = relevo._guardar_tema_abierto
+
+
 @pytest.fixture(autouse=True)
 def _sin_base(monkeypatch):
     """Nadie abre una conexión aquí. Los defaults son el caso normal: la conversación existe,
@@ -158,7 +193,7 @@ def _sin_base(monkeypatch):
     monkeypatch.setattr(relevo, "_cerrar_en_base", lambda url, conv, motivo: True)
     monkeypatch.setattr(relevo, "_tema_de", lambda url, tel: TEMA)
     monkeypatch.setattr(relevo, "_ficha_para_el_relevo", lambda url, tel: 55)
-    monkeypatch.setattr(relevo, "_guardar_tema_abierto", lambda url, pid, tema: None)
+    monkeypatch.setattr(relevo, "_guardar_tema_abierto", lambda url, tel, tema: None)
     monkeypatch.setattr(relevo, "_marcar_abierto", lambda url, tel, abierto: None)
     monkeypatch.setattr(relevo, "_tocar", lambda url, conv: None)
     monkeypatch.setattr(relevo, "_marcar_escalamiento", lambda url, mid: None)
@@ -340,6 +375,44 @@ def test_un_numero_sin_ficha_estrena_tema_y_ficha_PENDIENTE(monkeypatch):
     # Nace ya abierto: `createForumTopic` lo deja así, al revés que el que abre un archivo.
     assert tg.reabiertos == [], "se reabrió un tema recién creado"
     assert relevo.NOMBRE_PENDIENTE == "PENDIENTE"
+
+
+def test_el_hilo_del_paciente_sin_archivo_se_guarda_DE_VERDAD(monkeypatch):
+    """El relevo de quien nunca mandó un archivo, con la escritura del hilo SIN doblar.
+
+    ------------------------------------------------------------------------------------
+    Por qué esta prueba tiene que correr la función real
+    ------------------------------------------------------------------------------------
+
+    `_guardar_tema_abierto` llamaba a `persistencia.guardar_tema(conn, id_paciente=...)`, y
+    desde la migración 014 esa firma es `(conn, *, telefono, topic_id, abierto)`: el hilo se
+    ata al TELÉFONO y no a la ficha. `TypeError` garantizado, en el único camino que lo pasa
+    -- el del número que todavía no tiene hilo, o sea el que nunca mandó un archivo.
+
+    Y ese es justo el paciente del que habla `_ficha_para_el_relevo`: el desconocido con dolor
+    agudo, el que más escala. `activar` traga la excepción, deshace el relevo con
+    `tema_perdido` y avisa al General de que «no se pudo abrir el hilo» -- dejando además un
+    tema huérfano en Telegram por cada intento, porque `crear_tema` ya había corrido.
+
+    No lo cazaba nadie porque `_sin_base` dobla `_guardar_tema_abierto` con un `lambda`, y un
+    `lambda` no ejecuta la llamada de dentro. Por eso aquí se le devuelve la función real y se
+    dobla un escalón más abajo, en la conexión.
+    """
+    monkeypatch.setattr(relevo, "_tema_de", lambda url, tel: None)
+    monkeypatch.setattr(relevo, "_guardar_tema_abierto", _GUARDAR_TEMA_ABIERTO_REAL)
+    escrituras: list[tuple[str, tuple | None]] = []
+    monkeypatch.setattr(persistencia, "conectar", lambda url: ConexionFalsa(escrituras))
+    tg = TelegramFalso()
+
+    _activar(tg)
+
+    assert escrituras, "el hilo del paciente nuevo no se guardó en ninguna parte"
+    sql, parametros = escrituras[0]
+    assert "temas_telegram" in sql
+    # El teléfono, no el id de la ficha. Y `abierto` en TRUE: `createForumTopic` lo deja así,
+    # y la base tiene que decir la verdad o `cerrar` no sabría que hay un canal en vivo.
+    assert parametros == (TEL, TEMA, True)
+    assert tg.mensajes, "el doctor se quedó sin bienvenida: el relevo no llegó a activarse"
 
 
 def test_el_general_deja_de_ofrecer_un_boton_que_ya_no_aplica():
