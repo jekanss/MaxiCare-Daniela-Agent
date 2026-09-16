@@ -328,6 +328,14 @@ MODELO_LECTOR = "gpt-5.6-sol"
 #: Una pregunta cerrada por llamada. Pagar el tier de Daniela aquí sería 10× por lo mismo.
 MODELO_EVALUADOR = "gpt-5.6-luna"
 
+#: La política de tratamiento de datos, en constantes de módulo y no solo en los defaults del
+#: dataclass, por la misma razón que los modelos: son el valor que `desde_entorno` usa cuando
+#: la variable no está, y repetir el literal en los dos sitios es dejar que se separen.
+POLITICA_DATOS_URL = "https://drive.google.com/file/d/1IB_XYUfc6Dqd51zBeURemfAVQMVnTy28/view"
+
+#: La copia congelada de esta versión, con su SHA-256, está en `docs/politica/`.
+POLITICA_DATOS_VERSION = "politica-v2.0-2026-09"
+
 
 @dataclass(frozen=True)
 class Config:
@@ -425,23 +433,32 @@ class Config:
     plantilla_recordatorio_idioma: str = "es"
 
     #: La dirección donde vive la política de tratamiento de datos que el paciente ve en su
-    #: primer mensaje. `PENDIENTE` --su default-- APAGA el aviso: sale el mensaje limpio y no
-    #: se registra nada.
+    #: primer mensaje. El literal `PENDIENTE` APAGA el aviso: sale el mensaje limpio y no se
+    #: registra nada. Dejó de ser el default el 16/09/2026.
     #:
-    #: PENDIENTE: la URL real. El PDF existe y es público en Drive, pero ese no es el destino
-    #: final por tres razones: Drive deja subir una versión nueva sobre el mismo archivo sin
-    #: que el enlace cambie --y entonces quien ya aceptó apunta a un texto que no es el que
-    #: vio, que es justo lo que hay que poder acreditar--; un enlace opaco dentro de un
-    #: mensaje que pide confianza sobre datos personales trabaja en contra de sí mismo; y si
-    #: alguien mueve el archivo, el enlace muere en silencio y el sistema lo sigue mandando.
-    #: Tiene que vivir en el dominio de MaxiCare, con una copia congelada por versión.
-    politica_datos_url: str = "PENDIENTE"
+    #: Va aquí y no solo en el `.env` a propósito, y es la única URL del proyecto que lo hace:
+    #: no es un secreto --es un documento público-- y sí es algo que hay que poder acreditar.
+    #: En el código, el día que cambió queda en `git log`; en una variable del VPS no queda en
+    #: ninguna parte, y además se puede olvidar en un despliegue, que aquí significa dejar de
+    #: informar sin que nada falle. El `.env` sigue pudiendo pisarla (las pruebas y
+    #: `scripts/probar_atencion.py` la blanquean).
+    #:
+    #: El destino es Drive, decidido por el cliente. El riesgo conocido es que Drive deja
+    #: subir una versión nueva sobre el mismo archivo sin que el enlace cambie, y entonces
+    #: quien ya aceptó apunta a un texto que no vio. La contramedida es la copia congelada con
+    #: su SHA-256 en `docs/politica/`, que es lo que hace verificable el `politica_version` de
+    #: cada fila de `consentimientos`. Lo correcto sigue siendo servirlo desde el dominio de
+    #: MaxiCare; esto es lo que hay hasta entonces.
+    politica_datos_url: str = POLITICA_DATOS_URL
 
     #: El identificador de la versión vigente de la política. Se congela en cada fila de
     #: `consentimientos`: si la política cambia, hay que poder demostrar cuál vio cada
     #: persona. Cambiarlo NO reenvía el aviso a quien ya lo vio -- eso es una decisión
     #: aparte, y hoy no está construida.
-    politica_datos_version: str = "politica-2026-09"
+    #:
+    #: Nombra la versión que declara el PDF en su portada (2.0), no solo el mes: es lo que
+    #: permite pasar de una fila de `consentimientos` al archivo exacto de `docs/politica/`.
+    politica_datos_version: str = POLITICA_DATOS_VERSION
 
     @classmethod
     def desde_entorno(cls) -> Config:
@@ -460,9 +477,9 @@ class Config:
             plantilla_recordatorio_idioma=_opcional(
                 "MAXICARE_PLANTILLA_RECORDATORIO_IDIOMA", "es"
             ),
-            politica_datos_url=_opcional("MAXICARE_POLITICA_DATOS_URL", "PENDIENTE"),
+            politica_datos_url=_opcional("MAXICARE_POLITICA_DATOS_URL", POLITICA_DATOS_URL),
             politica_datos_version=_opcional(
-                "MAXICARE_POLITICA_DATOS_VERSION", "politica-2026-09"
+                "MAXICARE_POLITICA_DATOS_VERSION", POLITICA_DATOS_VERSION
             ),
             google_sa_b64=_opcional("MAXICARE_GOOGLE_SA_B64"),
             google_calendar_id=_opcional("MAXICARE_GOOGLE_CALENDAR_ID"),

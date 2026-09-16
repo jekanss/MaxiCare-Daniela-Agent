@@ -82,6 +82,13 @@ def config_falso(**cambios) -> Config:
         secreto_sesion="",
         permitir_cookie_insegura=False,
         daniela_responde=True,
+        # Vacía a propósito, igual que las credenciales de Google y por la misma razón: el
+        # default de `Config` es la URL REAL de la política, así que heredarlo le pegaría el
+        # pie del aviso a la respuesta de todas las pruebas de este archivo -- que no van de
+        # eso-- y las volvería a romper el día que la URL cambie. Las tres que sí prueban el
+        # aviso la pasan explícitamente. Es la misma decisión que toma
+        # `scripts/probar_atencion.py`.
+        politica_datos_url="",
     )
     campos.update(cambios)
     return Config(**campos)

@@ -111,14 +111,37 @@ cambia es qué se pierde al fallar.
   `contactos.aviso_mostrado_en`, que no caduca a las 24 h como `conversaciones`: un paciente
   que escribe cada semana no ve el aviso legal cada semana. Lo decide `_toca_avisar`, que es
   una función y no un `if` suelto porque sus dos condiciones **son** la política.
-- **Con `politica_datos_url` en `PENDIENTE` —su default hoy— el aviso no se emite, y por eso
-  la frase vuelve al prompt condicionada a ese mismo `PENDIENTE`.** Las dos mitades son
-  correctas por separado y juntas dejaban un hueco en el que nadie informaba de la política
-  ni una vez: menos cobertura que antes de que el código emitiera nada. El valor viaja en
+- **Con `politica_datos_url` en `PENDIENTE` el aviso no se emite, y por eso la frase vuelve al
+  prompt condicionada a ese mismo `PENDIENTE`.** Las dos mitades son correctas por separado y
+  juntas dejaban un hueco en el que nadie informaba de la política ni una vez: menos cobertura
+  que antes de que el código emitiera nada. El valor viaja en
   `ContextoDaniela.politica_datos_url` (default `PENDIENTE`, el lado que avisa) y lo único
-  que lo lee es `agentes.instrucciones_daniela`. El día que exista la URL, el aviso lo escribe
-  el código palabra por palabra y el bloque del prompt desaparece solo: dos avisos en el mismo
-  mensaje son uno de más.
+  que lo lee es `agentes.instrucciones_daniela`.
+- **Desde el 16/09/2026 la URL existe, así que en producción manda el código y el bloque del
+  prompt ya no sale.** Vive en `config.POLITICA_DATOS_URL`, en el código y no en el `.env`, y
+  es la única URL del proyecto que lo hace: es un documento público, el día que cambie tiene
+  que quedar en `git log`, y una variable olvidada en un despliegue no puede significar dejar
+  de informar. El `.env` la sigue pudiendo pisar. Ojo con la asimetría de `_opcional`:
+  **vacía cae al valor del código y NO apaga nada**; lo único que apaga es el literal
+  `PENDIENTE`.
+- **`config_falso()` de `tests/test_atencion.py` la blanquea a propósito**, igual que las
+  credenciales de Google y que `scripts/probar_atencion.py`. Sin eso, el pie del aviso se le
+  pega a la respuesta de todas las pruebas de extremo a extremo de ese archivo y de
+  `test_muro.py` —que no van de eso— y vuelven a romperse el día que la URL cambie. Las tres
+  que sí prueban el aviso pasan la URL explícitamente.
+- **Lo que el código NO puede sostener solo: que el documento detrás del enlace siga siendo el
+  que la gente aceptó.** El destino es Drive, y Drive deja subir una versión nueva sobre el
+  mismo archivo sin que el enlace cambie. Por eso cada `politica_version` tiene su PDF
+  congelado con su SHA-256 en `docs/politica/`: es lo que convierte la fila de
+  `consentimientos` en algo contrastable. Ninguna prueba lo caza, y el comando para
+  comprobarlo está en el README de esa carpeta.
+- **El relevo NO lleva aviso, y es un hueco conocido.** `relevo.py` escribe al paciente por su
+  cuenta (`whatsapp.enviar_texto` directo), así que un número cuyo primerísimo contacto lo
+  releve el doctor conversa sin verlo. Se cura solo —el aviso no se marca hasta que sale, así
+  que sale en cuanto Daniela vuelva a contestar— y por eso no se tocó el relevo, que es el
+  subsistema más frágil del proyecto. Si alguna vez deja de curarse solo (por ejemplo, si el
+  relevo pasara a poder cerrar una conversación entera sin devolvérsela a Daniela), hay que
+  cerrarlo ahí.
 - **Lo que prueba el puente es una prueba de Neon, no la suite offline.**
   `atencion._marcar_aviso` son tres líneas que las pruebas de extremo a extremo sustituyen con
   `monkeypatch` y que `scripts/probar_atencion.py` apaga con `politica_datos_url=""`. Es el
