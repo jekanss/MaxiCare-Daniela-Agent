@@ -50,7 +50,7 @@ from agents import (
 )
 from pydantic import BaseModel, Field
 
-from .config import MODELO_EVALUADOR, config_de_corrida
+from .config import MODELO_EVALUADOR, TELEFONO_PRIVACIDAD, config_de_corrida
 from .contratos import ContextoDaniela, RespuestaDaniela
 
 log = logging.getLogger("maxicare.guardrails")
@@ -178,31 +178,46 @@ class Veredicto:
     motivo: str = ""
 
 
-#: El teléfono del canal de privacidad que `agentes.py` manda a dar --+57 321 981 2422, la
-#: Ley 2300 exige uno-- autorizado de forma PERMANENTE y NO por turno. Un modelo que lo
-#: reformatee --"3219812422" en vez de "321 981 2422"-- produce una cifra que ninguna tool
-#: devolvió jamás, y sin esto dispara `sin_cifra_no_documentada` de forma intermitente: pasa
-#: la mayoría de las veces (con ESE espaciado, `cifras_de` no extrae nada) y falla la vez que
-#: el modelo lo junta distinto. Es una cadena y no un `set` de variantes a propósito: los
-#: dígitos del teléfono siempre salen en el mismo orden, así que cualquier fragmento de 5 o
-#: más que `cifras_de` extraiga de una reformulación válida es, por construcción, un
-#: substring de esta.
-_DIGITOS_TELEFONO_CLINICA = "573219812422"
+#: Los dígitos del teléfono del canal de privacidad que `agentes.py` manda a dar. El número
+#: en sí vive en `config.TELEFONO_PRIVACIDAD`, que es lo que ata el prompt a esto.
+_DIGITOS_PRIVACIDAD = re.sub(r"\D", "", TELEFONO_PRIVACIDAD)
+
+#: Ese mismo teléfono, escrito COMO SEA que lo escriba el modelo, para poder BORRARLO del
+#: mensaje antes de contar cifras.
+#:
+#: Por qué borrarlo y no perdonarlo después: un modelo que lo reformatee --"3219812422" en
+#: vez de "321 981 2422"-- produce una cifra que ninguna tool devolvió jamás, y sin esto
+#: `sin_cifra_no_documentada` dispara de forma intermitente sobre el propio canal de baja.
+#: La primera versión de la excepción comparaba `cifra not in "573219812422"`, o sea por
+#: SUBSTRING, y eso autorizaba de por vida las 36 cadenas contenidas ahí: `$3.219.812`
+#: --3,2 millones, el orden de magnitud real de un tratamiento-- normaliza a `3219812`, que
+#: SÍ es substring, y atravesaba entero el guardrail que existe para impedir que Daniela
+#: invente precios. Lo único que lo salvaba era que un precio redondo termina en `000`, que
+#: es una propiedad del formato y no una garantía.
+#:
+#: Con el borrado no hay lista de variantes que mantener ni fragmentos autorizados: lo que
+#: desaparece del texto es el teléfono y nada más, así que `$3.219.812` sigue disparando.
+#: Los separadores van sueltos entre dígito y dígito porque el modelo agrupa como quiere
+#: ("321 9812422", "321-981-2422"), y el indicativo es opcional porque no siempre lo escribe.
+#: Los `(?<!\d)` / `(?!\d)` impiden comerse el teléfono cuando es parte de un número mayor.
+_SEPARADOR_DE_DIGITOS = r"[\s.()-]*"
+_TELEFONO_PRIVACIDAD_EN_TEXTO = re.compile(
+    r"(?<!\d)(?:"
+    + _SEPARADOR_DE_DIGITOS.join(_DIGITOS_PRIVACIDAD)
+    + r"|"
+    + _SEPARADOR_DE_DIGITOS.join(_DIGITOS_PRIVACIDAD[2:])
+    + r")(?!\d)"
+)
 
 
 def revisar_cifras(mensaje: str, autorizadas: set[str]) -> Veredicto:
     """Ninguna cifra de dinero puede salir si una tool no la devolvió en este turno.
 
-    Excepción: un fragmento del teléfono de privacidad que el propio prompt manda a dar
-    nunca cuenta como "sobrante", venga como venga formateado -- ver
-    `_DIGITOS_TELEFONO_CLINICA`.
+    Excepción: el teléfono de privacidad que el propio prompt manda a dar se BORRA del texto
+    antes de contar, venga como venga formateado -- ver `_TELEFONO_PRIVACIDAD_EN_TEXTO`.
     """
-    dichas = cifras_de(mensaje)
-    sobrantes = {
-        cifra
-        for cifra in dichas - autorizadas
-        if cifra not in _DIGITOS_TELEFONO_CLINICA
-    }
+    dichas = cifras_de(_TELEFONO_PRIVACIDAD_EN_TEXTO.sub(" ", mensaje))
+    sobrantes = dichas - autorizadas
     if not sobrantes:
         return Veredicto(False)
     return Veredicto(

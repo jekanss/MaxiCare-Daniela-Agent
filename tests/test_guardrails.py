@@ -118,6 +118,23 @@ def test_un_fragmento_ajeno_al_telefono_de_privacidad_sigue_disparando():
     assert "9999999999" in veredicto.motivo
 
 
+def test_un_precio_contenido_en_los_digitos_del_telefono_SIGUE_disparando():
+    """La prueba que la excepción por substring no pasaba, y que es la razón de que ahora el
+    teléfono se BORRE del texto en vez de perdonarse después.
+
+    `cifra not in "573219812422"` autorizaba de por vida las 36 cadenas contenidas ahí.
+    `$3.219.812` --3,2 millones de pesos, el orden de magnitud real de un tratamiento--
+    normaliza a `3219812`, que SÍ es substring: un precio inventado atravesaba entero el
+    guardrail que existe justo para impedir que Daniela invente precios. Lo único que lo
+    salvaba era que un precio redondo termina en `000`, que es una propiedad del formato y
+    no una garantía.
+    """
+    veredicto = g.revisar_cifras("el implante sale en $3.219.812", autorizadas=set())
+
+    assert veredicto.dispara is True
+    assert "3219812" in veredicto.motivo
+
+
 # ==========================================================================================
 # sin_hora_no_verificada
 # ==========================================================================================

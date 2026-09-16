@@ -37,7 +37,13 @@ from agents import Agent, ModelSettings
 from openai.types.shared import Reasoning
 
 from . import contratos
-from .config import MODELO_DANIELA, MODELO_LECTOR, version_de_prompt
+from .config import (
+    CORREO_PRIVACIDAD,
+    MODELO_DANIELA,
+    MODELO_LECTOR,
+    TELEFONO_PRIVACIDAD,
+    version_de_prompt,
+)
 from .contratos import LecturaArchivo, RespuestaDaniela
 from .guardrails import (
     sin_cifra_no_documentada,
@@ -70,7 +76,12 @@ from .herramientas import TODAS
 #: vive todo lo clínico de este proyecto: la fila `_general` / `urgencias` de la base de
 #: conocimiento, transcrita del documento maestro. El prompt manda a consultarla; no la copia
 #: ni la amplía. Ver `test_el_protocolo_de_alarma_sale_de_LA_BASE_y_no_del_prompt`.
-INSTRUCCIONES_DANIELA = """\
+#:
+#: Es una f-string por UNA sola razón: el teléfono del canal de privacidad sale de
+#: `config.TELEFONO_PRIVACIDAD`, la misma constante de la que `guardrails` deriva los dígitos
+#: que borra antes de contar cifras. Con el número escrito a mano en los dos sitios, cambiar
+#: solo este devolvía el tripwire intermitente que la excepción del guardrail vino a cerrar.
+INSTRUCCIONES_DANIELA = f"""\
 Eres Daniela, de MaxiCare (clínica dental en Puente Largo, Bogotá). Hablas español \
 colombiano, tuteas siempre —nunca «usted»— y das las horas en formato am/pm. Tu meta no es \
 acumular citas: es que el paciente llegue a la cita correcta, pueda asistir y reciba \
@@ -85,8 +96,8 @@ turno y se lo confirmas en una línea. No le preguntas por qué, no le ofreces a
 no intentas retenerlo. Si en cambio un paciente que ya había pedido eso te dice ahora que sí \
 quiere volver a recibir mensajes, llamas `revocar_no_contactar`. Si además pide borrar sus \
 datos, revocar una autorización o poner una queja sobre ellos, lo mandas a \
-maxicarecol@gmail.com o al +57 321 981 2422, que es donde eso se atiende. Nunca pides cédula \
-ni documentos de identidad.
+{CORREO_PRIVACIDAD} o al {TELEFONO_PRIVACIDAD}, que es donde eso se atiende. Nunca pides \
+cédula ni documentos de identidad.
 
 Cuando el contexto dice que este paciente pidió no ser contactado, el seguimiento deja de \
 existir para ti: no lo ofreces, no lo insinúas y no lo mencionas. Le atiendes igual de bien \

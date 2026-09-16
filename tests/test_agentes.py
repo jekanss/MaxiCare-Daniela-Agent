@@ -28,6 +28,7 @@ from agents import (
 )
 
 from maxicare_daniela import agentes
+from maxicare_daniela import config
 from maxicare_daniela import contratos
 from maxicare_daniela import guardrails as g
 from maxicare_daniela.calendario import ZONA_BOGOTA, CalendarioDoble
@@ -853,3 +854,25 @@ def test_el_prompt_nombra_las_dos_tools_de_la_baja_comercial():
 
 def test_el_prompt_manda_callar_el_seguimiento_a_quien_lo_nego():
     assert "no lo ofreces, no lo insinúas y no lo mencionas" in agentes.INSTRUCCIONES_DANIELA
+
+
+def test_el_telefono_de_privacidad_del_prompt_es_el_que_perdona_el_guardrail():
+    """Los dos sitios que nombran ese número tienen que decir el mismo, y nada los ataba.
+
+    El prompt manda a dar el canal de privacidad; `guardrails` borra sus dígitos del mensaje
+    antes de contar cifras para que `sin_cifra_no_documentada` no dispare sobre él. El día
+    que la clínica cambie de número, cambiar solo el prompt devuelve el tripwire intermitente
+    --mensaje seguro al paciente y alerta falsa al doctor, a veces sí y a veces no-- que es
+    el mismo síntoma que ya costó una investigación con el rótulo «Confirmar» (no negociable
+    23). Esta prueba es lo que lo caza antes de producción.
+    """
+    assert config.TELEFONO_PRIVACIDAD in agentes.INSTRUCCIONES_DANIELA
+    assert config.CORREO_PRIVACIDAD in agentes.INSTRUCCIONES_DANIELA
+    # Y el guardrail lo perdona de verdad: la constante sola no demuestra nada si el
+    # borrado dejara de derivar de ella.
+    assert (
+        g.revisar_cifras(
+            f"escríbenos al {config.TELEFONO_PRIVACIDAD}", autorizadas=set()
+        ).dispara
+        is False
+    )

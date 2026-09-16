@@ -52,6 +52,21 @@ LIMITE_TURNOS = 15
 #: En True, el contenido clínico quedaría en los traces, que se exportan fuera.
 TRACE_INCLUDE_SENSITIVE_DATA = False
 
+#: El canal al que Daniela manda las solicitudes de privacidad --borrado, revocación, queja,
+#: habeas data--. La Ley 2300 exige que exista uno y que sea ágil.
+#:
+#: El teléfono vive AQUÍ y no dentro del prompt porque hay dos sitios que tienen que decir
+#: exactamente el mismo número: `agentes.INSTRUCCIONES_DANIELA`, que manda a darlo, y
+#: `guardrails`, que borra sus dígitos del mensaje antes de contar cifras para que
+#: `sin_cifra_no_documentada` no dispare sobre el propio canal de baja. El día que la clínica
+#: cambie de número, cambiar solo el prompt devuelve un tripwire intermitente --mensaje
+#: seguro al paciente y alerta falsa al doctor, a veces sí y a veces no--, que es el mismo
+#: síntoma que ya costó una investigación con el rótulo «Confirmar» (no negociable 23).
+#: `tests/test_agentes.py::test_el_telefono_de_privacidad_del_prompt_es_el_que_perdona_el_guardrail`
+#: ata los dos.
+TELEFONO_PRIVACIDAD = "+57 321 981 2422"
+CORREO_PRIVACIDAD = "maxicarecol@gmail.com"
+
 def version_de_prompt(texto: str) -> str:
     """Un identificador corto y estable del texto de un prompt, para el `trace_metadata`.
 
