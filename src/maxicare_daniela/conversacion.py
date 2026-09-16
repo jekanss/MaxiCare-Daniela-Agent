@@ -221,6 +221,12 @@ class Resultado:
     escalado_por: MotivoEscalamiento | None = None
     #: La excepción que se tradujo, si hubo. Para el log, nunca para el paciente.
     fallo: str | None = None
+    #: Si `al_escalar` llegó a interrumpir a alguien. `None` es «no se intentó» --no hubo
+    #: escalamiento, o el transporte no trae a quién avisar, que es el caso del chat web--.
+    #: `False` significa que se intentó y no hubo interrupción: el aviso se calló porque el
+    #: doctor ya tenía ese asunto delante sin responder, o Telegram lo rechazó. Lo lee
+    #: `atencion` para no contar en la pantalla del cliente una interrupción que no existió.
+    doctor_avisado: bool | None = None
 
 
 def _respuesta_de_emergencia(
@@ -324,7 +330,7 @@ async def responder(
     sesion: Any = None,
     run_config: RunConfig | None = None,
     max_turns: int = LIMITE_TURNOS,
-    al_escalar: Callable[[ContextoDaniela, MotivoEscalamiento, str], Awaitable[None]] | None = None,
+    al_escalar: Callable[[ContextoDaniela, MotivoEscalamiento, str], Awaitable[bool | None]] | None = None,
 ) -> Resultado:
     """Corre un turno completo y devuelve siempre algo que se le puede decir al paciente.
 
@@ -446,10 +452,17 @@ async def responder(
 
     if resultado.escalado_por is not None and al_escalar is not None:
         try:
-            await al_escalar(ctx, resultado.escalado_por, resultado.respuesta.mensaje_al_paciente)
+            # Un `al_escalar` que no devuelva nada --los dobles de las pruebas, y cualquier
+            # transporte futuro-- deja esto en `None`, que `atencion` lee como «cuéntalo»:
+            # el comportamiento de antes de que este aviso pudiera callarse.
+            avisado = await al_escalar(
+                ctx, resultado.escalado_por, resultado.respuesta.mensaje_al_paciente
+            )
+            resultado.doctor_avisado = avisado if isinstance(avisado, bool) else None
         except Exception:  # noqa: BLE001
             # Que no se pueda avisar al doctor no puede impedir que el paciente reciba su
             # mensaje. El escalamiento fallido queda en el log; la respuesta sale igual.
+            resultado.doctor_avisado = False
             log.exception("no se pudo escalar %s", ctx.id_conversacion)
 
     return resultado

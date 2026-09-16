@@ -382,8 +382,9 @@ salió de esa tarde, no del diseño:
   doctor mandaba al paciente moría en un 400. El tipo sale de la extensión del `file_path`.
 - **Al doctor se le vuelca la conversación al entrar**, con horas, leída de la base. Sin
   modelo: no cuesta nada y no cruza el muro, porque todo eso ya lo vio el paciente.
-- **Toda cita salida de un relevo se registraba como `"valoracion"`**, fijo — y
-  `"valoracion"` no es ninguna de las catorce claves de la clínica. Ahora se pregunta: de qué
+- **Toda cita salida de un relevo se registraba como `"valoracion"`**, fijo — y entonces
+  `"valoracion"` no era ninguna de las claves de la clínica (lo es desde la 020, creada por
+  otro motivo: que Daniela pudiera agendar sin diagnóstico). Ahora se pregunta: de qué
   es, cuándo, y el nombre si el número todavía no tiene. Con eso se toma el cupo, se crea el
   evento en Google Calendar y se escribe la fila, en ese orden, igual que si la hubiera
   agendado el paciente. Sin el nombre, la cita entraba en la agenda como «PENDIENTE ·

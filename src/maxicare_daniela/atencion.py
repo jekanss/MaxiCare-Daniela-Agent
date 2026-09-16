@@ -897,7 +897,7 @@ async def atender(
     telegram: Telegram,
     config: Config,
     calendario: Any | None = None,
-    al_escalar: Callable[..., Awaitable[None]] | None = None,
+    al_escalar: Callable[..., Awaitable[bool | None]] | None = None,
     dormir: Callable[[float], Awaitable[None]] | None = None,
     ventana: float | None = None,
     tope: float | None = None,
@@ -1225,7 +1225,11 @@ async def atender(
             # envío fallido lo necesita igual, y ahí `resultado` puede no existir.
             tripwires = resultado.tripwires
             # Aquí el escalamiento sí ocurrió: `al_escalar` corrió y el doctor está avisado.
-            escalamiento_real = escalado_por
+            # Salvo que `al_escalar` diga que NO interrumpió a nadie --el asunto ya estaba
+            # delante del doctor sin responder, o Telegram lo rechazó--. Es la misma razón
+            # por la que el camino del reventón de abajo pone `None`: la pantalla del cliente
+            # imprime «Se interrumpió al doctor N de M veces», y ese N tiene que ser cierto.
+            escalamiento_real = escalado_por if resultado.doctor_avisado is not False else None
         except Exception as e:  # noqa: BLE001
             # `responder` ya traduce lo que lanza el SDK, pero no lo que lanza una tool con un
             # bug ni un fallo de red a mitad de turno. El silencio es la única respuesta que

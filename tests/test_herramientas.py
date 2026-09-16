@@ -36,6 +36,20 @@ from maxicare_daniela.contratos import (
 
 INICIO = datetime(2026, 9, 15, 9, 0, tzinfo=h.ZONA_BOGOTA)
 
+#: El "ahora" de estas pruebas. Lunes, en hora hábil, y un día ANTES de `INICIO`.
+#:
+#: Tiene que estar clavado. `ContextoDaniela.ahora` cae al reloj de verdad si nadie se lo
+#: da, y con `INICIO` fijo en el 15/09/2026 estas pruebas se pusieron en ROJO solas al dar
+#: la medianoche del 16: `_crear_cita` dejó de ver una hora llena y pasó a ver una hora
+#: PASADA, así que doce comprobaciones empezaron a medir otra cosa sin que nadie tocara
+#: nada. Es la tercera vez que este proyecto tropieza con una fecha que envejece --las otras
+#: dos fueron `probar_tools.hora` y el bloque 10 de `probar_agentes`-- y es la primera en la
+#: suite offline, que es justamente la red que tenía que avisar.
+#:
+#: Quien quiera probar el pasado le pasa su propio `ahora`: `base.update(cambios)` va
+#: después, así que lo explícito sigue mandando.
+AHORA = datetime(2026, 9, 14, 8, 0, tzinfo=h.ZONA_BOGOTA)
+
 
 def contexto(**cambios) -> ContextoDaniela:
     base = dict(
@@ -43,6 +57,7 @@ def contexto(**cambios) -> ContextoDaniela:
         telefono_completo="573001112233",
         database_url="postgresql://no-se-usa",
         calendario=CalendarioDoble(),
+        ahora=AHORA,
     )
     base.update(cambios)
     return ContextoDaniela(**base)

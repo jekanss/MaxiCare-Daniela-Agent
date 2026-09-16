@@ -70,7 +70,7 @@ def test_tratamiento_no_admite_una_frase_clinica(frase_clinica):
         LecturaArchivo(**datos)
 
 
-def test_tratamiento_solo_admite_los_catorce_del_vocabulario():
+def test_tratamiento_solo_admite_los_quince_del_vocabulario():
     with pytest.raises(ValidationError):
         LecturaArchivo(**(REMISION_DE_MARIA | {"tratamiento": "carillas"}))
 
@@ -282,10 +282,45 @@ def test_el_muro_no_se_abre_con_el_vocabulario():
         contratos.fijar_vocabulario(get_args(contratos.Tratamiento))
 
 
-def test_el_vocabulario_arranca_con_los_catorce_del_literal():
+def test_el_vocabulario_arranca_con_los_quince_del_literal():
     """Sin base de datos, sin `runtime`, sin nada: importar el módulo basta. Es lo que hace
     que las pruebas offline y los scripts sigan funcionando igual."""
     assert contratos.vocabulario() == frozenset(get_args(contratos.Tratamiento))
+
+
+def test_una_valoracion_se_puede_agendar_sin_saber_de_que_es_el_tratamiento():
+    """La 020, y el defecto que cierra.
+
+    El 16/09/2026 una paciente nueva con dolor fuerte pidió revisión, el cupo estaba libre y
+    su número podía crear su primera cita. Daniela no la creó: escaló, y lo dejó escrito --
+    «no hay tratamiento determinado y la agenda requiere una clave de tratamiento para
+    reservar». «Sacarme una muela» no estaba en el catálogo (`cordales` son los terceros
+    molares, no cualquier muela) y el prompt manda escalar lo que no esté en la lista.
+
+    El paciente con dolor agudo y sin diagnóstico es el caso normal de una clínica dental, y
+    era el único que no podía agendar. Ahora la cita cuyo objeto es DETERMINAR el tratamiento
+    tiene su propia clave.
+    """
+    assert "valoracion" in contratos.vocabulario()
+
+    cita = SolicitudCita(
+        nombre_completo="Sora Patricia Delgado",
+        inicio=datetime(2026, 10, 1, 9, 0, tzinfo=timezone.utc),
+        tratamiento="valoracion",
+        clave_idempotencia="573001112233:2026-10-01T09:00",
+    )
+    assert cita.tratamiento == "valoracion"
+
+
+def test_la_valoracion_NO_desplaza_a_no_identificado():
+    """Las dos existen y no son lo mismo, que es justo por lo que se creó una nueva.
+
+    `no_identificado` es lo que usa el SISTEMA cuando no sabe de qué se trata algo -- un
+    archivo sin clasificar, una conversación que todavía no tiene rumbo. `valoracion` es un
+    servicio que la clínica presta. Una cita agendada con la primera diría que nadie sabe a
+    qué va el paciente; con la segunda dice a qué va.
+    """
+    assert {"valoracion", "no_identificado"} <= contratos.vocabulario()
 
 
 def test_una_cita_con_un_tratamiento_fuera_del_vocabulario_se_rechaza():

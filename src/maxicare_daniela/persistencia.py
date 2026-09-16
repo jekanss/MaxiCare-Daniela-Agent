@@ -2100,6 +2100,79 @@ def escalamiento_pendiente_de_aviso(conn, clave_idempotencia: str) -> int | None
     return fila[0] if fila else None
 
 
+def escalamiento_vivo_con_motivo(conn, id_conversacion: str, motivo: str) -> bool:
+    """¿Ya hay un escalamiento de ESE motivo delante del doctor y sin responder?
+
+    ------------------------------------------------------------------------------------
+    Para qué existe: el escalamiento rancio
+    ------------------------------------------------------------------------------------
+
+    `RespuestaDaniela.requiere_escalamiento` lo LEE el orquestador como un flanco --«avisa
+    ahora»-- y el modelo lo EMITE como un estado --«esto sigue necesitando a un humano»--.
+    Mientras el asunto siga abierto lo deja en `true`, y como la clave de idempotencia es por
+    TURNO (y tiene que serlo: congelada, el doctor se enteraría del primer escalamiento y de
+    ninguno más), cada turno se convertía en un Telegram nuevo al General.
+
+    Medido el 16/09/2026 sobre +573196842471: cuatro avisos en seis minutos. El turno 2
+    escaló de verdad por `clinico`; los turnos 3 y 4 repitieron el mismo motivo mientras
+    Daniela solo ofrecía horarios, y cada repetición arrastraba al General el texto íntegro
+    de lo que se le había respondido al paciente. El General se leía como la transcripción de
+    una conversación que nadie había pedido ver.
+
+    El prompt ya dice «Escalas una vez por asunto, no una vez por mensaje» y no bastó. Por
+    eso la guarda vive aquí y no en la obediencia del modelo, igual que la baja comercial del
+    no negociable 25.
+
+    ------------------------------------------------------------------------------------
+    Las tres condiciones, y qué agujero cierra cada una
+    ------------------------------------------------------------------------------------
+
+    - **`telegram_message_id IS NOT NULL`** -- nunca la fila sola. Es la misma regla que
+      sostiene `escalamiento_pendiente_de_aviso`: un aviso que no salió no es un aviso
+      duplicado. Sin esto, la clave se quemaría al INTENTAR y no al CONSEGUIR, y un 5xx de
+      Telegram dejaría al paciente «escalado» en una tabla que nadie mira.
+    - **`respondido_en IS NULL`** -- si el doctor ya contestó, ese asunto se cerró y lo que
+      venga después es nuevo, aunque el motivo se repita. **Hoy esa columna NO la escribe
+      nadie** (`escalamientos` solo recibe `telegram_message_id` y `relevo_activado`), así
+      que de momento esta condición no descarta nada: está aquí para el día que se marque, y
+      decirlo es más honesto que fingir que ya cierra el ciclo. Y NO vale `relevo_activado`
+      en su lugar: en el caso medido el doctor tomó el relevo en el turno 2 y lo devolvió, y
+      los turnos 3 y 4 son justo los que hay que callar.
+
+    ------------------------------------------------------------------------------------
+    Cuánto silencia esto de verdad, dicho para que nadie lo descubra solo
+    ------------------------------------------------------------------------------------
+
+    Con `respondido_en` sin escribir, el alcance real es: **un aviso de la red de seguridad
+    por motivo y por conversación**, y una conversación caduca a las 24 h sin contacto
+    (`conversacion_viva`). No es «uno para siempre».
+
+    Y sobre todo, **no toca la tool**. `herramientas._escalar_a_doctores` escribe su fila y
+    manda su propio Telegram sin pasar por `runtime._registrar_escalamiento`: si el modelo
+    escala algo de verdad nuevo --el paciente pasa de dolor a dificultad para tragar--
+    llamando a la tool, ese aviso sale siempre. Lo único que se calla es el flanco que el
+    modelo dejó encendido sin llamar a nadie. Ahí está la frontera, y es la que sostiene que
+    esto no compita con la seguridad clínica.
+    - **mismo `motivo`** -- un `dato_faltante` detrás de un `clinico` es otro asunto y pasa.
+      En el caso medido, esto habría callado los dos avisos del medio y conservado el
+      primero y el último, que son los que decían algo.
+
+    Lo que NO toca: la tool. `escalar_a_doctores` escribe su fila y manda su propio Telegram
+    con un resumen de verdad; `_avisar_a_doctores` corre después, encuentra la clave usada y
+    ya se callaba sola. Lo único que esta consulta silencia es la red de seguridad repitiendo
+    un aviso que el doctor tiene delante sin responder.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT 1 FROM escalamientos "
+            "WHERE conversacion_id = %s AND motivo = %s "
+            "  AND telegram_message_id IS NOT NULL AND respondido_en IS NULL "
+            "LIMIT 1",
+            (id_conversacion, motivo),
+        )
+        return cur.fetchone() is not None
+
+
 def anotar_telegram_en_escalamiento(conn, escalamiento_id: int, message_id: int) -> None:
     """Guarda el mensaje de Telegram para poder editarle el botón cuando alguien lo toque.
 

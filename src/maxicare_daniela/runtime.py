@@ -729,12 +729,38 @@ def _registrar_escalamiento(
     salió como si solo se intentó. Cuando la fila existe pero se quedó sin
     `telegram_message_id`, no hay nada que duplicar --hay un aviso que falta-- y se devuelve
     su id para mandarlo ahora. **Un aviso que no salió no es un aviso duplicado.**
+
+    -------------------------------------------------------------------------------------
+    Y una tercera consulta, que deduplica por ASUNTO y no por turno
+    -------------------------------------------------------------------------------------
+
+    La clave es por turno a propósito, así que por sí sola no para un modelo que deja
+    `requiere_escalamiento` en `true` turno tras turno mientras el asunto sigue abierto. El
+    porqué entero, con lo que se midió, está en `persistencia.escalamiento_vivo_con_motivo`.
+
+    Va PRIMERA, antes del INSERT, y eso es deliberado: la fila tampoco se escribe. Una fila
+    con `telegram_message_id` NULL significa en este proyecto «se intentó avisar y falló»
+    --es lo que lee `escalamiento_pendiente_de_aviso`-- y dejar ahí un duplicado que nadie
+    quiso mandar convertiría esa señal en mentira. Además, la métrica de cuántas veces se
+    interrumpió al doctor pasa a contar interrupciones de verdad: una, no tres.
+
+    No estorba al caso de arriba. Si la tool escribió su fila y el Telegram NO salió, esa
+    fila tiene `telegram_message_id` NULL, esta consulta no la ve, y el aviso que falta sale
+    igual por el camino de siempre.
     """
     # La clave la arma el orquestador, nunca el modelo. Y es LA MISMA que construye
     # `herramientas._escalar_a_doctores`, que es lo único que hace que este aviso y el de la
     # tool se reconozcan como el mismo escalamiento.
     clave = ctx.clave("escalamiento", ctx.turno_actual)
     with persistencia.conectar(ctx.database_url) as conn:
+        if persistencia.escalamiento_vivo_con_motivo(conn, ctx.id_conversacion, motivo):
+            log.info(
+                "%s ya tiene un escalamiento por %s delante del doctor y sin responder; "
+                "no se repite",
+                ctx.id_conversacion,
+                motivo,
+            )
+            return None
         nuevo = persistencia.insertar_escalamiento(
             conn,
             id_conversacion=ctx.id_conversacion,
@@ -755,8 +781,15 @@ def _anotar_telegram(ctx: ContextoDaniela, escalamiento_id: int, message_id: int
 
 async def _avisar_a_doctores(
     ctx: ContextoDaniela, motivo: str, mensaje_al_paciente: str
-) -> None:
+) -> bool:
     """Le cuenta a los doctores, por Telegram, que este turno escaló.
+
+    Devuelve si de verdad se interrumpió a alguien. No es telemetría de adorno: la pantalla
+    de casos sin resolver imprime «Se interrumpió al doctor N de M veces», y `atencion.py`
+    ya distingue por esto mismo el escalamiento que ocurrió del que se quedó en la intención
+    --lo cuenta el comentario de `escalamiento_real`--. Desde que este aviso puede callarse
+    a propósito (un asunto que el doctor ya tiene delante y sin responder), decir que sí
+    siempre pondría un número falso en la pantalla del cliente.
 
     Se lo pasa `conversacion.responder` como `al_escalar`, y salta en los dos casos en que
     el turno escala: cuando el modelo lo pide en su respuesta estructurada, y cuando el turno
@@ -820,7 +853,7 @@ async def _avisar_a_doctores(
                 ctx.turno_actual,
                 ctx.id_conversacion,
             )
-            return
+            return False
 
         # El texto lo escribe un modelo a partir de lo que dijo un desconocido, y Telegram
         # va en `parse_mode=HTML`: un `<` sin escapar rompe el mensaje entero, que es el que
@@ -844,8 +877,13 @@ async def _avisar_a_doctores(
         message_id = await _telegram.enviar_mensaje(texto, tema_id=ctx.tema_general)
 
         await asyncio.to_thread(_anotar_telegram, ctx, escalamiento_id, message_id)
+        return True
     except Exception:  # noqa: BLE001 -- ver docstring
         log.exception("no se pudo avisar a los doctores del escalamiento de %s", ctx.id_conversacion)
+        # Y `False`: si el Telegram no salió, no hubo interrupción que contar. La fila queda
+        # con `telegram_message_id` NULL y `escalamiento_pendiente_de_aviso` la reintenta en
+        # el turno siguiente; contarla ya sería contar a un doctor que todavía no sabe nada.
+        return False
 
 
 async def _rastreado(m: ingesta.MensajeEntrante) -> None:
@@ -1670,11 +1708,11 @@ async def api_sin_resolver(quien: dict = Depends(usuario_actual)) -> dict:
 
 @app.on_event("startup")
 def _cargar_vocabulario_de_tratamientos() -> None:
-    """Reemplaza los catorce del `Literal` por los tratamientos activos de la tabla, para que
+    """Reemplaza los quince del `Literal` por los tratamientos activos de la tabla, para que
     Daniela (y esta pantalla) hablen del mismo vocabulario sin reiniciar nada.
 
     Envuelto en `try/except` a propósito: si Neon no responde al encender, el proceso se
-    queda con los catorce del `Literal` y **el webhook de WhatsApp sigue vivo**. Una
+    queda con los quince del `Literal` y **el webhook de WhatsApp sigue vivo**. Una
     excepción sin capturar aquí tumbaría producción por una tabla que solo usa el panel.
     """
     try:
@@ -1683,7 +1721,7 @@ def _cargar_vocabulario_de_tratamientos() -> None:
         log.info("vocabulario de tratamientos cargado desde la base")
     except Exception:  # noqa: BLE001
         log.warning(
-            "no se pudo leer la tabla de tratamientos al arrancar; se usan los catorce del "
+            "no se pudo leer la tabla de tratamientos al arrancar; se usan los quince del "
             "Literal. El webhook sigue funcionando.", exc_info=True
         )
 

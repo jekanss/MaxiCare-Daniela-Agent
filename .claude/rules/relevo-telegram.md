@@ -152,9 +152,16 @@ sería el bug otra vez.
 ## De qué es la cita: texto libre, y es la única excepción del proyecto
 
 Hasta la 015, toda cita salida de un relevo se registraba con `tratamiento="valoracion"`,
-fijo — y `"valoracion"` no es ninguna de las catorce claves de `tratamientos`. Dos defectos
-en una línea: un valor inventado donde la regla dura 3 pide marcar lo desconocido, y una
-categoría fantasma en cualquier informe por tratamiento.
+fijo — y entonces `"valoracion"` no era ninguna de las catorce claves de `tratamientos`. Dos
+defectos en una línea: un valor inventado donde la regla dura 3 pide marcar lo desconocido, y
+una categoría fantasma en cualquier informe por tratamiento.
+
+**Desde la 020 esa clave SÍ existe**, y no deshace nada de lo de abajo. Se creó por el otro
+lado del sistema: Daniela no tenía con qué agendar a un paciente con dolor y sin diagnóstico
+(no negociable 12). Las dos vías siguen siendo distintas y por el mismo motivo de siempre —
+Daniela escribe una clave del catálogo, validada; el doctor que acaba de hablar con el
+paciente escribe lo que quiera, sin validar, porque sabe de qué es la cita mejor que un
+catálogo. Lo que se acabó es que Daniela no tuviera NINGUNA forma de decirlo.
 
 Ahora se pregunta, y **la respuesta se guarda tal cual la escriba el doctor, sin validar
 contra la lista viva**. Es el único sitio del proyecto donde eso pasa —en todos los demás,

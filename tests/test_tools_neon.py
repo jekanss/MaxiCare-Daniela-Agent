@@ -372,6 +372,69 @@ def test_un_escalamiento_sin_telegram_se_distingue_de_uno_ya_avisado(esquema, co
         assert persistencia.escalamiento_pendiente_de_aviso(conn, f"{clave}-inexistente") is None
 
 
+def test_un_asunto_que_el_doctor_ya_tiene_delante_y_sin_responder_no_se_repite(
+    esquema, contexto_de
+):
+    """Las tres condiciones de `escalamiento_vivo_con_motivo`, contra el SQL de verdad.
+
+    Lo que cierra: el modelo deja `requiere_escalamiento` en `true` turno tras turno
+    mientras el asunto sigue abierto, y como la clave de idempotencia es por TURNO, cada
+    turno se convertía en un Telegram nuevo al General. Cuatro en seis minutos el
+    16/09/2026, cada uno arrastrando el texto íntegro de lo que se le había respondido al
+    paciente.
+
+    Va contra Neon y no solo contra un doble porque lo que puede estar mal es el `WHERE`, y
+    los tres errores posibles son silenciosos: un `telegram_message_id = NULL` en vez de
+    `IS NOT NULL` no encuentra nunca nada --y el ruido vuelve entero--; olvidar
+    `respondido_en IS NULL` calla un asunto que el doctor ya cerró y que volvió a aparecer;
+    olvidar el `motivo` calla un escalamiento que no tiene nada que ver con el anterior.
+    """
+    ctx = contexto_de("573001110011", "Sora Prueba Rancia")
+
+    def _escribir(turno: int, motivo: str) -> int:
+        id_ = persistencia.insertar_escalamiento(
+            conn,
+            id_conversacion=ctx.id_conversacion,
+            motivo=motivo,
+            resumen=f"turno {turno}",
+            pregunta="¿alguien lo mira?",
+            clave_idempotencia=ctx.clave("escalamiento", turno),
+        )
+        assert id_ is not None
+        return id_
+
+    with persistencia.conectar(esquema) as conn:
+        vivo = persistencia.escalamiento_vivo_con_motivo
+
+        # Nada escrito todavía: no hay ningún asunto vivo.
+        assert vivo(conn, ctx.id_conversacion, "clinico") is False
+
+        # La fila existe, pero el Telegram NO salió. Eso no es un aviso que repetir: es un
+        # aviso que FALTA, y tiene que seguir saliendo. Es el falso positivo de esta prueba:
+        # sin este caso, quitarle el `IS NOT NULL` a la consulta la dejaría en verde.
+        primero = _escribir(2, "clinico")
+        assert vivo(conn, ctx.id_conversacion, "clinico") is False
+
+        # Ya salió: a partir de aquí el doctor lo tiene delante.
+        persistencia.anotar_telegram_en_escalamiento(conn, primero, 611)
+        assert vivo(conn, ctx.id_conversacion, "clinico") is True
+
+        # Otro motivo es otro asunto, y ese sí pasa.
+        assert vivo(conn, ctx.id_conversacion, "dato_faltante") is False
+
+        # Otra conversación tampoco se contagia. (`conversacion_id` es UUID en la 001, así
+        # que una cadena cualquiera no llega ni a comparar: revienta en el driver.)
+        assert vivo(conn, str(uuid.uuid4()), "clinico") is False
+
+        # Y en cuanto el doctor responde, el asunto se cierra: lo que venga después es nuevo.
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE escalamientos SET respondido_en = now() WHERE id = %s", (primero,)
+            )
+        conn.commit()
+        assert vivo(conn, ctx.id_conversacion, "clinico") is False
+
+
 def test_un_seguimiento_no_se_programa_dos_veces(esquema, contexto_de):
     ctx = contexto_de("573001110002")
     objetivo = _hora_libre(48)

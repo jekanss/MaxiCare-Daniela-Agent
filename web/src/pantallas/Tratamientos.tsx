@@ -56,7 +56,7 @@ const SP = "'Space Grotesk', sans-serif"
 
 const GENERAL = '_general'
 
-/* `no_identificado` es una fila de `tratamientos` como las otras trece, pero no es un
+/* `no_identificado` es una fila de `tratamientos` como las otras catorce, pero no es un
  * servicio: es donde cae lo que Daniela no pudo clasificar, y lo que queda escrito en
  * `citas.tratamiento` cuando la clasificación falla. Nadie le va a poner precio.
  *

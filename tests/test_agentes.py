@@ -257,6 +257,45 @@ def test_un_limite_clinico_no_es_un_escalamiento():
     assert "Un límite clínico no es un escalamiento" in texto
 
 
+def test_la_valoracion_se_AGENDA_y_no_se_escala():
+    """El defecto que la 020 y esta frase cierran juntas, medido el 16/09/2026.
+
+    El prompt ya decía las dos cosas, y se contradecían:
+
+      - «Si el paciente pregunta por algo que no está en la lista, no lo ofrezcas: escala.»
+      - «Un límite clínico no es un escalamiento... para eso está la valoración.»
+
+    La segunda nombra la valoración como la salida; la primera la mandaba a escalar, porque
+    no existía ninguna clave con la que darla. Daniela obedeció la que podía cumplir: con el
+    cupo libre, el nombre dado y permiso para crear su primera cita, escaló igual.
+
+    `test_un_limite_clinico_no_es_un_escalamiento` cubre que sepa que no tiene que escalar.
+    Esta cubre lo que sí tiene que hacer en su lugar, que es lo que faltaba.
+    """
+    texto = agentes.INSTRUCCIONES_DANIELA
+
+    assert "Y la AGENDAS" in texto
+    assert "`valoracion`" in texto, "no se le dice con qué clave reservarla"
+    assert "falta un diagnóstico, no un dato" in texto
+
+
+def test_la_valoracion_esta_en_la_lista_que_se_le_ofrece_y_no_identificado_NO():
+    """Las dos mitades, y la segunda es la que impide cambiar un defecto por otro.
+
+    `valoracion` tiene que aparecer o la frase de arriba manda a Daniela a usar una clave
+    que el prompt no le enseñó. `no_identificado` tiene que seguir fuera: es el valor que
+    usa el sistema cuando no sabe, y ofrecerlo como si fuera un servicio le daría dos claves
+    para la misma situación -- con la peor de las dos disponible para agendar a ciegas.
+    """
+    ctx = contexto(ahora=datetime(2026, 9, 13, 8, 15, tzinfo=ZONA_BOGOTA))
+
+    texto = asyncio.run(agentes.daniela.get_system_prompt(RunContextWrapper(context=ctx)))
+    ofrecidos = texto.split("TRATAMIENTOS QUE MAXICARE OFRECE HOY")[1].splitlines()[1]
+
+    assert "valoracion" in ofrecidos
+    assert "no_identificado" not in ofrecidos
+
+
 def test_cancelar_se_intenta_recuperar_UNA_vez_y_despues_se_cancela():
     """Visto en producción el 13/09/2026, conversación real:
 

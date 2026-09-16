@@ -1,0 +1,53 @@
+-- =========================================================================================
+-- 020 -- La valoracion es una cita que se puede agendar
+-- =========================================================================================
+--
+-- EL DEFECTO QUE CIERRA, medido el 16/09/2026 en produccion:
+--
+--   Paciente nueva, dolor fuerte, pide revision para manana a las 9:00. El cupo esta libre,
+--   dio su nombre, y su numero no tiene ficha -- o sea que PUEDE crear su primera cita.
+--   Daniela no la creo. Escalo, y dejo escrito el motivo:
+--
+--     "No hay tratamiento determinado y la agenda requiere una clave de tratamiento
+--      para reservar."
+--
+--     "Indicar como registrar la valoracion urgente sin asignar un tratamiento no
+--      determinado."
+--
+-- Tenia todo menos una clave con la que agendar. "Sacarme una muela" no esta en el catalogo
+-- --`cordales` son los terceros molares, no cualquier muela-- y el prompt le dice que lo que
+-- no este en la lista se escala. Obedecio.
+--
+-- El paciente con dolor agudo y sin diagnostico es el caso NORMAL de una clinica dental, no
+-- el raro, y era el unico que no podia agendar: justo el que mas necesita el cupo.
+--
+-- ─── Por que una clave nueva y no `no_identificado` ─────────────────────────────────────
+--
+-- `no_identificado` existe y habria servido tecnicamente. Pero es el valor que usa el
+-- SISTEMA cuando no sabe de que se trata algo -- un documento sin clasificar, una
+-- conversacion que todavia no tiene rumbo. Una cita agendada con el no dice lo mismo: dice
+-- que nadie sabe a que va el paciente.
+--
+-- Una valoracion si se sabe a que va. Es una cita con proposito propio: el profesional
+-- revisa y determina. Que aparezca asi en la agenda del doctor y en los informes por
+-- tratamiento es el dato correcto, no un hueco.
+--
+-- ─── Y lo que esto le hace a la 015 ─────────────────────────────────────────────────────
+--
+-- El encabezado de la 015 dice que "valoracion" no es ninguna de las catorce claves de
+-- `tratamientos`, y por eso una cita salida de un relevo se registraba con una categoria
+-- fantasma. Aquella se resolvio preguntandole al doctor, y su respuesta se guarda en texto
+-- libre sin validar. Eso NO cambia: son dos vias para dos momentos distintos.
+--
+--   Daniela agenda    -> clave del catalogo, validada. Ahora incluye `valoracion`.
+--   El doctor cierra  -> texto libre, tal cual lo escriba. Unica excepcion del proyecto.
+--
+-- El doctor que acaba de hablar con el paciente sigue sabiendo de que es la cita mejor que
+-- un catalogo. Lo que se acaba es que Daniela no tuviera NINGUNA forma de decirlo.
+-- =========================================================================================
+
+-- `ON CONFLICT DO NOTHING` por lo mismo que la 008: si la clinica ya la creo desde la
+-- pantalla, su etiqueta manda sobre esta.
+INSERT INTO tratamientos (clave, etiqueta, creado_por) VALUES
+    ('valoracion', 'Valoración', 'semilla')
+ON CONFLICT (clave) DO NOTHING;

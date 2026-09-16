@@ -35,6 +35,46 @@ horas mientras `uv run pytest -q` seguía verde. El mismo defecto se había arre
 minutos y medio. Los dos helpers cuentan ahora **bloques hábiles**, no horas de reloj: un
 `_hora_libre(20)` no son veinte horas después.
 
+## Una fecha clavada envejece, y a la tercera le tocó a la suite offline
+
+El 16/09/2026, sin que nadie tocara nada, `uv run pytest -q` amaneció con **doce pruebas de
+`test_herramientas.py` en rojo**. `INICIO` estaba clavado en el 15/09/2026 y
+`ContextoDaniela.ahora` cae al reloj de verdad si nadie se lo da: a medianoche, una hora que
+las pruebas usaban como «hora futura ocupada» pasó a ser una hora PASADA, y `_crear_cita`
+empezó a contestar otra cosa. Nadie había roto nada. Doce comprobaciones dejaron de medir lo
+que decían medir, en silencio, por el calendario.
+
+Es la **tercera** vez en este proyecto: antes fueron `scripts/probar_tools.py::hora` y el
+bloque 10 de `scripts/probar_agentes.py`, las dos el 13/09/2026. Las dos primeras se
+arreglaron contando bloques hábiles. Esta se arregla al revés, y es importante entender por
+qué: un script de entregable corre CONTRA LA AGENDA REAL y necesita una hora que de verdad
+exista mañana, así que cuenta hacia delante desde hoy. Una prueba offline no habla con nadie
+y lo que necesita es lo contrario: que el tiempo no se mueva. Por eso `tests/test_herramientas.py`
+ahora fija `AHORA` además de `INICIO`.
+
+**La regla: si una prueba offline compara contra el presente, el presente se clava.** Un
+`datetime.now()` --propio o heredado de un default-- dentro de la suite rápida es una prueba
+con fecha de caducidad, y la caducidad llega un día cualquiera a las 00:00, lejos del commit
+que la plantó.
+
+## Verde por el motivo equivocado
+
+Dos pruebas de `test_webhook_responde.py` afirmaban «el doctor NO recibe un segundo Telegram»
+y lo conseguían así: `ConexionFalsa` no tiene `cursor`, la consulta de verdad lanzaba
+`AttributeError`, `_avisar_a_doctores` se lo tragaba --promete no propagar-- y no salía
+ningún Telegram. La aserción pasaba. La deduplicación que decían probar no se ejecutaba
+NUNCA.
+
+Salió a la luz al añadir una consulta más al mismo camino, que es como suelen salir: el
+doble se quedó corto, y el fallo se disfrazó de éxito porque la prueba solo miraba una
+ausencia.
+
+**Una aserción sobre algo que NO ocurre no distingue «se decidió no hacerlo» de «reventó
+antes de intentarlo».** Cuando lo que se prueba es una ausencia, hay que comprobar además que
+el camino llegó hasta donde tenía que llegar --que la fila se escribió, que la consulta se
+consultó-- o doblar lo suficiente para que un error no pueda pasar por decisión. Verde por el
+motivo equivocado es peor que rojo: el rojo se arregla.
+
 ## Una tool se prueba por su función interna
 
 Cada tool vive en dos piezas: la lógica en `_nombre_de_la_tool(...)` y encima una

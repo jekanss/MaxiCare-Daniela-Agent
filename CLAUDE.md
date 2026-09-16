@@ -104,7 +104,12 @@ una —qué se midió, qué costó— está en la regla que cubre ese archivo.
    tercera categoría que no puede existir —ni desconocido ni verificado— y encierra al paciente
    sin un error en ningún log. El relevo la abría y dejó de hacerlo el 16/09/2026; las que
    quedaron las repara `asegurar_paciente` al agendar, escribiendo encima del marcador y **solo**
-   de él.
+   de él. **Y desde la 020 hay con QUÉ agendarlo: `valoracion`.** Poder agendar no servía de
+   nada sin una clave de tratamiento, y el paciente con dolor y sin diagnóstico --el caso
+   normal, no el raro-- no tenía ninguna: escalaba en vez de agendar con el cupo libre
+   delante. `no_identificado` NO es esa clave y sigue fuera de la lista que se le ofrece al
+   modelo: es lo que usa el sistema cuando no sabe, y una cita con él diría que nadie sabe a
+   qué va el paciente.
 13. **La pertenencia de una cita va por TELÉFONO (`_es_ajena`), nunca por el UUID, y toda hora
    que una tool confirma queda autorizada** — incluida la vieja al reprogramar y la cancelada
    al cancelar. Si no, `sin_hora_no_verificada` bloquea la confirmación de una escritura **que
@@ -194,6 +199,32 @@ una —qué se midió, qué costó— está en la regla que cubre ese archivo.
    `TIPOS_NO_COMERCIALES` en G0 **y** la misma guarda dentro de `programar_seguimiento`, que
    es lo que impide que dependa de que el modelo obedezca.
 
+26. **Un escalamiento se deduplica por TURNO y por ASUNTO, y hacen falta las dos.**
+   `requiere_escalamiento` lo LEE el orquestador como un flanco («avisa ahora») y el modelo lo
+   EMITE como un estado («esto sigue necesitando a un humano»): lo deja en `true` mientras el
+   asunto siga abierto. La clave `escalamiento:{turno}` no puede pararlo --y no debe: congelada,
+   el doctor se entera del primero y de ninguno más--, así que cada turno se volvía un Telegram
+   al General con el texto entero de lo que se le respondió al paciente. Cuatro en seis minutos
+   el 16/09/2026. Lo para `persistencia.escalamiento_vivo_con_motivo`, con sus tres condiciones:
+   **entregado** (`telegram_message_id` NO nulo, o se quemaría al INTENTAR y volvería el agujero
+   de la 6A), **sin responder**, y **mismo motivo** --sin esta última se callaría el
+   `dato_faltante` que viene detrás de un `clinico`, que es justo el que pedía algo nuevo--. Va
+   ANTES del INSERT: la fila tampoco se escribe, o `telegram_message_id` NULL dejaría de
+   significar «el Telegram no salió». El prompt ya decía «escalas una vez por asunto» y no
+   bastó: la guarda va en el código, como la baja de la 25. **Solo silencia la RED DE
+   SEGURIDAD, nunca la tool**: `herramientas._escalar_a_doctores` escribe su fila y manda su
+   propio Telegram sin pasar por `_registrar_escalamiento`, así que lo que el modelo escala de
+   verdad --llamando-- sale siempre, y lo único que se calla es el flanco que dejó encendido
+   sin llamar a nadie. Ahí está la frontera con la seguridad clínica, y quien mueva esta guarda
+   a un sitio por el que pase la tool la cruza. Dos cosas más que saber: `respondido_en` **hoy
+   no la escribe nadie** --la condición está para cuando se marque-- así que el alcance real es
+   un aviso por motivo y por conversación, y una conversación caduca a las 24 h. **Y un aviso
+   que se calla NO se
+   cuenta como interrupción**: `_avisar_a_doctores` devuelve un booleano que viaja en
+   `Resultado.doctor_avisado` hasta `atencion`, porque la pantalla imprime «se interrumpió al
+   doctor N de M veces» y ese N tiene que ser cierto. Es la misma mentira que ya evita el
+   camino del reventón, por la otra puerta.
+
 # Dónde está el resto
 
 El detalle de cada área se carga solo cuando tocas sus archivos:
@@ -222,6 +253,13 @@ El detalle de cada área se carga solo cuando tocas sus archivos:
   cuando el usuario lo pide: no empujes por tu cuenta. (Esta nota decía que `main` iba
   «decenas de commits» por delante de `origin/main`; el 14/09/2026 la diferencia era de UNO
   y se empujó. Si vuelves a citarla, compruébala con `git rev-list --left-right --count`.)
+- **Una fecha clavada en una prueba envejece, y ya ha pasado TRES veces.** El 16/09/2026
+  `uv run pytest -q` amaneció con doce pruebas en rojo sin que nadie tocara nada: `INICIO`
+  apuntaba al día anterior y `ContextoDaniela.ahora` cae al reloj de verdad si nadie se lo da.
+  Antes le tocó a `probar_tools.py::hora` y al bloque 10 de `probar_agentes.py`. Los scripts
+  cuentan bloques hábiles hacia delante --hablan con la agenda real--; las pruebas offline
+  hacen lo contrario y **clavan el presente** (`tests/test_herramientas.py::AHORA`). El detalle,
+  en `.claude/rules/pruebas.md`.
 - **El pooler de Neon rechaza `options` como parámetro de arranque** (`unsupported startup
   parameter in options: search_path`). Para fijar un `search_path` —o para una prueba de
   concurrencia de verdad— hay que usar la conexión directa: quitarle el `-pooler.` al host.

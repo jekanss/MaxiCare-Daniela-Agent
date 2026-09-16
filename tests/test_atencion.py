@@ -360,6 +360,7 @@ class Turnos:
         antes=None,
         revienta: Exception | None = None,
         escalado_por: str | None = None,
+        doctor_avisado: bool | None = None,
         tripwires: list[str] | None = None,
     ) -> None:
         self.texto = texto
@@ -367,6 +368,10 @@ class Turnos:
         self._antes = antes
         self._revienta = revienta
         self._escalado_por = escalado_por
+        #: Lo que `al_escalar` contestó. `None` es «no se intentó»; `False`, que se intentó
+        #: y no se interrumpió a nadie -- el asunto ya estaba delante del doctor, o Telegram
+        #: lo rechazó.
+        self._doctor_avisado = doctor_avisado
         #: Los guardrails que saltaron. El `Resultado` de verdad los trae llenos --
         #: `conversacion.responder` les hace `append` en las tres ramas de tripwire -- y son
         #: lo que convierte un guardrail en un caso del informe.
@@ -399,6 +404,7 @@ class Turnos:
             ),
             turno=ctx.turno_actual,
             escalado_por=self._escalado_por,  # type: ignore[arg-type]
+            doctor_avisado=self._doctor_avisado,
             tripwires=list(self._tripwires),
         )
 
@@ -2245,6 +2251,48 @@ def test_un_turno_que_revento_deja_un_caso_ROTO_con_el_tipo_y_no_con_el_mensaje(
 
     assert [(c["huella"], c["tipo"], c["escalo"]) for c in base.casos] == [
         ("roto:runtimeerror", "ROTO", 0),
+    ]
+
+
+def test_un_escalamiento_que_NO_interrumpio_a_nadie_no_se_cuenta_como_interrupcion(
+    monkeypatch,
+):
+    """Hermana de la de arriba, por el otro camino.
+
+    Desde la 26, `_avisar_a_doctores` puede callarse a propósito: el doctor ya tiene ese
+    asunto delante y sin responder, así que repetírselo es el ruido que hace que a la cuarta
+    deje de mirarlas. El turno escaló --el modelo lo pidió, y eso se registra-- pero NADIE
+    fue interrumpido.
+
+    Sin esto, la pantalla imprimiría «se interrumpió al doctor 3 de 3 veces» sobre una
+    conversación en la que el doctor recibió un solo Telegram. Es exactamente el número
+    falso contra el que ya se protege el camino del reventón.
+    """
+    base, _ = preparar(
+        monkeypatch,
+        base=BaseFalsa(viva=("conv-viva", 4, True, 0)),
+        turnos=Turnos(escalado_por="clinico", doctor_avisado=False),
+    )
+
+    atender(mensaje_texto("me sigue doliendo mucho"))
+
+    assert base.casos == [], "se contó una interrupción que no existió"
+
+
+def test_un_escalamiento_que_SI_aviso_se_cuenta(monkeypatch):
+    """El falso positivo de la de arriba. Sin ella, `doctor_avisado = False` a secas --o un
+    `if` mal puesto-- dejaría de contar TODOS los escalamientos y la pantalla diría que a los
+    doctores no se les molesta nunca."""
+    base, _ = preparar(
+        monkeypatch,
+        base=BaseFalsa(viva=("conv-viva", 4, True, 0)),
+        turnos=Turnos(escalado_por="clinico", doctor_avisado=True),
+    )
+
+    atender(mensaje_texto("me sigue doliendo mucho"))
+
+    assert [(c["huella"], c["tipo"], c["escalo"]) for c in base.casos] == [
+        ("humano:clinico", "HUMANO", 1),
     ]
 
 

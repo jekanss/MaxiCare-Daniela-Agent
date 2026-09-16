@@ -534,6 +534,14 @@ def base_falsa(monkeypatch) -> list[dict]:
     monkeypatch.setattr(
         persistencia, "anotar_telegram_en_escalamiento", lambda conn, eid, mid: None
     )
+    # Por defecto NO hay ningún asunto vivo: cada prueba de este bloque mira el camino en
+    # el que el aviso sí sale. Las dos que miran el camino contrario lo vuelven a doblar.
+    # `ConexionFalsa` no tiene cursor, así que sin este doble la consulta de verdad revienta
+    # con un `AttributeError` que `_avisar_a_doctores` se traga -- y el síntoma sería «no
+    # salió ningún Telegram», que es exactamente lo que estas pruebas creen estar midiendo.
+    monkeypatch.setattr(
+        persistencia, "escalamiento_vivo_con_motivo", lambda conn, id_conversacion, motivo: False
+    )
     return registradas
 
 
@@ -611,6 +619,16 @@ def test_un_turno_que_ya_escalo_no_manda_un_segundo_telegram(monkeypatch):
     monkeypatch.setattr(runtime, "_telegram", telegram)
     monkeypatch.setattr(persistencia, "conectar", lambda url: ConexionFalsa())
     monkeypatch.setattr(persistencia, "insertar_escalamiento", lambda _conn, **kw: None)
+    # Los dos dobles de abajo no son adorno. `ConexionFalsa` no tiene cursor, así que sin
+    # ellos las consultas de verdad lanzan `AttributeError`, `_avisar_a_doctores` se lo traga
+    # --promete no propagar-- y no sale ningún Telegram: la prueba pasaba EN VERDE midiendo
+    # un error en vez de la deduplicación. Verde por el motivo equivocado es peor que rojo.
+    monkeypatch.setattr(
+        persistencia, "escalamiento_vivo_con_motivo", lambda conn, id_conversacion, motivo: False
+    )
+    monkeypatch.setattr(
+        persistencia, "escalamiento_pendiente_de_aviso", lambda _conn, clave: None
+    )
 
     asyncio.run(runtime._avisar_a_doctores(ctx, "clinico", "Ya te confirmo."))
 
@@ -635,6 +653,11 @@ def test_un_escalamiento_escrito_pero_NUNCA_avisado_se_reintenta(monkeypatch):
 
     monkeypatch.setattr(runtime, "_telegram", telegram)
     monkeypatch.setattr(persistencia, "conectar", lambda url: ConexionFalsa())
+    # Falso, y no por comodidad: la fila de esta prueba se quedó SIN `telegram_message_id`,
+    # y la consulta de verdad exige que lo tenga. Es la misma frontera que mide la prueba.
+    monkeypatch.setattr(
+        persistencia, "escalamiento_vivo_con_motivo", lambda conn, id_conversacion, motivo: False
+    )
     # La clave ya existe: `insertar_escalamiento` no escribe nada.
     monkeypatch.setattr(persistencia, "insertar_escalamiento", lambda _conn, **kw: None)
     # ...pero esa fila se quedó sin Telegram.
@@ -662,6 +685,12 @@ def test_un_escalamiento_YA_avisado_no_se_reintenta(monkeypatch):
     monkeypatch.setattr(runtime, "_telegram", telegram)
     monkeypatch.setattr(persistencia, "conectar", lambda url: ConexionFalsa())
     monkeypatch.setattr(persistencia, "insertar_escalamiento", lambda _conn, **kw: None)
+    # Falso a propósito: lo que esta prueba mide es la deduplicación por CLAVE, y con la de
+    # por asunto en `True` el Telegram se callaría por el otro motivo. Ver el comentario de
+    # `test_un_turno_que_ya_escalo_no_manda_un_segundo_telegram`.
+    monkeypatch.setattr(
+        persistencia, "escalamiento_vivo_con_motivo", lambda conn, id_conversacion, motivo: False
+    )
     monkeypatch.setattr(
         persistencia, "escalamiento_pendiente_de_aviso", lambda _conn, clave: None
     )
@@ -669,6 +698,75 @@ def test_un_escalamiento_YA_avisado_no_se_reintenta(monkeypatch):
     asyncio.run(runtime._avisar_a_doctores(ctx, "clinico", "Ya te confirmo."))
 
     assert telegram.enviados == []
+
+
+def test_un_asunto_que_el_doctor_YA_TIENE_sin_responder_no_se_repite_al_turno_siguiente(
+    monkeypatch,
+):
+    """El escalamiento rancio, que es lo que inundaba el General.
+
+    La clave de idempotencia es por TURNO --y tiene que serlo-- así que no puede parar a un
+    modelo que deja `requiere_escalamiento` en `true` turno tras turno mientras el asunto
+    sigue abierto. Medido el 16/09/2026 sobre +573196842471: cuatro avisos en seis minutos
+    para una sola conversación, y los dos del medio no decían nada que el doctor no tuviera
+    ya delante -- solo arrastraban al General el texto entero de lo que Daniela le había
+    respondido al paciente.
+
+    Y no se escribe la fila tampoco. Una fila con `telegram_message_id` NULL significa en
+    este proyecto «se intentó avisar y falló»; dejar ahí un duplicado que nadie quiso mandar
+    convertiría esa señal en mentira.
+    """
+    ctx = _contexto()
+    telegram = TelegramFalso()
+    escritas: list[dict] = []
+
+    monkeypatch.setattr(runtime, "_telegram", telegram)
+    monkeypatch.setattr(persistencia, "conectar", lambda url: ConexionFalsa())
+    monkeypatch.setattr(
+        persistencia, "escalamiento_vivo_con_motivo", lambda conn, id_conversacion, motivo: True
+    )
+    monkeypatch.setattr(
+        persistencia,
+        "insertar_escalamiento",
+        lambda _conn, **kw: escritas.append(kw) or 9,
+    )
+
+    asyncio.run(runtime._avisar_a_doctores(ctx, "clinico", "¿Cuál de esos horarios te sirve?"))
+
+    assert telegram.enviados == [], "el doctor recibió dos veces el mismo asunto"
+    assert escritas == [], (
+        "se escribió una fila que nadie iba a avisar: `telegram_message_id` NULL dejaría de "
+        "significar «el Telegram no salió»"
+    )
+
+
+def test_un_motivo_DISTINTO_si_pasa_aunque_el_anterior_siga_sin_responder(monkeypatch):
+    """La otra mitad, y sin ella el arreglo de arriba es un agujero.
+
+    En la conversación medida, los tres primeros avisos fueron `clinico` y el cuarto
+    `dato_faltante` --«no hay tratamiento determinado y la agenda requiere una clave»--. Ese
+    cuarto era el único que pedía algo nuevo. Una guarda que dedujera solo por conversación,
+    sin mirar el motivo, lo habría callado justo a él.
+    """
+    ctx = _contexto()
+    telegram = TelegramFalso()
+
+    monkeypatch.setattr(runtime, "_telegram", telegram)
+    monkeypatch.setattr(persistencia, "conectar", lambda url: ConexionFalsa())
+    monkeypatch.setattr(
+        persistencia,
+        "escalamiento_vivo_con_motivo",
+        lambda conn, id_conversacion, motivo: motivo == "clinico",
+    )
+    monkeypatch.setattr(persistencia, "insertar_escalamiento", lambda _conn, **kw: 11)
+    monkeypatch.setattr(
+        persistencia, "anotar_telegram_en_escalamiento", lambda conn, eid, mid: None
+    )
+
+    asyncio.run(runtime._avisar_a_doctores(ctx, "dato_faltante", "Estoy confirmando con el equipo."))
+
+    assert len(telegram.enviados) == 1, "se calló un asunto nuevo por culpa de uno viejo"
+    assert "dato_faltante" in telegram.enviados[0]["texto"]
 
 
 def test_la_tool_y_el_orquestador_arman_exactamente_la_misma_clave(monkeypatch, base_falsa):
@@ -729,6 +827,11 @@ def test_en_un_turno_de_verdad_el_doctor_recibe_UN_telegram_y_no_dos(monkeypatch
         return len(vistas)
 
     monkeypatch.setattr(persistencia, "conectar", lambda url: ConexionFalsa())
+    # Esta prueba mide la deduplicación POR TURNO (la clave). La de por asunto se mide
+    # aparte; doblarla en falso aquí deja a la vista lo que esta prueba vino a ver.
+    monkeypatch.setattr(
+        persistencia, "escalamiento_vivo_con_motivo", lambda conn, id_conversacion, motivo: False
+    )
     monkeypatch.setattr(persistencia, "insertar_escalamiento", insertar_con_deduplicacion)
     monkeypatch.setattr(
         persistencia, "anotar_telegram_en_escalamiento", lambda conn, eid, mid: None

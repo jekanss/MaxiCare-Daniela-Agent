@@ -54,8 +54,10 @@ from .sin_resolver import Senal
 # Vocabularios cerrados
 # ---------------------------------------------------------------------------------------
 
-#: Los tratamientos de la base de conocimiento de MaxiCare, más `no_identificado` para
-#: cuando un archivo no dice a cuál se refiere. `endodoncia` y `protesis` están aquí porque
+#: Los tratamientos de la base de conocimiento de MaxiCare, más dos claves que no son
+#: tratamientos: `no_identificado` para cuando un archivo no dice a cuál se refiere, y
+#: `valoracion` --la 020-- para la cita cuyo objeto es justamente determinar el tratamiento.
+#: Sin ella, el paciente con dolor y sin diagnóstico era el único que no podía agendar. `endodoncia` y `protesis` están aquí porque
 #: los pacientes preguntan por ellos, pero la sección 2.12 del documento maestro dice que no
 #: tienen precio documentado: `consultar_base_conocimiento` devuelve "SIN DATO DOCUMENTADO"
 #: para los dos, y el guardrail `sin_cifra_no_documentada` bloquea cualquier cifra que
@@ -78,6 +80,7 @@ Tratamiento = Literal[
     "limpieza",
     "endodoncia",
     "protesis",
+    "valoracion",
     "no_identificado",
 ]
 
@@ -92,7 +95,7 @@ Tratamiento = Literal[
 #   - En `SolicitudCita` y en `registrar_estado_oportunidad` es vocabulario de negocio: qué
 #     tratamientos ofrece la clínica hoy. Eso cambia sin que cambie nada de seguridad.
 #
-# Este conjunto es la segunda mitad. Arranca con los catorce del Literal --así las pruebas
+# Este conjunto es la segunda mitad. Arranca con los quince del Literal --así las pruebas
 # offline y los scripts no necesitan base de datos-- y `runtime.py` lo reemplaza al arrancar
 # con los tratamientos activos de la tabla `tratamientos`.
 #
