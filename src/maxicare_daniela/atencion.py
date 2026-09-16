@@ -318,10 +318,17 @@ def _leer_estado(database_url: str, telefono: str, wamids: list[str]) -> _Estado
     """Las siete lecturas del turno en una sola conexión, que se cierra al volver.
 
     Cerrarla antes de llamar al modelo no es higiene: es el ruling 5 de la revisión de la
-    tarea 1. Ninguna de estas funciones hace `commit()` tras su SELECT, así que una conexión
-    sostenida durante `Runner.run` dejaría la sesión `idle in transaction` los ocho o diez
-    segundos que tarda un turno, reteniendo el snapshot y una conexión del pooler de Neon por
-    cada paciente que esté escribiendo a la vez.
+    tarea 1. `conectar` abre con `autocommit=False`, así que una conexión sostenida durante
+    `Runner.run` dejaría la sesión `idle in transaction` los ocho o diez segundos que tarda
+    un turno, reteniendo el snapshot y una conexión del pooler de Neon por cada paciente que
+    esté escribiendo a la vez.
+
+    La única de estas llamadas que escribe --y que por tanto comitea-- es
+    `asegurar_contacto`, que inserta la fila del número si no estaba. Es inocuo para lo de
+    arriba y para las lecturas que la siguen: ese `commit()` cierra la transacción abierta y
+    la siguiente consulta abre otra, así que lo que se lee después sigue siendo un snapshot
+    consistente de sí mismo; lo que no puede pasar --sostener una transacción durante la
+    llamada al modelo-- lo impide el `with`, que cierra la conexión antes de volver.
     """
     with persistencia.conectar(database_url) as conn:
         viva = persistencia.conversacion_viva(

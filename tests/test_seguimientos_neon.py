@@ -16,9 +16,10 @@ pytestmark = pytest.mark.neon
 ESQUEMA = "pruebas_seguimientos"
 
 TEL = "573001112299"
-# Un número DISTINTO de `TEL`: este archivo no limpia `contactos` entre pruebas (a
-# diferencia de `test_contacto_neon.py`), así que reusar `TEL` aquí contaminaría esta
-# prueba con la baja que la prueba anterior le dejó puesta a ese número.
+# Un número DISTINTO de `TEL`. El fixture `_limpio` ya borra `contactos` entre pruebas, así
+# que reusarlo no contaminaría nada; se mantiene separado porque el nombre dice qué se está
+# probando --un teléfono que NUNCA tuvo fila-- y eso se pierde si los dos casos comparten
+# número y solo los distingue el orden de las llamadas.
 TEL_SIN_CONTACTO = "573001112298"
 
 
@@ -65,6 +66,37 @@ def esquema(url: str):
         with conn.cursor() as cur:
             cur.execute(f"DROP SCHEMA IF EXISTS {ESQUEMA} CASCADE")
         conn.commit()
+
+
+@pytest.fixture(autouse=True)
+def _limpio(esquema):
+    """Cada prueba arranca con la cola vacía. Mismo patrón que `test_contacto_neon.py`.
+
+    No es higiene: `seguimientos_por_despachar` trae `limite=50` por defecto, y sin limpiar,
+    este esquema acumula una fila vencida por prueba y por corrida. El día que pase de 50,
+    las dos pruebas que hacen `next(f for f in filas if ...)` empiezan a dar `StopIteration`
+    de forma intermitente --la fila que buscan se queda fuera de la página-- y nadie lo va a
+    atribuir a esto.
+
+    `contactos` se limpia también, y su bitácora antes por la FK: la baja que una prueba le
+    pone a un número se la encontraría puesta la siguiente. `conversaciones` no se borra
+    --media docena de tablas cuelgan de ella-- pero sus dos columnas de recordatorio sí se
+    blanquean, que es lo que lee `ultimo_recordatorio` por teléfono: sin eso, la prueba que
+    empieza afirmando `ultimo_recordatorio(...) is None` solo pasa mientras siga corriendo
+    antes que las que anotan.
+    """
+    with persistencia.conectar(esquema) as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM seguimientos")
+            cur.execute("DELETE FROM consentimientos")
+            cur.execute("DELETE FROM contactos")
+            cur.execute(
+                "UPDATE conversaciones"
+                "   SET ultimo_recordatorio_tipo = NULL, ultimo_recordatorio_en = NULL"
+                " WHERE ultimo_recordatorio_tipo IS NOT NULL"
+            )
+        conn.commit()
+    yield
 
 
 @pytest.fixture

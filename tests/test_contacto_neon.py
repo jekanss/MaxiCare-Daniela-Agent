@@ -115,8 +115,9 @@ def test_asegurar_contacto_es_idempotente(conexion_pruebas):
 
 
 def test_leer_contacto_de_un_numero_que_no_existe(conexion_pruebas):
-    """`leer_contacto` NO crea. Es lo que usan el despachador y las tools, que no tienen por
-    qué inventar una fila solo por consultar."""
+    """`leer_contacto` NO crea: consultar el estado de un número no puede inventarle una
+    fila. Es la lectura natural de la tabla y la que usan estas pruebas para comprobar el
+    estado sin depender de la función que lo escribió."""
     assert persistencia.leer_contacto(conexion_pruebas, TEL) is None
 
 
@@ -303,6 +304,28 @@ def test_un_origen_inventado_lo_rechaza_la_base(conexion_pruebas):
     conexion_pruebas.rollback()
 
 
+def test_un_origen_de_baja_inventado_lo_rechaza_la_base(conexion_pruebas):
+    """El tercer CHECK de la 019, el de `contactos.no_contactar_origen`, que era el único de
+    los tres sin prueba. Misma lección de la migración 013: un CHECK que solo existe en
+    `public` deja que el esquema de pruebas acepte valores inventados en silencio, y entonces
+    la suite entera pasa a certificar algo que no es cierto en ninguna parte.
+
+    El `NULL` sí se acepta, y no es un hueco: es el estado de un contacto que nunca pidió la
+    baja, que son casi todos.
+    """
+    import psycopg
+
+    persistencia.asegurar_contacto(conexion_pruebas, TEL)
+
+    with pytest.raises(psycopg.errors.CheckViolation):
+        with conexion_pruebas.cursor() as cur:
+            cur.execute(
+                "UPDATE contactos SET no_contactar_origen = %s WHERE telefono = %s",
+                ("el_vecino", TEL),
+            )
+    conexion_pruebas.rollback()
+
+
 def test_no_se_puede_borrar_un_contacto_con_bitacora(conexion_pruebas):
     """La bitácora es el registro legal. Que no se pueda borrar no es una convención: es una
     FK con ON DELETE RESTRICT.
@@ -321,6 +344,56 @@ def test_no_se_puede_borrar_un_contacto_con_bitacora(conexion_pruebas):
         with conexion_pruebas.cursor() as cur:
             cur.execute("DELETE FROM contactos WHERE telefono = %s", (TEL,))
     conexion_pruebas.rollback()
+
+
+# ==========================================================================================
+# El puente entre el envío que salió bien y la fila que es la prueba
+# ==========================================================================================
+
+
+def test_marcar_aviso_de_atencion_escribe_la_fila_de_verdad(esquema, conexion_pruebas):
+    """`atencion._marcar_aviso` son tres líneas y NADIE las ejecutaba, en ninguna suite.
+
+    Las dos pruebas de extremo a extremo la sustituyen con `monkeypatch`, y
+    `scripts/probar_atencion.py` corre con `politica_datos_url=""` a propósito. Pero es el
+    ÚNICO eslabón entre el envío que salió bien y la fila de `consentimientos` que es la
+    prueba legal: un error en el kwarg `version=` no se vería hasta producción, en silencio,
+    y el síntoma sería «nadie consintió nunca».
+
+    `_marcar_aviso` abre su propia conexión con `persistencia.conectar(database_url)`, así
+    que lo que decide dónde escribe es la URL que se le pase. Se le pasa la del esquema de
+    pruebas --que lleva el `search_path` fijado, por eso `_url_de_pruebas` le quita el
+    pooler--, nunca la de `public`.
+    """
+    from maxicare_daniela import atencion
+
+    atencion._marcar_aviso(esquema, TEL, "politica-2026-09")
+
+    fila = persistencia.leer_contacto(conexion_pruebas, TEL)
+    assert fila is not None
+    assert fila["aviso_mostrado_en"] is not None
+    assert fila["politica_version"] == "politica-2026-09"
+
+    with conexion_pruebas.cursor() as cur:
+        cur.execute(
+            "SELECT evento, origen, politica_version FROM consentimientos WHERE telefono = %s",
+            (TEL,),
+        )
+        assert cur.fetchall() == [("aviso_mostrado", "codigo", "politica-2026-09")]
+
+
+def test_marcar_aviso_de_atencion_usa_la_version_que_le_pasan(esquema, conexion_pruebas):
+    """El cinturón del kwarg: si `version=` se perdiera por el camino, la fila de arriba
+    seguiría existiendo con la versión por defecto y la prueba no vería nada. Con una versión
+    que nadie más usa, un puente roto se nota."""
+    atencion_version = "politica-9999-12"
+    from maxicare_daniela import atencion
+
+    atencion._marcar_aviso(esquema, TEL, atencion_version)
+
+    assert persistencia.leer_contacto(conexion_pruebas, TEL)["politica_version"] == (
+        atencion_version
+    )
 
 
 # ==========================================================================================

@@ -2366,10 +2366,15 @@ def asegurar_contacto(conn, telefono: str) -> dict[str, Any]:
 
 
 def leer_contacto(conn, telefono: str) -> dict[str, Any] | None:
-    """Lo que ese número ha decidido, o `None` si nunca ha escrito.
+    """Lo que ese número ha decidido, o `None` si nunca ha escrito. NO crea la fila.
 
-    NO crea la fila: la usan el despachador y las tools, que no tienen por qué inventar un
-    contacto solo por consultar.
+    Hoy no la llama nadie en producción, y queda igual a propósito: es la lectura natural de
+    esta tabla y lo que usan las pruebas para comprobar el estado sin depender de la función
+    que lo escribió. Quien busque el camino real: el despachador saca `no_contactar` como una
+    columna más del `LEFT JOIN` de `seguimientos_por_despachar` --una tanda son hasta 50
+    filas y no puede hacer una consulta por cada una--, `atencion._leer_estado` lo saca del
+    `asegurar_contacto` que ya hace, y las dos tools de privacidad escriben con `pedir_baja`
+    y `revocar_baja`, que no necesitan leer antes porque su UPDATE es condicional.
     """
     with conn.cursor() as cur:
         cur.execute(
