@@ -1127,3 +1127,48 @@ def test_durante_un_relevo_el_general_no_recibe_el_aviso_de_archivos(monkeypatch
     _correr_archivo(tg)
 
     assert [m for m in tg.mensajes if m[1] == TEMA_GENERAL] == []
+
+
+# ==========================================================================================
+# Los botones de la plantilla de recordatorio
+# ==========================================================================================
+
+
+def test_el_texto_de_un_quick_reply_de_plantilla_no_se_pierde():
+    """Pulsar «Confirmar» tiene que llegar como texto, no como un mensaje mudo.
+
+    La plantilla `recordatorio_cita` lleva dos quick replies, y la respuesta a uno de ellos NO
+    viene como `text`: Meta manda `type: "button"` con el rótulo dentro de `button.text`. Sin
+    esta línea, el paciente que pulsa el botón llega con `texto = None` y `atencion` le entrega
+    al modelo «[El paciente envió algo de tipo «button». No trae texto.]» -- que es lo que pasó
+    en la primera prueba real, el 15/09/2026: Daniela contestó con su saludo de primer contacto
+    a alguien que acababa de pedir mover su cita.
+
+    Es decir: sin esto los dos botones que Meta aprobó no sirven para nada.
+    """
+    payload = _sobre({
+        "from": "573001234567",
+        "id": "wamid.boton",
+        "type": "button",
+        "button": {"payload": "Necesito cambiarla", "text": "Necesito cambiarla"},
+    })
+    [m] = extraer_mensajes(payload)
+    assert m.tipo == "button"
+    assert m.texto == "Necesito cambiarla"
+
+
+def test_un_quick_reply_sin_rotulo_cae_al_payload():
+    """`text` es lo que el paciente vio; `payload` lo que la plantilla definió.
+
+    En un quick reply los dos suelen coincidir. Se prefiere `text` --es literalmente lo que el
+    paciente leyó antes de pulsar-- y se cae a `payload` porque un mensaje mudo es justo el
+    fallo que esta pareja de pruebas existe para evitar.
+    """
+    payload = _sobre({
+        "from": "573001234567",
+        "id": "wamid.boton.sin.texto",
+        "type": "button",
+        "button": {"payload": "Confirmar"},
+    })
+    [m] = extraer_mensajes(payload)
+    assert m.texto == "Confirmar"

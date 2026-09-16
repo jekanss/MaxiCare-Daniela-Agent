@@ -161,6 +161,24 @@ def extraer_mensajes(payload: dict) -> list[MensajeEntrante]:
                     continue
 
                 cuerpo = m.get(tipo) if isinstance(m.get(tipo), dict) else {}
+
+                # Pulsar un quick reply de una plantilla NO llega como `text`: Meta manda
+                # `type: "button"`, con el rótulo dentro de `button.text` y lo que la
+                # plantilla definió en `button.payload`. Se prefiere `text` porque es
+                # literalmente lo que el paciente leyó antes de pulsar.
+                #
+                # Sin esta línea los dos botones de `recordatorio_cita` --«Confirmar» y
+                # «Necesito cambiarla»-- no sirven para nada: `texto` queda en None y
+                # `atencion._entrada_para_el_modelo` le entrega al modelo «[El paciente envió
+                # algo de tipo «button». No trae texto.]», sobre lo que no puede hacer nada.
+                # Medido en la primera prueba real de la plantilla, el 15/09/2026: el paciente
+                # pulsó «Necesito cambiarla» y Daniela respondió con su saludo de primer
+                # contacto. El prompt tiene desde la 017 un bloque que dice que un «sí» del
+                # paciente se refiere a la cita del recordatorio -- y ese «sí» no llegaba.
+                del_boton = None
+                if tipo == "button":
+                    del_boton = cuerpo.get("text") or cuerpo.get("payload")
+
                 mensajes.append(
                     MensajeEntrante(
                         wamid=wamid,
@@ -169,7 +187,11 @@ def extraer_mensajes(payload: dict) -> list[MensajeEntrante]:
                         tipo=tipo,
                         # Un adjunto puede traer texto propio en `caption`: «esta es la
                         # radiografía que me pidieron». Perderlo sería perder el contexto.
-                        texto=(m.get("text") or {}).get("body") or cuerpo.get("caption"),
+                        texto=(
+                            (m.get("text") or {}).get("body")
+                            or cuerpo.get("caption")
+                            or del_boton
+                        ),
                         media_id=cuerpo.get("id"),
                         mime=cuerpo.get("mime_type"),
                         nombre_archivo=cuerpo.get("filename"),
