@@ -371,7 +371,17 @@ excepción, y la excepción es el punto de toda la spec.
 Resetear a alguien lo devuelve a cero, pero **nunca lo devuelve a la lista de contactables**.
 Ese «no» es del paciente, no del sistema.
 
-El borrado registra un evento `rastro_borrado` en la bitácora con `origen = 'clinica'`.
+El borrado registra un evento `rastro_borrado` en la bitácora.
+
+**Decisión del 16/09/2026, contra lo que este párrafo decía antes: el origen es `codigo`, no
+`clinica`.** Esta spec y el plan pedían `clinica`, y se cambió al implementarlo. La razón:
+`clinica` significa «alguien de MaxiCare tomó esta decisión sobre este paciente», que es lo
+que hay que poder distinguir el día que se audite la bitácora. `/clearstate` no es eso: lo
+dispara el sistema sobre un número de la lista de pruebas, y anotarlo como `clinica` mete en
+la columna que acredita quién decidió un evento que no decidió nadie. **Se descartó** añadir
+un cuarto valor al CHECK (`sistema`, `pruebas`): el CHECK vive en cada esquema por la lección
+de la 013, así que ampliarlo cuesta una migración en todos ellos para distinguir un caso que
+`evento = 'rastro_borrado'` ya distingue por sí solo.
 
 Hay precedente exacto: `/clearstate` borra los ejemplos de casos sin resolver **sin** bajar el
 contador, por la misma razón (no negociable 22).
@@ -452,6 +462,15 @@ Cada paso deja la suite en verde. El 1 y el 2 no cambian ni un mensaje que vea u
   `seguimientos.tipo` con `Literal` y CHECK, que aquí se esquiva con la lista blanca de §4.1.
 - **El primer toque a las ~20 h dentro de ventana.** Es del sub-proyecto D. Se menciona aquí
   solo porque es la razón de que la plantilla de Meta haya dejado de ser urgente.
+- **Que la nota del paciente en la bitácora no se pueda retirar por ninguna ruta.**
+  `consentimientos.detalle` guarda la frase del paciente tal cual, escrita por el modelo,
+  truncada a 500 caracteres, protegida por `ON DELETE RESTRICT` y por un `/clearstate` que por
+  diseño no toca la bitácora: **ninguna ruta de borrado puede retirarla**. En un sistema cuyo
+  propósito es el tratamiento de datos, y que dirige las solicitudes de habeas data a un
+  correo, eso es una decisión de política de datos que esta spec no examinó y que le
+  corresponde a MaxiCare: o se acota la nota a un motivo cerrado, o se permite redactar
+  (`detalle = NULL`) en `rastro_borrado` dejando intactos evento, fecha, origen y versión, que
+  es lo que la ley pide acreditar. **Pendiente de decisión.**
 
 ## 11. El párrafo para marketing
 
