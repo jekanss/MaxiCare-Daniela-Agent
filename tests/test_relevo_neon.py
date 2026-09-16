@@ -25,7 +25,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from maxicare_daniela import persistencia
+from maxicare_daniela import persistencia, relevo
 from maxicare_daniela.config import cargar_dotenv
 
 pytestmark = pytest.mark.neon
@@ -466,6 +466,30 @@ def test_un_hilo_no_puede_ser_de_dos_personas(esquema):
     with pytest.raises(Exception):
         with persistencia.conectar(esquema) as conn:
             persistencia.guardar_tema(conn, telefono=TEL_VECINO, topic_id=7777)
+
+
+def test_el_relevo_guarda_el_hilo_del_paciente_sin_archivo(esquema):
+    """La funcion que el relevo usa para atar el hilo recien creado, sin doblar nada.
+
+    Llamaba a `guardar_tema` con `id_paciente=` --la firma de antes de la 014-- y reventaba
+    con `TypeError` en el unico camino que la recorre: el del numero que todavia no tiene
+    hilo, o sea el que nunca mando un archivo. `activar` se tragaba la excepcion y deshacia
+    el relevo, asi que el boton no funcionaba justo para el paciente nuevo con dolor.
+
+    `tests/test_relevo.py` dobla esta funcion entera --tiene que hacerlo, abre conexion-- y
+    por eso alli se comprueba la llamada y aqui el SQL. Las dos hacen falta.
+    """
+    relevo._guardar_tema_abierto(esquema, TEL, 8899)
+
+    with persistencia.conectar(esquema) as conn:
+        assert persistencia.tema_del_paciente(conn, TEL) == 8899
+        with conn.cursor() as cur:
+            cur.execute("SELECT abierto FROM temas_telegram WHERE telefono = %s", (TEL,))
+            # Nace ABIERTO: `createForumTopic` lo deja asi, y si la base dijera lo contrario
+            # `cerrar` no sabria que hay un canal en vivo hacia el WhatsApp de esa persona.
+            assert cur.fetchone()[0] is True
+        # Tener hilo NO es estar verificado: esta fila no crea ninguna ficha.
+        assert persistencia.buscar_paciente_por_telefono(conn, TEL) is None
 
 
 # ==========================================================================================
