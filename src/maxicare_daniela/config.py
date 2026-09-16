@@ -409,6 +409,25 @@ class Config:
     #: `es` es el default más probable y por eso mismo no es una comprobación.
     plantilla_recordatorio_idioma: str = "es"
 
+    #: La dirección donde vive la política de tratamiento de datos que el paciente ve en su
+    #: primer mensaje. `PENDIENTE` --su default-- APAGA el aviso: sale el mensaje limpio y no
+    #: se registra nada.
+    #:
+    #: PENDIENTE: la URL real. El PDF existe y es público en Drive, pero ese no es el destino
+    #: final por tres razones: Drive deja subir una versión nueva sobre el mismo archivo sin
+    #: que el enlace cambie --y entonces quien ya aceptó apunta a un texto que no es el que
+    #: vio, que es justo lo que hay que poder acreditar--; un enlace opaco dentro de un
+    #: mensaje que pide confianza sobre datos personales trabaja en contra de sí mismo; y si
+    #: alguien mueve el archivo, el enlace muere en silencio y el sistema lo sigue mandando.
+    #: Tiene que vivir en el dominio de MaxiCare, con una copia congelada por versión.
+    politica_datos_url: str = "PENDIENTE"
+
+    #: El identificador de la versión vigente de la política. Se congela en cada fila de
+    #: `consentimientos`: si la política cambia, hay que poder demostrar cuál vio cada
+    #: persona. Cambiarlo NO reenvía el aviso a quien ya lo vio -- eso es una decisión
+    #: aparte, y hoy no está construida.
+    politica_datos_version: str = "politica-2026-09"
+
     @classmethod
     def desde_entorno(cls) -> Config:
         return cls(
@@ -425,6 +444,10 @@ class Config:
             plantilla_recordatorio=_opcional("MAXICARE_PLANTILLA_RECORDATORIO"),
             plantilla_recordatorio_idioma=_opcional(
                 "MAXICARE_PLANTILLA_RECORDATORIO_IDIOMA", "es"
+            ),
+            politica_datos_url=_opcional("MAXICARE_POLITICA_DATOS_URL", "PENDIENTE"),
+            politica_datos_version=_opcional(
+                "MAXICARE_POLITICA_DATOS_VERSION", "politica-2026-09"
             ),
             google_sa_b64=_opcional("MAXICARE_GOOGLE_SA_B64"),
             google_calendar_id=_opcional("MAXICARE_GOOGLE_CALENDAR_ID"),

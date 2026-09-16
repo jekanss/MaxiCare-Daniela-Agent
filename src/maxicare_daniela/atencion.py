@@ -96,6 +96,42 @@ log = logging.getLogger("maxicare.atencion")
 #: después no es la continuación de nada: es una conversación nueva.
 VENTANA_CONVERSACION_HORAS = 24
 
+#: El aviso de la política, en un solo sitio y con un solo texto. Lo pega el CÓDIGO al primer
+#: mensaje saliente de un número que nunca lo ha visto, y no Daniela: una frase en el prompt
+#: sirve para que lo diga, pero no sirve como prueba -- nadie sabría si lo dijo, con qué
+#: palabras, ni si un día el modelo decidió resumirlo. Mismo principio que las claves de
+#: idempotencia (no negociable 2) y la huella de los casos sin resolver (no negociable 22):
+#: lo que tiene que ser demostrable lo escribe el código.
+AVISO_POLITICA = "Al continuar aceptas nuestra política de tratamiento de datos: {url}"
+
+
+def _con_aviso(respuesta: str, *, url: str) -> str:
+    """La respuesta con el aviso pegado al final, o tal cual si no hay URL que enseñar.
+
+    Va como línea aparte y al final: es un pie, no una interrupción. Lo que el paciente
+    preguntó se responde primero.
+
+    Con `url` vacía o en `PENDIENTE` devuelve la respuesta intacta. La regla dura 3 es para
+    el código: nunca fue permiso para mandarle el marcador a un paciente.
+    """
+    if not url or url == "PENDIENTE":
+        return respuesta
+    return f"{respuesta}\n\n{AVISO_POLITICA.format(url=url)}"
+
+
+def _toca_avisar(estado: _Estado, *, url: str) -> bool:
+    """Si a este número hay que enseñarle el aviso en este mensaje.
+
+    Es una función y no un `if` suelto porque las dos condiciones son la política entera:
+    sale UNA vez en la vida del número --el dato viene de `contactos`, que no caduca a las
+    24 h, así que un paciente que escribe cada día no ve el aviso legal cada día-- y no sale
+    en absoluto mientras no haya una URL que enseñar.
+    """
+    if not url or url == "PENDIENTE":
+        return False
+    return not estado.aviso_visto
+
+
 # ==========================================================================================
 # Estado del módulo -- SOLO vale con un worker
 # ==========================================================================================
@@ -383,6 +419,12 @@ def _leer_estado(database_url: str, telefono: str, wamids: list[str]) -> _Estado
         pidio_no_contacto=pidio_no_contacto,
         aviso_visto=aviso_visto,
     )
+
+
+def _marcar_aviso(database_url: str, telefono: str, version: str) -> None:
+    """Sincrónica, y siempre dentro de `asyncio.to_thread`, como el resto del módulo."""
+    with persistencia.conectar(database_url) as conn:
+        persistencia.marcar_aviso_mostrado(conn, telefono, version=version)
 
 
 def _anotar_resultado(
@@ -1170,8 +1212,35 @@ async def atender(
         espera = max(0.0, objetivo - (time.monotonic() - momento_inicio))
         await (dormir or asyncio.sleep)(espera)
 
+        # El aviso va pegado al primer saliente de un número que nunca lo ha visto. Se decide
+        # aquí, con el texto ya cerrado, para que valga igual si la respuesta salió del modelo
+        # o si es el mensaje seguro: a alguien que entra por primera vez y se encuentra un
+        # fallo también se le está atendiendo.
+        toca_avisar = _toca_avisar(estado, url=config.politica_datos_url)
+        if toca_avisar:
+            respuesta = _con_aviso(respuesta, url=config.politica_datos_url)
+
         try:
             wamid_respuesta = await whatsapp.enviar_texto(mensaje.telefono, respuesta)
+
+            if toca_avisar:
+                # DESPUÉS del envío, nunca antes. Es al revés que un recordatorio (no
+                # negociable 21) y es deliberado: allí el riesgo es mandarlo dos veces, así
+                # que se marca antes; aquí el riesgo es dar por mostrado un aviso que no
+                # salió, y esa constancia es precisamente la prueba. Repetir un aviso es
+                # inocuo; falsificar una prueba, no.
+                #
+                # Si esto falla, el turno sigue: el paciente ya tiene su respuesta y el aviso
+                # se le volverá a enseñar en el siguiente mensaje.
+                try:
+                    await asyncio.to_thread(
+                        _marcar_aviso,
+                        config.database_url,
+                        mensaje.telefono,
+                        config.politica_datos_version,
+                    )
+                except Exception:  # noqa: BLE001
+                    log.exception("no se pudo registrar el aviso de %s", mensaje.telefono)
         except Exception as e:  # noqa: BLE001 -- ver abajo
             # `ErrorDeCanal` NO basta, y esto está comprobado: `canales.enviar_texto` hace el
             # POST sin envolver los errores de httpx, así que un `ReadTimeout` o un

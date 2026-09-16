@@ -76,3 +76,16 @@ def test_el_cliente_de_openai_queda_apuntando_a_openai(monkeypatch):
 
     config.descartar_vacias_de_terceros()
     assert str(OpenAI().base_url) == "https://api.openai.com/v1/"
+
+
+def test_la_url_de_la_politica_arranca_en_pendiente(monkeypatch):
+    """Regla dura 3: lo que no se sabe se marca con el literal, nunca con un valor plausible.
+    Aquí además apaga el aviso, que es lo que se quiere: es preferible no enseñar un enlace
+    que enseñar uno que no vamos a poder sostener."""
+    monkeypatch.setenv("MAXICARE_DATABASE_URL", "postgres://nada")
+    monkeypatch.delenv("MAXICARE_POLITICA_DATOS_URL", raising=False)
+
+    c = config.Config.desde_entorno()
+
+    assert c.politica_datos_url == "PENDIENTE"
+    assert c.politica_datos_version == "politica-2026-09"
