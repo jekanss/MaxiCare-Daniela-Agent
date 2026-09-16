@@ -2402,7 +2402,12 @@ def marcar_aviso_mostrado(conn, telefono: str, *, version: str) -> None:
     Se llama DESPUÉS de que el envío haya salido bien, nunca antes: ver el comentario de
     `atencion` donde se usa. Es al revés que un recordatorio (no negociable 21) y es
     deliberado.
+
+    Empieza por `asegurar_contacto`: sin fila padre, el `INSERT` de `anotar_consentimiento`
+    de abajo viola la FK de `consentimientos` y tumba la transacción ENTERA de `conn`, no
+    solo este `UPDATE` -- y con ella, cualquier otro trabajo pendiente de ese turno.
     """
+    asegurar_contacto(conn, telefono)
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -2430,7 +2435,13 @@ def pedir_baja(
 
     La bitácora se escribe SIEMPRE, aunque el estado ya estuviera puesto: pedirlo dos veces
     son dos hechos distintos, y los dos ocurrieron.
+
+    Empieza por `asegurar_contacto`: sin fila padre, el `INSERT` de `anotar_consentimiento`
+    de abajo viola la FK de `consentimientos` y tumba la transacción ENTERA de `conn`, no
+    solo este `UPDATE` -- y con ella, cualquier otro trabajo pendiente de ese turno. Con la
+    fila asegurada, un número que nunca había escrito sí cambia de estado: devuelve `True`.
     """
+    asegurar_contacto(conn, telefono)
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -2457,7 +2468,12 @@ def revocar_baja(
     Que el paciente escriba de nuevo NO llama a esto: la baja solo se levanta si la persona
     lo pide. La bitácora conserva las dos decisiones con sus fechas, que es lo que hace el
     historial acreditable.
+
+    Empieza por `asegurar_contacto`: sin fila padre, el `INSERT` de `anotar_consentimiento`
+    de abajo viola la FK de `consentimientos` y tumba la transacción ENTERA de `conn`, no
+    solo este `UPDATE` -- y con ella, cualquier otro trabajo pendiente de ese turno.
     """
+    asegurar_contacto(conn, telefono)
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -2613,6 +2629,13 @@ def borrar_rastro(conn, telefono: str, *, conservar_wamid: str | None = None) ->
             # alguien lo devolvería a la lista de contactables sin que nadie se enterara.
             # Mismo criterio que los ejemplos de `casos_sin_resolver`, que se borran sin bajar
             # el contador (no negociable 22).
+            #
+            # Este conteo NO entra en `borradas`, a propósito: `reseteo.Borrado.filas` --y su
+            # `total_filas`-- alimentan la rama «no había nada que borrar» de
+            # `reseteo.confirmacion`. Resetear el aviso no es un borrado, y contarlo como uno
+            # dejaría esa rama inalcanzable en cuanto todo número conocido tenga fila en
+            # `contactos` -- el reseteo pasaría a "borrar" siempre al menos 1, y el paciente
+            # oiría «borré todo lo tuyo» sobre un número que ya estaba limpio.
             cur.execute(
                 """
                 UPDATE contactos
@@ -2622,16 +2645,16 @@ def borrar_rastro(conn, telefono: str, *, conservar_wamid: str | None = None) ->
                 """,
                 parametros,
             )
-            borradas["contactos_reseteados"] = cur.rowcount
 
             # El `WHERE EXISTS` es obligatorio: `consentimientos.telefono` tiene una FK, y un
             # `/clearstate` sobre un número que nunca escribió la violaría y tumbaría la
             # transacción entera -- dejando el reseteo a medias justo por la mitad que nadie
-            # mira.
+            # mira. El origen es 'codigo' y no 'clinica': lo dispara `/clearstate`, que es el
+            # sistema actuando sobre un número de prueba, no alguien de MaxiCare.
             cur.execute(
                 """
                 INSERT INTO consentimientos (telefono, evento, origen)
-                SELECT %(tel)s, 'rastro_borrado', 'clinica'
+                SELECT %(tel)s, 'rastro_borrado', 'codigo'
                  WHERE EXISTS (SELECT 1 FROM contactos WHERE telefono = %(tel)s)
                 """,
                 parametros,

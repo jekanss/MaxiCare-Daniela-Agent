@@ -204,6 +204,71 @@ def test_la_baja_de_un_numero_no_toca_a_su_vecino(conexion_pruebas):
 
 
 # ==========================================================================================
+# Un teléfono que nunca pasó por `asegurar_contacto`
+#
+# Las tres funciones de abajo llaman a `anotar_consentimiento`, que inserta en
+# `consentimientos` -- y esa tabla tiene una FK hacia `contactos`. Sin fila padre, ese
+# INSERT viola la FK y tumba la transacción ENTERA de la conexión, no solo la escritura del
+# consentimiento: un paciente que nunca escribió antes y pide la baja en el mismo aliento
+# ("hola, no me escriban más") se quedaría sin baja, sin bitácora y con el turno de WhatsApp
+# reventado. Las tres funciones se protegen llamando a `asegurar_contacto` de entrada.
+# ==========================================================================================
+
+
+def test_pedir_baja_sobre_un_numero_que_nunca_escribio_no_revienta(conexion_pruebas):
+    assert persistencia.leer_contacto(conexion_pruebas, TEL) is None
+
+    cambio = persistencia.pedir_baja(conexion_pruebas, TEL)
+
+    assert cambio is True
+    fila = persistencia.leer_contacto(conexion_pruebas, TEL)
+    assert fila is not None
+    assert fila["no_contactar"] is True
+
+    with conexion_pruebas.cursor() as cur:
+        cur.execute(
+            "SELECT evento FROM consentimientos WHERE telefono = %s ORDER BY id", (TEL,)
+        )
+        assert [f[0] for f in cur.fetchall()] == ["baja_solicitada"]
+
+
+def test_revocar_baja_sobre_un_numero_que_nunca_escribio_no_revienta(conexion_pruebas):
+    assert persistencia.leer_contacto(conexion_pruebas, TEL) is None
+
+    cambio = persistencia.revocar_baja(conexion_pruebas, TEL)
+
+    assert cambio is False, "no había baja que levantar, pero la fila se aseguró igual"
+    fila = persistencia.leer_contacto(conexion_pruebas, TEL)
+    assert fila is not None
+    assert fila["no_contactar"] is False
+
+    with conexion_pruebas.cursor() as cur:
+        cur.execute(
+            "SELECT evento FROM consentimientos WHERE telefono = %s ORDER BY id", (TEL,)
+        )
+        assert [f[0] for f in cur.fetchall()] == ["baja_revocada"]
+
+
+def test_marcar_aviso_mostrado_sobre_un_numero_que_nunca_escribio_no_revienta(
+    conexion_pruebas,
+):
+    assert persistencia.leer_contacto(conexion_pruebas, TEL) is None
+
+    persistencia.marcar_aviso_mostrado(conexion_pruebas, TEL, version="politica-2026-09")
+
+    fila = persistencia.leer_contacto(conexion_pruebas, TEL)
+    assert fila is not None
+    assert fila["aviso_mostrado_en"] is not None
+    assert fila["politica_version"] == "politica-2026-09"
+
+    with conexion_pruebas.cursor() as cur:
+        cur.execute(
+            "SELECT evento FROM consentimientos WHERE telefono = %s ORDER BY id", (TEL,)
+        )
+        assert [f[0] for f in cur.fetchall()] == ["aviso_mostrado"]
+
+
+# ==========================================================================================
 # Lo que la BASE garantiza, y no Python
 # ==========================================================================================
 

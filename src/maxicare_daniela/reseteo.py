@@ -255,10 +255,6 @@ ETIQUETAS_DE_TABLA: dict[str, tuple[str, str]] = {
     # frases y no de casos: «1 caso sin resolver» le prometería al paciente un borrado que
     # no ocurrió, y de paso le contaría de una tabla que es de la clínica, no suya.
     "casos_sin_resolver": ("frase tuya", "frases tuyas"),
-    # Otra fila que `borrar_rastro` edita en vez de borrar (migración 019): el contacto se
-    # queda, y lo único que se resetea es el aviso de la política -- lo volverá a ver. El
-    # `no_contactar`, si lo tenía puesto, NO se toca ni aparece aquí.
-    "contactos_reseteados": ("aviso de política tuyo reiniciado", "avisos de política tuyos reiniciados"),
 }
 
 
