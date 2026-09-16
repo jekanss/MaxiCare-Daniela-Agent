@@ -572,6 +572,34 @@ def test_un_numero_desconocido_no_entra_identificado(monkeypatch):
     assert turnos.ctx.telefono_sin_paciente is True
 
 
+def test_una_ficha_con_el_marcador_PENDIENTE_no_es_un_paciente_conocido(monkeypatch):
+    """`PENDIENTE` es un marcador, no un nombre, y el turno tiene que saberlo.
+
+    El relevo abría una ficha con ese literal para todo número que no tuviera una, y eso
+    metía al paciente en la peor de las tres categorías: ni desconocido --que puede pedir su
+    primera cita-- ni verificado. Medido en producción el 16/09/2026 con una paciente real
+    de prueba: dio su nombre, `_mismo_nombre('PENDIENTE', 'Sora Patricia Delgado')` dijo que
+    no, se agotaron los dos intentos y Daniela escaló en vez de agendar. La paciente se fue
+    sin cita.
+
+    La ficha ya no se crea (ver `relevo._tema_abierto_para`), pero las que quedaron de antes
+    siguen ahí y esta línea es lo que impide que sigan encerrando a alguien.
+    """
+    _, turnos = preparar(
+        monkeypatch,
+        base=BaseFalsa(viva=("conv-viva", 2, False, 0), paciente=(18, "PENDIENTE")),
+    )
+
+    atender(mensaje_texto(nombre_perfil="Sora Patricia Delgado"))
+
+    # Lo que de verdad decide: puede pedir su primera cita.
+    assert turnos.ctx.telefono_sin_paciente is True
+    assert turnos.ctx.identidad_verificada is False
+    # Y el marcador NO viaja como si fuera su nombre: con esto puesto, Daniela le escribía
+    # al paciente comparándolo contra «PENDIENTE» y podía llegar a llamarlo así.
+    assert turnos.ctx.nombre_paciente is None
+
+
 # ==========================================================================================
 # 6-7 · El candado
 # ==========================================================================================

@@ -120,6 +120,15 @@ Cuatro cosas sostienen que esto no se convierta en una puerta:
   `buscar_paciente_por_telefono` contra la base —`atencion._leer_estado`, con la lectura que
   ya hacía, y lo refresca `herramientas._identificar_paciente`—. Si el modelo pudiera
   escribirlo, bastaría con que dijera «soy nuevo».
+- **Una ficha con el marcador `persistencia.NOMBRE_PENDIENTE` NO cuenta como ficha**, en los
+  dos sitios. Es la tercera categoría que no debería existir y que existió: ni desconocido
+  —que puede pedir su primera cita— ni verificado. El relevo abría una fila así para todo
+  número sin ficha; si el doctor cerraba sin agendar, nadie le preguntaba nunca el nombre y el
+  marcador se quedaba puesto. Medido en producción el 16/09/2026: la paciente dio su nombre,
+  no «coincidió» con `PENDIENTE`, gastó los dos intentos de identificación y Daniela escaló en
+  vez de agendar. El relevo ya no la crea (`.claude/rules/relevo-telegram.md`), pero quedan las
+  de antes, y **agendar las repara**: `asegurar_paciente` escribe encima del marcador y solo
+  de él. El `id` de esa fila sí se conserva en el contexto — es real y sus citas apuntan ahí.
 - **`reprogramar_cita` y `cancelar_cita` NO entran**, tenga ficha el número o no: operan
   sobre citas que ya existen, y una cita existente sí puede ser de la persona a la que
   alguien está suplantando.

@@ -100,6 +100,11 @@ una —qué se midió, qué costó— está en la regla que cubre ese archivo.
    nunca.** El permiso lo da `ctx.telefono_sin_paciente`, que sale de la base y **nunca del
    modelo**, y la excepción es una lista blanca de UNA tool (`_ESCRITURAS_PARA_DESCONOCIDO`).
    **`crear_cita` registra al paciente**, así que desde el turno siguiente sí puede mover lo suyo.
+   **Y una ficha cuyo nombre es `persistencia.NOMBRE_PENDIENTE` NO cuenta como ficha**: es la
+   tercera categoría que no puede existir —ni desconocido ni verificado— y encierra al paciente
+   sin un error en ningún log. El relevo la abría y dejó de hacerlo el 16/09/2026; las que
+   quedaron las repara `asegurar_paciente` al agendar, escribiendo encima del marcador y **solo**
+   de él.
 13. **La pertenencia de una cita va por TELÉFONO (`_es_ajena`), nunca por el UUID, y toda hora
    que una tool confirma queda autorizada** — incluida la vieja al reprogramar y la cancelada
    al cancelar. Si no, `sin_hora_no_verificada` bloquea la confirmación de una escritura **que

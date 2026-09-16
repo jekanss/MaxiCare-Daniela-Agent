@@ -420,6 +420,10 @@ def _leer_estado(database_url: str, telefono: str, wamids: list[str]) -> _Estado
         for uno in wamids:
             persistencia.ligar_mensaje_a_conversacion(conn, uno, id_conversacion)
 
+    #: La ficha SOLO cuando dice quién es alguien. Una con el marcador `PENDIENTE` es una
+    #: fila que existe y no identifica a nadie, y el turno tiene que verla como lo que es.
+    conocido = paciente if paciente and paciente[1] != persistencia.NOMBRE_PENDIENTE else None
+
     return _Estado(
         id_conversacion=id_conversacion,
         turno_actual=turno_actual,
@@ -427,13 +431,23 @@ def _leer_estado(database_url: str, telefono: str, wamids: list[str]) -> _Estado
         # el plan, no este módulo. El `or` conserva una verificación que ya se había hecho
         # dentro de la conversación -- desverificar a alguien a mitad de la charla sería
         # pedirle sus datos dos veces.
-        identidad_verificada=bool(paciente) or bool(verificada),
+        #
+        # `conocido` y no `paciente` a secas: una ficha cuyo nombre es el marcador
+        # `PENDIENTE` existe pero no dice quién es nadie. Tratarla como identidad metía al
+        # paciente en el único hueco sin salida del sistema -- ni desconocido, que puede pedir
+        # su primera cita, ni verificado -- y ahí se quedaba, porque el marcador solo lo pisa
+        # el cierre de un relevo CON cita. Medido en producción el 16/09/2026.
+        identidad_verificada=bool(conocido) or bool(verificada),
         intentos_identificacion=intentos,
+        # El id SÍ sale de la ficha aunque lleve el marcador: es una fila real, y es a lo que
+        # tienen que apuntar sus citas. Lo que no sale es el nombre.
         id_paciente=paciente[0] if paciente else None,
         # El nombre del perfil de WhatsApp NO entra aquí: lo escribe el propio desconocido y
-        # tratarlo como identidad sería regalarle el nombre de un paciente a cualquiera.
-        nombre_paciente=paciente[1] if paciente else None,
-        telefono_sin_paciente=paciente is None,
+        # tratarlo como identidad sería regalarle el nombre de un paciente a cualquiera. El
+        # marcador tampoco: con él puesto, Daniela comparaba lo que le decía el paciente
+        # contra la palabra «PENDIENTE».
+        nombre_paciente=conocido[1] if conocido else None,
+        telefono_sin_paciente=conocido is None,
         tomada_por=tomada_por,
         ultimo_recordatorio_tipo=recordatorio[0] if recordatorio else None,
         ultimo_recordatorio_en=recordatorio[1] if recordatorio else None,

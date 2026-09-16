@@ -88,11 +88,14 @@ PREFIJO_TOMAR_TEL = "relevotel:"
 PREFIJO_SI_AGENDO = "agendo:"
 PREFIJO_NO_AGENDO = "sincita:"
 
-#: El nombre con el que el relevo abre la ficha de un número que no tenía ninguna. Es el
-#: literal de la regla dura 3 del proyecto, y no el nombre del perfil de WhatsApp: ese lo
-#: escribe el propio desconocido, y guardarlo sería dejar que alguien se registre solo con el
-#: nombre que le apetezca. Lo que no se sabe se marca como no sabido.
-NOMBRE_PENDIENTE = "PENDIENTE"
+#: El marcador de «todavía no sé cómo se llama». Definido en `persistencia` y reexportado
+#: aquí porque este módulo lo nombra en cuatro sitios.
+#:
+#: El relevo ya NO abre fichas con él (ver `_tema_abierto_para`), pero el marcador sigue
+#: haciendo falta por los dos extremos: las fichas que quedaron de antes lo llevan, y el
+#: cierre con cita lo usa como condición para poder escribir el nombre encima sin pisar
+#: nunca el de un paciente de verdad.
+NOMBRE_PENDIENTE = persistencia.NOMBRE_PENDIENTE
 
 #: A quién ya se le avisó de que se le acaba el tiempo. En memoria y no en la base a
 #: propósito: añadir una columna para esto obligaría a una migración, y el peor caso de
@@ -216,33 +219,6 @@ def _tema_de(database_url: str, telefono: str) -> int | None:
         return persistencia.tema_del_paciente(conn, telefono)
 
 
-def _ficha_para_el_relevo(database_url: str, telefono: str) -> int:
-    """Crea la ficha del paciente si no la tiene, y devuelve su id.
-
-    ------------------------------------------------------------------------------------
-    Esto hace justo lo que `lectura.asegurar_tema` se niega a hacer, y la diferencia es
-    quién lo decide
-    ------------------------------------------------------------------------------------
-
-    `asegurar_tema` no crea fichas porque un desconocido que manda una foto no puede
-    convertirse en paciente verificado por el hecho de mandarla: `atencion._leer_estado`
-    deriva `identidad_verificada` de la EXISTENCIA de esta fila, así que crearla ahí
-    desactivaba `revisar_identidad` para cualquiera con una cámara.
-
-    Aquí lo dispara un humano pulsando un botón a propósito para hablar con esa persona. Esa
-    es la autorización que allá no existe, y el precio de no hacerlo es peor que el de
-    hacerlo: el número sin ficha es exactamente el paciente nuevo con dolor agudo --el que
-    más escala-- y dejarlo sin relevo deja el botón muerto justo donde hace falta.
-
-    El nombre va como `PENDIENTE` y no como el del perfil de WhatsApp. La ficha dice «este
-    número existe y un doctor habló con él», no «esta persona se llama así».
-    """
-    with persistencia.conectar(database_url) as conn:
-        return persistencia.asegurar_paciente(
-            conn, nombre_completo=NOMBRE_PENDIENTE, telefono=telefono
-        )
-
-
 def _guardar_tema_abierto(database_url: str, telefono: str, tema: int) -> None:
     """Ata el hilo recién creado al NÚMERO, y lo deja constando como abierto.
 
@@ -311,9 +287,12 @@ def _guardar_tratamiento(database_url: str, id_conversacion: str, tratamiento: s
 def _nombre_del_paciente(database_url: str, telefono: str) -> str | None:
     """Cómo se llama ese número, o `None` si no se sabe.
 
-    `PENDIENTE` cuenta como no saberlo: es el marcador que pone `_ficha_para_el_relevo`, no
-    un nombre. Devolverlo como si lo fuera es lo que metía «PENDIENTE · Cordales» en la
-    agenda de la clínica.
+    `PENDIENTE` cuenta como no saberlo: es un marcador, no un nombre. Devolverlo como si lo
+    fuera es lo que metía «PENDIENTE · Cordales» en la agenda de la clínica.
+
+    El relevo ya no escribe ese marcador, pero esta comprobación se queda: siguen existiendo
+    las fichas que dejó antes del 16/09/2026, y son justo las de los números a los que un
+    doctor ya relevó una vez.
     """
     with persistencia.conectar(database_url) as conn:
         fila = persistencia.buscar_paciente_por_telefono(conn, telefono)
@@ -380,10 +359,25 @@ async def _tema_abierto_para(
     tema = await asyncio.to_thread(_tema_de, database_url, telefono)
 
     if tema is None:
-        # Ver `_ficha_para_el_relevo`: esto es deliberado y lo autoriza el doctor. El id que
-        # devuelve ya no lo usa nadie --desde la 014 el hilo cuelga del teléfono-- pero la
-        # ficha se sigue creando: es lo que le da identidad verificada a ese número.
-        await asyncio.to_thread(_ficha_para_el_relevo, database_url, telefono)
+        # Aquí se abría la ficha `PENDIENTE`, y se quitó el 16/09/2026.
+        #
+        # Existía porque hasta la migración 014 el hilo colgaba de
+        # `pacientes.telegram_topic_id`: sin ficha no había dónde guardarlo. La 014 lo movió
+        # al TELÉFONO y la ficha se quedó por inercia -- el comentario que había aquí ya
+        # admitía que «el id que devuelve ya no lo usa nadie», y defendía la fila por lo único
+        # que seguía haciendo: dar identidad verificada. Eso resultó ser el daño, no el
+        # beneficio.
+        #
+        # Medido en producción: el relevo dejaba la ficha, el doctor cerraba el hilo SIN
+        # agendar --así que nadie llegaba a preguntarle el nombre, que es lo único que pisa el
+        # marcador-- y el paciente dejaba de ser un desconocido sin llegar a ser nadie. Al dar
+        # su nombre no coincidía con «PENDIENTE», gastaba los dos intentos de identificación y
+        # Daniela escalaba en vez de agendar: ni desconocido --que puede pedir su primera
+        # cita-- ni verificado. El único hueco sin salida de los tres.
+        #
+        # Quién registra el nombre, que es lo que esta fila NO hacía: quien AGENDA.
+        # `herramientas._crear_cita` cuando agenda Daniela, y `_nombrar` --que crea la ficha
+        # si no hay ninguna-- cuando la agenda el doctor al cerrar.
         tema = await telegram.crear_tema(nombre_del_tema(telefono, None))
         # Nace ABIERTO, que es la diferencia con el tema que abre el primer archivo. No hace
         # falta `reabrir_tema` después: `createForumTopic` ya lo deja así.
