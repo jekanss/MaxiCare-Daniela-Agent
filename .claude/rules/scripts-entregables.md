@@ -67,11 +67,29 @@ argument 'group_id'`). **Quien cambie una de esas firmas corre los seis que no g
   clínica: corriendo de noche, la base caía fuera de jornada y las tools rechazaban todo
   —seis comprobaciones en rojo, incluida la de concurrencia que cierra la fase 3—. Quien
   añada un `hora(N)` grande no está pidiendo N horas después.
-- `probar_agentes.py` es el único que gasta siempre, y gasta en TRECE bloques. Iterar sobre
-  la conducta de un bloque pagando los otros doce es la forma más cara de trabajar aquí;
+- `probar_agentes.py` es el único que gasta siempre, y gasta en CATORCE bloques. Iterar sobre
+  la conducta de un bloque pagando los otros trece es la forma más cara de trabajar aquí;
   el cliente ya lo señaló. Los bloques comparten teléfono salvo donde se parametriza
   `nuevo_contexto`, así que lo que siembra un bloque sigue vivo en el siguiente: un `FALLA`
-  puede ser del escenario y no del modelo.
+  puede ser del escenario y no del modelo. Tres cosas suyas, medidas el 16/09/2026 corriéndolo
+  tres veces seguidas, que costaron tres corridas pagadas y conviene no volver a pagar:
+  - **Hay UN solo `CalendarioDoble` para toda la corrida (`CALENDARIO`), y tiene que seguir
+    siéndolo.** `eventos` es un dict por instancia; con uno por contexto, una cita sembrada
+    con un contexto y mirada desde el siguiente aparece como borrada en Google y
+    `_sincronizar_con_calendar` la cancela en Neon — correctamente (no negociable 20). El
+    bloque 13 certificaba así sobre una cita que se borraba sola.
+  - **Se siembra con `hora_habil()`, que cuenta bloques hábiles**, igual que
+    `probar_tools.py::hora`. Con `ahora + N días` la siembra cae en domingo según el día en
+    que se corra, `_crear_cita` devuelve «fuera de horario» y el escenario conversa contra una
+    base vacía sin decirlo.
+  - **`nuevo_contexto` pasa la URL REAL de la política, no el default `PENDIENTE`.** Ese
+    default mete en el prompt un bloque que producción ya no manda; certificar conducta sobre
+    un prompt que no existe es la única forma en que un entregable miente sin fallar.
+  - **El bloque 10 falla de forma intermitente y NO es del producto: 1 de 3 corridas.** Exige
+    `consultar_citas` en el PRIMER turno, y cuando falla Daniela pide el nombre completo —que
+    no es «pedirle un código al paciente», que es lo que esa línea dice vigilar—. La capacidad
+    está viva y se ve en el bloque 13, que llega a la tool desde una frase mucho peor escrita.
+    Imprime el texto completo al fallar: léelo antes de investigar.
 - `probar_recordatorios.py` escribe en `pruebas` —el mismo esquema y el mismo molde
   (`url_de_pruebas`, `montar_esquema`, `limpiar`) que `probar_tools.py`— y no gasta un token:
   el despachador corre con `whatsapp=None` o con la plantilla vacía en todo el camino. Dobla a
