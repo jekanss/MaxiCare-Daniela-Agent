@@ -782,3 +782,30 @@ def test_el_lector_no_puede_devolver_una_frase_clinica_en_tratamiento():
             confianza="alta",
             contexto_clinico="lo que sea",
         )
+
+
+def test_confirmar_la_asistencia_tambien_pide_calidez():
+    """El cuarto caso, que nació el 15/09/2026 con los botones de la plantilla.
+
+    `test_una_confirmacion_no_se_queda_en_el_dato_seco` cubre las tres ESCRITURAS: una cita
+    agendada, movida o cancelada. Pulsar «Confirmar» en el recordatorio no es ninguna de las
+    tres -- la cita no cambia, solo se lee con `consultar_citas` -- así que el disparador del
+    bloque de calidez se caía justo en el turno más agradecido de todos.
+
+    Medido en producción el 15/09/2026, la primera vez que un paciente pudo pulsar ese botón:
+
+        «Sí, queda confirmada tu cita de limpieza el jueves 17 de septiembre a las 11:00 am.»
+
+    Correcto y seco, que es exactamente el vacío que el bloque existía para tapar. El sub-punto
+    que hacía falta --«si la cita queda en pie, algo que le sirva para llegar bien»-- ya estaba
+    escrito debajo; lo único que no llegaba era el disparador.
+
+    Como la de arriba, esto solo comprueba que la instrucción está escrita. Que el modelo la
+    obedezca lo ve `scripts/probar_agentes.py` contra la API real, o un WhatsApp de verdad.
+    """
+    texto = agentes.INSTRUCCIONES_DANIELA
+
+    assert "CONFIRMA QUE ASISTIRÁ" in texto
+    # El sub-punto que da el contenido de esa línea tiene que seguir ahí: sin él, el
+    # disparador nuevo apunta a un bloque que ya no dice qué escribir.
+    assert "llegue con algo de margen" in texto
