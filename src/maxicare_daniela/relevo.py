@@ -243,9 +243,16 @@ def _ficha_para_el_relevo(database_url: str, telefono: str) -> int:
         )
 
 
-def _guardar_tema_abierto(database_url: str, id_paciente: int, tema: int) -> None:
+def _guardar_tema_abierto(database_url: str, telefono: str, tema: int) -> None:
+    """Ata el hilo recién creado al NÚMERO, y lo deja constando como abierto.
+
+    Va por teléfono desde la migración 014 --antes colgaba de `pacientes.telegram_topic_id`--
+    y esta función se quedó pasando el id de la ficha: `TypeError` en el único camino que la
+    recorre, el del número que todavía no tiene hilo. Ver
+    `test_el_hilo_del_paciente_sin_archivo_se_guarda_DE_VERDAD`.
+    """
     with persistencia.conectar(database_url) as conn:
-        persistencia.guardar_tema(conn, id_paciente=id_paciente, topic_id=tema, abierto=True)
+        persistencia.guardar_tema(conn, telefono=telefono, topic_id=tema, abierto=True)
 
 
 def _marcar_abierto(database_url: str, telefono: str, abierto: bool) -> None:
@@ -373,12 +380,14 @@ async def _tema_abierto_para(
     tema = await asyncio.to_thread(_tema_de, database_url, telefono)
 
     if tema is None:
-        # Ver `_ficha_para_el_relevo`: esto es deliberado y lo autoriza el doctor.
-        id_paciente = await asyncio.to_thread(_ficha_para_el_relevo, database_url, telefono)
+        # Ver `_ficha_para_el_relevo`: esto es deliberado y lo autoriza el doctor. El id que
+        # devuelve ya no lo usa nadie --desde la 014 el hilo cuelga del teléfono-- pero la
+        # ficha se sigue creando: es lo que le da identidad verificada a ese número.
+        await asyncio.to_thread(_ficha_para_el_relevo, database_url, telefono)
         tema = await telegram.crear_tema(nombre_del_tema(telefono, None))
         # Nace ABIERTO, que es la diferencia con el tema que abre el primer archivo. No hace
         # falta `reabrir_tema` después: `createForumTopic` ya lo deja así.
-        await asyncio.to_thread(_guardar_tema_abierto, database_url, id_paciente, tema)
+        await asyncio.to_thread(_guardar_tema_abierto, database_url, telefono, tema)
         log.info("el relevo abrió el tema %s para +%s, que no tenía", tema, telefono)
         return tema
 
