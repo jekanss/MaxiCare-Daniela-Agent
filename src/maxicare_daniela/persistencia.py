@@ -1844,10 +1844,17 @@ def seguimientos_por_despachar(
             SELECT s.id, s.conversacion_id, s.cita_id, s.tipo, s.fecha_objetivo, s.intentos,
                    COALESCE(c.telefono, cv.telefono)      AS telefono,
                    c.nombre_completo, c.tratamiento, c.inicio AS cita_inicio,
-                   c.estado AS cita_estado, cv.tomada_por
+                   c.estado AS cita_estado, cv.tomada_por,
+                   -- La baja comercial. Entra como columna de este SELECT --que ya hace el
+                   -- LEFT JOIN para sacar el teléfono-- y no como una consulta por fila: una
+                   -- tanda son hasta 50. El COALESCE hace explícito que un número sin fila
+                   -- de contacto NO está de baja: el LEFT JOIN devuelve NULL, y NULL no es
+                   -- FALSE para un `if`.
+                   COALESCE(co.no_contactar, FALSE)       AS no_contactar
               FROM seguimientos s
-              LEFT JOIN citas c          ON c.id  = s.cita_id
+              LEFT JOIN citas c           ON c.id  = s.cita_id
               LEFT JOIN conversaciones cv ON cv.id = s.conversacion_id
+              LEFT JOIN contactos co      ON co.telefono = COALESCE(c.telefono, cv.telefono)
              WHERE s.enviado_en IS NULL
                AND s.anulado_en IS NULL
                AND s.fecha_objetivo <= %s

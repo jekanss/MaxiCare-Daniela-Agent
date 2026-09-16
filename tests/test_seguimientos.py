@@ -125,6 +125,7 @@ def fila(**cambios) -> dict:
         cita_inicio=momento(17, 9),
         cita_estado="confirmada",
         tomada_por=None,
+        no_contactar=False,
     )
     base.update(cambios)
     return base
@@ -282,6 +283,58 @@ def test_un_seguimiento_sin_cita_se_salta_las_tres_primeras_guardas():
         ultimo_mensaje=None,
     )
     assert d.accion == "enviar"
+
+
+def test_g0_anula_una_reactivacion_a_quien_pidio_la_baja():
+    decision = s.decidir(
+        fila(tipo="reactivacion", cita_id=None, cita_inicio=None, no_contactar=True),
+        ahora=momento(16, 18),
+        jornada=JORNADA,
+        ultimo_mensaje=None,
+    )
+
+    assert decision.accion == "anular"
+    assert decision.motivo == "baja_solicitada"
+
+
+def test_g0_NO_toca_el_recordatorio_de_una_cita():
+    """La prueba que más importa de todo el trabajo. Pedir que no te manden publicidad no es
+    renunciar a que te avisen de tu propia cita: si se mezclan, el paciente no llega, la
+    clínica pierde el cupo, y el sistema habría hecho exactamente lo que se le pidió."""
+    decision = s.decidir(
+        fila(tipo="recordatorio_cita", no_contactar=True),
+        ahora=momento(16, 18),
+        jornada=JORNADA,
+        ultimo_mensaje=None,
+    )
+
+    assert decision.accion == "enviar"
+
+
+def test_un_tipo_inventado_se_trata_como_comercial():
+    """`seguimientos.tipo` es texto libre que escribe el modelo. La lista blanca falla hacia
+    el lado seguro: lo que no está en ella se comprueba contra la baja. Una lista negra
+    dejaría pasar cualquier invento directo al envío."""
+    decision = s.decidir(
+        fila(tipo="promo_de_diciembre", cita_id=None, cita_inicio=None, no_contactar=True),
+        ahora=momento(16, 18),
+        jornada=JORNADA,
+        ultimo_mensaje=None,
+    )
+
+    assert decision.accion == "anular"
+    assert decision.motivo == "baja_solicitada"
+
+
+def test_sin_baja_g0_no_hace_nada():
+    decision = s.decidir(
+        fila(tipo="reactivacion", cita_id=None, cita_inicio=None, no_contactar=False),
+        ahora=momento(16, 18),
+        jornada=JORNADA,
+        ultimo_mensaje=None,
+    )
+
+    assert decision.accion == "enviar"
 
 
 def test_los_cuatro_huecos_de_la_plantilla_salen_en_hora_de_bogota(monkeypatch):

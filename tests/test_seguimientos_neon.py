@@ -15,6 +15,12 @@ pytestmark = pytest.mark.neon
 
 ESQUEMA = "pruebas_seguimientos"
 
+TEL = "573001112299"
+# Un número DISTINTO de `TEL`: este archivo no limpia `contactos` entre pruebas (a
+# diferencia de `test_contacto_neon.py`), así que reusar `TEL` aquí contaminaría esta
+# prueba con la baja que la prueba anterior le dejó puesta a ese número.
+TEL_SIN_CONTACTO = "573001112298"
+
 
 def _url_de_pruebas() -> str:
     """La URL de Neon, sin pooler y apuntada al esquema de pruebas de este archivo.
@@ -302,3 +308,54 @@ def test_la_cola_trae_lo_que_el_despachador_necesita_para_decidir(conexion_prueb
         "telefono", "nombre_completo", "tratamiento", "cita_inicio", "cita_estado",
         "tomada_por",
     }
+
+
+def test_la_consulta_trae_la_baja_del_contacto(conexion_pruebas):
+    """La comprobación entra como una columna del SELECT que ya hace LEFT JOIN para sacar el
+    teléfono, y no como una consulta por fila: una tanda son hasta 50."""
+    id_conv = persistencia.asegurar_conversacion(
+        conexion_pruebas, telefono=TEL, paciente_id=None, canal="whatsapp"
+    )
+    ayer = datetime.now(ZONA_BOGOTA) - timedelta(days=1)
+    persistencia.insertar_seguimiento(
+        conexion_pruebas,
+        id_conversacion=id_conv,
+        tipo="reactivacion",
+        fecha_objetivo=ayer,
+        clave_idempotencia="baja-1",
+    )
+    persistencia.asegurar_contacto(conexion_pruebas, TEL)
+    persistencia.pedir_baja(conexion_pruebas, TEL)
+
+    filas = persistencia.seguimientos_por_despachar(
+        conexion_pruebas, ahora=datetime.now(ZONA_BOGOTA)
+    )
+    # Filtrado por `conversacion_id` y no `[0]`: este archivo no limpia `seguimientos` entre
+    # pruebas, así que la cola trae también lo que dejaron vivo las pruebas anteriores.
+    # `str(...)`: psycopg devuelve la columna UUID como `uuid.UUID`, e `id_conv` es un `str`.
+    fila = next(f for f in filas if str(f["conversacion_id"]) == id_conv)
+
+    assert fila["no_contactar"] is True
+
+
+def test_un_telefono_sin_fila_de_contacto_no_cuenta_como_baja(conexion_pruebas):
+    """El LEFT JOIN devuelve NULL, y NULL no es TRUE. El COALESCE lo hace explícito para que
+    nadie tenga que acordarse de esto al leer la guarda."""
+    id_conv = persistencia.asegurar_conversacion(
+        conexion_pruebas, telefono=TEL_SIN_CONTACTO, paciente_id=None, canal="whatsapp"
+    )
+    ayer = datetime.now(ZONA_BOGOTA) - timedelta(days=1)
+    persistencia.insertar_seguimiento(
+        conexion_pruebas,
+        id_conversacion=id_conv,
+        tipo="reactivacion",
+        fecha_objetivo=ayer,
+        clave_idempotencia="sin-contacto-1",
+    )
+
+    filas = persistencia.seguimientos_por_despachar(
+        conexion_pruebas, ahora=datetime.now(ZONA_BOGOTA)
+    )
+    fila = next(f for f in filas if str(f["conversacion_id"]) == id_conv)
+
+    assert fila["no_contactar"] is False
