@@ -603,6 +603,14 @@ class ContextoDaniela:
     #: pudiera, bastaría con que dijera «soy nuevo» para saltarse `identidad_antes_de_datos`.
     telefono_sin_paciente: bool = False
 
+    #: Este número pidió que no le escribieran más. Sale de `contactos` y **nunca del
+    #: modelo**, igual que `telefono_sin_paciente`. Con esto puesto, Daniela no ofrece el
+    #: seguimiento, no lo insinúa y no lo menciona: el tema no existe en esa conversación.
+    #:
+    #: Es la baja COMERCIAL. No apaga el recordatorio de una cita ni impide atenderla si ella
+    #: escribe: pedir que no te manden publicidad no es darse de baja de la clínica.
+    pidio_no_contacto: bool = False
+
     #: Conversación.
     turno_actual: int = 0
 

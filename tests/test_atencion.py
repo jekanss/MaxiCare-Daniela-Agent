@@ -30,7 +30,7 @@ from datetime import datetime
 import httpx
 import pytest
 
-from maxicare_daniela import atencion, conversacion, ingesta, persistencia
+from maxicare_daniela import atencion, contratos, conversacion, ingesta, persistencia
 from maxicare_daniela.calendario import CalendarioCaido, CalendarioDoble, ErrorDeCalendario
 from maxicare_daniela.canales import ErrorDeCanal
 from maxicare_daniela.config import MARGEN_LECTURA_SEGUNDOS, Config
@@ -170,6 +170,7 @@ class BaseFalsa:
         nueva: str = "conv-nueva",
         recordatorio: tuple[str, datetime] | None = None,
         caso_revienta: Exception | None = None,
+        contacto: dict | None = None,
     ) -> None:
         self.viva = viva
         #: Lo que `_anotar_resultado` dejó en `casos_sin_resolver`, en orden. Cada elemento
@@ -183,6 +184,10 @@ class BaseFalsa:
         #: último mensaje que el despachador le mandó a este paciente, o `None`.
         self.recordatorio = recordatorio
         self.configuracion = CONFIGURACION_OPERATIVA if configuracion is None else configuracion
+        #: Lo que devuelve `persistencia.asegurar_contacto`: por defecto, un contacto recién
+        #: nacido -- contactable y sin el aviso mostrado, que es lo que produce la fila en
+        #: blanco de verdad.
+        self.contacto = contacto
         self.nueva = nueva
         self.llamadas: list[tuple] = []
         #: Las conexiones que se abrieron, en orden. Sirven para comprobar el ruling 5 --que
@@ -225,6 +230,22 @@ class BaseFalsa:
             conn.comprobar()
             anotar("buscar_paciente_por_telefono", telefono)
             return self.paciente
+
+        def asegurar_contacto(conn, telefono):
+            conn.comprobar()
+            anotar("asegurar_contacto", telefono)
+            if self.contacto is not None:
+                return dict(self.contacto)
+            return {
+                "telefono": telefono,
+                "creado_en": None,
+                "actualizado_en": None,
+                "aviso_mostrado_en": None,
+                "politica_version": None,
+                "no_contactar": False,
+                "no_contactar_en": None,
+                "no_contactar_origen": None,
+            }
 
         def asegurar_conversacion(conn, *, telefono, paciente_id=None, canal="whatsapp"):
             conn.comprobar()
@@ -290,6 +311,7 @@ class BaseFalsa:
         monkeypatch.setattr(
             persistencia, "buscar_paciente_por_telefono", buscar_paciente_por_telefono
         )
+        monkeypatch.setattr(persistencia, "asegurar_contacto", asegurar_contacto)
         monkeypatch.setattr(persistencia, "asegurar_conversacion", asegurar_conversacion)
         monkeypatch.setattr(persistencia, "leer_configuracion", leer_configuracion)
         monkeypatch.setattr(persistencia, "conversacion_tomada", conversacion_tomada)
@@ -2336,3 +2358,56 @@ def test_un_caso_que_revienta_no_le_quita_la_respuesta_a_nadie(monkeypatch):
     assert base.argumentos("tocar_conversacion") == ("conv-viva", 5), (
         "el turno se cuenta antes que el caso, así que un caso roto no se lo lleva"
     )
+
+
+# ==========================================================================================
+# El contacto y la señal de la baja
+# ==========================================================================================
+
+
+def test_el_estado_lleva_la_senal_de_la_baja():
+    """Sale de la base y nunca del modelo, igual que `telefono_sin_paciente`. Si el modelo
+    pudiera ponerla, bastaría con que dijera «no me escriban» para desactivar la
+    reactivación de otro."""
+    estado = atencion._Estado(
+        id_conversacion="c-1",
+        turno_actual=0,
+        identidad_verificada=False,
+        intentos_identificacion=0,
+        id_paciente=None,
+        nombre_paciente=None,
+        telefono_sin_paciente=True,
+        tomada_por=None,
+        pidio_no_contacto=True,
+    )
+
+    assert estado.pidio_no_contacto is True
+    # El default es contactable: la baja es algo que el paciente pide.
+    assert estado.aviso_visto is False
+
+
+def test_el_contexto_recibe_la_senal_de_la_baja():
+    """El fallo que esto evita: doce días después de darse de baja, María escribe por una
+    muela rota. Para el sistema es una conversación nueva y en blanco, así que sin esta
+    señal Daniela cierra como cierra siempre --«¿te escribo en unos días?»-- y le pide
+    permiso para algo que ella ya negó expresamente."""
+    ctx = contratos.ContextoDaniela(
+        id_conversacion="c-1",
+        telefono_completo="573001112201",
+        database_url="postgres://nada",
+        calendario=None,
+        pidio_no_contacto=True,
+    )
+
+    assert ctx.pidio_no_contacto is True
+
+
+def test_el_contexto_por_defecto_no_tiene_baja():
+    ctx = contratos.ContextoDaniela(
+        id_conversacion="c-1",
+        telefono_completo="573001112201",
+        database_url="postgres://nada",
+        calendario=None,
+    )
+
+    assert ctx.pidio_no_contacto is False

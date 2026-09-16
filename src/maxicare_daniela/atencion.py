@@ -248,6 +248,14 @@ class _Estado:
     #: `None` si la tabla `configuracion` no respondió. No es lo mismo que un diccionario
     #: vacío: quien lo recibe tiene que poder distinguir «no se pudo leer» de «está vacía».
     operativa: dict[str, int] | None = field(default=None)
+    #: Este número pidió que no le escribieran más. Sale de `contactos` --tabla propia por
+    #: teléfono, migración 019-- y nunca del modelo: si lo pusiera él, bastaría con que un
+    #: paciente dijera «no me escriban» en una frase ambigua para apagarle la reactivación a
+    #: otro. Con esto puesto, Daniela no ofrece el seguimiento ni lo menciona.
+    pidio_no_contacto: bool = field(default=False)
+    #: Este número ya vio el aviso de la política. Se lee aquí, en la misma pasada, y lo
+    #: consume el pegado del aviso antes del envío.
+    aviso_visto: bool = field(default=False)
 
 
 # ==========================================================================================
@@ -269,6 +277,11 @@ def _leer_estado(database_url: str, telefono: str, wamids: list[str]) -> _Estado
             conn, telefono, ventana_horas=VENTANA_CONVERSACION_HORAS
         )
         paciente = persistencia.buscar_paciente_por_telefono(conn, telefono)
+
+        # La fila nace aquí, con el primer mensaje que entra, y no cuando alguien agenda: los
+        # que preguntan y no agendan son justo los que hay que poder recordar. `asegurar_`
+        # porque puede existir desde hace meses; es idempotente.
+        contacto = persistencia.asegurar_contacto(conn, telefono)
 
         if viva is None:
             id_conversacion = persistencia.asegurar_conversacion(
@@ -338,6 +351,8 @@ def _leer_estado(database_url: str, telefono: str, wamids: list[str]) -> _Estado
         ultimo_recordatorio_tipo=recordatorio[0] if recordatorio else None,
         ultimo_recordatorio_en=recordatorio[1] if recordatorio else None,
         operativa=operativa,
+        pidio_no_contacto=bool(contacto["no_contactar"]),
+        aviso_visto=contacto["aviso_mostrado_en"] is not None,
     )
 
 
@@ -1040,6 +1055,7 @@ async def atender(
             identidad_verificada=estado.identidad_verificada,
             intentos_identificacion=estado.intentos_identificacion,
             telefono_sin_paciente=estado.telefono_sin_paciente,
+            pidio_no_contacto=estado.pidio_no_contacto,
             turno_actual=estado.turno_actual,
             tomada_por=estado.tomada_por,
             # El tema propio de la conversación llega con el relevo (6C). Hasta entonces todo
