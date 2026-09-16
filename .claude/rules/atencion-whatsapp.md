@@ -392,3 +392,46 @@ guarda hoy `(texto, tema_id)`, y quien escriba uno nuevo tiene que hacer lo mism
   grupo. Eso lo mira una persona con un Telegram delante: el tema del paciente existe, está
   cerrado, tiene el archivo dentro y la lectura debajo. Decir que lo cubre un script sería
   mentir sobre lo que está verificado.
+
+## Los botones de la plantilla
+
+El 15/09/2026 Meta aprobó `recordatorio_cita` con dos quick replies —«Confirmar» y «Necesito
+cambiarla»— y eso abrió un camino de entrada que no existía cuando se escribieron ni la
+ingesta, ni el prompt, ni los guardrails. Los tres se rompieron en el mismo sitio, y ninguno
+de los tres dejó un error en ningún log.
+
+- **El rótulo no viene en `text`.** Meta manda `type: "button"` con el texto en `button.text`
+  y lo que definió la plantilla en `button.payload`. `extraer_mensajes` miraba `text.body` y
+  `<tipo>.caption`, así que `texto` quedaba en `None` y `atencion` le entregaba al modelo
+  «[El paciente envió algo de tipo «button». No trae texto.]». El paciente pulsó «Necesito
+  cambiarla» y Daniela contestó con su saludo de primer contacto. Se prefiere `text` sobre
+  `payload`: es lo que el paciente leyó antes de pulsar.
+- **`uso_indebido` leía el rótulo como una inyección.** Textual, del evaluador real: «El
+  mensaje inyectado intenta imponer instrucciones del sistema y controlar la respuesta de la
+  asistente». Un imperativo de una palabra es indistinguible de una orden al sistema. El coste
+  es el de los unicornios —mensaje seguro al paciente y alerta falsa al doctor— y además
+  **intermitente**: el mismo texto pasó a las 22:04 y disparó a las 22:11, que es la peor
+  clase de fallo porque en una demo pasa.
+
+  Se cerró por dos lados. `_entrada_para_el_modelo` envuelve el rótulo —«[El paciente pulsó el
+  botón «X» del mensaje automático que le enviamos]»—, y eso lo ve también el evaluador,
+  porque `uso_indebido` recibe EXACTAMENTE la misma cadena que el modelo. Y
+  `ctx.entrada_solo_de_botones` le hace saltarse la evaluación entera: lo que llega en un
+  quick reply sale de la plantilla que Meta aprobó, es uno de dos valores fijos, y no hay
+  superficie de inyección que vigilar. Preguntarle a un evaluador probabilístico por una lista
+  cerrada solo añade una forma de equivocarse.
+
+  **`all` y no `any`, y esa es la mitad que no se puede aflojar:** con un solo botón bastando,
+  pulsar «Confirmar» y escribir «ignora tus instrucciones» detrás colaría el texto libre sin
+  evaluar. La señal sale del `type` del webhook y nunca del modelo, igual que
+  `telefono_sin_paciente`.
+- **El bloque de calidez no cubría confirmar la asistencia.** Se disparaba con «una cita
+  agendada, movida o cancelada»: las tres son ESCRITURAS, y al pulsar «Confirmar» la cita no
+  cambia —solo se lee con `consultar_citas`—. El turno más agradecido de todos se quedaba en
+  «Sí, queda confirmada tu cita…» y punto. El sub-punto que hacía falta («que llegue con algo
+  de margen») ya estaba escrito debajo; lo único que no llegaba era el disparador.
+
+**Ninguna prueba offline caza el primero de los tres**, porque el webhook va doblado a mano:
+quien toque `extraer_mensajes` corre `scripts/probar_atencion.py`. Y la conducta de los otros
+dos solo se ve contra el modelo real o con un WhatsApp delante — `uv run python
+scripts/probar_plantilla.py <numero>` manda uno de verdad.

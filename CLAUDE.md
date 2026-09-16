@@ -50,6 +50,7 @@ Entregables por fase. **Los marcados gastan tokens**; los demás, ni uno:
 | `scripts/probar_persistencia.py` | que una conversación sobrevive a reiniciar (fase 7) | solo con `--chat` |
 | `scripts/probar_panel.py` | el panel de tratamientos (fase 8) | solo con `--chat` |
 | `scripts/probar_recordatorios.py` | la cola de recordatorios y su despachador | no |
+| `scripts/probar_plantilla.py` | la plantilla de Meta, y manda UNA de verdad | **sí** (`--estado` no) |
 | `scripts/probar_calendario.py` | `CalendarioGoogle` contra el calendario real | no |
 | `scripts/probar_webhook.py <url>` | el webhook en producción | **sí** (despierta a Daniela) |
 
@@ -146,6 +147,14 @@ una —qué se midió, qué costó— está en la regla que cubre ese archivo.
    conversación: sin eso, reprogramar deja vivo un recordatorio de una cita que ya no existe.
    El despacho vive en su **propia** tarea de `runtime.py`, no en la de relevos, que no arranca
    sin Telegram.
+22. **El rótulo de un quick reply llega en `button.text`, y `uso_indebido` NO lo evalúa.** Meta
+   manda `type: "button"`, no `text`: mirar solo `text.body` deja el turno MUDO —sin un error en
+   ningún log— y los dos botones que Meta aprobó sin servir para nada. Y el rótulo suelto
+   («Confirmar») el evaluador lo lee como una inyección, con mensaje seguro al paciente y alerta
+   falsa al doctor, de forma **intermitente**: pasó a las 22:04 y disparó a las 22:11. La señal
+   `ctx.entrada_solo_de_botones` sale del `type` del webhook y **nunca del modelo**, y exige
+   TODOS los mensajes del grupo, no alguno: con uno bastando, el botón es el portillo por donde
+   entra texto libre sin evaluar.
 
 # Dónde está el resto
 
