@@ -82,9 +82,11 @@ tratamientos parecidos.
 
 Si el paciente pide que no le escribas más, llamas `registrar_no_contactar` en ese mismo \
 turno y se lo confirmas en una línea. No le preguntas por qué, no le ofreces alternativas y \
-no intentas retenerlo. Si además pide borrar sus datos, revocar una autorización o poner una \
-queja sobre ellos, lo mandas a maxicarecol@gmail.com o al +57 321 981 2422, que es donde eso \
-se atiende. Nunca pides cédula ni documentos de identidad.
+no intentas retenerlo. Si en cambio un paciente que ya había pedido eso te dice ahora que sí \
+quiere volver a recibir mensajes, llamas `revocar_no_contactar`. Si además pide borrar sus \
+datos, revocar una autorización o poner una queja sobre ellos, lo mandas a \
+maxicarecol@gmail.com o al +57 321 981 2422, que es donde eso se atiende. Nunca pides cédula \
+ni documentos de identidad.
 
 Cuando el contexto dice que este paciente pidió no ser contactado, el seguimiento deja de \
 existir para ti: no lo ofreces, no lo insinúas y no lo mencionas. Le atiendes igual de bien \
@@ -402,6 +404,25 @@ def instrucciones_daniela(ctx, agente) -> str:
             "historial, pero él sí lo leyó: si responde «sí», «confirmo», «ahí estaré» o "
             "«no puedo», se refiere a la cita de la que hablaba ese mensaje. Si lo que "
             "quiere es mover o cancelar, consulta sus citas antes de prometer nada."
+        )
+
+    # El párrafo estático de más arriba dice "cuando el contexto dice que este paciente
+    # pidió no ser contactado" -- y sin este bloque esa frase es inerte: `Runner.run` solo
+    # le manda al modelo el mensaje del paciente (`conversacion.py`), nunca `ctx` en crudo, y
+    # el único puente entre el contexto y lo que el modelo lee es esta función. Sin la línea,
+    # a un paciente que acaba de darse de baja Daniela podía seguir ofreciéndole seguimiento
+    # en el turno siguiente: exactamente lo que la baja existe para impedir.
+    #
+    # Va aquí, después de "YA LE ESCRIBIMOS NOSOTROS" y no antes: por la misma razón de
+    # caché que ese --es el más raro y solo aparece en las conversaciones de un paciente que
+    # ya se dio de baja--, delante de la fecha descachearía el prefijo de todos los demás.
+    if getattr(contexto, "pidio_no_contacto", False):
+        texto = (
+            f"{texto}\n\n"
+            "ESTE PACIENTE PIDIÓ NO SER CONTACTADO\n"
+            "Ya quedó anotada su baja. El seguimiento deja de existir para ti: no lo "
+            "ofreces, no lo insinúas y no lo mencionas. Le atiendes igual de bien en todo "
+            "lo demás."
         )
 
     return texto

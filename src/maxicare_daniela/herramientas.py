@@ -419,10 +419,15 @@ def _fallo_escalamiento(ctx: RunContextWrapper[Any], error: Exception) -> str:
 
 
 def _fallo_privacidad(ctx: RunContextWrapper[ContextoDaniela], error: Exception) -> str:
-    log.exception("no se pudo registrar la decisión de privacidad")
+    # No negociable 1: nunca confirmarle al paciente algo que no ocurrió. `pedir_baja` y
+    # `revocar_baja` hacen su propio commit -- una excepción antes de eso deja la
+    # transacción en rollback -- así que un fallo aquí significa que NO quedó anotado, y
+    # decirle lo contrario es justo el error que ese no negociable prohíbe.
+    log.error("no se pudo registrar la decisión de privacidad: %s", error)
     return (
-        "No se pudo registrar ahora mismo. Dile al paciente que su solicitud queda anotada "
-        "y escala: esto NO se deja pasar en silencio."
+        "No se pudo registrar todavía. NO le digas al paciente que quedó anotado: no es "
+        "cierto. Dile que lo estás resolviendo y escala a los doctores para que alguien lo "
+        "anote a mano: esto NO se deja pasar en silencio."
     )
 
 
@@ -1956,12 +1961,16 @@ async def registrar_no_contactar(
 
 
 async def _revocar_no_contactar(ctx: ContextoDaniela, nota: str | None) -> str:
-    def trabajo(conn) -> None:
-        persistencia.revocar_baja(
+    def trabajo(conn) -> bool:
+        return persistencia.revocar_baja(
             conn, ctx.telefono_completo, origen="paciente", detalle=nota
         )
 
-    await _con_base(ctx, trabajo)
+    cambio = await _con_base(ctx, trabajo)
+    if not cambio:
+        # No negociable 1: a este número nadie le había apagado nada, así que "vuelve a
+        # recibir mensajes" sería confirmar un cambio que no ocurrió.
+        return "Este número no tenía nada desactivado. Sigue con lo que necesite."
     return "Anotado: vuelve a recibir mensajes nuestros. Confírmaselo en una línea."
 
 

@@ -78,7 +78,7 @@ def correr(agente, entrada, ctx, guion):
 # ==========================================================================================
 
 
-def test_daniela_tiene_las_nueve_tools_del_plan_y_la_decima():
+def test_daniela_tiene_las_nueve_tools_del_plan_la_decima_y_la_baja_comercial():
     """`consultar_citas` no está en el plan y se añade en esta lista a conciencia.
 
     Sin ella, `reprogramar_cita` y `cancelar_cita` solo funcionan dentro de la conversación
@@ -563,6 +563,29 @@ def test_sin_recordatorio_el_bloque_no_aparece():
     assert "YA LE ESCRIBIMOS NOSOTROS" not in texto
 
 
+def test_pidio_no_contacto_apaga_el_seguimiento_en_lo_que_el_modelo_realmente_lee():
+    """El párrafo estático de la política de datos dice "cuando el contexto dice que este
+    paciente pidió no ser contactado" -- y sin este bloque esa frase era inerte: `ctx` nunca
+    llega al modelo en crudo, solo lo que `instrucciones_daniela` construye. Por eso la
+    prueba mira el texto que devuelve el prompt dinámico, no la constante
+    `INSTRUCCIONES_DANIELA`."""
+    ctx = contexto(pidio_no_contacto=True)
+
+    texto = asyncio.run(agentes.daniela.get_system_prompt(RunContextWrapper(context=ctx)))
+
+    assert "ESTE PACIENTE PIDIÓ NO SER CONTACTADO" in texto
+    assert "no lo ofreces, no lo insinúas y no lo mencionas" in texto
+
+
+def test_sin_la_baja_el_bloque_de_seguimiento_apagado_no_aparece():
+    """El caso normal: casi ningún paciente se dio de baja, y el prompt no paga ese bloque."""
+    ctx = contexto(pidio_no_contacto=False)
+
+    texto = asyncio.run(agentes.daniela.get_system_prompt(RunContextWrapper(context=ctx)))
+
+    assert "ESTE PACIENTE PIDIÓ NO SER CONTACTADO" not in texto
+
+
 def test_el_bloque_de_presentacion_no_revienta_sin_contexto():
     """`context=None` en varias pruebas que solo miran el vocabulario."""
     texto = asyncio.run(agentes.daniela.get_system_prompt(RunContextWrapper(context=None)))
@@ -819,6 +842,13 @@ def test_confirmar_la_asistencia_tambien_pide_calidez():
 def test_el_prompt_prohibe_persuadir_a_quien_pide_la_baja():
     """Marketing lo pidió expresamente: confirmar y no retener."""
     assert "no intentas retenerlo" in agentes.INSTRUCCIONES_DANIELA
+
+
+def test_el_prompt_nombra_las_dos_tools_de_la_baja_comercial():
+    """La asimetría se lee como olvido: si el prompt solo nombra `registrar_no_contactar`,
+    la revocación queda dependiendo solo del docstring de la tool."""
+    assert "registrar_no_contactar" in agentes.INSTRUCCIONES_DANIELA
+    assert "revocar_no_contactar" in agentes.INSTRUCCIONES_DANIELA
 
 
 def test_el_prompt_manda_callar_el_seguimiento_a_quien_lo_nego():

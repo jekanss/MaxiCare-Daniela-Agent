@@ -2764,7 +2764,7 @@ def test_revocar_no_contactar_la_levanta(monkeypatch):
     anotado: list[tuple] = []
 
     async def base_falsa(ctx, trabajo):
-        trabajo(BaseFalsa())
+        return trabajo(BaseFalsa())
 
     def revocar_baja(conn, telefono, *, origen="paciente", detalle=None):
         anotado.append((telefono, origen, detalle))
@@ -2776,7 +2776,28 @@ def test_revocar_no_contactar_la_levanta(monkeypatch):
     salida = asyncio.run(h._revocar_no_contactar(contexto(), "pidio que le avisen"))
 
     assert anotado == [("573001112233", "paciente", "pidio que le avisen")]
-    assert salida
+    assert "vuelve a recibir mensajes" in salida
+
+
+def test_revocar_no_contactar_a_un_numero_que_nunca_se_dio_de_baja_no_confirma_un_cambio_falso(
+    monkeypatch,
+):
+    """No negociable 1: `revocar_baja` devuelve `False` cuando no había nada que levantar, y
+    la tool no puede decirle al paciente que "vuelve a recibir mensajes" si nunca los había
+    dejado de recibir -- confirmaría un cambio que no ocurrió."""
+
+    async def base_falsa(ctx, trabajo):
+        return trabajo(BaseFalsa())
+
+    def revocar_baja(conn, telefono, *, origen="paciente", detalle=None):
+        return False
+
+    monkeypatch.setattr(h, "_con_base", base_falsa)
+    monkeypatch.setattr(h.persistencia, "revocar_baja", revocar_baja)
+
+    salida = asyncio.run(h._revocar_no_contactar(contexto(), None))
+
+    assert "vuelve a recibir mensajes" not in salida
 
 
 def test_las_dos_tools_estan_registradas():
@@ -2786,3 +2807,15 @@ def test_las_dos_tools_estan_registradas():
 
     assert "registrar_no_contactar" in nombres
     assert "revocar_no_contactar" in nombres
+
+
+def test_el_modelo_solo_puede_escribir_la_nota_nunca_la_fecha_el_origen_o_la_version():
+    """La frontera no es documental, es estructural: sin esta prueba, añadir mañana un
+    parámetro `fecha` u `origen` a la tool PÚBLICA no rompería ninguna otra -- las tres
+    pruebas de arriba llaman al helper `_nombre` con guion bajo, no al `FunctionTool`
+    decorado que es lo único que el modelo puede tocar de verdad."""
+    por_nombre = {t.name: t for t in h.TODAS}
+
+    for nombre in ("registrar_no_contactar", "revocar_no_contactar"):
+        propiedades = set(por_nombre[nombre].params_json_schema["properties"])
+        assert propiedades == {"nota"}

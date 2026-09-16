@@ -178,10 +178,31 @@ class Veredicto:
     motivo: str = ""
 
 
+#: El teléfono del canal de privacidad que `agentes.py` manda a dar --+57 321 981 2422, la
+#: Ley 2300 exige uno-- autorizado de forma PERMANENTE y NO por turno. Un modelo que lo
+#: reformatee --"3219812422" en vez de "321 981 2422"-- produce una cifra que ninguna tool
+#: devolvió jamás, y sin esto dispara `sin_cifra_no_documentada` de forma intermitente: pasa
+#: la mayoría de las veces (con ESE espaciado, `cifras_de` no extrae nada) y falla la vez que
+#: el modelo lo junta distinto. Es una cadena y no un `set` de variantes a propósito: los
+#: dígitos del teléfono siempre salen en el mismo orden, así que cualquier fragmento de 5 o
+#: más que `cifras_de` extraiga de una reformulación válida es, por construcción, un
+#: substring de esta.
+_DIGITOS_TELEFONO_CLINICA = "573219812422"
+
+
 def revisar_cifras(mensaje: str, autorizadas: set[str]) -> Veredicto:
-    """Ninguna cifra de dinero puede salir si una tool no la devolvió en este turno."""
+    """Ninguna cifra de dinero puede salir si una tool no la devolvió en este turno.
+
+    Excepción: un fragmento del teléfono de privacidad que el propio prompt manda a dar
+    nunca cuenta como "sobrante", venga como venga formateado -- ver
+    `_DIGITOS_TELEFONO_CLINICA`.
+    """
     dichas = cifras_de(mensaje)
-    sobrantes = dichas - autorizadas
+    sobrantes = {
+        cifra
+        for cifra in dichas - autorizadas
+        if cifra not in _DIGITOS_TELEFONO_CLINICA
+    }
     if not sobrantes:
         return Veredicto(False)
     return Veredicto(
