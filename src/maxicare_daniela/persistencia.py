@@ -2310,6 +2310,172 @@ def rastro_de(conn, telefono: str) -> dict:
     return {"eventos": eventos, "topic_id": topic_id, "mensajes_telegram": mensajes}
 
 
+# ==========================================================================================
+# La persona del teléfono, y lo que ha decidido sobre sus datos (migración 019)
+# ==========================================================================================
+
+
+#: Las columnas de `contactos`, en un solo sitio. Las dos lecturas devuelven un `dict` con
+#: exactamente estas claves, así que quien las consuma no depende del orden del SELECT.
+_COLUMNAS_CONTACTO = (
+    "telefono, creado_en, actualizado_en, aviso_mostrado_en, politica_version, "
+    "no_contactar, no_contactar_en, no_contactar_origen"
+)
+
+
+def _fila_contacto(cur) -> dict[str, Any] | None:
+    fila = cur.fetchone()
+    if fila is None:
+        return None
+    return dict(zip([d[0] for d in cur.description], fila))
+
+
+def asegurar_contacto(conn, telefono: str) -> dict[str, Any]:
+    """La fila de ese número, creándola en blanco si no estaba. Nunca falla por existir.
+
+    Nace sin aviso y sin baja: contactable, porque la baja es algo que el paciente pide y
+    nunca un default. Tener fila aquí NO significa estar verificado -- eso lo sigue diciendo
+    la existencia de la fila en `pacientes` (no negociable 12).
+
+    `ON CONFLICT DO NOTHING` y no un `UPDATE`: dos mensajes del mismo número pueden entrar a
+    la vez y el candado de `atencion` es de proceso, no protege entre réplicas.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO contactos (telefono) VALUES (%s) ON CONFLICT (telefono) DO NOTHING",
+            (telefono,),
+        )
+        cur.execute(
+            f"SELECT {_COLUMNAS_CONTACTO} FROM contactos WHERE telefono = %s", (telefono,)
+        )
+        fila = _fila_contacto(cur)
+    conn.commit()
+    if fila is None:
+        # Imposible salvo bug: o la insertó esta llamada, o ya estaba. Un `assert` no vale
+        # --`python -O` los borra-- y devolver `None` dejaría a `_leer_estado` reventando
+        # más tarde con un `TypeError` sin relación aparente con la causa.
+        raise RuntimeError(f"no se pudo asegurar el contacto de {telefono}")
+    return fila
+
+
+def leer_contacto(conn, telefono: str) -> dict[str, Any] | None:
+    """Lo que ese número ha decidido, o `None` si nunca ha escrito.
+
+    NO crea la fila: la usan el despachador y las tools, que no tienen por qué inventar un
+    contacto solo por consultar.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            f"SELECT {_COLUMNAS_CONTACTO} FROM contactos WHERE telefono = %s", (telefono,)
+        )
+        return _fila_contacto(cur)
+
+
+def anotar_consentimiento(
+    conn,
+    telefono: str,
+    *,
+    evento: str,
+    origen: str,
+    version: str | None = None,
+    detalle: str | None = None,
+) -> None:
+    """Una línea en la bitácora. Solo se añade: nada la modifica ni la borra.
+
+    No hace `commit()` a propósito -- las tres funciones de abajo la llaman dentro de su
+    propia transacción, para que el estado y su rastro entren o no entren juntos. Un estado
+    cambiado sin rastro es exactamente lo que esta tabla existe para impedir.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO consentimientos (telefono, evento, origen, politica_version, detalle)
+            VALUES (%s, %s, %s, %s, %s)
+            """,
+            (telefono, evento, origen, version, (detalle or None) and detalle[:500]),
+        )
+
+
+def marcar_aviso_mostrado(conn, telefono: str, *, version: str) -> None:
+    """Deja constancia de que a este número se le enseñó la política, y cuál.
+
+    Se llama DESPUÉS de que el envío haya salido bien, nunca antes: ver el comentario de
+    `atencion` donde se usa. Es al revés que un recordatorio (no negociable 21) y es
+    deliberado.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE contactos
+               SET aviso_mostrado_en = now(), politica_version = %s, actualizado_en = now()
+             WHERE telefono = %s
+            """,
+            (version, telefono),
+        )
+    anotar_consentimiento(
+        conn, telefono, evento="aviso_mostrado", origen="codigo", version=version
+    )
+    conn.commit()
+
+
+def pedir_baja(
+    conn, telefono: str, *, origen: str = "paciente", detalle: str | None = None
+) -> bool:
+    """Apaga las comunicaciones COMERCIALES de ese número. Devuelve si el estado cambió.
+
+    Nunca apaga el recordatorio de una cita: eso lo garantiza la lista blanca de
+    `seguimientos.TIPOS_NO_COMERCIALES`, no esta función. Pedir que no te manden publicidad
+    no es renunciar a que te avisen de tu propia cita, y confundir las dos cosas deja a un
+    paciente sin llegar a la clínica.
+
+    La bitácora se escribe SIEMPRE, aunque el estado ya estuviera puesto: pedirlo dos veces
+    son dos hechos distintos, y los dos ocurrieron.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE contactos
+               SET no_contactar = TRUE, no_contactar_en = now(),
+                   no_contactar_origen = %s, actualizado_en = now()
+             WHERE telefono = %s AND no_contactar = FALSE
+            """,
+            (origen, telefono),
+        )
+        cambio = cur.rowcount > 0
+    anotar_consentimiento(
+        conn, telefono, evento="baja_solicitada", origen=origen, detalle=detalle
+    )
+    conn.commit()
+    return cambio
+
+
+def revocar_baja(
+    conn, telefono: str, *, origen: str = "paciente", detalle: str | None = None
+) -> bool:
+    """Vuelve a permitir lo comercial. Devuelve si el estado cambió.
+
+    Que el paciente escriba de nuevo NO llama a esto: la baja solo se levanta si la persona
+    lo pide. La bitácora conserva las dos decisiones con sus fechas, que es lo que hace el
+    historial acreditable.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE contactos
+               SET no_contactar = FALSE, no_contactar_en = NULL,
+                   no_contactar_origen = NULL, actualizado_en = now()
+             WHERE telefono = %s AND no_contactar = TRUE
+            """,
+            (telefono,),
+        )
+        cambio = cur.rowcount > 0
+    anotar_consentimiento(
+        conn, telefono, evento="baja_revocada", origen=origen, detalle=detalle
+    )
+    conn.commit()
+    return cambio
+
+
 def borrar_rastro(conn, telefono: str, *, conservar_wamid: str | None = None) -> dict[str, int]:
     """Borra de la base todo lo que ata un teléfono a este sistema. Devuelve el conteo.
 
@@ -2336,6 +2502,11 @@ def borrar_rastro(conn, telefono: str, *, conservar_wamid: str | None = None) ->
     Todo va en una transacción. Un borrado a medias es peor que ninguno: dejaría, por
     ejemplo, un paciente sin conversaciones, que es un estado que el resto del código no
     espera ver nunca.
+
+    `contactos` es la única tabla que este borrado NO borra. Se le resetea el aviso y nada
+    más: el `no_contactar` sobrevive, porque es una decisión del paciente y no un estado del
+    sistema. La bitácora `consentimientos` no se toca en ningún caso -- la FK con ON DELETE
+    RESTRICT lo hace imposible aunque alguien lo intente.
     """
     parametros = {"tel": telefono, "wamid": conservar_wamid}
     borradas: dict[str, int] = {}
@@ -2435,6 +2606,36 @@ def borrar_rastro(conn, telefono: str, *, conservar_wamid: str | None = None) ->
             # «message thread not found» -- una radiografía perdida por una fila de más.
             cur.execute("DELETE FROM temas_telegram WHERE telefono = %(tel)s", parametros)
             borradas["temas_telegram"] = cur.rowcount
+
+            # La excepción de `/clearstate`, y el punto entero de la migración 019. Se resetea
+            # el aviso --lo volverá a ver, que es lo correcto en un reseteo-- pero el
+            # `no_contactar` NO se toca, y la fila NO se borra: si se fueran, resetear a
+            # alguien lo devolvería a la lista de contactables sin que nadie se enterara.
+            # Mismo criterio que los ejemplos de `casos_sin_resolver`, que se borran sin bajar
+            # el contador (no negociable 22).
+            cur.execute(
+                """
+                UPDATE contactos
+                   SET aviso_mostrado_en = NULL, politica_version = NULL,
+                       actualizado_en = now()
+                 WHERE telefono = %(tel)s
+                """,
+                parametros,
+            )
+            borradas["contactos_reseteados"] = cur.rowcount
+
+            # El `WHERE EXISTS` es obligatorio: `consentimientos.telefono` tiene una FK, y un
+            # `/clearstate` sobre un número que nunca escribió la violaría y tumbaría la
+            # transacción entera -- dejando el reseteo a medias justo por la mitad que nadie
+            # mira.
+            cur.execute(
+                """
+                INSERT INTO consentimientos (telefono, evento, origen)
+                SELECT %(tel)s, 'rastro_borrado', 'clinica'
+                 WHERE EXISTS (SELECT 1 FROM contactos WHERE telefono = %(tel)s)
+                """,
+                parametros,
+            )
         conn.commit()
     except Exception:
         conn.rollback()
