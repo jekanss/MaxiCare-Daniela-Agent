@@ -250,6 +250,11 @@ ETIQUETAS_DE_TABLA: dict[str, tuple[str, str]] = {
     # Desde la migración 014 el hilo de Telegram vive en su propia tabla y `borrar_rastro`
     # la cuenta aparte. Sin esta entrada, el paciente recibía «1 en temas_telegram».
     "temas_telegram": ("hilo tuyo en el grupo", "hilos tuyos en el grupo"),
+    # La única fila que `borrar_rastro` no borra sino que edita: de `casos_sin_resolver` se
+    # va la FRASE, y el caso se queda con su contador intacto. Por eso la etiqueta habla de
+    # frases y no de casos: «1 caso sin resolver» le prometería al paciente un borrado que
+    # no ocurrió, y de paso le contaría de una tabla que es de la clínica, no suya.
+    "casos_sin_resolver": ("frase tuya", "frases tuyas"),
 }
 
 

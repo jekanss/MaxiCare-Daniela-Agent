@@ -35,6 +35,7 @@ from maxicare_daniela.calendario import CalendarioCaido, CalendarioDoble, ErrorD
 from maxicare_daniela.canales import ErrorDeCanal
 from maxicare_daniela.config import MARGEN_LECTURA_SEGUNDOS, Config
 from maxicare_daniela.contratos import LecturaNoClinica, RespuestaDaniela
+from maxicare_daniela.sin_resolver import Senal
 
 TELEFONO = "573001112233"
 OTRO_TELEFONO = "573009998877"
@@ -168,8 +169,14 @@ class BaseFalsa:
         configuracion: dict | None = None,
         nueva: str = "conv-nueva",
         recordatorio: tuple[str, datetime] | None = None,
+        caso_revienta: Exception | None = None,
     ) -> None:
         self.viva = viva
+        #: Lo que `_anotar_resultado` dejó en `casos_sin_resolver`, en orden. Cada elemento
+        #: es el `dict` de argumentos con que se llamó a `persistencia.registrar_caso`.
+        self.casos: list[dict] = []
+        #: Para comprobar que un fallo de la instrumentación no puede tumbar un turno.
+        self.caso_revienta = caso_revienta
         self.paciente = paciente
         self.tomada = tomada
         #: Lo que devuelve `persistencia.ultimo_recordatorio`: el par (tipo, cuándo) del
@@ -266,6 +273,18 @@ class BaseFalsa:
             conn.comprobar()
             anotar("marcar_fallo_respuesta", wamid, motivo)
 
+        def registrar_caso(conn, *, huella, tipo, escalo=0, ejemplo=None, telefono=""):
+            conn.comprobar()
+            anotar("registrar_caso", huella, tipo, escalo, ejemplo, telefono)
+            self.casos.append(
+                {
+                    "huella": huella, "tipo": tipo, "escalo": escalo,
+                    "ejemplo": ejemplo, "telefono": telefono,
+                }
+            )
+            if self.caso_revienta is not None:
+                raise self.caso_revienta
+
         monkeypatch.setattr(persistencia, "conectar", conectar)
         monkeypatch.setattr(persistencia, "conversacion_viva", conversacion_viva)
         monkeypatch.setattr(
@@ -281,6 +300,7 @@ class BaseFalsa:
         monkeypatch.setattr(persistencia, "tocar_conversacion", tocar_conversacion)
         monkeypatch.setattr(persistencia, "marcar_respondido", marcar_respondido)
         monkeypatch.setattr(persistencia, "marcar_fallo_respuesta", marcar_fallo_respuesta)
+        monkeypatch.setattr(persistencia, "registrar_caso", registrar_caso)
         return self
 
 
@@ -299,12 +319,17 @@ class Turnos:
         antes=None,
         revienta: Exception | None = None,
         escalado_por: str | None = None,
+        tripwires: list[str] | None = None,
     ) -> None:
         self.texto = texto
         self.llamadas: list[dict] = []
         self._antes = antes
         self._revienta = revienta
         self._escalado_por = escalado_por
+        #: Los guardrails que saltaron. El `Resultado` de verdad los trae llenos --
+        #: `conversacion.responder` les hace `append` en las tres ramas de tripwire -- y son
+        #: lo que convierte un guardrail en un caso del informe.
+        self._tripwires = tripwires or []
 
     async def __call__(self, entrada, *, ctx, sesion=None, al_escalar=None, **extra):
         ctx.turno.reiniciar()
@@ -333,6 +358,7 @@ class Turnos:
             ),
             turno=ctx.turno_actual,
             escalado_por=self._escalado_por,  # type: ignore[arg-type]
+            tripwires=list(self._tripwires),
         )
 
     @property
@@ -2052,3 +2078,261 @@ def test_un_texto_normal_no_se_disfraza_de_boton():
     )
 
     assert entrada == "Confirmar"
+# ==========================================================================================
+# El rastro que el turno deja en el informe de «sin resolver»
+#
+# Es un OBSERVADOR: con la captura encendida o apagada, Daniela contesta exactamente igual.
+# Lo que estas pruebas vigilan es lo contrario de lo habitual -- no que escriba, sino que
+# escribir no pueda costarle nada al paciente.
+# ==========================================================================================
+
+
+async def _consulto(ctx, tratamiento="ortodoncia", concepto="precio", hubo_dato=False):
+    """Lo que `herramientas._consultar_base_conocimiento` deja en el contexto al correr.
+
+    Va por el `antes` de `Turnos`, es decir DESPUÉS de `ctx.turno.reiniciar()`, que es
+    cuando ocurre de verdad: durante la corrida del modelo.
+    """
+    ctx.turno.senales.append(Senal(tratamiento, concepto, hubo_dato=hubo_dato))
+
+
+def test_un_hueco_de_conocimiento_queda_escrito_con_la_frase_del_paciente(monkeypatch):
+    """El cable entero: la tool anota en `ctx.turno`, y `_anotar_resultado` lo vuelca cuando
+    el paciente ya tiene su respuesta. Sin esto, `SIN DATO DOCUMENTADO` no se contaba en
+    ninguna parte y la clínica no podía saber qué ficha le falta."""
+    base, _ = preparar(
+        monkeypatch,
+        base=BaseFalsa(viva=("conv-viva", 4, True, 0)),
+        turnos=Turnos(antes=_consulto),
+    )
+
+    atender(mensaje_texto("cuanto me sale la ortodoncia en cuotas"))
+
+    assert base.casos == [
+        {
+            "huella": "falta_dato:ortodoncia:precio",
+            "tipo": "FALTA_DATO",
+            "escalo": 0,
+            "ejemplo": "cuanto me sale la ortodoncia en cuotas",
+            "telefono": TELEFONO,
+        }
+    ]
+
+
+def test_el_caso_se_escribe_DESPUES_de_responderle_al_paciente(monkeypatch):
+    """El orden es la garantía entera de este módulo: el informe se escribe con el mensaje
+    ya enviado, así que ni una consulta suya puede retrasar una respuesta."""
+    base, _ = preparar(
+        monkeypatch,
+        base=BaseFalsa(viva=("conv-viva", 4, True, 0)),
+        turnos=Turnos(antes=_consulto),
+    )
+    whatsapp = WhatsAppFalso()
+
+    atender(mensaje_texto(), whatsapp=whatsapp)
+
+    assert whatsapp.textos, "el paciente tiene que haber recibido su respuesta"
+    assert base.nombres.index("tocar_conversacion") < base.nombres.index("registrar_caso")
+
+
+def test_un_guardrail_que_salto_deja_su_caso_con_el_tratamiento_del_turno(monkeypatch):
+    """`Resultado.tripwires` moría dentro del proceso: un guardrail que frenó a Daniela y se
+    regeneró bien --el caso MÁS frecuente-- no dejaba rastro. Y la huella lleva el
+    tratamiento que se consultó, que es lo que convierte «saltó 4 veces» en «las 4 eran por
+    limpieza dental»."""
+    base, _ = preparar(
+        monkeypatch,
+        base=BaseFalsa(viva=("conv-viva", 4, True, 0)),
+        turnos=Turnos(
+            antes=lambda ctx: _consulto(ctx, "limpieza", "precio", hubo_dato=True),
+            tripwires=["sin_cifra_no_documentada"],
+        ),
+    )
+
+    atender(mensaje_texto())
+
+    assert [(c["huella"], c["tipo"]) for c in base.casos] == [
+        ("guardrail:sin_cifra_no_documentada:limpieza", "GUARDRAIL")
+    ]
+
+
+def test_un_turno_que_revento_deja_un_caso_ROTO_con_el_tipo_y_no_con_el_mensaje(monkeypatch):
+    """El mensaje de una excepción lleva ids y horas: con él dentro, cada error sería único y
+    la tabla no agruparía jamás.
+
+    Y UNA sola tarjeta. El turno reventado NO escala: ese `escalado_por = "dato_faltante"`
+    del camino de reventón es un marcador sintético --`conversacion.responder` lanzó, así que
+    `al_escalar` no corrió y ningún doctor fue avisado--, y pasárselo al informe abría un
+    `humano:dato_faltante` con `escalo=1` además del `ROTO`. Dos daños: dos tarjetas para una
+    historia, y la pantalla imprimiendo «se interrumpió al doctor 1 de N veces» sobre una
+    interrupción que no existió."""
+    base, _ = preparar(
+        monkeypatch,
+        base=BaseFalsa(viva=("conv-viva", 4, True, 0)),
+        turnos=Turnos(revienta=RuntimeError("la tool 7 falló en la conversación abc-123")),
+    )
+
+    atender(mensaje_texto("me duele"))
+
+    assert [(c["huella"], c["tipo"], c["escalo"]) for c in base.casos] == [
+        ("roto:runtimeerror", "ROTO", 0),
+    ]
+
+
+def test_si_el_envio_falla_el_hueco_de_conocimiento_se_cuenta_igual(monkeypatch):
+    """El turno ocurrió entero: lo que falló fue entregarlo. El hueco que Daniela encontró es
+    el mismo, y encima hay un `ROTO` por el envío."""
+    base, _ = preparar(
+        monkeypatch,
+        base=BaseFalsa(viva=("conv-viva", 4, True, 0)),
+        turnos=Turnos(antes=_consulto),
+    )
+    whatsapp = WhatsAppFalso(falla_con=httpx.ConnectError("sin red"))
+
+    atender(mensaje_texto("y la ortodoncia?"), whatsapp=whatsapp)
+
+    assert [(c["huella"], c["tipo"]) for c in base.casos] == [
+        ("falta_dato:ortodoncia:precio", "FALTA_DATO"),
+        ("roto:connecterror", "ROTO"),
+    ]
+
+
+def test_un_mensaje_que_entra_durante_un_relevo_no_ensucia_el_informe(monkeypatch):
+    """No negociable 15: ese `fallo_respuesta` empieza por `relevo:` y NO es un fallo. Sin el
+    filtro, cada conversación que un doctor toma metería un caso `ROTO` inventado -- y
+    justamente en las conversaciones que más se miran."""
+    base, _ = preparar(
+        monkeypatch,
+        base=BaseFalsa(viva=("conv-viva", 4, True, 0), tomada="Dra. Ruiz"),
+    )
+
+    atender(mensaje_texto("me sigue doliendo"))
+
+    assert base.casos == []
+
+
+def test_un_turno_limpio_no_escribe_nada(monkeypatch):
+    """Lo normal es que no haya caso. Una fila por turno convertiría el informe en un log."""
+    base, _ = preparar(
+        monkeypatch,
+        base=BaseFalsa(viva=("conv-viva", 4, True, 0)),
+        turnos=Turnos(antes=lambda ctx: _consulto(ctx, "implantes", "precio", hubo_dato=True)),
+    )
+
+    atender(mensaje_texto())
+
+    assert base.casos == []
+
+
+def test_el_ejemplo_guardado_es_lo_QUE_ESCRIBIO_el_paciente_y_no_el_prompt(monkeypatch):
+    """Con dos mensajes, `_entrada_del_grupo` antepone una cabecera de instrucción para el
+    modelo. Esa cabecera acaba en la pantalla de la clínica y en el informe que lee el
+    modelo de la tarea 3: el ejemplo deja de leerse como la pregunta de un paciente."""
+    base, _ = preparar(
+        monkeypatch,
+        base=BaseFalsa(viva=("conv-1", 4, True, 0)),
+        turnos=Turnos(antes=_consulto),
+    )
+    whatsapp = WhatsAppFalso()
+
+    async def escena():
+        lider = asyncio.create_task(
+            _atender(
+                mensaje_texto("cuanto vale la ortodoncia?", wamid="w1"),
+                whatsapp=whatsapp, **_en_grupo(),
+            )
+        )
+        await asyncio.sleep(0.02)
+        assert atencion._buferes, "el líder no abrió el grupo; la prueba no prueba nada"
+        await _atender(
+            mensaje_texto("y se puede en cuotas?", wamid="w2"),
+            whatsapp=whatsapp, **_en_grupo(),
+        )
+        await lider
+
+    asyncio.run(escena())
+
+    assert [c["ejemplo"] for c in base.casos] == [
+        "cuanto vale la ortodoncia?\ny se puede en cuotas?"
+    ]
+    assert "varios mensajes seguidos" not in base.casos[0]["ejemplo"], (
+        "el andamiaje que se le arma al modelo no es la frase del paciente"
+    )
+
+
+def test_el_NOMBRE_DEL_ARCHIVO_no_se_guarda_como_frase_del_paciente(monkeypatch):
+    """`_entrada_para_el_modelo` mete el nombre del archivo dentro del aviso que le arma al
+    modelo. Guardarlo como ejemplo lo saca a una pantalla donde nadie lo pidió, y un nombre
+    de archivo puede ser `cedula_1032....jpg`: regla dura 4, no se registran documentos de
+    identidad de ningún tipo."""
+    base, _ = preparar(
+        monkeypatch,
+        base=BaseFalsa(viva=("conv-1", 4, True, 0)),
+        turnos=Turnos(antes=_consulto),
+    )
+
+    atender(
+        mensaje_texto(
+            tipo="image",
+            texto="esto me lo tomaron ayer, cuanto vale arreglarlo?",
+            media_id="media-1",
+            mime="image/jpeg",
+            nombre_archivo="cedula_1032456789.jpg",
+        )
+    )
+
+    ejemplo = base.casos[0]["ejemplo"]
+    assert ejemplo == "esto me lo tomaron ayer, cuanto vale arreglarlo?"
+    assert "cedula" not in ejemplo and ".jpg" not in ejemplo
+
+
+def test_un_turno_sin_texto_no_deja_ejemplo(monkeypatch):
+    """Una radiografía sola no es una frase. El caso se cuenta igual; el ejemplo es `None`,
+    y `registrar_caso` guarda `[]`."""
+    base, _ = preparar(
+        monkeypatch,
+        base=BaseFalsa(viva=("conv-1", 4, True, 0)),
+        turnos=Turnos(antes=_consulto),
+    )
+
+    atender(mensaje_texto(tipo="image", texto=None, media_id="m-1", mime="image/jpeg"))
+
+    assert base.casos[0]["ejemplo"] is None
+
+
+def test_un_caso_que_revienta_no_se_lleva_por_delante_a_los_demas(monkeypatch):
+    """Sin un `try` por caso, el primero que falla mata el bucle y el turno pierde el resto
+    -- un turno con hueco Y guardrail se quedaba sin el guardrail."""
+    base, _ = preparar(
+        monkeypatch,
+        base=BaseFalsa(viva=("conv-1", 4, True, 0), caso_revienta=RuntimeError("tabla rota")),
+        turnos=Turnos(antes=_consulto, tripwires=["sin_cifra_no_documentada"]),
+    )
+
+    atender(mensaje_texto("cuanto vale?"))
+
+    assert [c["tipo"] for c in base.casos] == ["FALTA_DATO", "GUARDRAIL"], (
+        "el segundo caso ni se intentó"
+    )
+
+
+def test_un_caso_que_revienta_no_le_quita_la_respuesta_a_nadie(monkeypatch):
+    """La razón por la que esto va al final de `_anotar_resultado` y dentro de su `try`. Un
+    `tipo` fuera del CHECK, la tabla sin migrar, Neon cayéndose justo ahí: el paciente ya
+    tiene su mensaje y el turno ya está contado. Se pierde un caso, y se pierde solo."""
+    base, _ = preparar(
+        monkeypatch,
+        base=BaseFalsa(
+            viva=("conv-viva", 4, True, 0), caso_revienta=RuntimeError("tabla sin migrar")
+        ),
+        turnos=Turnos(antes=_consulto),
+    )
+    whatsapp = WhatsAppFalso()
+
+    resultado = atender(mensaje_texto(), whatsapp=whatsapp)
+
+    assert resultado.respondido is True
+    assert whatsapp.textos == ["Claro que sí, con mucho gusto."]
+    assert base.argumentos("tocar_conversacion") == ("conv-viva", 5), (
+        "el turno se cuenta antes que el caso, así que un caso roto no se lo lleva"
+    )

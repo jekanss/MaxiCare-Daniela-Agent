@@ -98,6 +98,22 @@ argument 'group_id'`). **Quien cambie una de esas firmas corre los seis que no g
   —el token es de usuario de sistema con acceso total, y por eso sus `granular_scopes` vienen
   SIN `target_ids`—. El envío real es la comprobación definitiva, y un rechazo de Meta no se
   cobra.
+- `probar_sin_resolver.py` escribe en `pruebas_sin_resolver`, propio y no compartido con
+  `probar_tools.py` ni con `probar_recordatorios.py` — a propósito: los tres montan con
+  `DROP SCHEMA ... CASCADE`, y correr dos de ellos a la vez sobre el mismo nombre hace que
+  uno le borre el esquema al otro a mitad de corrida. Medido: 22 `FALLA` de
+  `UndefinedTable: relation "reservas" does not exist` en `-m neon` por correrlo junto a
+  `probar_recordatorios.py`, ninguna una regresión real — desaparecieron corriéndolos uno a
+  la vez. Dobla a mano las firmas de `sin_resolver.casos_del_turno` y
+  `persistencia.registrar_caso` en su helper `volcar()`; quien les cambie la firma rompe este
+  script en silencio, igual que a los demás de esta lista. Su comprobación 8 es la única que
+  no dobla nada: llama a `persistencia.borrar_rastro`, el camino REAL de `/clearstate`
+  (`olvidar_ejemplos_de` sobrevive suelta solo para mantenimiento — su propio docstring dice
+  que `/clearstate` no pasa por ahí), y de paso comprueba que la clave `casos_sin_resolver`
+  aparece en lo que esa función devuelve y que tiene etiqueta legible en
+  `reseteo.ETIQUETAS_DE_TABLA` sin guion bajo: sin esa etiqueta el paciente recibe «1 en
+  casos_sin_resolver» por WhatsApp, el nombre interno de una tabla de la clínica que no es
+  suya.
 
 ## `medir_historial.py`
 

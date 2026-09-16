@@ -29,7 +29,7 @@ export type Seccion = {
  * único honesto de los tres -- y la especificación lo pide literalmente: «cada pantalla
  * tiene un estado vacío que explica qué falta». */
 export const SECCIONES: Seccion[] = [
-  { id: 'bandeja', etiqueta: 'Bandeja', icono: '💬', fase: 6 },
+  { id: 'bandeja', etiqueta: 'Sin resolver', icono: '💬', fase: null },
   { id: 'agenda', etiqueta: 'Agenda', icono: '📅', fase: null },
   { id: 'leads', etiqueta: 'Leads', icono: '👥', fase: 8 },
   { id: 'tratamientos', etiqueta: 'Tratamientos', icono: '🦷', fase: null },

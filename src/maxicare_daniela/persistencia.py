@@ -2216,6 +2216,52 @@ _CONVERSACIONES_DEL_TELEFONO = """
         OR paciente_id IN (SELECT id FROM pacientes WHERE telefono = %(tel)s)
 """
 
+#: Cuántas FRASES de ese teléfono hay guardadas. Va con el `UPDATE` de abajo y siempre
+#: ANTES: después, el teléfono ya no está en ninguna parte y la cuenta daría cero.
+#:
+#: Existe porque el número que devuelve el borrado sale por WhatsApp diciendo «frases», y el
+#: `rowcount` del `UPDATE` cuenta FILAS. Un paciente que preguntó dos veces lo mismo deja dos
+#: entradas en `ejemplos` del MISMO caso: se le borraban dos y se le decía «1 frase tuya».
+#:
+#: Dos sentencias y no una sola con CTE, a propósito: en un `UPDATE ... FROM cte`, el valor
+#: nuevo se calcula con la instantánea de la consulta, así que un `registrar_caso` de otro
+#: turno que entrara entre medias se perdería. La forma de abajo --el `SET` que se lee a sí
+#: mismo-- la vuelve a evaluar sobre la fila que acaba de bloquear, y no pierde nada. Entre
+#: las dos sentencias cabe una desviación de la CUENTA, nunca del borrado; y las dos van en
+#: la misma transacción.
+_CONTAR_EJEMPLOS_DEL_TELEFONO = """
+    SELECT count(*)::int
+      FROM casos_sin_resolver c, json_array_elements(c.ejemplos::json) AS e
+     WHERE e ->> 'telefono' = %(tel)s
+"""
+
+#: Quitar las frases de un teléfono de `casos_sin_resolver`, sin tocar el contador.
+#:
+#: Vive en una constante y no dentro de una función porque lo usan DOS: `borrar_rastro`, que
+#: es `/clearstate`, y `olvidar_ejemplos_de`, que lo expone suelto para el mantenimiento.
+#: Con dos copias, afinar el filtro en una deja a la otra contando filas que no cambió.
+#:
+#: **El `WHERE` es un EXISTS y no un `LIKE`, y esa diferencia la lee un paciente.** El
+#: conteo que devuelve esto sale por WhatsApp en la confirmación del reseteo, así que tiene
+#: que ser el de las filas que CAMBIARON. `ejemplos LIKE '%573001110001%'` cuenta las que
+#: COINCIDEN, que es otra cosa: casa con un número del que este es prefijo, y casa con un
+#: número escrito DENTRO del `texto` de la frase de otro paciente. En los dos casos el
+#: `UPDATE` no cambiaba nada y el paciente recibía «1 frase tuya» igual.
+_OLVIDAR_EJEMPLOS_DEL_TELEFONO = """
+    UPDATE casos_sin_resolver SET ejemplos = (
+        -- `WITH ORDINALITY` numera cada elemento en el orden en que salió del arreglo, y el
+        -- `ORDER BY` sobre esa columna es lo que garantiza que el reagrupado después del
+        -- filtro conserva el orden cronológico.
+        SELECT coalesce(json_agg(v.elem ORDER BY v.n)::text, '[]')
+          FROM json_array_elements(ejemplos::json) WITH ORDINALITY AS v(elem, n)
+         WHERE v.elem ->> 'telefono' IS DISTINCT FROM %(tel)s
+    )
+    WHERE EXISTS (
+        SELECT 1 FROM json_array_elements(ejemplos::json) AS e
+         WHERE e ->> 'telefono' = %(tel)s
+    )
+"""
+
 
 def rastro_de(conn, telefono: str) -> dict:
     """Qué hay que borrar fuera de Postgres: eventos de Calendar y mensajes de Telegram.
@@ -2354,6 +2400,24 @@ def borrar_rastro(conn, telefono: str, *, conservar_wamid: str | None = None) ->
             )
             borradas["agent_sessions"] = cur.rowcount
 
+            # Las frases que este número dejó en el informe de «sin resolver». Es el único
+            # sitio del borrado que NO borra una fila: el caso vive --«doce personas
+            # preguntaron el precio de la ortodoncia» sigue siendo cierto-- y lo que se va es
+            # la frase textual, que es lo único suyo que hay ahí dentro. Por eso el contador
+            # no baja: es historia de la clínica, no dato del paciente.
+            #
+            # Va aquí dentro y no en una llamada aparte por la TRANSACCIÓN, no por el orden:
+            # el teléfono de una frase viaja dentro del propio JSON de `ejemplos`, así que
+            # después del DELETE de `conversaciones` se seguiría sabiendo cuáles borrar --a
+            # diferencia de `agent_sessions`, aquí arriba, donde el orden sí es obligatorio.
+            # Lo que no se puede es dejarlo fuera: un `UPDATE` en su propia transacción
+            # triunfaría mientras la purga revienta y se deshace, y el reseteo quedaría a
+            # medias justo por la mitad que nadie mira.
+            cur.execute(_CONTAR_EJEMPLOS_DEL_TELEFONO, parametros)
+            fila = cur.fetchone()
+            borradas["casos_sin_resolver"] = fila[0] if fila else 0
+            cur.execute(_OLVIDAR_EJEMPLOS_DEL_TELEFONO, parametros)
+
             cur.execute(
                 f"DELETE FROM conversaciones WHERE id IN ({_CONVERSACIONES_DEL_TELEFONO})",
                 parametros,
@@ -2377,3 +2441,211 @@ def borrar_rastro(conn, telefono: str, *, conservar_wamid: str | None = None) ->
         raise
 
     return borradas
+
+
+# ==========================================================================================
+# Lo que Daniela no pudo resolver
+# ==========================================================================================
+
+
+def registrar_caso(
+    conn, *, huella: str, tipo: str, escalo: int = 0,
+    ejemplo: str | None = None, telefono: str = "",
+) -> None:
+    """Suma uno al caso de esa huella, o lo crea. UN solo viaje a la base.
+
+    El recorte a cinco ejemplos se hace en SQL y no leyendo-modificando-escribiendo en
+    Python a proposito: entre el SELECT y el UPDATE cabe el turno de otro paciente, y esa
+    carrera se come un ejemplo cada vez que dos personas preguntan lo mismo a la vez. Con
+    `ON CONFLICT ... DO UPDATE` el recorte ocurre dentro de la misma sentencia atomica.
+
+    `escalo` se SUMA, no se pisa: es la metrica que le dice a la clinica cuanto le costo en
+    interrupciones al doctor la ficha que falta.
+
+    Es INSTRUMENTACION: no puede tumbar nada del turno clinico que la llama. Si el `INSERT`
+    revienta -- un `tipo` fuera del CHECK, lo que sea -- se hace `rollback` antes de dejar
+    subir la excepcion. Sin eso, la conexion del llamador (`atencion._anotar_resultado`,
+    `relevo.activar`, las dos con escrituras clinicas ya hechas en esa misma conexion) queda
+    con la transaccion abortada, y toda sentencia posterior sobre ella muere con «current
+    transaction is aborted», aunque no tenga nada que ver con este caso.
+    """
+    from .sin_resolver import MAX_EJEMPLOS
+
+    nuevo = (
+        json.dumps([{"texto": ejemplo.strip(), "telefono": telefono}], ensure_ascii=False)
+        if ejemplo and ejemplo.strip()
+        else "[]"
+    )
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO casos_sin_resolver (huella, tipo, escalo, ejemplos)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (huella) DO UPDATE SET
+                    contador   = casos_sin_resolver.contador + 1,
+                    escalo     = casos_sin_resolver.escalo + EXCLUDED.escalo,
+                    ultima_vez = now(),
+                    ejemplos   = (
+                        -- La concatenacion `||` de arreglos solo existe para `jsonb`, no
+                        -- para `json` (Postgres: "operator does not exist: json || json").
+                        -- La columna sigue siendo TEXT -- el cast a `jsonb` es solo para
+                        -- esta cuenta, y el resultado vuelve a `::text` antes de guardarse.
+                        -- `WITH ORDINALITY` y no `row_number() OVER ()`: el segundo no
+                        -- lleva `ORDER BY` y su orden no lo garantiza nada por contrato,
+                        -- justo en la cuenta que decide QUE cinco ejemplos sobreviven.
+                        -- `WITH ORDINALITY` numera en el orden en que salieron del arreglo,
+                        -- que es el cronologico. Es el mismo mecanismo que usa
+                        -- `_OLVIDAR_EJEMPLOS_DEL_TELEFONO`.
+                        SELECT coalesce(jsonb_agg(e.v ORDER BY e.n)::text, '[]')
+                          FROM jsonb_array_elements(
+                                casos_sin_resolver.ejemplos::jsonb || EXCLUDED.ejemplos::jsonb
+                               ) WITH ORDINALITY AS e(v, n)
+                         WHERE e.n > greatest(
+                            0,
+                            jsonb_array_length(
+                                casos_sin_resolver.ejemplos::jsonb || EXCLUDED.ejemplos::jsonb
+                            ) - %s
+                         )
+                    )
+                """,
+                (huella, tipo, escalo, nuevo, MAX_EJEMPLOS),
+            )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+
+def casos_recientes(conn, *, dias: int = 30, limite: int = 50) -> list[dict[str, Any]]:
+    """La ventana que ve la pantalla: lo de los ultimos `dias`, lo que mas paso primero.
+
+    La ventana ES el mecanismo de limpieza. Lo que se arregla deja de acumular, sale de
+    `dias`, y se hunde solo -- sin que nadie marque nada como resuelto. Por eso esta pantalla
+    no tiene botones: no le hacen falta.
+
+    El telefono se filtra AQUI y no en la pantalla, para que ni siquiera viaje al navegador.
+
+    De solo lectura, pero con el mismo `rollback` que la escritura: un `SELECT` que revienta
+    deja la transaccion de la conexion tan abortada como un `INSERT`, y esta funcion puede
+    correr sobre una conexion que el llamador siga usando despues.
+    """
+    from .sin_resolver import sin_telefonos
+
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT huella, tipo, contador, escalo, primera_vez, ultima_vez, ejemplos, "
+                "       informe "
+                "  FROM casos_sin_resolver "
+                " WHERE ultima_vez > now() - make_interval(days => %s) "
+                " ORDER BY contador DESC, ultima_vez DESC "
+                " LIMIT %s",
+                (max(1, min(dias, 365)), max(1, min(limite, 200))),
+            )
+            return [
+                {
+                    "huella": huella, "tipo": tipo, "contador": contador, "escalo": escalo,
+                    "primera_vez": primera.isoformat(), "ultima_vez": ultima.isoformat(),
+                    "ejemplos": sin_telefonos(json.loads(ejemplos)),
+                    "informe": json.loads(informe) if informe else None,
+                }
+                for huella, tipo, contador, escalo, primera, ultima, ejemplos, informe
+                in cur.fetchall()
+            ]
+    except Exception:
+        conn.rollback()
+        raise
+
+
+def casos_sin_informe(conn, *, limite: int = 5, dias: int = 30) -> list[dict[str, Any]]:
+    """Los que esperan informe. Un caso se analiza UNA vez.
+
+    Se re-analiza solo si crecio por cinco Y pasaron siete dias: que el contador suba de 12 a
+    40 no tiene por que costar otra llamada, porque el informe seguiria diciendo lo mismo.
+
+    Y solo dentro de la MISMA ventana que ve la pantalla. Un caso de hace noventa dias con
+    `informe IS NULL` pagaba su llamada al modelo para un informe que `casos_recientes` no va
+    a mostrar nunca. La ventana es la que hunde lo que dejo de pasar; analizarlo era pagar
+    por escribirle un informe a algo que ya se hundio.
+
+    De solo lectura, pero con el mismo `rollback` que la escritura: ver `casos_recientes`.
+    """
+    from .sin_resolver import sin_telefonos
+
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT huella, tipo, contador, escalo, primera_vez, ultima_vez, ejemplos "
+                "  FROM casos_sin_resolver "
+                " WHERE ultima_vez > now() - make_interval(days => %s) "
+                "   AND (informe IS NULL "
+                "        OR (contador >= informe_sobre * 5 AND informe_en < now() - interval "
+                "            '7 days')) "
+                " ORDER BY contador DESC "
+                " LIMIT %s",
+                (max(1, min(dias, 365)), max(1, min(limite, 50))),
+            )
+            return [
+                {
+                    "huella": huella, "tipo": tipo, "contador": contador, "escalo": escalo,
+                    "primera_vez": primera.isoformat(), "ultima_vez": ultima.isoformat(),
+                    "ejemplos": sin_telefonos(json.loads(ejemplos)),
+                }
+                for huella, tipo, contador, escalo, primera, ultima, ejemplos in cur.fetchall()
+            ]
+    except Exception:
+        conn.rollback()
+        raise
+
+
+def guardar_informe(conn, *, huella: str, informe: dict[str, Any], sobre: int) -> None:
+    """Deja el informe y el contador sobre el que se escribio.
+
+    Instrumentacion, igual que `registrar_caso`: si el `UPDATE` revienta, `rollback` antes de
+    dejar subir la excepcion, para no dejar la conexion del llamador con la transaccion
+    abortada.
+    """
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE casos_sin_resolver "
+                "   SET informe = %s, informe_en = now(), informe_sobre = %s "
+                " WHERE huella = %s",
+                (json.dumps(informe, ensure_ascii=False), sobre, huella),
+            )
+            if cur.rowcount == 0:
+                log.warning("guardar_informe: la huella %s ya no existe", huella)
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+
+def olvidar_ejemplos_de(conn, telefono: str) -> int:
+    """Quita las frases de ese telefono de todos los casos. Devuelve cuantas FRASES quito.
+
+    `/clearstate` NO pasa por aqui: corre el mismo SQL --`_OLVIDAR_EJEMPLOS_DEL_TELEFONO`,
+    la constante que las dos comparten-- desde dentro de `borrar_rastro`, para que el olvido
+    caiga en la unica transaccion del borrado. Esta funcion sobrevive suelta para el
+    mantenimiento: quitar las frases de un numero sin desmontarle la conversacion.
+
+    El contador NO baja, a proposito. El conteo es historia de la clinica, no dato del
+    paciente: «doce personas preguntaron por ortodoncia» sigue siendo cierto aunque se borre
+    una de esas conversaciones.
+
+    Instrumentacion tambien, igual que `registrar_caso`: `rollback` si el `UPDATE` revienta.
+    """
+    if not telefono:
+        return 0
+    try:
+        with conn.cursor() as cur:
+            cur.execute(_CONTAR_EJEMPLOS_DEL_TELEFONO, {"tel": telefono})
+            fila = cur.fetchone()
+            cuantas = fila[0] if fila else 0
+            cur.execute(_OLVIDAR_EJEMPLOS_DEL_TELEFONO, {"tel": telefono})
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    return cuantas

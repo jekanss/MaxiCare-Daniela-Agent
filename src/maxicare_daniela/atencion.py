@@ -77,7 +77,7 @@ from typing import Any, Awaitable, Callable
 
 from . import conversacion, guardrails, ingesta
 from . import lectura as lectura_mod
-from . import persistencia
+from . import persistencia, sin_resolver
 from .calendario import CalendarioCaido, CalendarioDoble, Jornada, calendario_desde_config
 from .canales import Telegram, WhatsApp
 from .config import (
@@ -349,12 +349,25 @@ def _anotar_resultado(
     wamid_respuesta: str | None,
     motivo: str | None,
     turno: int,
+    senales: list[sin_resolver.Senal] | None = None,
+    tripwires: list[str] | None = None,
+    escalado_por: str | None = None,
+    frase: str | None = None,
+    telefono: str = "",
 ) -> None:
     """El segundo bloque de base: qué pasó con la respuesta. Nunca propaga.
 
     Un fallo escribiendo esto importa --de aquí sale «¿a quién no le contestamos?»-- pero
     importa menos que reventar un turno al que el paciente ya recibió su respuesta.
+
+    Los cinco últimos son lo que este turno deja en el informe de «sin resolver», y van con
+    default porque los caminos de error llegan aquí sin la mitad de ellos: un turno que
+    reventó antes de correr no tiene `tripwires`, y el mensaje que entra durante un relevo no
+    tiene turno siquiera. Un default por argumento es también lo que deja intactas las
+    llamadas de los scripts de `scripts/`, que doblan esta firma a mano.
     """
+    senales = senales or []
+    tripwires = tripwires or []
     try:
         with persistencia.conectar(database_url) as conn:
             # Una sola respuesta puede contestar a varios mensajes. Los tres quedan
@@ -390,6 +403,42 @@ def _anotar_resultado(
             # `id_conversacion + turno` dejaba de distinguir un escalamiento nuevo de un
             # reintento del anterior -- el doctor solo se enteraba del primero.
             persistencia.tocar_conversacion(conn, id_conversacion, turno_actual=turno)
+
+            # Lo que este turno deja en el informe de «sin resolver». Va aquí, al final y
+            # dentro del `try` que ya traga, por una razón que no se puede mover: cuando esta
+            # línea corre, el paciente YA tiene su respuesta en pantalla. Si esto revienta se
+            # pierde un caso y queda en el `log.exception` de abajo; nunca se rompe un turno.
+            # Y `registrar_caso` hace `rollback` antes de propagar, así que un caso que falle
+            # tampoco deja abortada la transacción del `tocar_conversacion` de arriba.
+            #
+            # Corre en el hilo de `to_thread` de quien llama, que sí está dentro del candado
+            # del teléfono. No lo mueve ni lo alarga en nada que importe: es un UPSERT por
+            # caso sobre la conexión que este bloque ya tenía abierta, y lo normal es que la
+            # lista venga vacía. Lo que NO puede hacer es subir más arriba, a donde el
+            # paciente todavía está esperando.
+            for caso in sin_resolver.casos_del_turno(
+                senales=senales,
+                tripwires=tripwires,
+                escalado_por=escalado_por,
+                motivo=motivo,
+                frase=frase,
+            ):
+                # Uno por uno, y cada uno con su red. `registrar_caso` hace `rollback` y
+                # propaga, así que sin este `try` el primero que falla mata el bucle: un
+                # turno con hueco Y guardrail perdía el guardrail por culpa del hueco. Y el
+                # `log.exception` de abajo diría «no se pudo anotar el resultado», que suena
+                # a turno reventado cuando lo único perdido es instrumentación.
+                try:
+                    persistencia.registrar_caso(
+                        conn,
+                        huella=caso.huella,
+                        tipo=caso.tipo,
+                        escalo=caso.escalo,
+                        ejemplo=caso.ejemplo,
+                        telefono=telefono,
+                    )
+                except Exception:  # noqa: BLE001 -- instrumentación, nunca el turno
+                    log.warning("no se pudo registrar el caso %s", caso.huella)
     except Exception:  # noqa: BLE001 -- ver docstring
         log.exception("no se pudo anotar el resultado de %s", ", ".join(wamids))
 
@@ -857,6 +906,12 @@ async def atender(
     if len(mensajes) > 1:
         log.info("%s: %d mensajes en un solo turno", mensaje.telefono, len(mensajes))
     texto = _entrada_del_grupo(mensajes, leidas)
+    # Y aparte, lo que el paciente escribió de verdad. NO es `texto`: esa es la entrada que
+    # se le arma al modelo, con la cabecera de «esto vino en varios mensajes» y, si hubo
+    # archivo, un aviso que lleva el NOMBRE del archivo dentro. Eso acaba en la pantalla de
+    # la clínica y en el informe, donde no pinta nada -- y un nombre de archivo puede ser una
+    # cédula (regla dura 4). Ver `sin_resolver.frase_para_el_informe`.
+    frase_del_paciente = sin_resolver.frase_para_el_informe([m.texto for m in mensajes])
 
     # El candado se coge ANTES de leer la base, y ese orden es el arreglo entero.
     #
@@ -944,6 +999,11 @@ async def atender(
                 estado.id_conversacion,
                 wamids,
                 wamid_respuesta=None,
+                # Y esto es lo que hace que un relevo NO ensucie el informe de «sin
+                # resolver»: `sin_resolver.casos_del_turno` filtra el motivo que empieza por
+                # `relevo:`, así que esta llamada no escribe ni un caso. Los cinco argumentos
+                # del informe se quedan en su default a propósito -- aquí no hubo turno, no
+                # existe `ctx`, y no hay señal ninguna que contar.
                 motivo=motivo_relevo,
                 # El turno NO avanza: no hubo turno. Y `_anotar_resultado` llama igualmente a
                 # `tocar_conversacion`, que es lo que mantiene la conversación viva mientras
@@ -1034,6 +1094,11 @@ async def atender(
             )
             respuesta = resultado.respuesta.mensaje_al_paciente
             turno, escalado_por, fallo = resultado.turno, resultado.escalado_por, None
+            # Se saca del `resultado` aquí y no en la llamada de abajo porque el camino del
+            # envío fallido lo necesita igual, y ahí `resultado` puede no existir.
+            tripwires = resultado.tripwires
+            # Aquí el escalamiento sí ocurrió: `al_escalar` corrió y el doctor está avisado.
+            escalamiento_real = escalado_por
         except Exception as e:  # noqa: BLE001
             # `responder` ya traduce lo que lanza el SDK, pero no lo que lanza una tool con un
             # bug ni un fallo de red a mitad de turno. El silencio es la única respuesta que
@@ -1041,6 +1106,17 @@ async def atender(
             log.exception("el turno de %s reventó; sale el mensaje seguro", estado.id_conversacion)
             respuesta = conversacion.MENSAJE_SEGURO
             turno, escalado_por, fallo = ctx.turno_actual, "dato_faltante", f"{type(e).__name__}: {e}"
+            # No hubo `Resultado` que preguntar. Las señales sí sobreviven: viven en el
+            # contexto, y una consulta sin dato que ocurrió antes del reventón ocurrió igual.
+            tripwires = []
+            # Y el escalamiento NO ocurrió. Ese `"dato_faltante"` es un marcador sintético de
+            # este camino --lo lee `Atendido` y el log-- pero `conversacion.responder` lanzó
+            # antes de llegar a `al_escalar`: ningún doctor fue avisado. Pasárselo al informe
+            # abría un `humano:dato_faltante` con `escalo=1` ADEMÁS del `roto:X` --dos
+            # tarjetas para una historia, que es la regla que esta tabla existe para no
+            # romper-- y la pantalla imprimía «se interrumpió al doctor 1 de N veces» sobre
+            # una interrupción que no existió: un número falso en la pantalla del cliente.
+            escalamiento_real = None
 
         # `limites.latencia_maxima`: nunca instantánea, nunca más de un minuto. Se descuenta
         # lo que ya tardó el turno; sumarlo daría respuestas de minuto y medio y el paciente
@@ -1069,6 +1145,14 @@ async def atender(
                 wamid_respuesta=None,
                 motivo=f"{type(e).__name__}: {e}",
                 turno=turno,
+                # El turno ocurrió entero: lo que falló fue entregarlo. El hueco de
+                # conocimiento que Daniela encontró es el mismo, y el `motivo` añade encima
+                # un caso `ROTO` por el envío -- que es justo lo que hay que poder contar.
+                senales=ctx.turno.senales,
+                tripwires=tripwires,
+                escalado_por=escalamiento_real,
+                frase=frase_del_paciente,
+                telefono=mensaje.telefono,
             )
             return Atendido(
                 wamid=mensaje.wamid,
@@ -1088,6 +1172,14 @@ async def atender(
             wamid_respuesta=wamid_respuesta,
             motivo=fallo,
             turno=turno,
+            # El turno normal: el paciente ya tiene su respuesta y esto solo deja el rastro.
+            # La frase es la del GRUPO entero, no la del último mensaje: ese puede ser «?» a
+            # secas, y la pregunta estar en el anterior.
+            senales=ctx.turno.senales,
+            tripwires=tripwires,
+            escalado_por=escalamiento_real,
+            frase=frase_del_paciente,
+            telefono=mensaje.telefono,
         )
         return Atendido(
             wamid=mensaje.wamid,

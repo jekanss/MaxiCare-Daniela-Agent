@@ -50,6 +50,7 @@ Entregables por fase. **Los marcados gastan tokens**; los demás, ni uno:
 | `scripts/probar_persistencia.py` | que una conversación sobrevive a reiniciar (fase 7) | solo con `--chat` |
 | `scripts/probar_panel.py` | el panel de tratamientos (fase 8) | solo con `--chat` |
 | `scripts/probar_recordatorios.py` | la cola de recordatorios y su despachador | no |
+| `scripts/probar_sin_resolver.py` | el informe de lo que Daniela no pudo (fase PENDIENTE) | no |
 | `scripts/probar_plantilla.py` | la plantilla de Meta, y manda UNA de verdad | **sí** (`--estado` no) |
 | `scripts/probar_calendario.py` | `CalendarioGoogle` contra el calendario real | no |
 | `scripts/probar_webhook.py <url>` | el webhook en producción | **sí** (despierta a Daniela) |
@@ -147,7 +148,17 @@ una —qué se midió, qué costó— está en la regla que cubre ese archivo.
    conversación: sin eso, reprogramar deja vivo un recordatorio de una cita que ya no existe.
    El despacho vive en su **propia** tarea de `runtime.py`, no en la de relevos, que no arranca
    sin Telegram.
-22. **El rótulo de un quick reply llega en `button.text`, y `uso_indebido` NO lo evalúa.** Meta
+22. **El informe de «sin resolver» se escribe DESPUÉS de responderle al paciente, y su huella
+   la arma el código.** Va dentro del `try` de `_anotar_resultado` que ya traga: si revienta
+   se pierde un caso, nunca un turno. Con huellas del modelo, dos casos iguales salen
+   distintos y la agrupación —que es todo el valor— se rompe sin un solo error en el log. El
+   `ROTO` agrupa por `type(e).__name__`, **nunca** por el mensaje: con el mensaje cada error
+   es único. Un `fallo_respuesta` que empieza por `relevo:` no entra: contarlo inundaría el
+   informe con un caso por cada relevo y ahogaría los fallos de verdad bajo ruido que no lo
+   es. Y `/clearstate` borra los ejemplos **sin** bajar el contador: bajarlo borraría de la
+   cuenta a un paciente real cada vez que alguien resetea su número, y «doce personas
+   preguntaron por ortodoncia» dejaría de ser cierto.
+23. **El rótulo de un quick reply llega en `button.text`, y `uso_indebido` NO lo evalúa.** Meta
    manda `type: "button"`, no `text`: mirar solo `text.body` deja el turno MUDO —sin un error en
    ningún log— y los dos botones que Meta aprobó sin servir para nada. Y el rótulo suelto
    («Confirmar») el evaluador lo lee como una inyección, con mensaje seguro al paciente y alerta
