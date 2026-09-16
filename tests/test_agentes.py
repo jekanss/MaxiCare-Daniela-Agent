@@ -84,6 +84,9 @@ def test_daniela_tiene_las_nueve_tools_del_plan_y_la_decima():
     Sin ella, `reprogramar_cita` y `cancelar_cita` solo funcionan dentro de la conversación
     donde la cita se creó: son las únicas dos tools cuya entrada obligatoria --el UUID-- no
     puede salir de ninguna otra.
+
+    `registrar_no_contactar` y `revocar_no_contactar` tampoco están en el plan: son la baja
+    comercial, añadida el 16/09/2026.
     """
     nombres = {t.name for t in agentes.daniela.tools}
 
@@ -98,6 +101,8 @@ def test_daniela_tiene_las_nueve_tools_del_plan_y_la_decima():
         "programar_seguimiento",
         "escalar_a_doctores",
         "consultar_citas",
+        "registrar_no_contactar",
+        "revocar_no_contactar",
     }
 
 
@@ -633,7 +638,7 @@ def test_el_modelo_recibe_las_tools_y_las_instrucciones():
     correr(agentes.daniela, "hola", ctx, guion)
 
     recibido = guion.recibido[0]
-    assert len(recibido["tools"]) == 10
+    assert len(recibido["tools"]) == 12
     assert "MaxiCare" in recibido["instrucciones"]
 
 
@@ -809,3 +814,12 @@ def test_confirmar_la_asistencia_tambien_pide_calidez():
     # El sub-punto que da el contenido de esa línea tiene que seguir ahí: sin él, el
     # disparador nuevo apunta a un bloque que ya no dice qué escribir.
     assert "llegue con algo de margen" in texto
+
+
+def test_el_prompt_prohibe_persuadir_a_quien_pide_la_baja():
+    """Marketing lo pidió expresamente: confirmar y no retener."""
+    assert "no intentas retenerlo" in agentes.INSTRUCCIONES_DANIELA
+
+
+def test_el_prompt_manda_callar_el_seguimiento_a_quien_lo_nego():
+    assert "no lo ofreces, no lo insinúas y no lo mencionas" in agentes.INSTRUCCIONES_DANIELA

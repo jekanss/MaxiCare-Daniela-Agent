@@ -418,6 +418,14 @@ def _fallo_escalamiento(ctx: RunContextWrapper[Any], error: Exception) -> str:
     )
 
 
+def _fallo_privacidad(ctx: RunContextWrapper[ContextoDaniela], error: Exception) -> str:
+    log.exception("no se pudo registrar la decisión de privacidad")
+    return (
+        "No se pudo registrar ahora mismo. Dile al paciente que su solicitud queda anotada "
+        "y escala: esto NO se deja pasar en silencio."
+    )
+
+
 # ==========================================================================================
 # 1. consultar_base_conocimiento
 # ==========================================================================================
@@ -1908,11 +1916,78 @@ async def consultar_citas(wrapper: RunContextWrapper[ContextoDaniela]) -> str:
 
 
 # ==========================================================================================
+# 11. La baja comercial y su revocación
+# ==========================================================================================
+
+
+async def _registrar_no_contactar(ctx: ContextoDaniela, nota: str | None) -> str:
+    def trabajo(conn) -> None:
+        persistencia.pedir_baja(
+            conn, ctx.telefono_completo, origen="paciente", detalle=nota
+        )
+
+    await _con_base(ctx, trabajo)
+    return (
+        "Anotado: a este número no le vuelve a salir nada comercial, ni ahora ni nunca. "
+        "Confírmaselo en una línea y sigue con lo que necesite. No le preguntes por qué, no "
+        "le ofrezcas alternativas y no intentes retenerlo. Su cita, si tiene una, le sigue "
+        "llegando igual: esto no la toca."
+    )
+
+
+@function_tool(failure_error_function=_fallo_privacidad)
+async def registrar_no_contactar(
+    wrapper: RunContextWrapper[ContextoDaniela],
+    nota: str,
+) -> str:
+    """Anota que el paciente NO quiere recibir más mensajes nuestros.
+
+    Llámala en cuanto lo pida, aunque lo diga de pasada. Si dudas entre si lo pidió o no,
+    llámala igual: dejar de escribirle a quien no lo pidió es una molestia, escribirle a
+    quien sí lo pidió es faltarle al respeto.
+
+    NO la llames porque el paciente esté molesto, tenga prisa o no conteste. Solo cuando
+    pida que no le escriban.
+
+    Args:
+        nota: la frase con la que lo pidió, tal cual. Sin interpretarla.
+    """
+    return await _registrar_no_contactar(wrapper.context, nota or None)
+
+
+async def _revocar_no_contactar(ctx: ContextoDaniela, nota: str | None) -> str:
+    def trabajo(conn) -> None:
+        persistencia.revocar_baja(
+            conn, ctx.telefono_completo, origen="paciente", detalle=nota
+        )
+
+    await _con_base(ctx, trabajo)
+    return "Anotado: vuelve a recibir mensajes nuestros. Confírmaselo en una línea."
+
+
+@function_tool(failure_error_function=_fallo_privacidad)
+async def revocar_no_contactar(
+    wrapper: RunContextWrapper[ContextoDaniela],
+    nota: str,
+) -> str:
+    """Vuelve a activar los mensajes a un paciente que los había desactivado.
+
+    SOLO si lo pide él. Que vuelva a escribirte no es pedirlo: alguien que se dio de baja y
+    meses después pregunta por una muela rota sigue sin querer publicidad.
+
+    Args:
+        nota: la frase con la que lo pidió, tal cual.
+    """
+    return await _revocar_no_contactar(wrapper.context, nota or None)
+
+
+# ==========================================================================================
 # El conjunto -- lo que `agentes.py` importará en la fase 4
 # ==========================================================================================
 
-#: Las nueve del plan, en el orden de `herramientas[]`, más `consultar_citas` al final, que
-#: no está en el plan y por eso no se cuela entre ellas.
+#: Las nueve del plan, en el orden de `herramientas[]`, más `consultar_citas`, y las dos de
+#: la baja comercial al final: ninguna de las tres está en el plan y por eso no se cuelan
+#: entre las nueve.
 TODAS = (
     consultar_base_conocimiento,
     consultar_disponibilidad,
@@ -1924,6 +1999,8 @@ TODAS = (
     programar_seguimiento,
     escalar_a_doctores,
     consultar_citas,
+    registrar_no_contactar,
+    revocar_no_contactar,
 )
 
 __all__ = [
@@ -1940,5 +2017,7 @@ __all__ = [
     "identificar_paciente",
     "programar_seguimiento",
     "registrar_estado_oportunidad",
+    "registrar_no_contactar",
     "reprogramar_cita",
+    "revocar_no_contactar",
 ]

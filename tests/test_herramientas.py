@@ -2730,3 +2730,59 @@ def test_el_calendario_de_google_se_niega_a_existir_sin_credenciales():
 
     with pytest.raises(ErrorDeCalendario, match="MAXICARE_GOOGLE_SA_B64"):
         CalendarioGoogle("", "agenda@maxicare.example")
+
+
+# ==========================================================================================
+# La baja comercial y su revocación
+# ==========================================================================================
+
+
+def test_registrar_no_contactar_apaga_lo_comercial(monkeypatch):
+    """El modelo solo levanta la mano. La fecha, el origen y la versión las arma el código
+    desde `ctx`: si el modelo pudiera escribirlas, la bitácora dejaría de ser una prueba."""
+    anotado: list[tuple] = []
+
+    async def base_falsa(ctx, trabajo):
+        trabajo(BaseFalsa())
+
+    def pedir_baja(conn, telefono, *, origen="paciente", detalle=None):
+        anotado.append((telefono, origen, detalle))
+        return True
+
+    monkeypatch.setattr(h, "_con_base", base_falsa)
+    monkeypatch.setattr(h.persistencia, "pedir_baja", pedir_baja)
+
+    salida = asyncio.run(h._registrar_no_contactar(contexto(), "dijo que no le escriban"))
+
+    assert anotado == [("573001112233", "paciente", "dijo que no le escriban")]
+    # El texto que vuelve al modelo tiene que decirle las tres cosas: que quedó anotado, que
+    # no insista, y que la cita no se toca.
+    assert "no intentes retenerlo" in salida or "no le ofrezcas alternativas" in salida
+
+
+def test_revocar_no_contactar_la_levanta(monkeypatch):
+    anotado: list[tuple] = []
+
+    async def base_falsa(ctx, trabajo):
+        trabajo(BaseFalsa())
+
+    def revocar_baja(conn, telefono, *, origen="paciente", detalle=None):
+        anotado.append((telefono, origen, detalle))
+        return True
+
+    monkeypatch.setattr(h, "_con_base", base_falsa)
+    monkeypatch.setattr(h.persistencia, "revocar_baja", revocar_baja)
+
+    salida = asyncio.run(h._revocar_no_contactar(contexto(), "pidio que le avisen"))
+
+    assert anotado == [("573001112233", "paciente", "pidio que le avisen")]
+    assert salida
+
+
+def test_las_dos_tools_estan_registradas():
+    """Una tool que existe y no está en la lista es una tool que el modelo no puede llamar,
+    sin un solo error en ningún log."""
+    nombres = {t.name for t in h.TODAS}
+
+    assert "registrar_no_contactar" in nombres
+    assert "revocar_no_contactar" in nombres
