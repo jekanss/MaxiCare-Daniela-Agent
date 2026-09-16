@@ -453,7 +453,13 @@ Cada paso deja la suite en verde. El 1 y el 2 no cambian ni un mensaje que vea u
   es **adivinar** la edad por el texto, y eso falla hacia los dos lados — le corta la atención
   a una adulta que escribe informal, y de forma intermitente, como ya pasó con el rótulo
   «Confirmar» (no negociable 23). **Este punto queda abierto y por escrito.**
-- **La URL definitiva de la política** (§2.2). Es un `PENDIENTE` real, no un descuido.
+- ~~**La URL definitiva de la política** (§2.2). Es un `PENDIENTE` real, no un descuido.~~
+  **RESUELTO el 16/09/2026.** El cliente entregó el enlace público de Drive (versión 2.0,
+  septiembre de 2026), comprobado accesible sin sesión antes de cablearlo. Vive en
+  `config.POLITICA_DATOS_URL` y no en el `.env`, con copia congelada y SHA-256 en
+  `docs/politica/`. Lo que **sigue** abierto es el destino ideal —una dirección del dominio de
+  MaxiCare con una copia por versión—, porque Drive deja sobrescribir el mismo enlace: es un
+  riesgo conocido, mitigado y anotado, no una tarea de código.
 - **El permiso como aviso en lugar de sí expreso** (D2, D3). Decidido, implementado y
   pendiente de confirmar con marketing (§11).
 - **La memoria del reencuentro** (sub-proyecto C). Daniela sigue tratando como desconocida a
@@ -473,6 +479,12 @@ Cada paso deja la suite en verde. El 1 y el 2 no cambian ni un mensaje que vea u
   es lo que la ley pide acreditar. **Pendiente de decisión.**
 
 ## 11. El párrafo para marketing
+
+**Reemplazado el 16/09/2026 por `docs/politica/para-marketing-2026-09-16.md`**, que es lo que
+hay que enviarles. Este párrafo se escribió antes de que existiera el PDF de la política, y la
+política publicada cambió la pregunta: ya no es «esto se aparta de lo que nos mandaron», es
+«§6 y §12 lo permiten, §5 y §10 lo contradicen, y hay que decidir cuál manda». Se conserva
+abajo como estaba, porque es el estado en que se tomaron las decisiones de esta spec.
 
 Va en lo próximo que se les mande, literal o reescrito, pero no se omite:
 

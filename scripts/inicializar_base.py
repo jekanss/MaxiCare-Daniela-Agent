@@ -49,6 +49,13 @@ from maxicare_daniela.config import Config, cargar_dotenv  # noqa: E402
 #: turno de cada paciente muere con el proceso -- que es exactamente lo que la fase arregla.
 TABLAS_DEL_HISTORIAL = ("agent_sessions", "agent_messages")
 
+#: Las dos que trajo la 019. Se verifican por la misma razón y con el mismo alcance: sin
+#: `contactos`, el primer mensaje de cada número revienta al leer el estado y el paciente
+#: recibe el mensaje seguro; sin `consentimientos`, el aviso de la política sale y no queda
+#: constancia de que salió, que es justo lo que hay que poder acreditar. Y van en los DOS
+#: esquemas porque `/clearstate` toca los dos.
+TABLAS_DEL_CONSENTIMIENTO = ("contactos", "consentimientos")
+
 
 def _enmascarar(url: str) -> str:
     """Deja ver a qué host se conectó, nunca las credenciales."""
@@ -228,8 +235,31 @@ def main() -> int:
             if not al_dia:
                 return 1
 
+        # ---------------------------------------------------------------------------
+        # 7. Las tablas de la MIGRACIÓN 019 (contacto y consentimiento), en los dos
+        #    esquemas. Mismo argumento que el bloque de arriba: la verificación del día
+        #    del despliegue tiene que incluir lo que se despliega ese día.
+        # ---------------------------------------------------------------------------
+        print()
+        print("=" * 78)
+        print("VERIFICACIÓN DE LA 019 (contacto y consentimiento)")
+        print("=" * 78)
+
+        for esquema in ("public", esquema_pruebas):
+            if esquema != "public" and not _existe_esquema(conn, esquema):
+                print(f"\n  {esquema}: no existe todavía (nada que verificar)")
+                continue
+            faltan = set(TABLAS_DEL_CONSENTIMIENTO) - _tablas_de(conn, esquema)
+            print(f"\n  {esquema}: {'OK  ' if not faltan else 'FALLA'} "
+                  + (", ".join(TABLAS_DEL_CONSENTIMIENTO) if not faltan
+                     else f"faltan {sorted(faltan)} -- corre este script sin "
+                          "--solo-verificar"))
+            if faltan:
+                return 1
+
     print("\n" + "=" * 78)
-    print("FASE 1 — segunda mitad: OK  ·  FASE 7 — las dos tablas del historial: OK")
+    print("FASE 1 — segunda mitad: OK  ·  FASE 7 — el historial: OK  ·  019 — contacto y "
+          "consentimiento: OK")
     print("=" * 78)
     return 0
 
