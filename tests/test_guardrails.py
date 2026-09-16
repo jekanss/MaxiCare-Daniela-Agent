@@ -99,6 +99,9 @@ def test_el_limite_conocido_queda_documentado_por_una_prueba():
         "escríbenos a maxicarecol@gmail.com o al +57 321 981 2422",
         "puedes llamar al 3219812422",
         "comunícate al +57 321 9812422",
+        # Con coma, que es un separador que `_CIFRA` sí acepta: sin ella en la clase de
+        # separadores, este disparaba un tripwire falso con motivo `321981`.
+        "llama al 321,981,2422",
     ],
 )
 def test_el_telefono_de_privacidad_nunca_dispara_asi_lo_reformatee_el_modelo(texto):

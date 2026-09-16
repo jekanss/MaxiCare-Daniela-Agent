@@ -199,8 +199,21 @@ _DIGITOS_PRIVACIDAD = re.sub(r"\D", "", TELEFONO_PRIVACIDAD)
 #: desaparece del texto es el teléfono y nada más, así que `$3.219.812` sigue disparando.
 #: Los separadores van sueltos entre dígito y dígito porque el modelo agrupa como quiere
 #: ("321 9812422", "321-981-2422"), y el indicativo es opcional porque no siempre lo escribe.
-#: Los `(?<!\d)` / `(?!\d)` impiden comerse el teléfono cuando es parte de un número mayor.
-_SEPARADOR_DE_DIGITOS = r"[\s.()-]*"
+#:
+#: **La coma tiene que estar en esta clase**, y no por simetría: `_CIFRA` la acepta como
+#: separador de miles, así que "llama al 321,981,2422" --raro, pero es una forma que el
+#: modelo produce-- se quedaba sin borrar y disparaba un tripwire falso con motivo `321981`.
+#: Es la misma clase de intermitencia que este borrado vino a cerrar, estrechada a una forma
+#: rara del número. Quien toque esta clase la compara con `_CIFRA` antes.
+#:
+#: Los `(?<!\d)` / `(?!\d)` acotan por los extremos, y lo que garantizan es menos de lo que
+#: parece: valen para una cadena de dígitos pegada ("13219812422" no se toca), **no** cuando
+#: el número mayor lleva separadores. "$3.219.812.422" se borra entero y no dispara, y
+#: "$1.573.219.812.422" dispara con el motivo «Dijiste 1», que al modelo no le dice nada.
+#: Los dos son precios que nadie va a escribir --3 mil millones, 1,5 billones-- y se aceptan
+#: como el límite que son; endurecer el regex por ellos costaría dejar de borrar el teléfono
+#: en alguna de las formas que sí ocurren, que es el fallo caro.
+_SEPARADOR_DE_DIGITOS = r"[\s.,()-]*"
 _TELEFONO_PRIVACIDAD_EN_TEXTO = re.compile(
     r"(?<!\d)(?:"
     + _SEPARADOR_DE_DIGITOS.join(_DIGITOS_PRIVACIDAD)
