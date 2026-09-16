@@ -1142,6 +1142,10 @@ async def atender(
             intentos_identificacion=estado.intentos_identificacion,
             telefono_sin_paciente=estado.telefono_sin_paciente,
             pidio_no_contacto=estado.pidio_no_contacto,
+            # No la usa ninguna tool: la lee `agentes.instrucciones_daniela` para saber si
+            # el aviso del código está apagado (`PENDIENTE`) y, en ese caso, devolverle a
+            # Daniela la frase de avisarlo con sus palabras. Con URL, manda el código.
+            politica_datos_url=config.politica_datos_url,
             turno_actual=estado.turno_actual,
             tomada_por=estado.tomada_por,
             # El tema propio de la conversación llega con el relevo (6C). Hasta entonces todo

@@ -358,6 +358,33 @@ def instrucciones_daniela(ctx, agente) -> str:
     # de fecha sobra en vez de reventar.
     contexto = getattr(ctx, "context", None)
 
+    # El aviso de la política, mientras el código todavía no pueda emitirlo.
+    #
+    # Hasta esta rama, ese aviso era una frase de este prompt. La frase se quitó porque el
+    # código lo emite mejor --siempre el mismo texto, con constancia de qué versión vio el
+    # paciente (no negociable 24)-- pero el código lo emite solo cuando hay una URL que
+    # enseñar, y hoy `politica_datos_url` sigue en `PENDIENTE`. Entre las dos cosas queda un
+    # hueco en el que NADIE avisa: menos cobertura que antes de la rama, y sobre un sistema
+    # cuyo objeto es el tratamiento de datos personales.
+    #
+    # Así que la frase vuelve, pero CONDICIONADA: sin URL la dice Daniela con sus palabras;
+    # con URL manda el código y esta desaparece, porque dos avisos en el mismo mensaje son
+    # uno de más. El default de `ContextoDaniela.politica_datos_url` es `PENDIENTE`, así que
+    # quien no lo pase --el chat del panel, una prueba-- se queda del lado que avisa.
+    #
+    # Va aquí, el primero de los bloques dinámicos y pegado al vocabulario, por caché: es el
+    # MENOS volátil de todos --el mismo texto para todos los pacientes, y solo cambia el día
+    # que se despliegue la URL--, así que delante de los demás no descachea nada.
+    if getattr(contexto, "politica_datos_url", "PENDIENTE") == "PENDIENTE":
+        texto = (
+            f"{texto}\n\n"
+            "LA POLÍTICA DE DATOS\n"
+            "Antes de pedir datos sensibles —el nombre completo, el teléfono, cualquier "
+            "cosa de salud— le dices en una línea que al continuar acepta la política de "
+            "tratamiento de datos de MaxiCare. Una sola vez por conversación, sin solemnidad "
+            "y sin frenar lo que venía haciendo."
+        )
+
     # Presentación: solo en el turno 1, y con el mismo cuidado defensivo que la fecha. Va
     # aquí -- después del vocabulario, antes de la fecha -- porque cambia una vez por
     # conversación: menos volátil que "AHORA MISMO" (que cambia cada minuto), más volátil

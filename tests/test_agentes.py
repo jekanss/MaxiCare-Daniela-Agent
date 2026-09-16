@@ -587,6 +587,44 @@ def test_sin_la_baja_el_bloque_de_seguimiento_apagado_no_aparece():
     assert "ESTE PACIENTE PIDIÓ NO SER CONTACTADO" not in texto
 
 
+def test_sin_url_de_politica_el_prompt_le_devuelve_el_aviso_a_daniela():
+    """El hueco que abrieron las dos mitades correctas de esta rama, cerrado.
+
+    La frase estática del prompt («antes de pedir datos sensibles, informas que al continuar
+    acepta la política») se quitó porque el código lo emite mejor. Pero el código lo emite
+    solo cuando hay URL, y `politica_datos_url` sigue en `PENDIENTE`: entre las dos cosas
+    nadie avisaba ni una vez, que es MENOS cobertura que antes de esta rama.
+
+    Se mira el texto que devuelve el prompt dinámico, no `INSTRUCCIONES_DANIELA`: la frase ya
+    no es estática y sobre la constante esta prueba no vería nada.
+    """
+    ctx = contexto(politica_datos_url="PENDIENTE")
+
+    texto = asyncio.run(agentes.daniela.get_system_prompt(RunContextWrapper(context=ctx)))
+
+    assert "LA POLÍTICA DE DATOS" in texto
+    assert "acepta la política de tratamiento de datos de MaxiCare" in texto
+
+
+def test_con_url_de_politica_el_aviso_lo_dice_el_codigo_y_el_prompt_se_calla():
+    """La otra rama, y no es simetría por gusto: con la URL puesta, `atencion` pega el aviso
+    al primer saliente palabra por palabra. Si además lo dijera el prompt, el paciente
+    leería el mismo aviso dos veces en el mismo mensaje."""
+    ctx = contexto(politica_datos_url="https://maxicarecol.com/politica/2026-09.pdf")
+
+    texto = asyncio.run(agentes.daniela.get_system_prompt(RunContextWrapper(context=ctx)))
+
+    assert "LA POLÍTICA DE DATOS" not in texto
+
+
+def test_el_default_del_contexto_deja_a_daniela_del_lado_que_avisa():
+    """Quien no pase el campo --el chat del panel, una prueba, un script-- se queda con el
+    aviso puesto. El default no es cosmético: es de qué lado cae el olvido."""
+    texto = asyncio.run(agentes.daniela.get_system_prompt(RunContextWrapper(context=contexto())))
+
+    assert "LA POLÍTICA DE DATOS" in texto
+
+
 def test_el_bloque_de_presentacion_no_revienta_sin_contexto():
     """`context=None` en varias pruebas que solo miran el vocabulario."""
     texto = asyncio.run(agentes.daniela.get_system_prompt(RunContextWrapper(context=None)))
