@@ -440,7 +440,25 @@ async def uso_indebido(
     wrapper: RunContextWrapper[ContextoDaniela], agente: Any, entrada: Any
 ) -> GuardrailFunctionOutput:
     """Corre en paralelo con el agente: no debe añadir latencia al caso normal, que es el
-    99% de los mensajes."""
+    99% de los mensajes.
+
+    **No evalúa un turno que sean SOLO quick replies de plantilla.** Lo que llega en uno de
+    esos no lo escribe el paciente: sale de la plantilla que Meta aprobó, y elegir entre
+    «Confirmar» y «Necesito cambiarla» no es una superficie por la que se pueda inyectar
+    nada. Preguntarle a un evaluador --que es probabilístico-- por una lista cerrada solo
+    añade una forma de equivocarse, y el 15/09/2026 se equivocó: leyó «Confirmar» como
+    «intenta imponer instrucciones del sistema», así que quien confirmaba su cita recibió el
+    mensaje seguro y el doctor una alerta que no tenía que atender. Intermitente, encima --el
+    mismo texto pasó siete minutos antes--, que es la peor clase de fallo: en una demo pasa.
+
+    La señal la pone `atencion` desde el `type` del webhook y solo si TODOS los mensajes del
+    grupo son botones; con texto libre de por medio, esto sigue corriendo entero.
+    """
+    if getattr(wrapper.context, "entrada_solo_de_botones", False):
+        return GuardrailFunctionOutput(
+            output_info="quick reply de plantilla: no es texto del paciente",
+            tripwire_triggered=False,
+        )
     texto = entrada if isinstance(entrada, str) else str(entrada)
     veredicto = await _preguntar(_evaluador_uso, texto, ctx=wrapper.context)
     if veredicto.dispara:

@@ -641,6 +641,20 @@ def _entrada_para_el_modelo(
             aviso += f"\nEl paciente escribió junto al archivo: {mensaje.texto}"
         return aviso
 
+    # Un quick reply de plantilla llega como el rótulo pelado: «Confirmar». Sin decir de
+    # dónde sale, el modelo no sabe a qué contesta -- y el evaluador de `uso_indebido`, que
+    # recibe EXACTAMENTE esta misma cadena, ve un imperativo suelto. El 15/09/2026 lo
+    # clasificó como «intenta imponer instrucciones del sistema» y el paciente que confirmaba
+    # su cita se llevó el mensaje seguro, con su alerta falsa al doctor.
+    #
+    # El corchete no es decorativo: es la misma convención que el aviso de más abajo y la del
+    # grupo del búfer -- lo que va entre corchetes lo escribe el SISTEMA, no el paciente.
+    if mensaje.texto and mensaje.tipo == "button":
+        return (
+            f"[El paciente pulsó el botón «{mensaje.texto}» del mensaje automático que le "
+            "enviamos. No lo escribió él: eligió una de las opciones.]"
+        )
+
     if mensaje.texto:
         return mensaje.texto
 
@@ -982,6 +996,11 @@ async def atender(
             horas_minimas_para_recordar=operativa.get("horas_minimas_para_recordar", 4),
             ultimo_recordatorio_tipo=estado.ultimo_recordatorio_tipo,
             ultimo_recordatorio_en=estado.ultimo_recordatorio_en,
+            # Sale del `type` que mandó Meta, nunca del modelo. `all` y no `any`: un solo
+            # botón en un grupo que además trae texto libre dejaría ese texto sin evaluar.
+            # Ver el campo en `contratos.ContextoDaniela`, que explica qué costó.
+            entrada_solo_de_botones=bool(mensajes)
+            and all(m.tipo == "button" for m in mensajes),
             jornada=Jornada(
                 apertura=operativa.get("hora_apertura", 8),
                 cierre=operativa.get("hora_cierre", 17),

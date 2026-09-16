@@ -2010,3 +2010,45 @@ def test_el_relevo_mantiene_viva_la_conversacion(monkeypatch):
 
     assert base.argumentos("tocar_conversacion") == ("conv-viva", 4)
     assert resultado.turno == 4
+
+
+def test_el_boton_llega_al_modelo_con_contexto():
+    """«Confirmar» a secas no dice de qué.
+
+    El rótulo de un quick reply llega sin nada alrededor: ni de qué mensaje viene, ni que fue
+    un botón y no algo que el paciente escribió. Con el contexto delante, el modelo sabe que
+    está respondiendo al recordatorio -- y el evaluador de `uso_indebido`, que recibe
+    EXACTAMENTE esta misma cadena, deja de ver un imperativo suelto que parece una orden.
+    """
+    from maxicare_daniela.ingesta import MensajeEntrante
+
+    entrada = atencion._entrada_para_el_modelo(
+        MensajeEntrante(
+            wamid="wamid.b",
+            telefono="573001234567",
+            nombre_perfil=None,
+            tipo="button",
+            texto="Confirmar",
+        )
+    )
+
+    assert "Confirmar" in entrada
+    assert "pulsó" in entrada or "boton" in entrada.lower() or "botón" in entrada
+
+
+def test_un_texto_normal_no_se_disfraza_de_boton():
+    """Lo de arriba vale para `button` y para nada más: un texto del paciente llega tal cual,
+    que es lo que el resto del sistema --y los tres guardrails-- esperan leer."""
+    from maxicare_daniela.ingesta import MensajeEntrante
+
+    entrada = atencion._entrada_para_el_modelo(
+        MensajeEntrante(
+            wamid="wamid.t",
+            telefono="573001234567",
+            nombre_perfil=None,
+            tipo="text",
+            texto="Confirmar",
+        )
+    )
+
+    assert entrada == "Confirmar"

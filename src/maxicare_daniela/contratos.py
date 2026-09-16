@@ -610,6 +610,23 @@ class ContextoDaniela:
     ultimo_recordatorio_tipo: str | None = None
     ultimo_recordatorio_en: datetime | None = None
 
+    #: `True` solo si TODOS los mensajes del turno son quick replies de una plantilla
+    #: (`type: "button"` en el webhook de Meta). Lo lee `guardrails.uso_indebido` para no
+    #: preguntarle a un evaluador por algo que es una lista cerrada: el rótulo de un botón no
+    #: lo escribe el paciente, sale de la plantilla que Meta aprobó, y elegir entre dos valores
+    #: fijos no es una superficie de inyección.
+    #:
+    #: Medido en producción el 15/09/2026: el evaluador leyó «Confirmar» -- un imperativo de
+    #: una palabra -- como «intenta imponer instrucciones del sistema», y el paciente que
+    #: confirmaba su cita recibió el mensaje seguro mientras el doctor recibía una alerta
+    #: falsa. Intermitente, además: el mismo texto pasó a las 22:04 y disparó a las 22:11.
+    #:
+    #: TODOS y no ALGUNO: si bastara con un botón en el grupo, pulsarlo y escribir detrás
+    #: colaría el texto libre sin vigilancia. Sale del `type` que manda Meta y **nunca del
+    #: modelo**, igual que `telefono_sin_paciente`: un campo que el modelo pudiera escribir
+    #: sería una forma de pedir que no lo vigilen. El default es el lado estricto.
+    entrada_solo_de_botones: bool = False
+
     #: El horario en que la clínica atiende. Lo que impide ofrecer —y agendar— la madrugada.
     #: Viaja en el contexto por lo mismo que `calendario` y `ahora`: una prueba lo fija. Ver
     #: `calendario.Jornada`, que explica el fallo de producción que lo trajo.
