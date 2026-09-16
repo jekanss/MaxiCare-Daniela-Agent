@@ -417,6 +417,13 @@ def configuracion(url: str, *, responde: bool = True) -> Config:
         telegram_chat_doctores="",
         google_sa_b64="",
         google_calendar_id="",
+        # Vacio A PROPOSITO, igual que Telegram y Google: la comprobacion 1 compara
+        # `texto_enviado` contra la marca unica que puso `Turnos`, y una URL real en el
+        # `.env` de quien corra esto le pegaria el aviso de la politica al final -- la
+        # comprobacion fallaria por una razon que no tiene nada que ver con el turno. El
+        # aviso ya lo cubre `pytest` (`test_atencion.py`); este script no necesita probarlo
+        # otra vez, y con esto queda determinista pase lo que pase en el entorno.
+        politica_datos_url="",
         daniela_responde=responde,
     )
 

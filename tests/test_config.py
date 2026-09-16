@@ -84,6 +84,7 @@ def test_la_url_de_la_politica_arranca_en_pendiente(monkeypatch):
     que enseñar uno que no vamos a poder sostener."""
     monkeypatch.setenv("MAXICARE_DATABASE_URL", "postgres://nada")
     monkeypatch.delenv("MAXICARE_POLITICA_DATOS_URL", raising=False)
+    monkeypatch.delenv("MAXICARE_POLITICA_DATOS_VERSION", raising=False)
 
     c = config.Config.desde_entorno()
 

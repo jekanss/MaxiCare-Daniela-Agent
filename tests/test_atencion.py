@@ -2623,3 +2623,59 @@ def test_si_el_envio_tiene_exito_el_aviso_SI_queda_marcado(monkeypatch):
         "Al continuar aceptas nuestra política de tratamiento de datos: "
         "https://maxicarecol.com/politica-datos"
     )
+
+
+def test_a_quien_ya_lo_vio_no_se_le_repite_de_extremo_a_extremo(monkeypatch):
+    """El turno completo, con `_leer_estado` corriendo de verdad sobre un contacto que YA vio
+    el aviso: sale limpio y `_marcar_aviso` no se llama otra vez. Las pruebas de arriba
+    comprueban el mecanismo con un `_Estado` montado a mano o con el contacto por defecto de
+    `BaseFalsa` (recién nacido); esta es la que comprueba que `aviso_mostrado_en` puesto de
+    verdad en la fila de `contactos` llega hasta aquí y apaga el pie -- exactamente el mismo
+    hueco que `test_un_no_contactar_de_la_fila_de_verdad_llega_hasta_el_contexto` cierra para
+    la baja."""
+    preparar(
+        monkeypatch,
+        base=BaseFalsa(
+            contacto={
+                "telefono": TELEFONO,
+                "creado_en": FECHA_CONTACTO,
+                "actualizado_en": FECHA_CONTACTO,
+                "aviso_mostrado_en": FECHA_CONTACTO,
+                "politica_version": "politica-2026-09",
+                "no_contactar": False,
+                "no_contactar_en": None,
+                "no_contactar_origen": None,
+            }
+        ),
+    )
+    marcados: list[tuple] = []
+    monkeypatch.setattr(atencion, "_marcar_aviso", lambda *args: marcados.append(args))
+    whatsapp = WhatsAppFalso()
+
+    resultado = atender(
+        mensaje_texto(),
+        whatsapp=whatsapp,
+        config=config_falso(
+            politica_datos_url="https://maxicarecol.com/politica-datos",
+            politica_datos_version="politica-2026-09",
+        ),
+    )
+
+    assert resultado.respondido is True
+    assert whatsapp.textos == ["Claro que sí, con mucho gusto."], (
+        "un contacto que ya vio el aviso recibe el texto tal cual, sin el pie"
+    )
+    assert marcados == [], "el aviso ya mostrado no se vuelve a marcar"
+
+
+def test_una_respuesta_que_raya_el_limite_sale_sin_aviso_y_entera():
+    """Perder el aviso de un mensaje gigantesco es inocuo -- no se marcó, y vuelve a salir en
+    el siguiente turno --; perder el mensaje ENTERO porque el pie lo empujó sobre el tope de
+    WhatsApp no lo es, y menos en el primer contacto de ese número."""
+    url = "https://maxicarecol.com/politica-datos"
+    pie = f"\n\n{atencion.AVISO_POLITICA.format(url=url)}"
+    respuesta = "x" * (atencion.LIMITE_TEXTO_WHATSAPP - len(pie) + 1)
+
+    salida = atencion._con_aviso(respuesta, url=url)
+
+    assert salida == respuesta, "se quedó igual de larga: no le cortó nada, tampoco pegó el pie"

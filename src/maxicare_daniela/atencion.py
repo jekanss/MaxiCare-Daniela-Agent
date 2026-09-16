@@ -104,6 +104,14 @@ VENTANA_CONVERSACION_HORAS = 24
 #: lo que tiene que ser demostrable lo escribe el código.
 AVISO_POLITICA = "Al continuar aceptas nuestra política de tratamiento de datos: {url}"
 
+#: El tope de un mensaje de texto de WhatsApp (Meta). No hay una constante de esto en el
+#: resto del repo porque hasta ahora nada armaba un texto lo bastante largo como para
+#: acercarse: `mensaje_al_paciente` no tiene tope propio (`contratos.py`) y
+#: `canales.enviar_texto` no trunca, así que pegarle el pie a una respuesta que ya lo rozara
+#: haría fallar el envío ENTERO -- justo en el primer contacto de ese número, el peor momento
+#: posible para dejarlo mudo.
+LIMITE_TEXTO_WHATSAPP = 4096
+
 
 def _con_aviso(respuesta: str, *, url: str) -> str:
     """La respuesta con el aviso pegado al final, o tal cual si no hay URL que enseñar.
@@ -113,10 +121,17 @@ def _con_aviso(respuesta: str, *, url: str) -> str:
 
     Con `url` vacía o en `PENDIENTE` devuelve la respuesta intacta. La regla dura 3 es para
     el código: nunca fue permiso para mandarle el marcador a un paciente.
+
+    Y si pegar el pie hace que el conjunto rebase `LIMITE_TEXTO_WHATSAPP`, también devuelve
+    la respuesta intacta: perder el aviso de un mensaje así es inocuo -- no se marca, y vuelve
+    a salir en el siguiente turno --; perder el mensaje entero por culpa del pie no lo es.
     """
     if not url or url == "PENDIENTE":
         return respuesta
-    return f"{respuesta}\n\n{AVISO_POLITICA.format(url=url)}"
+    pie = f"\n\n{AVISO_POLITICA.format(url=url)}"
+    if len(respuesta) + len(pie) > LIMITE_TEXTO_WHATSAPP:
+        return respuesta
+    return respuesta + pie
 
 
 def _toca_avisar(estado: _Estado, *, url: str) -> bool:
