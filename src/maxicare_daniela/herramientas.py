@@ -633,6 +633,19 @@ async def _identificar_paciente(ctx: ContextoDaniela, nombre_completo: str) -> s
 
     coincide, nombre_registrado, id_paciente = await _con_base(ctx, trabajo)
     ctx.intentos_identificacion += 1
+
+    # Una ficha con el marcador `PENDIENTE` no registra a nadie: se trata igual que no tener
+    # ninguna, y a partir de aquí este camino no la distingue.
+    #
+    # Sin esto, `nombre_registrado` no era `None`, así que ni entraba en la rama de «puede ser
+    # alguien escribiendo por primera vez» ni dejaba `telefono_sin_paciente` en `True` -- y
+    # ese booleano es el permiso de crear la PRIMERA cita. Producción, 16/09/2026: una
+    # paciente nueva dio su nombre, no «coincidió» con el marcador, se le pidió que lo diera
+    # «tal como aparece en tu historia clínica» --nunca había venido--, se gastaron los dos
+    # intentos y la tool ordenó escalar. Se fue sin cita.
+    if nombre_registrado == persistencia.NOMBRE_PENDIENTE:
+        nombre_registrado = None
+
     # Se refresca con lo que acaba de devolver la base, no se deja lo que trajo el turno: si
     # alguien registró a este paciente entre `_leer_estado` y esta llamada, el dato del turno
     # ya es viejo. Es el mismo hecho que decide si puede pedir su primera cita.

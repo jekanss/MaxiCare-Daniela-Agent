@@ -51,6 +51,19 @@ SIN_DATO = (
     "memoria. Dile al paciente que lo vas a confirmar con los doctores y escala."
 )
 
+#: El marcador que ocupa el nombre de una ficha cuando todavía no se sabe. **No es un
+#: nombre**, y todo el que lea `pacientes.nombre_completo` tiene que saberlo: una ficha con
+#: esto puesto significa «este número existe», nunca «esta persona se llama así».
+#:
+#: Vive aquí, y no en `relevo.py` donde nació, porque lo consultan tres módulos que no se
+#: importan entre sí -- `relevo` al componer el nombre del hilo, `atencion` al armar el turno
+#: y `herramientas` al identificar--. Una copia por módulo es exactamente cómo se separan:
+#: hasta el 16/09/2026 solo `relevo` sabía qué era esto, y los otros dos lo trataban como el
+#: nombre del paciente. El resultado, medido en producción: una paciente que dio su nombre de
+#: verdad, no «coincidió» con el marcador, gastó los dos intentos de identificación y acabó
+#: escalada en vez de agendada.
+NOMBRE_PENDIENTE = "PENDIENTE"
+
 #: Lo que se antepone a un dato que existe pero que MaxiCare todavía no aprobó (sección 4
 #: del documento maestro).
 PENDIENTE_APROBACION = (
@@ -603,8 +616,23 @@ def asegurar_paciente(conn, *, nombre_completo: str, telefono: str) -> int:
     No actualiza el nombre de uno que ya existe: si el número de la casa lo usan dos
     personas, pisarlo haría que el historial del primero apareciera bajo el nombre del
     segundo. Resolver eso es trabajo de un humano, no de un UPDATE silencioso.
+
+    **Con UNA excepción, y es la misma regla, no un agujero en ella:** si lo que hay guardado
+    es el marcador `NOMBRE_PENDIENTE`, se escribe encima. Eso no pisa el nombre de nadie --el
+    marcador no es un nombre-- y es lo que repara las fichas que el relevo dejó abiertas en
+    blanco antes del 16/09/2026. Sin esto se quedaban marcadas para siempre: el único camino
+    que pisaba el marcador era un relevo que terminara CON cita, y el caso que lo creó es
+    justo el del doctor que cierra sin agendar.
+
+    Quien llama aquí siempre trae un nombre de verdad: `_crear_cita` el que le dio el
+    paciente, `relevo._agendar` el que escribió el doctor.
     """
     existente = buscar_paciente_por_telefono(conn, telefono)
+    if existente and existente[1] == NOMBRE_PENDIENTE:
+        nombrar_si_esta_pendiente(
+            conn, telefono=telefono, nombre=nombre_completo, pendiente=NOMBRE_PENDIENTE
+        )
+        return existente[0]
     if existente:
         return existente[0]
 

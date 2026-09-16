@@ -344,17 +344,65 @@ Comprobado contra la API: el servidor de archivos de Telegram responde
 `(#100) Param file must be a file with one of the following types`, y el doctor ve su foto
 sin entregar. Lo resuelve `canales._mime_de`.
 
-## La ficha PENDIENTE: ya casi nunca hace falta
+## La ficha PENDIENTE: QUITADA el 16/09/2026
 
-El relevo sabe crear la fila de `pacientes` con `nombre_completo = "PENDIENTE"` —nunca el
-nombre del perfil de WhatsApp— para un número que no la tenga. Se escribió el 13/09/2026,
-cuando el hilo colgaba de esa tabla y era la única forma de darle uno a un lead.
+**El relevo ya no crea ninguna fila en `pacientes`.** Esta sección decía «si algún día deja de
+hacer falta, quítala», y ese día llegó por la peor vía: hizo daño en producción.
 
-Desde la 014 **ya no se dispara casi nunca**: el hilo se crea solo con el primer archivo, sin
-ficha. Queda para el caso en que el relevo es lo primero que le pasa a ese número —alguien que
-solo escribió texto y a quien un doctor decide escribir—, y sigue siendo aceptable por lo
-mismo de siempre: lo autoriza un humano pulsando un botón, no una cámara. Lo que sí crea
-identidad verificada es esa fila, así que si algún día deja de hacer falta, quítala.
+Existía desde el 13/09/2026, cuando el hilo colgaba de `pacientes.telegram_topic_id` y era la
+única forma de darle uno a un lead. La 014 movió el hilo al teléfono y la ficha se quedó por
+inercia, defendida por lo único que seguía haciendo: dar identidad verificada.
+
+**Eso era el daño, no el beneficio.** Medido con una paciente de prueba el 16/09/2026:
+
+```
+doctor pulsa «Hablar yo con el paciente»  →  ficha con nombre = 'PENDIENTE'
+doctor cierra el hilo SIN agendar          →  nadie le pregunta el nombre
+                                              (el cierre solo lo pregunta si hubo cita,
+                                               y es lo único que pisa el marcador)
+Daniela retoma:
+  _leer_estado  →  identidad_verificada = True
+                   nombre_paciente      = 'PENDIENTE'
+                   telefono_sin_paciente = False   ← pierde el permiso de su 1ª cita
+  «Sora Patricia Delgado»  →  no coincide con 'PENDIENTE'  → intento 1
+  «Es primera vez»          →  intento 2 agotado → la tool ordena escalar
+```
+
+Ni desconocida —que puede pedir su primera cita— ni verificada: **el único hueco sin salida de
+los tres**, y sin un solo error en ningún log. La paciente se fue sin cita.
+
+**Quién registra el nombre, que es la pregunta que decide si quitarla era seguro: quien
+AGENDA.** Nunca fue el relevo.
+
+| Quién agenda | Dónde se crea la ficha, con el nombre de verdad |
+|---|---|
+| Daniela | `herramientas._crear_cita` → `persistencia.asegurar_paciente` |
+| El doctor, al cerrar | `relevo._nombrar` → `nombrar_si_esta_pendiente`, que **crea la fila si no hay ninguna** |
+
+Esa última mitad es la que hace seguro el cambio, y la fija
+`test_el_nombre_del_cierre_crea_la_ficha_si_el_relevo_ya_no_la_dejo` corriendo la función real
+contra una conexión falsa: doblarla con un `lambda` dejaría pasar en verde el día que alguien
+la convierta en un `UPDATE`.
+
+### El marcador sigue existiendo, y tres sitios tienen que conocerlo
+
+Vive en `persistencia.NOMBRE_PENDIENTE` —**un solo sitio**; hasta ese día solo `relevo` sabía
+qué era, y los otros dos módulos lo trataban como el nombre del paciente—. Sigue haciendo
+falta por las fichas que quedaron de antes, que son justo las de los números ya relevados:
+
+- `relevo._nombre_del_paciente` lo devuelve como `None` (lo que evitaba «PENDIENTE · Cordales»
+  en la agenda);
+- `atencion._leer_estado` no lo cuenta como identidad ni lo pasa como nombre — el `id` de la
+  ficha sí sale, porque es una fila real a la que apuntan sus citas;
+- `herramientas._identificar_paciente` lo trata como «este número no está registrado», que es
+  lo que devuelve el permiso de la primera cita.
+
+Y **agendar repara la ficha vieja**: `asegurar_paciente` escribe encima del marcador —y solo
+del marcador—, así que el primer paciente que agende deja de estar marcado. Sin eso se
+quedaban así para siempre. Lo sostienen dos pruebas de Neon, la que repara y su falso
+positivo: `test_agendar_NO_le_pisa_el_nombre_a_un_paciente_de_verdad`, que es la mitad que no
+se puede aflojar —la hija que agenda desde el teléfono de la casa no puede renombrar la ficha
+de su madre—.
 
 ## Qué prueba qué
 

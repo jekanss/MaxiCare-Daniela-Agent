@@ -701,8 +701,12 @@ def test_el_nombre_de_un_paciente_de_VERDAD_no_se_pisa(esquema):
 
 
 def test_al_numero_sin_ficha_se_le_crea_una_con_su_nombre(esquema):
-    """Lo dispara un doctor que acaba de hablar con esa persona: el mismo permiso que
-    `relevo._ficha_para_el_relevo`, y aqui ademas con el nombre de verdad."""
+    """Lo dispara un doctor que acaba de hablar con esa persona, y con el nombre de verdad.
+
+    Desde el 16/09/2026 es ademas la razon por la que el relevo pudo dejar de abrir la ficha
+    en blanco: este camino la CREA cuando no hay ninguna, asi que quitarla de la activacion no
+    dejo al doctor sin poder registrar a nadie.
+    """
     telefono = TEL
 
     with persistencia.conectar(esquema) as conn:
@@ -712,6 +716,56 @@ def test_al_numero_sin_ficha_se_le_crea_una_con_su_nombre(esquema):
             conn, telefono=telefono, nombre="Ana Ruiz", pendiente="PENDIENTE"
         )
         assert persistencia.buscar_paciente_por_telefono(conn, telefono)[1] == "Ana Ruiz"
+
+
+def test_agendar_le_quita_el_marcador_a_una_ficha_que_lo_tenia(esquema):
+    """La reparacion de las fichas que el relevo dejo en blanco antes del 16/09/2026.
+
+    `asegurar_paciente` no actualiza nombres, a proposito --dos personas en el telefono de la
+    casa--, y esa regla dejaba el marcador puesto PARA SIEMPRE: el unico camino que lo pisaba
+    era un relevo que terminara CON cita, y el caso que creo el marcador es justo el del
+    doctor que cierra sin agendar.
+
+    Contra Postgres de verdad y no contra un doble, porque lo que hay que comprobar es el
+    `ON CONFLICT ... WHERE` de `nombrar_si_esta_pendiente`: un doble diria que si a cualquier
+    cosa, incluida la version que pisa el nombre de un paciente real.
+    """
+    with persistencia.conectar(esquema) as conn:
+        # Como quedaba la ficha tras un relevo, hasta hoy.
+        marcado = persistencia.asegurar_paciente(
+            conn, nombre_completo=persistencia.NOMBRE_PENDIENTE, telefono=TEL
+        )
+        assert persistencia.buscar_paciente_por_telefono(conn, TEL)[1] == "PENDIENTE"
+
+        # Y ahora el paciente agenda: `_crear_cita` llama justo a esto.
+        mismo = persistencia.asegurar_paciente(
+            conn, nombre_completo="Sora Patricia Delgado", telefono=TEL
+        )
+
+        assert mismo == marcado, "no puede abrir una ficha nueva: sus citas apuntan a la vieja"
+        assert persistencia.buscar_paciente_por_telefono(conn, TEL)[1] == (
+            "Sora Patricia Delgado"
+        )
+
+
+def test_agendar_NO_le_pisa_el_nombre_a_un_paciente_de_verdad(esquema):
+    """El falso positivo de la anterior, y la mitad que no se puede aflojar.
+
+    Sin esta, la reparacion de arriba se podria escribir como un UPDATE a secas y pasaria en
+    verde -- y entonces la hija que agenda desde el telefono de la casa le cambiaria el nombre
+    a la ficha de su madre, con el historial de la madre debajo.
+    """
+    with persistencia.conectar(esquema) as conn:
+        original = persistencia.asegurar_paciente(
+            conn, nombre_completo="Carmen Delgado", telefono=TEL
+        )
+
+        mismo = persistencia.asegurar_paciente(
+            conn, nombre_completo="Sora Patricia Delgado", telefono=TEL
+        )
+
+        assert mismo == original
+        assert persistencia.buscar_paciente_por_telefono(conn, TEL)[1] == "Carmen Delgado"
 
 
 def test_un_estado_de_cierre_inventado_lo_sigue_rechazando_la_base(esquema):

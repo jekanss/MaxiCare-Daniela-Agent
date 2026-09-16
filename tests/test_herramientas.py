@@ -624,6 +624,35 @@ def test_la_comparacion_de_nombres_tolera_lo_que_debe(registrado, ofrecido, espe
     assert h._mismo_nombre(registrado, ofrecido) is esperado
 
 
+def test_una_ficha_PENDIENTE_se_trata_como_un_numero_sin_registrar(monkeypatch):
+    """El marcador del relevo no es un nombre, y esta tool es donde más caro costaba.
+
+    Con la ficha en `PENDIENTE`, `nombre_registrado` no era `None`, así que
+    `telefono_sin_paciente` se quedaba en `False` y el paciente perdía el permiso de crear su
+    PRIMERA cita (`_ESCRITURAS_PARA_DESCONOCIDO`). Encima la respuesta le decía al modelo que
+    el nombre «no coincide con el registrado», que es lo que hacía a Daniela pedirlo otra vez
+    «tal como aparece en tu historia clínica» -- a alguien que nunca ha venido.
+
+    Producción, 16/09/2026: dos intentos gastados y escalamiento, sobre una paciente que solo
+    quería una valoración.
+    """
+    ctx = contexto()
+
+    async def base_falsa(_ctx, trabajo):
+        return (False, persistencia.NOMBRE_PENDIENTE, 18)
+
+    monkeypatch.setattr(h, "_con_base", base_falsa)
+
+    texto = asyncio.run(h._identificar_paciente(ctx, "Sora Patricia Delgado"))
+
+    assert ctx.telefono_sin_paciente is True, "perdió el permiso de su primera cita"
+    assert "no está registrado" in texto
+    assert "puedes agendarle una cita nueva" in texto.lower()
+    # Y lo que NO debe decir: nada de volver a pedir el nombre contra un registro que no
+    # existe. Esa frase es la que el paciente leyó como «usted ya está en el sistema».
+    assert "historia clínica" not in texto.lower()
+
+
 # ==========================================================================================
 # crear_cita -- el camino que puede mandar a alguien a una clínica vacía
 # ==========================================================================================

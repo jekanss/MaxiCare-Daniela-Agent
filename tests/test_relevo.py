@@ -175,6 +175,11 @@ class ConexionFalsa:
     def execute(self, sql: str, parametros: tuple | None = None) -> None:
         self.escrituras.append((sql, parametros))
 
+    def fetchone(self) -> tuple[int] | None:
+        #: Lo mínimo para que `nombrar_si_esta_pendiente` --que hace `INSERT ... RETURNING
+        #: id`-- pueda correr de verdad aquí. No imita a psycopg: dice «la fila se escribió».
+        return (18,)
+
     def commit(self) -> None:
         pass
 
@@ -182,6 +187,10 @@ class ConexionFalsa:
 #: La función DE VERDAD, capturada al importar el módulo --antes de que ningún `monkeypatch`
 #: la tape--. La prueba del hilo del paciente sin archivo la vuelve a poner en su sitio.
 _GUARDAR_TEMA_ABIERTO_REAL = relevo._guardar_tema_abierto
+
+#: Igual, y por lo mismo: `_sin_base` la dobla con un `lambda` que devuelve `True` sin tocar
+#: nada, así que la prueba del nombre del cierre tiene que volver a ponerla en su sitio.
+_NOMBRAR_REAL = relevo._nombrar
 
 
 @pytest.fixture(autouse=True)
@@ -192,7 +201,6 @@ def _sin_base(monkeypatch):
     monkeypatch.setattr(relevo, "_activar_en_base", lambda url, conv, doctor: None)
     monkeypatch.setattr(relevo, "_cerrar_en_base", lambda url, conv, motivo: True)
     monkeypatch.setattr(relevo, "_tema_de", lambda url, tel: TEMA)
-    monkeypatch.setattr(relevo, "_ficha_para_el_relevo", lambda url, tel: 55)
     monkeypatch.setattr(relevo, "_guardar_tema_abierto", lambda url, tel, tema: None)
     monkeypatch.setattr(relevo, "_marcar_abierto", lambda url, tel, abierto: None)
     monkeypatch.setattr(relevo, "_tocar", lambda url, conv: None)
@@ -348,33 +356,45 @@ def test_el_segundo_doctor_se_entera_de_quien_la_tiene(monkeypatch):
     assert tg.mensajes == [], "el segundo doctor escribió en un hilo que no es suyo"
 
 
-def test_un_numero_sin_ficha_estrena_tema_y_ficha_PENDIENTE(monkeypatch):
-    """El caso que decidía si el botón vale de algo: el paciente nuevo con dolor.
+def test_un_numero_sin_ficha_estrena_tema_y_NINGUNA_ficha(monkeypatch):
+    """El relevo abre hilo y NO abre ficha. Esta prueba afirmaba lo contrario hasta hoy.
 
-    `lectura.asegurar_tema` se niega a crear la ficha --con razón: un desconocido que manda
-    una foto no puede volverse paciente verificado por mandarla-- y ese mismo número es el
-    que más escala. Aquí lo autoriza un humano pulsando un botón, y el nombre va como
-    `PENDIENTE` y NUNCA como el del perfil de WhatsApp: la ficha dice «este número existe»,
-    no «esta persona se llama así».
+    ------------------------------------------------------------------------------------
+    Por qué se invirtió, el 16/09/2026
+    ------------------------------------------------------------------------------------
+
+    La ficha `PENDIENTE` existía por una razón que caducó: hasta la migración 014 el hilo de
+    Telegram colgaba de `pacientes.telegram_topic_id`, así que sin ficha no había dónde
+    guardarlo. La 014 lo movió al TELÉFONO (`temas_telegram`) y la ficha se quedó por
+    inercia -- el propio comentario del código decía ya que el id «no lo usa nadie».
+
+    Lo que sí hacía era daño, y se midió en producción con una paciente de prueba: el relevo
+    le dejó la ficha, el doctor cerró el hilo SIN agendar --así que nadie llegó a preguntarle
+    el nombre, que es lo único que pisa el marcador-- y cuando Daniela retomó, la paciente
+    había dejado de ser una desconocida. Dio su nombre, no coincidió con «PENDIENTE», gastó
+    los dos intentos y Daniela escaló en vez de agendar. Ni desconocida --que puede pedir su
+    primera cita-- ni verificada: el único hueco sin salida de los tres.
+
+    Y no rompe el camino del doctor que SÍ agenda: `nombrar_si_esta_pendiente` crea la ficha
+    ella misma si no hay ninguna. Lo fija
+    `test_el_nombre_del_cierre_crea_la_ficha_si_el_relevo_ya_no_la_dejo`.
     """
     monkeypatch.setattr(relevo, "_tema_de", lambda url, tel: None)
-    fichas: list[tuple[str, str]] = []
-
-    def _ficha(url, telefono):
-        fichas.append((url, telefono))
-        return 55
-
-    monkeypatch.setattr(relevo, "_ficha_para_el_relevo", _ficha)
+    # Si alguien vuelve a introducir la creación de la ficha, esto revienta la prueba en vez
+    # de dejarla pasar en verde: no es un doble que la tolera, es una trampa.
+    monkeypatch.setattr(
+        persistencia,
+        "asegurar_paciente",
+        lambda *a, **k: pytest.fail("el relevo volvió a abrir una ficha en blanco"),
+    )
     tg = TelegramFalso()
 
     _activar(tg)
 
-    assert fichas == [(URL, TEL)]
     assert tg.creados, "no se le abrió hilo al paciente nuevo"
     assert TEL in tg.creados[0]
     # Nace ya abierto: `createForumTopic` lo deja así, al revés que el que abre un archivo.
     assert tg.reabiertos == [], "se reabrió un tema recién creado"
-    assert relevo.NOMBRE_PENDIENTE == "PENDIENTE"
 
 
 def test_el_hilo_del_paciente_sin_archivo_se_guarda_DE_VERDAD(monkeypatch):
@@ -1765,9 +1785,41 @@ def test_al_paciente_SIN_nombre_se_le_pregunta_antes_de_nada(monkeypatch):
 
 
 def test_PENDIENTE_no_cuenta_como_nombre():
-    """Es el marcador que pone `_ficha_para_el_relevo` --«este numero existe»--, no un nombre.
-    Tratarlo como uno es lo que metia «PENDIENTE - Cordales» en la agenda."""
+    """El marcador sobrevive aunque el relevo ya no lo escriba: quedan fichas viejas con el,
+    y `_nombre_del_paciente` es lo que impide que «PENDIENTE - Cordales» llegue a la agenda.
+    """
     assert relevo.NOMBRE_PENDIENTE == "PENDIENTE"
+    assert relevo.NOMBRE_PENDIENTE == persistencia.NOMBRE_PENDIENTE, (
+        "el marcador vive en UN sitio; dos copias es como se separan"
+    )
+
+
+def test_el_nombre_del_cierre_crea_la_ficha_si_el_relevo_ya_no_la_dejo(monkeypatch):
+    """La otra mitad de quitar la ficha en blanco, y la razon por la que quitarla es seguro.
+
+    Quien registra el nombre no es ni fue nunca el relevo: es quien AGENDA. Si agenda
+    Daniela, `crear_cita` crea la ficha con el nombre que le dio el paciente; si agenda el
+    doctor, el cierre le pregunta el nombre y lo escribe aqui. Sin la ficha en blanco delante,
+    este camino tiene que CREARLA, no solo pisar un marcador.
+
+    Es lo que hace `nombrar_si_esta_pendiente` con su `INSERT ... ON CONFLICT`, y esta prueba
+    lo ejercita con la funcion real contra una conexion falsa: doblarla con un `lambda`
+    dejaria pasar en verde justo el dia que alguien la cambie por un `UPDATE`.
+    """
+    escrituras: list[tuple[str, tuple | None]] = []
+    monkeypatch.setattr(persistencia, "conectar", lambda url: ConexionFalsa(escrituras))
+
+    escribio = _NOMBRAR_REAL(URL, TEL, "Sora Patricia Delgado")
+
+    sql = " ".join(s for s, _ in escrituras)
+    assert "INSERT INTO pacientes" in sql, "no crearia la ficha del que no tenia ninguna"
+    assert "ON CONFLICT (telefono) DO UPDATE" in sql, "no pisaria un marcador ya existente"
+    parametros = [p for _, p in escrituras if p]
+    assert any("Sora Patricia Delgado" in p for p in parametros)
+    assert any(relevo.NOMBRE_PENDIENTE in p for p in parametros), (
+        "sin el marcador como condicion, pisaria el nombre de un paciente de verdad"
+    )
+    assert escribio is True
 
 
 def test_al_paciente_que_YA_tiene_nombre_no_se_le_pregunta(monkeypatch):
