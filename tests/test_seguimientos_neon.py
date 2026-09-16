@@ -15,6 +15,13 @@ pytestmark = pytest.mark.neon
 
 ESQUEMA = "pruebas_seguimientos"
 
+TEL = "573001112299"
+# Un número DISTINTO de `TEL`. El fixture `_limpio` ya borra `contactos` entre pruebas, así
+# que reusarlo no contaminaría nada; se mantiene separado porque el nombre dice qué se está
+# probando --un teléfono que NUNCA tuvo fila-- y eso se pierde si los dos casos comparten
+# número y solo los distingue el orden de las llamadas.
+TEL_SIN_CONTACTO = "573001112298"
+
 
 def _url_de_pruebas() -> str:
     """La URL de Neon, sin pooler y apuntada al esquema de pruebas de este archivo.
@@ -59,6 +66,37 @@ def esquema(url: str):
         with conn.cursor() as cur:
             cur.execute(f"DROP SCHEMA IF EXISTS {ESQUEMA} CASCADE")
         conn.commit()
+
+
+@pytest.fixture(autouse=True)
+def _limpio(esquema):
+    """Cada prueba arranca con la cola vacía. Mismo patrón que `test_contacto_neon.py`.
+
+    No es higiene: `seguimientos_por_despachar` trae `limite=50` por defecto, y sin limpiar,
+    este esquema acumula una fila vencida por prueba y por corrida. El día que pase de 50,
+    las dos pruebas que hacen `next(f for f in filas if ...)` empiezan a dar `StopIteration`
+    de forma intermitente --la fila que buscan se queda fuera de la página-- y nadie lo va a
+    atribuir a esto.
+
+    `contactos` se limpia también, y su bitácora antes por la FK: la baja que una prueba le
+    pone a un número se la encontraría puesta la siguiente. `conversaciones` no se borra
+    --media docena de tablas cuelgan de ella-- pero sus dos columnas de recordatorio sí se
+    blanquean, que es lo que lee `ultimo_recordatorio` por teléfono: sin eso, la prueba que
+    empieza afirmando `ultimo_recordatorio(...) is None` solo pasa mientras siga corriendo
+    antes que las que anotan.
+    """
+    with persistencia.conectar(esquema) as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM seguimientos")
+            cur.execute("DELETE FROM consentimientos")
+            cur.execute("DELETE FROM contactos")
+            cur.execute(
+                "UPDATE conversaciones"
+                "   SET ultimo_recordatorio_tipo = NULL, ultimo_recordatorio_en = NULL"
+                " WHERE ultimo_recordatorio_tipo IS NOT NULL"
+            )
+        conn.commit()
+    yield
 
 
 @pytest.fixture
@@ -302,3 +340,54 @@ def test_la_cola_trae_lo_que_el_despachador_necesita_para_decidir(conexion_prueb
         "telefono", "nombre_completo", "tratamiento", "cita_inicio", "cita_estado",
         "tomada_por",
     }
+
+
+def test_la_consulta_trae_la_baja_del_contacto(conexion_pruebas):
+    """La comprobación entra como una columna del SELECT que ya hace LEFT JOIN para sacar el
+    teléfono, y no como una consulta por fila: una tanda son hasta 50."""
+    id_conv = persistencia.asegurar_conversacion(
+        conexion_pruebas, telefono=TEL, paciente_id=None, canal="whatsapp"
+    )
+    ayer = datetime.now(ZONA_BOGOTA) - timedelta(days=1)
+    persistencia.insertar_seguimiento(
+        conexion_pruebas,
+        id_conversacion=id_conv,
+        tipo="reactivacion",
+        fecha_objetivo=ayer,
+        clave_idempotencia="baja-1",
+    )
+    persistencia.asegurar_contacto(conexion_pruebas, TEL)
+    persistencia.pedir_baja(conexion_pruebas, TEL)
+
+    filas = persistencia.seguimientos_por_despachar(
+        conexion_pruebas, ahora=datetime.now(ZONA_BOGOTA)
+    )
+    # Filtrado por `conversacion_id` y no `[0]`: este archivo no limpia `seguimientos` entre
+    # pruebas, así que la cola trae también lo que dejaron vivo las pruebas anteriores.
+    # `str(...)`: psycopg devuelve la columna UUID como `uuid.UUID`, e `id_conv` es un `str`.
+    fila = next(f for f in filas if str(f["conversacion_id"]) == id_conv)
+
+    assert fila["no_contactar"] is True
+
+
+def test_un_telefono_sin_fila_de_contacto_no_cuenta_como_baja(conexion_pruebas):
+    """El LEFT JOIN devuelve NULL, y NULL no es TRUE. El COALESCE lo hace explícito para que
+    nadie tenga que acordarse de esto al leer la guarda."""
+    id_conv = persistencia.asegurar_conversacion(
+        conexion_pruebas, telefono=TEL_SIN_CONTACTO, paciente_id=None, canal="whatsapp"
+    )
+    ayer = datetime.now(ZONA_BOGOTA) - timedelta(days=1)
+    persistencia.insertar_seguimiento(
+        conexion_pruebas,
+        id_conversacion=id_conv,
+        tipo="reactivacion",
+        fecha_objetivo=ayer,
+        clave_idempotencia="sin-contacto-1",
+    )
+
+    filas = persistencia.seguimientos_por_despachar(
+        conexion_pruebas, ahora=datetime.now(ZONA_BOGOTA)
+    )
+    fila = next(f for f in filas if str(f["conversacion_id"]) == id_conv)
+
+    assert fila["no_contactar"] is False

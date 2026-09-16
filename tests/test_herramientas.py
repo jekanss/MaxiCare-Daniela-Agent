@@ -25,6 +25,7 @@ import pytest
 from maxicare_daniela import contratos
 from maxicare_daniela import herramientas as h
 from maxicare_daniela import persistencia
+from maxicare_daniela import seguimientos
 from maxicare_daniela.calendario import Bloqueo, CalendarioDoble, Jornada, bloques_del_dia
 from maxicare_daniela.contratos import (
     ContextoDaniela,
@@ -2451,6 +2452,52 @@ def test_no_se_programa_un_seguimiento_hacia_atras():
     assert "ya pasó" in texto
 
 
+def test_con_la_baja_puesta_lo_comercial_NO_LLEGA_A_INSERTARSE(monkeypatch):
+    """La guarda va en el código, no solo en el prompt.
+
+    `seguimientos.decidir` ya anula esto con G0 al despachar, así que sin esta comprobación
+    tampoco saldría nada. Pero entonces lo único que impide escribir la fila es que el modelo
+    obedezca una instrucción, y en este proyecto lo demostrable lo escribe el código (no
+    negociables 2, 12, 22). Que `_con_base` reviente si alguien la llama es justamente lo que
+    prueba que no se llega a la base.
+    """
+    ctx = contexto(pidio_no_contacto=True)
+
+    async def base_prohibida(_ctx, trabajo):
+        raise AssertionError("no se puede tocar la base con la baja puesta")
+
+    monkeypatch.setattr(h, "_con_base", base_prohibida)
+
+    futuro = (ctx.ahora + timedelta(days=2)).isoformat()
+    texto = asyncio.run(h._programar_seguimiento(ctx, "reactivacion", futuro))
+
+    assert "no le escribieran más" in texto
+    assert "no se programó nada comercial" in texto
+
+
+def test_con_la_baja_puesta_el_recordatorio_de_una_cita_SI_se_programa(monkeypatch):
+    """La otra mitad, y la que importa: pedir que no te manden publicidad no es renunciar a
+    que te avisen de tu propia cita. Las dos van juntas porque el fallo que interesa es que
+    alguien las una (no negociable 25)."""
+    ctx = contexto(pidio_no_contacto=True)
+
+    async def base_falsa(_ctx, trabajo):
+        return (None, True)
+
+    monkeypatch.setattr(h, "_con_base", base_falsa)
+
+    futuro = (ctx.ahora + timedelta(days=2)).isoformat()
+    texto = asyncio.run(h._programar_seguimiento(ctx, "recordatorio_cita", futuro))
+
+    assert "programado" in texto
+
+
+def test_la_guarda_de_la_baja_usa_LA_MISMA_lista_blanca_que_el_despachador():
+    """Dos listas para el mismo hecho acaban divergiendo, y divergir aquí significa que la
+    tool programa lo que el despachador anula --o, peor, al revés--."""
+    assert "recordatorio_cita" in seguimientos.TIPOS_NO_COMERCIALES
+
+
 # ==========================================================================================
 # registrar_estado_oportunidad -- valida contra el vocabulario vivo, no contra el Literal
 # ==========================================================================================
@@ -2730,3 +2777,92 @@ def test_el_calendario_de_google_se_niega_a_existir_sin_credenciales():
 
     with pytest.raises(ErrorDeCalendario, match="MAXICARE_GOOGLE_SA_B64"):
         CalendarioGoogle("", "agenda@maxicare.example")
+
+
+# ==========================================================================================
+# La baja comercial y su revocación
+# ==========================================================================================
+
+
+def test_registrar_no_contactar_apaga_lo_comercial(monkeypatch):
+    """El modelo solo levanta la mano. La fecha, el origen y la versión las arma el código
+    desde `ctx`: si el modelo pudiera escribirlas, la bitácora dejaría de ser una prueba."""
+    anotado: list[tuple] = []
+
+    async def base_falsa(ctx, trabajo):
+        trabajo(BaseFalsa())
+
+    def pedir_baja(conn, telefono, *, origen="paciente", detalle=None):
+        anotado.append((telefono, origen, detalle))
+        return True
+
+    monkeypatch.setattr(h, "_con_base", base_falsa)
+    monkeypatch.setattr(h.persistencia, "pedir_baja", pedir_baja)
+
+    salida = asyncio.run(h._registrar_no_contactar(contexto(), "dijo que no le escriban"))
+
+    assert anotado == [("573001112233", "paciente", "dijo que no le escriban")]
+    # El texto que vuelve al modelo tiene que decirle las tres cosas: que quedó anotado, que
+    # no insista, y que la cita no se toca.
+    assert "no intentes retenerlo" in salida or "no le ofrezcas alternativas" in salida
+
+
+def test_revocar_no_contactar_la_levanta(monkeypatch):
+    anotado: list[tuple] = []
+
+    async def base_falsa(ctx, trabajo):
+        return trabajo(BaseFalsa())
+
+    def revocar_baja(conn, telefono, *, origen="paciente", detalle=None):
+        anotado.append((telefono, origen, detalle))
+        return True
+
+    monkeypatch.setattr(h, "_con_base", base_falsa)
+    monkeypatch.setattr(h.persistencia, "revocar_baja", revocar_baja)
+
+    salida = asyncio.run(h._revocar_no_contactar(contexto(), "pidio que le avisen"))
+
+    assert anotado == [("573001112233", "paciente", "pidio que le avisen")]
+    assert "vuelve a recibir mensajes" in salida
+
+
+def test_revocar_no_contactar_a_un_numero_que_nunca_se_dio_de_baja_no_confirma_un_cambio_falso(
+    monkeypatch,
+):
+    """No negociable 1: `revocar_baja` devuelve `False` cuando no había nada que levantar, y
+    la tool no puede decirle al paciente que "vuelve a recibir mensajes" si nunca los había
+    dejado de recibir -- confirmaría un cambio que no ocurrió."""
+
+    async def base_falsa(ctx, trabajo):
+        return trabajo(BaseFalsa())
+
+    def revocar_baja(conn, telefono, *, origen="paciente", detalle=None):
+        return False
+
+    monkeypatch.setattr(h, "_con_base", base_falsa)
+    monkeypatch.setattr(h.persistencia, "revocar_baja", revocar_baja)
+
+    salida = asyncio.run(h._revocar_no_contactar(contexto(), None))
+
+    assert "vuelve a recibir mensajes" not in salida
+
+
+def test_las_dos_tools_estan_registradas():
+    """Una tool que existe y no está en la lista es una tool que el modelo no puede llamar,
+    sin un solo error en ningún log."""
+    nombres = {t.name for t in h.TODAS}
+
+    assert "registrar_no_contactar" in nombres
+    assert "revocar_no_contactar" in nombres
+
+
+def test_el_modelo_solo_puede_escribir_la_nota_nunca_la_fecha_el_origen_o_la_version():
+    """La frontera no es documental, es estructural: sin esta prueba, añadir mañana un
+    parámetro `fecha` u `origen` a la tool PÚBLICA no rompería ninguna otra -- las tres
+    pruebas de arriba llaman al helper `_nombre` con guion bajo, no al `FunctionTool`
+    decorado que es lo único que el modelo puede tocar de verdad."""
+    por_nombre = {t.name: t for t in h.TODAS}
+
+    for nombre in ("registrar_no_contactar", "revocar_no_contactar"):
+        propiedades = set(por_nombre[nombre].params_json_schema["properties"])
+        assert propiedades == {"nota"}

@@ -25,12 +25,12 @@ import itertools
 import random
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 
 import httpx
 import pytest
 
-from maxicare_daniela import atencion, conversacion, ingesta, persistencia
+from maxicare_daniela import atencion, contratos, conversacion, ingesta, persistencia
 from maxicare_daniela.calendario import CalendarioCaido, CalendarioDoble, ErrorDeCalendario
 from maxicare_daniela.canales import ErrorDeCanal
 from maxicare_daniela.config import MARGEN_LECTURA_SEGUNDOS, Config
@@ -46,6 +46,11 @@ CONFIGURACION_OPERATIVA = {
     "cierre_relevo_minutos": 120,
     "telegram_topic_general": 7,
 }
+
+#: `contactos.creado_en`/`actualizado_en` son `TIMESTAMPTZ NOT NULL DEFAULT now()` (migración
+#: 019): la base nunca los devuelve en `None`. Un doble que sí lo hiciera certificaría en
+#: verde código que revienta contra una fila real -- lo que sí lee la Tarea 3.
+FECHA_CONTACTO = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
 
 
 # ==========================================================================================
@@ -77,6 +82,13 @@ def config_falso(**cambios) -> Config:
         secreto_sesion="",
         permitir_cookie_insegura=False,
         daniela_responde=True,
+        # Vacía a propósito, igual que las credenciales de Google y por la misma razón: el
+        # default de `Config` es la URL REAL de la política, así que heredarlo le pegaría el
+        # pie del aviso a la respuesta de todas las pruebas de este archivo -- que no van de
+        # eso-- y las volvería a romper el día que la URL cambie. Las tres que sí prueban el
+        # aviso la pasan explícitamente. Es la misma decisión que toma
+        # `scripts/probar_atencion.py`.
+        politica_datos_url="",
     )
     campos.update(cambios)
     return Config(**campos)
@@ -170,6 +182,7 @@ class BaseFalsa:
         nueva: str = "conv-nueva",
         recordatorio: tuple[str, datetime] | None = None,
         caso_revienta: Exception | None = None,
+        contacto: dict | Exception | None = None,
     ) -> None:
         self.viva = viva
         #: Lo que `_anotar_resultado` dejó en `casos_sin_resolver`, en orden. Cada elemento
@@ -183,6 +196,11 @@ class BaseFalsa:
         #: último mensaje que el despachador le mandó a este paciente, o `None`.
         self.recordatorio = recordatorio
         self.configuracion = CONFIGURACION_OPERATIVA if configuracion is None else configuracion
+        #: Lo que devuelve `persistencia.asegurar_contacto`: por defecto, un contacto recién
+        #: nacido -- contactable y sin el aviso mostrado, que es lo que produce la fila en
+        #: blanco de verdad. Una `Exception` simula el error de SQL que `_leer_estado`
+        #: tiene que degradar.
+        self.contacto = contacto
         self.nueva = nueva
         self.llamadas: list[tuple] = []
         #: Las conexiones que se abrieron, en orden. Sirven para comprobar el ruling 5 --que
@@ -225,6 +243,28 @@ class BaseFalsa:
             conn.comprobar()
             anotar("buscar_paciente_por_telefono", telefono)
             return self.paciente
+
+        def asegurar_contacto(conn, telefono):
+            conn.comprobar()
+            anotar("asegurar_contacto", telefono)
+            if isinstance(self.contacto, Exception):
+                # Un error de SQL de verdad aborta la transacción -- igual que
+                # `leer_configuracion` unas líneas abajo. Sin este `abortar()`, la prueba de
+                # la degradación pasaría por la razón equivocada.
+                conn.abortar()
+                raise self.contacto
+            if self.contacto is not None:
+                return dict(self.contacto)
+            return {
+                "telefono": telefono,
+                "creado_en": FECHA_CONTACTO,
+                "actualizado_en": FECHA_CONTACTO,
+                "aviso_mostrado_en": None,
+                "politica_version": None,
+                "no_contactar": False,
+                "no_contactar_en": None,
+                "no_contactar_origen": None,
+            }
 
         def asegurar_conversacion(conn, *, telefono, paciente_id=None, canal="whatsapp"):
             conn.comprobar()
@@ -290,6 +330,7 @@ class BaseFalsa:
         monkeypatch.setattr(
             persistencia, "buscar_paciente_por_telefono", buscar_paciente_por_telefono
         )
+        monkeypatch.setattr(persistencia, "asegurar_contacto", asegurar_contacto)
         monkeypatch.setattr(persistencia, "asegurar_conversacion", asegurar_conversacion)
         monkeypatch.setattr(persistencia, "leer_configuracion", leer_configuracion)
         monkeypatch.setattr(persistencia, "conversacion_tomada", conversacion_tomada)
@@ -2336,3 +2377,312 @@ def test_un_caso_que_revienta_no_le_quita_la_respuesta_a_nadie(monkeypatch):
     assert base.argumentos("tocar_conversacion") == ("conv-viva", 5), (
         "el turno se cuenta antes que el caso, así que un caso roto no se lo lleva"
     )
+
+
+# ==========================================================================================
+# El contacto y la señal de la baja
+# ==========================================================================================
+
+
+def test_el_estado_lleva_la_senal_de_la_baja():
+    """Sale de la base y nunca del modelo, igual que `telefono_sin_paciente`. Si el modelo
+    pudiera ponerla, bastaría con que dijera «no me escriban» para desactivar la
+    reactivación de otro."""
+    estado = atencion._Estado(
+        id_conversacion="c-1",
+        turno_actual=0,
+        identidad_verificada=False,
+        intentos_identificacion=0,
+        id_paciente=None,
+        nombre_paciente=None,
+        telefono_sin_paciente=True,
+        tomada_por=None,
+        pidio_no_contacto=True,
+    )
+
+    assert estado.pidio_no_contacto is True
+    assert estado.aviso_visto is False
+
+
+def test_el_estado_por_defecto_no_tiene_la_senal_de_la_baja():
+    """El default es contactable: la baja es algo que el paciente pide."""
+    estado = atencion._Estado(
+        id_conversacion="c-1",
+        turno_actual=0,
+        identidad_verificada=False,
+        intentos_identificacion=0,
+        id_paciente=None,
+        nombre_paciente=None,
+        telefono_sin_paciente=True,
+        tomada_por=None,
+    )
+
+    assert estado.pidio_no_contacto is False
+
+
+def test_el_contexto_recibe_la_senal_de_la_baja():
+    """El fallo que esto evita: doce días después de darse de baja, María escribe por una
+    muela rota. Para el sistema es una conversación nueva y en blanco, así que sin esta
+    señal Daniela cierra como cierra siempre --«¿te escribo en unos días?»-- y le pide
+    permiso para algo que ella ya negó expresamente."""
+    ctx = contratos.ContextoDaniela(
+        id_conversacion="c-1",
+        telefono_completo="573001112201",
+        database_url="postgres://nada",
+        calendario=None,
+        pidio_no_contacto=True,
+    )
+
+    assert ctx.pidio_no_contacto is True
+
+
+def test_el_contexto_por_defecto_no_tiene_baja():
+    ctx = contratos.ContextoDaniela(
+        id_conversacion="c-1",
+        telefono_completo="573001112201",
+        database_url="postgres://nada",
+        calendario=None,
+    )
+
+    assert ctx.pidio_no_contacto is False
+
+
+def test_un_no_contactar_de_la_fila_de_verdad_llega_hasta_el_contexto(monkeypatch):
+    """Extremo a extremo, con `_leer_estado` corriendo de verdad -- no un dataclass montado
+    a mano. Las pruebas de arriba comprueban que `_Estado` y `ContextoDaniela` ACEPTAN el
+    campo; ninguna comprueba que `_leer_estado` lo LEA de `contactos` ni que `atender` lo
+    COPIE al contexto. Pasarían en verde con `_leer_estado` sin tocar y con `atender` sin
+    pasar la señal -- exactamente lo que esta prueba existe para no dejar pasar."""
+    _, turnos = preparar(
+        monkeypatch,
+        base=BaseFalsa(
+            contacto={
+                "telefono": TELEFONO,
+                "creado_en": FECHA_CONTACTO,
+                "actualizado_en": FECHA_CONTACTO,
+                "aviso_mostrado_en": None,
+                "politica_version": None,
+                "no_contactar": True,
+                "no_contactar_en": FECHA_CONTACTO,
+                "no_contactar_origen": "paciente",
+            }
+        ),
+    )
+
+    atender(mensaje_texto())
+
+    assert turnos.ctx.pidio_no_contacto is True
+
+
+def test_si_asegurar_contacto_revienta_el_turno_responde_igual_y_calla_lo_comercial(
+    monkeypatch,
+):
+    """`asegurar_contacto` es una escritura nueva y no esencial para el turno: nadie
+    consume `pidio_no_contacto` todavía. Dejar que su excepción tumbe `_leer_estado` entero
+    cambiaría un turno clínico completo -- Daniela sin contestar -- por una señal de
+    consentimiento que hoy no hace nada, justo el empate que el principio del proyecto
+    decide a favor de lo clínico.
+
+    Se degrada hacia el lado seguro con `pidio_no_contacto=True`: no ofrecer nada comercial
+    nunca es un daño. Y, como `leer_configuracion`, tiene que dejar la transacción limpia
+    para las lecturas que siguen dentro del mismo `with`.
+    """
+    base, turnos = preparar(
+        monkeypatch,
+        base=BaseFalsa(contacto=RuntimeError("statement timeout")),
+    )
+    whatsapp = WhatsAppFalso()
+
+    resultado = atender(mensaje_texto(), whatsapp=whatsapp)
+
+    assert resultado.respondido is True
+    assert whatsapp.textos and whatsapp.textos[0] != conversacion.MENSAJE_SEGURO, (
+        "cayó al camino de «sin base»: la lectura entera se fue al suelo"
+    )
+    assert base.conexiones[0].rollbacks == 1, "la transacción quedó abortada y nadie la limpió"
+    assert "conversacion_tomada" in base.nombres
+    assert "ligar_mensaje_a_conversacion" in base.nombres
+    assert turnos.ctx.pidio_no_contacto is True
+
+
+def test_si_asegurar_contacto_revienta_tambien_se_degrada_a_aviso_no_visto(monkeypatch):
+    """El otro lado de la misma degradación, a nivel de `_Estado` -- `ContextoDaniela` no
+    lleva `aviso_visto` todavía (Tarea 3), así que esto no se puede ver desde `ctx`. Volver
+    a enseñar un aviso ya visto es inocuo: por eso el lado seguro aquí es `False`, no `True`.
+    """
+    base = BaseFalsa(contacto=RuntimeError("statement timeout")).instalar(monkeypatch)
+
+    estado = atencion._leer_estado("postgres://nada", TELEFONO, [])
+
+    assert estado.pidio_no_contacto is True
+    assert estado.aviso_visto is False
+    assert base.conexiones[0].rollbacks == 1
+
+
+# ==========================================================================================
+# El aviso de la política
+# ==========================================================================================
+
+
+def _estado(**cambios) -> atencion._Estado:
+    """Un `_Estado` con los mismos valores mínimos que ya usan las pruebas de la Tarea 2."""
+    campos = dict(
+        id_conversacion="c-1",
+        turno_actual=0,
+        identidad_verificada=False,
+        intentos_identificacion=0,
+        id_paciente=None,
+        nombre_paciente=None,
+        telefono_sin_paciente=True,
+        tomada_por=None,
+    )
+    campos.update(cambios)
+    return atencion._Estado(**campos)
+
+
+def test_sin_url_no_se_aniade_el_aviso():
+    """El default es PENDIENTE, y con él el mensaje sale limpio. Mandarle el marcador a un
+    paciente sería leerse la regla dura 3 al revés."""
+    assert atencion._con_aviso("Hola, con gusto te cuento.", url="PENDIENTE") == (
+        "Hola, con gusto te cuento."
+    )
+    assert atencion._con_aviso("Hola.", url="") == "Hola."
+
+
+def test_con_url_el_aviso_va_al_final_y_separado():
+    """Es un pie, no una interrupción: la respuesta del paciente va primero."""
+    salida = atencion._con_aviso("Hola.", url="https://maxicarecol.com/politica-datos")
+
+    assert salida.startswith("Hola.")
+    assert salida.endswith(
+        "Al continuar aceptas nuestra política de tratamiento de datos: "
+        "https://maxicarecol.com/politica-datos"
+    )
+
+
+def test_el_texto_del_aviso_no_se_reescribe_en_cada_sitio():
+    """Una sola constante. Si cada sitio lo redactara, dos pacientes tendrían dos avisos
+    distintos y ninguno sería el que dice la bitácora que vieron."""
+    assert "{url}" in atencion.AVISO_POLITICA
+
+
+def test_a_quien_ya_lo_vio_no_se_le_repite():
+    """Sale UNA vez en la vida de ese número, no una por conversación. El dato viene de
+    `contactos`, que no caduca a las 24 h: si viniera de la conversación, el paciente vería
+    el aviso legal cada día que escribiera."""
+    url = "https://maxicarecol.com/politica-datos"
+
+    assert atencion._toca_avisar(_estado(aviso_visto=False), url=url) is True
+    assert atencion._toca_avisar(_estado(aviso_visto=True), url=url) is False
+
+
+def test_con_la_url_pendiente_no_toca_avisar_a_nadie():
+    assert atencion._toca_avisar(_estado(aviso_visto=False), url="PENDIENTE") is False
+    assert atencion._toca_avisar(_estado(aviso_visto=False), url="") is False
+
+
+def test_si_el_envio_falla_el_aviso_NO_queda_marcado(monkeypatch):
+    """Al revés que un recordatorio (no negociable 21), y deliberadamente. Marcar antes
+    significaría que un timeout de red deja constancia de un aviso que el paciente nunca
+    vio -- y esa constancia es precisamente la prueba. Repetir un aviso es inocuo;
+    falsificar una prueba, no."""
+    preparar(monkeypatch)
+    marcados: list[tuple] = []
+    monkeypatch.setattr(atencion, "_marcar_aviso", lambda *args: marcados.append(args))
+    whatsapp = WhatsAppFalso(falla_con=RuntimeError("timeout"))
+
+    resultado = atender(
+        mensaje_texto(),
+        whatsapp=whatsapp,
+        config=config_falso(
+            politica_datos_url="https://maxicarecol.com/politica-datos",
+            politica_datos_version="politica-2026-09",
+        ),
+    )
+
+    assert resultado.respondido is False
+    assert marcados == [], "un envío que reventó no puede dejar constancia de un aviso mostrado"
+
+
+def test_si_el_envio_tiene_exito_el_aviso_SI_queda_marcado(monkeypatch):
+    """El control positivo de la prueba anterior: si `_marcar_aviso` dejara de llamarse del
+    todo, la prueba de arriba pasaría igual sin que el mecanismo existiera. Esta es la que
+    lo descarta."""
+    preparar(monkeypatch)
+    marcados: list[tuple] = []
+    monkeypatch.setattr(atencion, "_marcar_aviso", lambda *args: marcados.append(args))
+    whatsapp = WhatsAppFalso()
+
+    resultado = atender(
+        mensaje_texto(),
+        whatsapp=whatsapp,
+        config=config_falso(
+            politica_datos_url="https://maxicarecol.com/politica-datos",
+            politica_datos_version="politica-2026-09",
+        ),
+    )
+
+    assert resultado.respondido is True
+    assert marcados == [
+        ("postgresql://no-se-usa/na", TELEFONO, "politica-2026-09"),
+    ]
+    assert whatsapp.textos[0].endswith(
+        "Al continuar aceptas nuestra política de tratamiento de datos: "
+        "https://maxicarecol.com/politica-datos"
+    )
+
+
+def test_a_quien_ya_lo_vio_no_se_le_repite_de_extremo_a_extremo(monkeypatch):
+    """El turno completo, con `_leer_estado` corriendo de verdad sobre un contacto que YA vio
+    el aviso: sale limpio y `_marcar_aviso` no se llama otra vez. Las pruebas de arriba
+    comprueban el mecanismo con un `_Estado` montado a mano o con el contacto por defecto de
+    `BaseFalsa` (recién nacido); esta es la que comprueba que `aviso_mostrado_en` puesto de
+    verdad en la fila de `contactos` llega hasta aquí y apaga el pie -- exactamente el mismo
+    hueco que `test_un_no_contactar_de_la_fila_de_verdad_llega_hasta_el_contexto` cierra para
+    la baja."""
+    preparar(
+        monkeypatch,
+        base=BaseFalsa(
+            contacto={
+                "telefono": TELEFONO,
+                "creado_en": FECHA_CONTACTO,
+                "actualizado_en": FECHA_CONTACTO,
+                "aviso_mostrado_en": FECHA_CONTACTO,
+                "politica_version": "politica-2026-09",
+                "no_contactar": False,
+                "no_contactar_en": None,
+                "no_contactar_origen": None,
+            }
+        ),
+    )
+    marcados: list[tuple] = []
+    monkeypatch.setattr(atencion, "_marcar_aviso", lambda *args: marcados.append(args))
+    whatsapp = WhatsAppFalso()
+
+    resultado = atender(
+        mensaje_texto(),
+        whatsapp=whatsapp,
+        config=config_falso(
+            politica_datos_url="https://maxicarecol.com/politica-datos",
+            politica_datos_version="politica-2026-09",
+        ),
+    )
+
+    assert resultado.respondido is True
+    assert whatsapp.textos == ["Claro que sí, con mucho gusto."], (
+        "un contacto que ya vio el aviso recibe el texto tal cual, sin el pie"
+    )
+    assert marcados == [], "el aviso ya mostrado no se vuelve a marcar"
+
+
+def test_una_respuesta_que_raya_el_limite_sale_sin_aviso_y_entera():
+    """Perder el aviso de un mensaje gigantesco es inocuo -- no se marcó, y vuelve a salir en
+    el siguiente turno --; perder el mensaje ENTERO porque el pie lo empujó sobre el tope de
+    WhatsApp no lo es, y menos en el primer contacto de ese número."""
+    url = "https://maxicarecol.com/politica-datos"
+    pie = f"\n\n{atencion.AVISO_POLITICA.format(url=url)}"
+    respuesta = "x" * (atencion.LIMITE_TEXTO_WHATSAPP - len(pie) + 1)
+
+    salida = atencion._con_aviso(respuesta, url=url)
+
+    assert salida == respuesta, "se quedó igual de larga: no le cortó nada, tampoco pegó el pie"

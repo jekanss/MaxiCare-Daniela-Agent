@@ -41,7 +41,7 @@ Entregables por fase. **Los marcados gastan tokens**; los demás, ni uno:
 
 | Comando | Qué prueba | ¿Gasta? |
 |---|---|---|
-| `scripts/probar_tools.py` | las diez tools contra Neon (fase 3) | no |
+| `scripts/probar_tools.py` | las doce tools contra Neon (fase 3) | no |
 | `scripts/probar_agentes.py` | los dos agentes contra la API real (fase 4) | **sí** |
 | `scripts/probar_web.py` | el cascarón web (fase 5) | solo con `--chat` |
 | `scripts/probar_atencion.py` | el turno de WhatsApp de punta a punta (fase 6A) | solo con `--chat` |
@@ -166,6 +166,28 @@ una —qué se midió, qué costó— está en la regla que cubre ese archivo.
    `ctx.entrada_solo_de_botones` sale del `type` del webhook y **nunca del modelo**, y exige
    TODOS los mensajes del grupo, no alguno: con uno bastando, el botón es el portillo por donde
    entra texto libre sin evaluar.
+24. **El aviso de la política se MARCA DESPUÉS del envío, justo al revés que la 21, y es
+   deliberado.** En un recordatorio el riesgo es mandarlo dos veces, así que se marca antes;
+   en el aviso el riesgo es dejar constancia de uno que nunca salió, y esa constancia ES la
+   prueba legal. Repetir un aviso es inocuo; falsificar una prueba, no. Sale **una sola vez
+   en la vida del número** —el dato vive en `contactos`, que no caduca a las 24 h— y el
+   literal `PENDIENTE` lo apaga entero: mientras lo esté, la frase de avisarlo vive en el
+   prompt, **condicionada a ese `PENDIENTE`**, o el sistema no informa de la política ni una
+   vez. **Desde el 16/09/2026 hay URL y vive en `config.py`, no en el `.env`** —es pública, y
+   el día que cambie tiene que quedar en `git log`; un despliegue que olvide una variable no
+   puede significar dejar de informar—, así que manda el código y la frase del prompt
+   desapareció sola. La `politica_version` de cada fila **tiene que tener su PDF congelado con
+   su SHA-256 en `docs/politica/`**: un consentimiento que no se puede contrastar con un
+   documento no acredita nada, y el destino es Drive, donde una versión nueva se sube sobre el
+   mismo enlace.
+25. **`/clearstate` resetea el aviso y NUNCA la baja, y la fila de `contactos` no se borra
+   jamás.** Ese «no» es del paciente, no del sistema: si la fila se fuera, resetear a alguien
+   lo devolvería a la lista de contactables sin que nadie se entere. Mismo precedente que los
+   ejemplos de casos sin resolver (22). La bitácora `consentimientos` no se toca en ningún
+   caso y el `ON DELETE RESTRICT` lo hace imposible aunque alguien lo intente. Y la baja es
+   **comercial**: no apaga el recordatorio de una cita, y eso lo sostienen la lista blanca
+   `TIPOS_NO_COMERCIALES` en G0 **y** la misma guarda dentro de `programar_seguimiento`, que
+   es lo que impide que dependa de que el modelo obedezca.
 
 # Dónde está el resto
 

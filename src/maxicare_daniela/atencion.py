@@ -96,6 +96,57 @@ log = logging.getLogger("maxicare.atencion")
 #: después no es la continuación de nada: es una conversación nueva.
 VENTANA_CONVERSACION_HORAS = 24
 
+#: El aviso de la política, en un solo sitio y con un solo texto. Lo pega el CÓDIGO al primer
+#: mensaje saliente de un número que nunca lo ha visto, y no Daniela: una frase en el prompt
+#: sirve para que lo diga, pero no sirve como prueba -- nadie sabría si lo dijo, con qué
+#: palabras, ni si un día el modelo decidió resumirlo. Mismo principio que las claves de
+#: idempotencia (no negociable 2) y la huella de los casos sin resolver (no negociable 22):
+#: lo que tiene que ser demostrable lo escribe el código.
+AVISO_POLITICA = "Al continuar aceptas nuestra política de tratamiento de datos: {url}"
+
+#: El tope de un mensaje de texto de WhatsApp (Meta). No hay una constante de esto en el
+#: resto del repo porque hasta ahora nada armaba un texto lo bastante largo como para
+#: acercarse: `mensaje_al_paciente` no tiene tope propio (`contratos.py`) y
+#: `canales.enviar_texto` no trunca, así que pegarle el pie a una respuesta que ya lo rozara
+#: haría fallar el envío ENTERO -- justo en el primer contacto de ese número, el peor momento
+#: posible para dejarlo mudo.
+LIMITE_TEXTO_WHATSAPP = 4096
+
+
+def _con_aviso(respuesta: str, *, url: str) -> str:
+    """La respuesta con el aviso pegado al final, o tal cual si no hay URL que enseñar.
+
+    Va como línea aparte y al final: es un pie, no una interrupción. Lo que el paciente
+    preguntó se responde primero.
+
+    Con `url` vacía o en `PENDIENTE` devuelve la respuesta intacta. La regla dura 3 es para
+    el código: nunca fue permiso para mandarle el marcador a un paciente.
+
+    Y si pegar el pie hace que el conjunto rebase `LIMITE_TEXTO_WHATSAPP`, también devuelve
+    la respuesta intacta: perder el aviso de un mensaje así es inocuo -- no se marca, y vuelve
+    a salir en el siguiente turno --; perder el mensaje entero por culpa del pie no lo es.
+    """
+    if not url or url == "PENDIENTE":
+        return respuesta
+    pie = f"\n\n{AVISO_POLITICA.format(url=url)}"
+    if len(respuesta) + len(pie) > LIMITE_TEXTO_WHATSAPP:
+        return respuesta
+    return respuesta + pie
+
+
+def _toca_avisar(estado: _Estado, *, url: str) -> bool:
+    """Si a este número hay que enseñarle el aviso en este mensaje.
+
+    Es una función y no un `if` suelto porque las dos condiciones son la política entera:
+    sale UNA vez en la vida del número --el dato viene de `contactos`, que no caduca a las
+    24 h, así que un paciente que escribe cada día no ve el aviso legal cada día-- y no sale
+    en absoluto mientras no haya una URL que enseñar.
+    """
+    if not url or url == "PENDIENTE":
+        return False
+    return not estado.aviso_visto
+
+
 # ==========================================================================================
 # Estado del módulo -- SOLO vale con un worker
 # ==========================================================================================
@@ -248,6 +299,14 @@ class _Estado:
     #: `None` si la tabla `configuracion` no respondió. No es lo mismo que un diccionario
     #: vacío: quien lo recibe tiene que poder distinguir «no se pudo leer» de «está vacía».
     operativa: dict[str, int] | None = field(default=None)
+    #: Este número pidió que no le escribieran más. Sale de `contactos` --tabla propia por
+    #: teléfono, migración 019-- y nunca del modelo: si lo pusiera él, bastaría con que un
+    #: paciente dijera «no me escriban» en una frase ambigua para apagarle la reactivación a
+    #: otro. Con esto puesto, Daniela no ofrece el seguimiento ni lo menciona.
+    pidio_no_contacto: bool = field(default=False)
+    #: Este número ya vio el aviso de la política. Se lee aquí, en la misma pasada, y lo
+    #: consume el pegado del aviso antes del envío.
+    aviso_visto: bool = field(default=False)
 
 
 # ==========================================================================================
@@ -259,16 +318,57 @@ def _leer_estado(database_url: str, telefono: str, wamids: list[str]) -> _Estado
     """Las siete lecturas del turno en una sola conexión, que se cierra al volver.
 
     Cerrarla antes de llamar al modelo no es higiene: es el ruling 5 de la revisión de la
-    tarea 1. Ninguna de estas funciones hace `commit()` tras su SELECT, así que una conexión
-    sostenida durante `Runner.run` dejaría la sesión `idle in transaction` los ocho o diez
-    segundos que tarda un turno, reteniendo el snapshot y una conexión del pooler de Neon por
-    cada paciente que esté escribiendo a la vez.
+    tarea 1. `conectar` abre con `autocommit=False`, así que una conexión sostenida durante
+    `Runner.run` dejaría la sesión `idle in transaction` los ocho o diez segundos que tarda
+    un turno, reteniendo el snapshot y una conexión del pooler de Neon por cada paciente que
+    esté escribiendo a la vez.
+
+    La única de estas llamadas que escribe --y que por tanto comitea-- es
+    `asegurar_contacto`, que inserta la fila del número si no estaba. Es inocuo para lo de
+    arriba y para las lecturas que la siguen: ese `commit()` cierra la transacción abierta y
+    la siguiente consulta abre otra, así que lo que se lee después sigue siendo un snapshot
+    consistente de sí mismo; lo que no puede pasar --sostener una transacción durante la
+    llamada al modelo-- lo impide el `with`, que cierra la conexión antes de volver.
     """
     with persistencia.conectar(database_url) as conn:
         viva = persistencia.conversacion_viva(
             conn, telefono, ventana_horas=VENTANA_CONVERSACION_HORAS
         )
         paciente = persistencia.buscar_paciente_por_telefono(conn, telefono)
+
+        # La fila nace aquí, con el primer mensaje que entra, y no cuando alguien agenda: los
+        # que preguntan y no agendan son justo los que hay que poder recordar. `asegurar_`
+        # porque puede existir desde hace meses; es idempotente.
+        try:
+            contacto = persistencia.asegurar_contacto(conn, telefono)
+            pidio_no_contacto = bool(contacto["no_contactar"])
+            aviso_visto = contacto["aviso_mostrado_en"] is not None
+        except Exception:  # noqa: BLE001 -- degradar hacia el lado seguro, nunca tumbar el turno
+            # El mismo mecanismo de `leer_configuracion`, un poco más abajo: `conectar` abre
+            # con `autocommit=False`, así que un `statement_timeout` o un esquema a medio
+            # migrar aquí deja la transacción ABORTADA y las lecturas que siguen dentro de
+            # este mismo `with` --paciente, conversación, configuración-- revientan en
+            # cadena con `InFailedSqlTransaction` si nadie hace `rollback()`.
+            #
+            # A diferencia de `leer_configuracion`, esta es una ESCRITURA nueva que no es
+            # esencial para el turno: hoy nadie consume `pidio_no_contacto` ni `aviso_visto`
+            # más allá de guardarlos en el contexto -- la Tarea 3 es quien los usa de
+            # verdad. Dejar que la excepción se propague cambiaría un turno clínico entero
+            # (Daniela sin contestar, `MENSAJE_SEGURO` de emergencia) por una señal de
+            # consentimiento que todavía no hace nada: exactamente el empate que decide el
+            # principio del proyecto, a favor de lo clínico y nunca de lo comercial.
+            #
+            # Se degrada hacia el lado seguro en las DOS direcciones: `pidio_no_contacto=True`
+            # porque no ofrecer nada comercial nunca es un daño, y `aviso_visto=False` porque
+            # volver a enseñar un aviso ya visto es inocuo. Y no dura más que este mensaje:
+            # `asegurar_contacto` es idempotente, así que la fila nace sola en el turno
+            # siguiente en cuanto la base vuelva a responder.
+            conn.rollback()
+            log.warning(
+                "no se pudo asegurar el contacto de %s; se degrada a no-contactar", telefono
+            )
+            pidio_no_contacto = True
+            aviso_visto = False
 
         if viva is None:
             id_conversacion = persistencia.asegurar_conversacion(
@@ -338,7 +438,15 @@ def _leer_estado(database_url: str, telefono: str, wamids: list[str]) -> _Estado
         ultimo_recordatorio_tipo=recordatorio[0] if recordatorio else None,
         ultimo_recordatorio_en=recordatorio[1] if recordatorio else None,
         operativa=operativa,
+        pidio_no_contacto=pidio_no_contacto,
+        aviso_visto=aviso_visto,
     )
+
+
+def _marcar_aviso(database_url: str, telefono: str, version: str) -> None:
+    """Sincrónica, y siempre dentro de `asyncio.to_thread`, como el resto del módulo."""
+    with persistencia.conectar(database_url) as conn:
+        persistencia.marcar_aviso_mostrado(conn, telefono, version=version)
 
 
 def _anotar_resultado(
@@ -1040,6 +1148,11 @@ async def atender(
             identidad_verificada=estado.identidad_verificada,
             intentos_identificacion=estado.intentos_identificacion,
             telefono_sin_paciente=estado.telefono_sin_paciente,
+            pidio_no_contacto=estado.pidio_no_contacto,
+            # No la usa ninguna tool: la lee `agentes.instrucciones_daniela` para saber si
+            # el aviso del código está apagado (`PENDIENTE`) y, en ese caso, devolverle a
+            # Daniela la frase de avisarlo con sus palabras. Con URL, manda el código.
+            politica_datos_url=config.politica_datos_url,
             turno_actual=estado.turno_actual,
             tomada_por=estado.tomada_por,
             # El tema propio de la conversación llega con el relevo (6C). Hasta entonces todo
@@ -1125,8 +1238,35 @@ async def atender(
         espera = max(0.0, objetivo - (time.monotonic() - momento_inicio))
         await (dormir or asyncio.sleep)(espera)
 
+        # El aviso va pegado al primer saliente de un número que nunca lo ha visto. Se decide
+        # aquí, con el texto ya cerrado, para que valga igual si la respuesta salió del modelo
+        # o si es el mensaje seguro: a alguien que entra por primera vez y se encuentra un
+        # fallo también se le está atendiendo.
+        toca_avisar = _toca_avisar(estado, url=config.politica_datos_url)
+        if toca_avisar:
+            respuesta = _con_aviso(respuesta, url=config.politica_datos_url)
+
         try:
             wamid_respuesta = await whatsapp.enviar_texto(mensaje.telefono, respuesta)
+
+            if toca_avisar:
+                # DESPUÉS del envío, nunca antes. Es al revés que un recordatorio (no
+                # negociable 21) y es deliberado: allí el riesgo es mandarlo dos veces, así
+                # que se marca antes; aquí el riesgo es dar por mostrado un aviso que no
+                # salió, y esa constancia es precisamente la prueba. Repetir un aviso es
+                # inocuo; falsificar una prueba, no.
+                #
+                # Si esto falla, el turno sigue: el paciente ya tiene su respuesta y el aviso
+                # se le volverá a enseñar en el siguiente mensaje.
+                try:
+                    await asyncio.to_thread(
+                        _marcar_aviso,
+                        config.database_url,
+                        mensaje.telefono,
+                        config.politica_datos_version,
+                    )
+                except Exception:  # noqa: BLE001
+                    log.exception("no se pudo registrar el aviso de %s", mensaje.telefono)
         except Exception as e:  # noqa: BLE001 -- ver abajo
             # `ErrorDeCanal` NO basta, y esto está comprobado: `canales.enviar_texto` hace el
             # POST sin envolver los errores de httpx, así que un `ReadTimeout` o un

@@ -12,6 +12,7 @@ El resultado fue que Daniela contestaba a todos el mensaje seguro mientras `/sal
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 from openai import OpenAI
 
@@ -76,3 +77,54 @@ def test_el_cliente_de_openai_queda_apuntando_a_openai(monkeypatch):
 
     config.descartar_vacias_de_terceros()
     assert str(OpenAI().base_url) == "https://api.openai.com/v1/"
+
+
+def test_la_politica_sale_del_codigo_y_no_del_entorno(monkeypatch):
+    """Sin variables, la URL y la versión son las del código, no `PENDIENTE`.
+
+    Hasta el 16/09/2026 el default era el literal `PENDIENTE`, que apagaba el aviso, porque no
+    había URL que enseñar. Ahora la hay, y vive en `config.py` en vez de en el `.env` del VPS:
+    es pública, y el día que cambie tiene que quedar en `git log`. Un despliegue que olvide una
+    variable no puede significar dejar de informar sobre el tratamiento de datos.
+
+    La versión se afirma contra el nombre del archivo congelado de `docs/politica/`: si alguien
+    la cambia sin dejar ahí el PDF de esa versión, las filas de `consentimientos` apuntan a un
+    documento que no existe.
+    """
+    monkeypatch.setenv("MAXICARE_DATABASE_URL", "postgres://nada")
+    monkeypatch.delenv("MAXICARE_POLITICA_DATOS_URL", raising=False)
+    monkeypatch.delenv("MAXICARE_POLITICA_DATOS_VERSION", raising=False)
+
+    c = config.Config.desde_entorno()
+
+    assert c.politica_datos_url.startswith("https://")
+    assert c.politica_datos_url == config.POLITICA_DATOS_URL
+    assert c.politica_datos_version == "politica-v2.0-2026-09"
+
+    congelada = (
+        Path(__file__).resolve().parent.parent
+        / "docs"
+        / "politica"
+        / f"{c.politica_datos_version}.pdf"
+    )
+    assert congelada.is_file(), (
+        f"falta la copia congelada {congelada.name}: sin ella, un consentimiento registrado "
+        "con esta versión no se puede acreditar contra ningún documento"
+    )
+
+
+def test_una_variable_vacia_no_apaga_el_aviso(monkeypatch):
+    """Un `.env` copiado de `.env.ejemplo` trae las dos claves presentes y sin valor.
+
+    Si eso llegara como cadena vacía, `_con_aviso` devolvería la respuesta intacta y el
+    sistema dejaría de informar en producción sin un solo error en ningún log. Es la trampa
+    que ya costó un incidente con una clave de API vacía.
+    """
+    monkeypatch.setenv("MAXICARE_DATABASE_URL", "postgres://nada")
+    monkeypatch.setenv("MAXICARE_POLITICA_DATOS_URL", "")
+    monkeypatch.setenv("MAXICARE_POLITICA_DATOS_VERSION", "   ")
+
+    c = config.Config.desde_entorno()
+
+    assert c.politica_datos_url == config.POLITICA_DATOS_URL
+    assert c.politica_datos_version == config.POLITICA_DATOS_VERSION

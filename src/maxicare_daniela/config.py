@@ -52,6 +52,21 @@ LIMITE_TURNOS = 15
 #: En True, el contenido clínico quedaría en los traces, que se exportan fuera.
 TRACE_INCLUDE_SENSITIVE_DATA = False
 
+#: El canal al que Daniela manda las solicitudes de privacidad --borrado, revocación, queja,
+#: habeas data--. La Ley 2300 exige que exista uno y que sea ágil.
+#:
+#: El teléfono vive AQUÍ y no dentro del prompt porque hay dos sitios que tienen que decir
+#: exactamente el mismo número: `agentes.INSTRUCCIONES_DANIELA`, que manda a darlo, y
+#: `guardrails`, que borra sus dígitos del mensaje antes de contar cifras para que
+#: `sin_cifra_no_documentada` no dispare sobre el propio canal de baja. El día que la clínica
+#: cambie de número, cambiar solo el prompt devuelve un tripwire intermitente --mensaje
+#: seguro al paciente y alerta falsa al doctor, a veces sí y a veces no--, que es el mismo
+#: síntoma que ya costó una investigación con el rótulo «Confirmar» (no negociable 23).
+#: `tests/test_agentes.py::test_el_telefono_de_privacidad_del_prompt_es_el_que_perdona_el_guardrail`
+#: ata los dos.
+TELEFONO_PRIVACIDAD = "+57 321 981 2422"
+CORREO_PRIVACIDAD = "maxicarecol@gmail.com"
+
 def version_de_prompt(texto: str) -> str:
     """Un identificador corto y estable del texto de un prompt, para el `trace_metadata`.
 
@@ -313,6 +328,14 @@ MODELO_LECTOR = "gpt-5.6-sol"
 #: Una pregunta cerrada por llamada. Pagar el tier de Daniela aquí sería 10× por lo mismo.
 MODELO_EVALUADOR = "gpt-5.6-luna"
 
+#: La política de tratamiento de datos, en constantes de módulo y no solo en los defaults del
+#: dataclass, por la misma razón que los modelos: son el valor que `desde_entorno` usa cuando
+#: la variable no está, y repetir el literal en los dos sitios es dejar que se separen.
+POLITICA_DATOS_URL = "https://drive.google.com/file/d/1IB_XYUfc6Dqd51zBeURemfAVQMVnTy28/view"
+
+#: La copia congelada de esta versión, con su SHA-256, está en `docs/politica/`.
+POLITICA_DATOS_VERSION = "politica-v2.0-2026-09"
+
 
 @dataclass(frozen=True)
 class Config:
@@ -409,6 +432,34 @@ class Config:
     #: `es` es el default más probable y por eso mismo no es una comprobación.
     plantilla_recordatorio_idioma: str = "es"
 
+    #: La dirección donde vive la política de tratamiento de datos que el paciente ve en su
+    #: primer mensaje. El literal `PENDIENTE` APAGA el aviso: sale el mensaje limpio y no se
+    #: registra nada. Dejó de ser el default el 16/09/2026.
+    #:
+    #: Va aquí y no solo en el `.env` a propósito, y es la única URL del proyecto que lo hace:
+    #: no es un secreto --es un documento público-- y sí es algo que hay que poder acreditar.
+    #: En el código, el día que cambió queda en `git log`; en una variable del VPS no queda en
+    #: ninguna parte, y además se puede olvidar en un despliegue, que aquí significa dejar de
+    #: informar sin que nada falle. El `.env` sigue pudiendo pisarla (las pruebas y
+    #: `scripts/probar_atencion.py` la blanquean).
+    #:
+    #: El destino es Drive, decidido por el cliente. El riesgo conocido es que Drive deja
+    #: subir una versión nueva sobre el mismo archivo sin que el enlace cambie, y entonces
+    #: quien ya aceptó apunta a un texto que no vio. La contramedida es la copia congelada con
+    #: su SHA-256 en `docs/politica/`, que es lo que hace verificable el `politica_version` de
+    #: cada fila de `consentimientos`. Lo correcto sigue siendo servirlo desde el dominio de
+    #: MaxiCare; esto es lo que hay hasta entonces.
+    politica_datos_url: str = POLITICA_DATOS_URL
+
+    #: El identificador de la versión vigente de la política. Se congela en cada fila de
+    #: `consentimientos`: si la política cambia, hay que poder demostrar cuál vio cada
+    #: persona. Cambiarlo NO reenvía el aviso a quien ya lo vio -- eso es una decisión
+    #: aparte, y hoy no está construida.
+    #:
+    #: Nombra la versión que declara el PDF en su portada (2.0), no solo el mes: es lo que
+    #: permite pasar de una fila de `consentimientos` al archivo exacto de `docs/politica/`.
+    politica_datos_version: str = POLITICA_DATOS_VERSION
+
     @classmethod
     def desde_entorno(cls) -> Config:
         return cls(
@@ -425,6 +476,10 @@ class Config:
             plantilla_recordatorio=_opcional("MAXICARE_PLANTILLA_RECORDATORIO"),
             plantilla_recordatorio_idioma=_opcional(
                 "MAXICARE_PLANTILLA_RECORDATORIO_IDIOMA", "es"
+            ),
+            politica_datos_url=_opcional("MAXICARE_POLITICA_DATOS_URL", POLITICA_DATOS_URL),
+            politica_datos_version=_opcional(
+                "MAXICARE_POLITICA_DATOS_VERSION", POLITICA_DATOS_VERSION
             ),
             google_sa_b64=_opcional("MAXICARE_GOOGLE_SA_B64"),
             google_calendar_id=_opcional("MAXICARE_GOOGLE_CALENDAR_ID"),

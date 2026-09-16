@@ -147,6 +147,28 @@ MINUTOS_MINIMOS_ANTES_DE_LA_CITA = 75
 #: Si el paciente escribió hace menos de esto, ya está hablando con Daniela.
 MINUTOS_DE_CONTACTO_RECIENTE = 60
 
+#: Los tipos de seguimiento que NO son comerciales, y que por tanto una baja NO apaga.
+#:
+#: Es una lista BLANCA a propósito. `seguimientos.tipo` es texto libre que escribe el modelo
+#: (`programar_seguimiento`), así que con una lista negra de tipos comerciales, cualquier tipo
+#: inventado se colaría directo al envío. Con esta, lo que no está aquí se comprueba contra la
+#: baja: falla hacia el lado seguro.
+#:
+#: Acotar `tipo` con un `Literal` y un CHECK es trabajo del sub-proyecto D, y entonces esto se
+#: podrá derivar de esa lista en vez de mantenerse a mano.
+#:
+#: **El portillo que esta lista tiene abierto, dicho y no escondido:** el tipo lo escribe el
+#: modelo, así que un `tipo='recordatorio_cita'` salido de `programar_seguimiento` atraviesa
+#: G0 sin mirarla aunque el paciente esté de baja. Hoy no sale nada por ahí --esa tool nunca
+#: pone `cita_id`, y el despachador anula con `sin_plantilla` todo lo que llegue sin
+#: `cita_inicio`--, así que el portillo está abierto pero no da a ninguna parte. Lo que lo
+#: abriría de par en par es el sub-proyecto D, que añade plantillas para los tipos sin cita:
+#: ese día, cerrar `tipo` deja de ser una mejora y pasa a ser la condición para que esta
+#: guarda siga siendo cierta. Mientras tanto lo estrecha `herramientas._programar_seguimiento`,
+#: que comprueba `ctx.pidio_no_contacto` contra esta misma lista antes de insertar, y el
+#: docstring de la tool, que ya no le ofrece al modelo `'recordatorio_cita'` como ejemplo.
+TIPOS_NO_COMERCIALES = frozenset({"recordatorio_cita"})
+
 
 @dataclass(frozen=True)
 class Decision:
@@ -168,10 +190,24 @@ def decidir(
 ) -> Decision:
     """Las siete guardas, en orden. Es lo que separa un recordatorio de un buzón de spam.
 
+    G0 va antes que las siete, y decide sobre la baja comercial: un tipo que no está en
+    `TIPOS_NO_COMERCIALES` se anula si el contacto pidió no ser contactado. Es el orden que
+    pidió MaxiCare por escrito: privacidad -> canal -> criterio -> contacto.
+
     El orden importa: las tres primeras son sobre la cita y se saltan si el seguimiento no
     cuelga de ninguna; las dos siguientes aplazan en vez de anular, porque su motivo deja de
     ser cierto más tarde; la sexta anula y la séptima aplaza al día siguiente.
     """
+    # G0. La baja comercial, antes que las siete. Es el orden que pidió MaxiCare por escrito:
+    # privacidad -> canal -> criterio -> contacto.
+    #
+    # El tipo se mira DENTRO de la condición, y no en un `if` anterior que anule por baja sin
+    # más: un recordatorio de cita cruza esta guarda sin que la baja le aplique. Pedir que no
+    # te manden publicidad no es renunciar a que te avisen de tu propia cita, y si se mezclan,
+    # el que pierde es el paciente que SÍ iba a ir.
+    if fila.get("tipo") not in TIPOS_NO_COMERCIALES and fila.get("no_contactar"):
+        return Decision("anular", "baja_solicitada")
+
     cita_estado = fila.get("cita_estado")
     cita_inicio = fila.get("cita_inicio")
 

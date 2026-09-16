@@ -418,6 +418,28 @@ def _fallo_escalamiento(ctx: RunContextWrapper[Any], error: Exception) -> str:
     )
 
 
+def _fallo_privacidad(ctx: RunContextWrapper[ContextoDaniela], error: Exception) -> str:
+    # No negociable 1: nunca confirmarle al paciente algo que no ocurrió. `pedir_baja` y
+    # `revocar_baja` hacen su propio commit -- una excepción antes de eso deja la
+    # transacción en rollback -- así que un fallo aquí significa que NO quedó anotado, y
+    # decirle lo contrario es justo el error que ese no negociable prohíbe.
+    # `log.exception` y no `log.error` como sus hermanas de arriba, y la diferencia es
+    # deliberada: este es el ÚNICO `_fallo_*` cuya salida le pide a un humano que vaya a
+    # anotar la baja a mano, y sin el traceback nadie sabe contra qué --si fue el pooler, el
+    # esquema o la fila-- cuando llegue a hacerlo.
+    #
+    # Comprobado contra el SDK instalado (0.22.2): `failure_error_function` se invoca DENTRO
+    # del `except` de `tool.__call__`, así que hay excepción viva y `exception()` adjunta el
+    # traceback entero. El `%s` se queda para que la primera línea siga diciendo qué pasó sin
+    # tener que bajar a leerlo.
+    log.exception("no se pudo registrar la decisión de privacidad: %s", error)
+    return (
+        "No se pudo registrar todavía. NO le digas al paciente que quedó anotado: no es "
+        "cierto. Dile que lo estás resolviendo y escala a los doctores para que alguien lo "
+        "anote a mano: esto NO se deja pasar en silencio."
+    )
+
+
 # ==========================================================================================
 # 1. consultar_base_conocimiento
 # ==========================================================================================
@@ -1385,6 +1407,23 @@ async def registrar_estado_oportunidad(
 async def _programar_seguimiento(
     ctx: ContextoDaniela, tipo: str, fecha_objetivo: str
 ) -> str:
+    # La baja comercial, EN CÓDIGO y no solo en el prompt. `seguimientos.decidir` ya la
+    # recoge con G0 al despachar, así que sin esto no sale nada -- pero entonces lo único
+    # que impide INSERTAR la fila es que el modelo obedezca una instrucción, y en este
+    # proyecto lo que tiene que ser cierto lo escribe el código (no negociables 2, 12, 22).
+    # Se devuelve texto en vez de lanzar: el modelo tiene que saber por qué no se programó,
+    # o lo intentará otra vez con otra fecha.
+    #
+    # `ctx.pidio_no_contacto` sale de `contactos`, nunca del modelo, y el tipo se mira contra
+    # la MISMA lista blanca del despachador: un recordatorio de cita se programa igual, que
+    # es justo lo que la baja no puede apagar (no negociable 25).
+    if ctx.pidio_no_contacto and tipo not in seguimientos.TIPOS_NO_COMERCIALES:
+        return (
+            "Este paciente pidió que no le escribieran más, así que no se programó nada "
+            "comercial. No se lo ofrezcas ni se lo menciones. El recordatorio de una cita "
+            "suya sí se sigue programando: eso no es publicidad."
+        )
+
     objetivo = _a_fecha(fecha_objetivo, "fecha_objetivo")
     # `ctx.ahora` y no `_ahora()`: el instante del turno, que una prueba puede fijar. Es la
     # regla que el propio docstring de `ContextoDaniela.ahora` declara, y esta tool era la
@@ -1427,10 +1466,14 @@ async def _programar_seguimiento(
 async def programar_seguimiento(
     wrapper: RunContextWrapper[ContextoDaniela], tipo: str, fecha_objetivo: str
 ) -> str:
-    """Deja programado un recordatorio o una reactivación para más adelante.
+    """Deja programado un seguimiento comercial para más adelante.
+
+    Si el paciente pidió que no le escribieran más, no se programa nada y te lo dice: no
+    insistas ni lo intentes con otra fecha. Los recordatorios de una cita NO se piden por
+    aquí — los programa el sistema solo al crear o mover la cita.
 
     Args:
-        tipo: qué clase de seguimiento, por ejemplo 'recordatorio_cita' o 'reactivacion'.
+        tipo: qué clase de seguimiento, por ejemplo 'reactivacion'.
         fecha_objetivo: cuándo debe salir, en ISO y hora de Bogotá.
     """
     return await _programar_seguimiento(wrapper.context, tipo, fecha_objetivo)
@@ -1908,11 +1951,82 @@ async def consultar_citas(wrapper: RunContextWrapper[ContextoDaniela]) -> str:
 
 
 # ==========================================================================================
+# 11. La baja comercial y su revocación
+# ==========================================================================================
+
+
+async def _registrar_no_contactar(ctx: ContextoDaniela, nota: str | None) -> str:
+    def trabajo(conn) -> None:
+        persistencia.pedir_baja(
+            conn, ctx.telefono_completo, origen="paciente", detalle=nota
+        )
+
+    await _con_base(ctx, trabajo)
+    return (
+        "Anotado: a este número no le vuelve a salir nada comercial, ni ahora ni nunca. "
+        "Confírmaselo en una línea y sigue con lo que necesite. No le preguntes por qué, no "
+        "le ofrezcas alternativas y no intentes retenerlo. Su cita, si tiene una, le sigue "
+        "llegando igual: esto no la toca."
+    )
+
+
+@function_tool(failure_error_function=_fallo_privacidad)
+async def registrar_no_contactar(
+    wrapper: RunContextWrapper[ContextoDaniela],
+    nota: str,
+) -> str:
+    """Anota que el paciente NO quiere recibir más mensajes nuestros.
+
+    Llámala en cuanto lo pida, aunque lo diga de pasada. Si dudas entre si lo pidió o no,
+    llámala igual: dejar de escribirle a quien no lo pidió es una molestia, escribirle a
+    quien sí lo pidió es faltarle al respeto.
+
+    NO la llames porque el paciente esté molesto, tenga prisa o no conteste. Solo cuando
+    pida que no le escriban.
+
+    Args:
+        nota: la frase con la que lo pidió, tal cual. Sin interpretarla.
+    """
+    return await _registrar_no_contactar(wrapper.context, nota or None)
+
+
+async def _revocar_no_contactar(ctx: ContextoDaniela, nota: str | None) -> str:
+    def trabajo(conn) -> bool:
+        return persistencia.revocar_baja(
+            conn, ctx.telefono_completo, origen="paciente", detalle=nota
+        )
+
+    cambio = await _con_base(ctx, trabajo)
+    if not cambio:
+        # No negociable 1: a este número nadie le había apagado nada, así que "vuelve a
+        # recibir mensajes" sería confirmar un cambio que no ocurrió.
+        return "Este número no tenía nada desactivado. Sigue con lo que necesite."
+    return "Anotado: vuelve a recibir mensajes nuestros. Confírmaselo en una línea."
+
+
+@function_tool(failure_error_function=_fallo_privacidad)
+async def revocar_no_contactar(
+    wrapper: RunContextWrapper[ContextoDaniela],
+    nota: str,
+) -> str:
+    """Vuelve a activar los mensajes a un paciente que los había desactivado.
+
+    SOLO si lo pide él. Que vuelva a escribirte no es pedirlo: alguien que se dio de baja y
+    meses después pregunta por una muela rota sigue sin querer publicidad.
+
+    Args:
+        nota: la frase con la que lo pidió, tal cual.
+    """
+    return await _revocar_no_contactar(wrapper.context, nota or None)
+
+
+# ==========================================================================================
 # El conjunto -- lo que `agentes.py` importará en la fase 4
 # ==========================================================================================
 
-#: Las nueve del plan, en el orden de `herramientas[]`, más `consultar_citas` al final, que
-#: no está en el plan y por eso no se cuela entre ellas.
+#: Las nueve del plan, en el orden de `herramientas[]`, más `consultar_citas`, y las dos de
+#: la baja comercial al final: ninguna de las tres está en el plan y por eso no se cuelan
+#: entre las nueve.
 TODAS = (
     consultar_base_conocimiento,
     consultar_disponibilidad,
@@ -1924,6 +2038,8 @@ TODAS = (
     programar_seguimiento,
     escalar_a_doctores,
     consultar_citas,
+    registrar_no_contactar,
+    revocar_no_contactar,
 )
 
 __all__ = [
@@ -1940,5 +2056,7 @@ __all__ = [
     "identificar_paciente",
     "programar_seguimiento",
     "registrar_estado_oportunidad",
+    "registrar_no_contactar",
     "reprogramar_cita",
+    "revocar_no_contactar",
 ]

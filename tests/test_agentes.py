@@ -28,6 +28,7 @@ from agents import (
 )
 
 from maxicare_daniela import agentes
+from maxicare_daniela import config
 from maxicare_daniela import contratos
 from maxicare_daniela import guardrails as g
 from maxicare_daniela.calendario import ZONA_BOGOTA, CalendarioDoble
@@ -78,12 +79,15 @@ def correr(agente, entrada, ctx, guion):
 # ==========================================================================================
 
 
-def test_daniela_tiene_las_nueve_tools_del_plan_y_la_decima():
+def test_daniela_tiene_las_nueve_tools_del_plan_la_decima_y_la_baja_comercial():
     """`consultar_citas` no está en el plan y se añade en esta lista a conciencia.
 
     Sin ella, `reprogramar_cita` y `cancelar_cita` solo funcionan dentro de la conversación
     donde la cita se creó: son las únicas dos tools cuya entrada obligatoria --el UUID-- no
     puede salir de ninguna otra.
+
+    `registrar_no_contactar` y `revocar_no_contactar` tampoco están en el plan: son la baja
+    comercial, añadida el 16/09/2026.
     """
     nombres = {t.name for t in agentes.daniela.tools}
 
@@ -98,6 +102,8 @@ def test_daniela_tiene_las_nueve_tools_del_plan_y_la_decima():
         "programar_seguimiento",
         "escalar_a_doctores",
         "consultar_citas",
+        "registrar_no_contactar",
+        "revocar_no_contactar",
     }
 
 
@@ -558,6 +564,67 @@ def test_sin_recordatorio_el_bloque_no_aparece():
     assert "YA LE ESCRIBIMOS NOSOTROS" not in texto
 
 
+def test_pidio_no_contacto_apaga_el_seguimiento_en_lo_que_el_modelo_realmente_lee():
+    """El párrafo estático de la política de datos dice "cuando el contexto dice que este
+    paciente pidió no ser contactado" -- y sin este bloque esa frase era inerte: `ctx` nunca
+    llega al modelo en crudo, solo lo que `instrucciones_daniela` construye. Por eso la
+    prueba mira el texto que devuelve el prompt dinámico, no la constante
+    `INSTRUCCIONES_DANIELA`."""
+    ctx = contexto(pidio_no_contacto=True)
+
+    texto = asyncio.run(agentes.daniela.get_system_prompt(RunContextWrapper(context=ctx)))
+
+    assert "ESTE PACIENTE PIDIÓ NO SER CONTACTADO" in texto
+    assert "no lo ofreces, no lo insinúas y no lo mencionas" in texto
+
+
+def test_sin_la_baja_el_bloque_de_seguimiento_apagado_no_aparece():
+    """El caso normal: casi ningún paciente se dio de baja, y el prompt no paga ese bloque."""
+    ctx = contexto(pidio_no_contacto=False)
+
+    texto = asyncio.run(agentes.daniela.get_system_prompt(RunContextWrapper(context=ctx)))
+
+    assert "ESTE PACIENTE PIDIÓ NO SER CONTACTADO" not in texto
+
+
+def test_sin_url_de_politica_el_prompt_le_devuelve_el_aviso_a_daniela():
+    """El hueco que abrieron las dos mitades correctas de esta rama, cerrado.
+
+    La frase estática del prompt («antes de pedir datos sensibles, informas que al continuar
+    acepta la política») se quitó porque el código lo emite mejor. Pero el código lo emite
+    solo cuando hay URL, y `politica_datos_url` sigue en `PENDIENTE`: entre las dos cosas
+    nadie avisaba ni una vez, que es MENOS cobertura que antes de esta rama.
+
+    Se mira el texto que devuelve el prompt dinámico, no `INSTRUCCIONES_DANIELA`: la frase ya
+    no es estática y sobre la constante esta prueba no vería nada.
+    """
+    ctx = contexto(politica_datos_url="PENDIENTE")
+
+    texto = asyncio.run(agentes.daniela.get_system_prompt(RunContextWrapper(context=ctx)))
+
+    assert "LA POLÍTICA DE DATOS" in texto
+    assert "acepta la política de tratamiento de datos de MaxiCare" in texto
+
+
+def test_con_url_de_politica_el_aviso_lo_dice_el_codigo_y_el_prompt_se_calla():
+    """La otra rama, y no es simetría por gusto: con la URL puesta, `atencion` pega el aviso
+    al primer saliente palabra por palabra. Si además lo dijera el prompt, el paciente
+    leería el mismo aviso dos veces en el mismo mensaje."""
+    ctx = contexto(politica_datos_url="https://maxicarecol.com/politica/2026-09.pdf")
+
+    texto = asyncio.run(agentes.daniela.get_system_prompt(RunContextWrapper(context=ctx)))
+
+    assert "LA POLÍTICA DE DATOS" not in texto
+
+
+def test_el_default_del_contexto_deja_a_daniela_del_lado_que_avisa():
+    """Quien no pase el campo --el chat del panel, una prueba, un script-- se queda con el
+    aviso puesto. El default no es cosmético: es de qué lado cae el olvido."""
+    texto = asyncio.run(agentes.daniela.get_system_prompt(RunContextWrapper(context=contexto())))
+
+    assert "LA POLÍTICA DE DATOS" in texto
+
+
 def test_el_bloque_de_presentacion_no_revienta_sin_contexto():
     """`context=None` en varias pruebas que solo miran el vocabulario."""
     texto = asyncio.run(agentes.daniela.get_system_prompt(RunContextWrapper(context=None)))
@@ -633,7 +700,7 @@ def test_el_modelo_recibe_las_tools_y_las_instrucciones():
     correr(agentes.daniela, "hola", ctx, guion)
 
     recibido = guion.recibido[0]
-    assert len(recibido["tools"]) == 10
+    assert len(recibido["tools"]) == 12
     assert "MaxiCare" in recibido["instrucciones"]
 
 
@@ -809,3 +876,41 @@ def test_confirmar_la_asistencia_tambien_pide_calidez():
     # El sub-punto que da el contenido de esa línea tiene que seguir ahí: sin él, el
     # disparador nuevo apunta a un bloque que ya no dice qué escribir.
     assert "llegue con algo de margen" in texto
+
+
+def test_el_prompt_prohibe_persuadir_a_quien_pide_la_baja():
+    """Marketing lo pidió expresamente: confirmar y no retener."""
+    assert "no intentas retenerlo" in agentes.INSTRUCCIONES_DANIELA
+
+
+def test_el_prompt_nombra_las_dos_tools_de_la_baja_comercial():
+    """La asimetría se lee como olvido: si el prompt solo nombra `registrar_no_contactar`,
+    la revocación queda dependiendo solo del docstring de la tool."""
+    assert "registrar_no_contactar" in agentes.INSTRUCCIONES_DANIELA
+    assert "revocar_no_contactar" in agentes.INSTRUCCIONES_DANIELA
+
+
+def test_el_prompt_manda_callar_el_seguimiento_a_quien_lo_nego():
+    assert "no lo ofreces, no lo insinúas y no lo mencionas" in agentes.INSTRUCCIONES_DANIELA
+
+
+def test_el_telefono_de_privacidad_del_prompt_es_el_que_perdona_el_guardrail():
+    """Los dos sitios que nombran ese número tienen que decir el mismo, y nada los ataba.
+
+    El prompt manda a dar el canal de privacidad; `guardrails` borra sus dígitos del mensaje
+    antes de contar cifras para que `sin_cifra_no_documentada` no dispare sobre él. El día
+    que la clínica cambie de número, cambiar solo el prompt devuelve el tripwire intermitente
+    --mensaje seguro al paciente y alerta falsa al doctor, a veces sí y a veces no-- que es
+    el mismo síntoma que ya costó una investigación con el rótulo «Confirmar» (no negociable
+    23). Esta prueba es lo que lo caza antes de producción.
+    """
+    assert config.TELEFONO_PRIVACIDAD in agentes.INSTRUCCIONES_DANIELA
+    assert config.CORREO_PRIVACIDAD in agentes.INSTRUCCIONES_DANIELA
+    # Y el guardrail lo perdona de verdad: la constante sola no demuestra nada si el
+    # borrado dejara de derivar de ella.
+    assert (
+        g.revisar_cifras(
+            f"escríbenos al {config.TELEFONO_PRIVACIDAD}", autorizadas=set()
+        ).dispara
+        is False
+    )

@@ -50,7 +50,7 @@ from agents import (
 )
 from pydantic import BaseModel, Field
 
-from .config import MODELO_EVALUADOR, config_de_corrida
+from .config import MODELO_EVALUADOR, TELEFONO_PRIVACIDAD, config_de_corrida
 from .contratos import ContextoDaniela, RespuestaDaniela
 
 log = logging.getLogger("maxicare.guardrails")
@@ -178,9 +178,58 @@ class Veredicto:
     motivo: str = ""
 
 
+#: Los dígitos del teléfono del canal de privacidad que `agentes.py` manda a dar. El número
+#: en sí vive en `config.TELEFONO_PRIVACIDAD`, que es lo que ata el prompt a esto.
+_DIGITOS_PRIVACIDAD = re.sub(r"\D", "", TELEFONO_PRIVACIDAD)
+
+#: Ese mismo teléfono, escrito COMO SEA que lo escriba el modelo, para poder BORRARLO del
+#: mensaje antes de contar cifras.
+#:
+#: Por qué borrarlo y no perdonarlo después: un modelo que lo reformatee --"3219812422" en
+#: vez de "321 981 2422"-- produce una cifra que ninguna tool devolvió jamás, y sin esto
+#: `sin_cifra_no_documentada` dispara de forma intermitente sobre el propio canal de baja.
+#: La primera versión de la excepción comparaba `cifra not in "573219812422"`, o sea por
+#: SUBSTRING, y eso autorizaba de por vida las 36 cadenas contenidas ahí: `$3.219.812`
+#: --3,2 millones, el orden de magnitud real de un tratamiento-- normaliza a `3219812`, que
+#: SÍ es substring, y atravesaba entero el guardrail que existe para impedir que Daniela
+#: invente precios. Lo único que lo salvaba era que un precio redondo termina en `000`, que
+#: es una propiedad del formato y no una garantía.
+#:
+#: Con el borrado no hay lista de variantes que mantener ni fragmentos autorizados: lo que
+#: desaparece del texto es el teléfono y nada más, así que `$3.219.812` sigue disparando.
+#: Los separadores van sueltos entre dígito y dígito porque el modelo agrupa como quiere
+#: ("321 9812422", "321-981-2422"), y el indicativo es opcional porque no siempre lo escribe.
+#:
+#: **La coma tiene que estar en esta clase**, y no por simetría: `_CIFRA` la acepta como
+#: separador de miles, así que "llama al 321,981,2422" --raro, pero es una forma que el
+#: modelo produce-- se quedaba sin borrar y disparaba un tripwire falso con motivo `321981`.
+#: Es la misma clase de intermitencia que este borrado vino a cerrar, estrechada a una forma
+#: rara del número. Quien toque esta clase la compara con `_CIFRA` antes.
+#:
+#: Los `(?<!\d)` / `(?!\d)` acotan por los extremos, y lo que garantizan es menos de lo que
+#: parece: valen para una cadena de dígitos pegada ("13219812422" no se toca), **no** cuando
+#: el número mayor lleva separadores. "$3.219.812.422" se borra entero y no dispara, y
+#: "$1.573.219.812.422" dispara con el motivo «Dijiste 1», que al modelo no le dice nada.
+#: Los dos son precios que nadie va a escribir --3 mil millones, 1,5 billones-- y se aceptan
+#: como el límite que son; endurecer el regex por ellos costaría dejar de borrar el teléfono
+#: en alguna de las formas que sí ocurren, que es el fallo caro.
+_SEPARADOR_DE_DIGITOS = r"[\s.,()-]*"
+_TELEFONO_PRIVACIDAD_EN_TEXTO = re.compile(
+    r"(?<!\d)(?:"
+    + _SEPARADOR_DE_DIGITOS.join(_DIGITOS_PRIVACIDAD)
+    + r"|"
+    + _SEPARADOR_DE_DIGITOS.join(_DIGITOS_PRIVACIDAD[2:])
+    + r")(?!\d)"
+)
+
+
 def revisar_cifras(mensaje: str, autorizadas: set[str]) -> Veredicto:
-    """Ninguna cifra de dinero puede salir si una tool no la devolvió en este turno."""
-    dichas = cifras_de(mensaje)
+    """Ninguna cifra de dinero puede salir si una tool no la devolvió en este turno.
+
+    Excepción: el teléfono de privacidad que el propio prompt manda a dar se BORRA del texto
+    antes de contar, venga como venga formateado -- ver `_TELEFONO_PRIVACIDAD_EN_TEXTO`.
+    """
+    dichas = cifras_de(_TELEFONO_PRIVACIDAD_EN_TEXTO.sub(" ", mensaje))
     sobrantes = dichas - autorizadas
     if not sobrantes:
         return Veredicto(False)

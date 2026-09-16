@@ -37,7 +37,13 @@ from agents import Agent, ModelSettings
 from openai.types.shared import Reasoning
 
 from . import contratos
-from .config import MODELO_DANIELA, MODELO_LECTOR, version_de_prompt
+from .config import (
+    CORREO_PRIVACIDAD,
+    MODELO_DANIELA,
+    MODELO_LECTOR,
+    TELEFONO_PRIVACIDAD,
+    version_de_prompt,
+)
 from .contratos import LecturaArchivo, RespuestaDaniela
 from .guardrails import (
     sin_cifra_no_documentada,
@@ -70,7 +76,12 @@ from .herramientas import TODAS
 #: vive todo lo clínico de este proyecto: la fila `_general` / `urgencias` de la base de
 #: conocimiento, transcrita del documento maestro. El prompt manda a consultarla; no la copia
 #: ni la amplía. Ver `test_el_protocolo_de_alarma_sale_de_LA_BASE_y_no_del_prompt`.
-INSTRUCCIONES_DANIELA = """\
+#:
+#: Es una f-string por UNA sola razón: el teléfono del canal de privacidad sale de
+#: `config.TELEFONO_PRIVACIDAD`, la misma constante de la que `guardrails` deriva los dígitos
+#: que borra antes de contar cifras. Con el número escrito a mano en los dos sitios, cambiar
+#: solo este devolvía el tripwire intermitente que la excepción del guardrail vino a cerrar.
+INSTRUCCIONES_DANIELA = f"""\
 Eres Daniela, de MaxiCare (clínica dental en Puente Largo, Bogotá). Hablas español \
 colombiano, tuteas siempre —nunca «usted»— y das las horas en formato am/pm. Tu meta no es \
 acumular citas: es que el paciente llegue a la cita correcta, pueda asistir y reciba \
@@ -80,8 +91,17 @@ NUNCA afirmas un precio, una condición o una disponibilidad que no venga de una
 este mismo turno. Si no tienes el dato, lo dices y escalas; no estimas ni extrapolas de \
 tratamientos parecidos.
 
-Antes de pedir datos sensibles, informas que al continuar acepta la política de tratamiento \
-de datos de MaxiCare. Nunca pides cédula ni documentos de identidad.
+Si el paciente pide que no le escribas más, llamas `registrar_no_contactar` en ese mismo \
+turno y se lo confirmas en una línea. No le preguntas por qué, no le ofreces alternativas y \
+no intentas retenerlo. Si en cambio un paciente que ya había pedido eso te dice ahora que sí \
+quiere volver a recibir mensajes, llamas `revocar_no_contactar`. Si además pide borrar sus \
+datos, revocar una autorización o poner una queja sobre ellos, lo mandas a \
+{CORREO_PRIVACIDAD} o al {TELEFONO_PRIVACIDAD}, que es donde eso se atiende. Nunca pides \
+cédula ni documentos de identidad.
+
+Cuando el contexto dice que este paciente pidió no ser contactado, el seguimiento deja de \
+existir para ti: no lo ofreces, no lo insinúas y no lo mencionas. Le atiendes igual de bien \
+en todo lo demás.
 
 Escalar no detiene la conversación: dices que lo estás revisando y sigues ofreciendo \
 alternativas.
@@ -338,6 +358,33 @@ def instrucciones_daniela(ctx, agente) -> str:
     # de fecha sobra en vez de reventar.
     contexto = getattr(ctx, "context", None)
 
+    # El aviso de la política, mientras el código todavía no pueda emitirlo.
+    #
+    # Hasta esta rama, ese aviso era una frase de este prompt. La frase se quitó porque el
+    # código lo emite mejor --siempre el mismo texto, con constancia de qué versión vio el
+    # paciente (no negociable 24)-- pero el código lo emite solo cuando hay una URL que
+    # enseñar, y hoy `politica_datos_url` sigue en `PENDIENTE`. Entre las dos cosas queda un
+    # hueco en el que NADIE avisa: menos cobertura que antes de la rama, y sobre un sistema
+    # cuyo objeto es el tratamiento de datos personales.
+    #
+    # Así que la frase vuelve, pero CONDICIONADA: sin URL la dice Daniela con sus palabras;
+    # con URL manda el código y esta desaparece, porque dos avisos en el mismo mensaje son
+    # uno de más. El default de `ContextoDaniela.politica_datos_url` es `PENDIENTE`, así que
+    # quien no lo pase --el chat del panel, una prueba-- se queda del lado que avisa.
+    #
+    # Va aquí, el primero de los bloques dinámicos y pegado al vocabulario, por caché: es el
+    # MENOS volátil de todos --el mismo texto para todos los pacientes, y solo cambia el día
+    # que se despliegue la URL--, así que delante de los demás no descachea nada.
+    if getattr(contexto, "politica_datos_url", "PENDIENTE") == "PENDIENTE":
+        texto = (
+            f"{texto}\n\n"
+            "LA POLÍTICA DE DATOS\n"
+            "Antes de pedir datos sensibles —el nombre completo, el teléfono, cualquier "
+            "cosa de salud— le dices en una línea que al continuar acepta la política de "
+            "tratamiento de datos de MaxiCare. Una sola vez por conversación, sin solemnidad "
+            "y sin frenar lo que venía haciendo."
+        )
+
     # Presentación: solo en el turno 1, y con el mismo cuidado defensivo que la fecha. Va
     # aquí -- después del vocabulario, antes de la fecha -- porque cambia una vez por
     # conversación: menos volátil que "AHORA MISMO" (que cambia cada minuto), más volátil
@@ -395,6 +442,25 @@ def instrucciones_daniela(ctx, agente) -> str:
             "historial, pero él sí lo leyó: si responde «sí», «confirmo», «ahí estaré» o "
             "«no puedo», se refiere a la cita de la que hablaba ese mensaje. Si lo que "
             "quiere es mover o cancelar, consulta sus citas antes de prometer nada."
+        )
+
+    # El párrafo estático de más arriba dice "cuando el contexto dice que este paciente
+    # pidió no ser contactado" -- y sin este bloque esa frase es inerte: `Runner.run` solo
+    # le manda al modelo el mensaje del paciente (`conversacion.py`), nunca `ctx` en crudo, y
+    # el único puente entre el contexto y lo que el modelo lee es esta función. Sin la línea,
+    # a un paciente que acaba de darse de baja Daniela podía seguir ofreciéndole seguimiento
+    # en el turno siguiente: exactamente lo que la baja existe para impedir.
+    #
+    # Va aquí, después de "YA LE ESCRIBIMOS NOSOTROS" y no antes: por la misma razón de
+    # caché que ese --es el más raro y solo aparece en las conversaciones de un paciente que
+    # ya se dio de baja--, delante de la fecha descachearía el prefijo de todos los demás.
+    if getattr(contexto, "pidio_no_contacto", False):
+        texto = (
+            f"{texto}\n\n"
+            "ESTE PACIENTE PIDIÓ NO SER CONTACTADO\n"
+            "Ya quedó anotada su baja. El seguimiento deja de existir para ti: no lo "
+            "ofreces, no lo insinúas y no lo mencionas. Le atiendes igual de bien en todo "
+            "lo demás."
         )
 
     return texto

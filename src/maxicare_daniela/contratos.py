@@ -603,6 +603,29 @@ class ContextoDaniela:
     #: pudiera, bastaría con que dijera «soy nuevo» para saltarse `identidad_antes_de_datos`.
     telefono_sin_paciente: bool = False
 
+    #: Este número pidió que no le escribieran más. Sale de `contactos` y **nunca del
+    #: modelo**, igual que `telefono_sin_paciente`. Con esto puesto, Daniela no ofrece el
+    #: seguimiento, no lo insinúa y no lo menciona: el tema no existe en esa conversación.
+    #:
+    #: Es la baja COMERCIAL. No apaga el recordatorio de una cita ni impide atenderla si ella
+    #: escribe: pedir que no te manden publicidad no es darse de baja de la clínica.
+    pidio_no_contacto: bool = False
+
+    #: La dirección donde vive la política de tratamiento de datos, copiada de
+    #: `config.politica_datos_url`. El turno NO la usa para nada: lo único que la lee es
+    #: `agentes.instrucciones_daniela`, y solo para saber si sigue en `PENDIENTE`.
+    #:
+    #: Mientras lo esté, el aviso que emite el código está apagado (`atencion._toca_avisar`),
+    #: y entonces el prompt le devuelve a Daniela la frase de avisarlo con sus palabras. Con
+    #: una URL de verdad, el aviso lo escribe el código palabra por palabra y esa frase
+    #: desaparece del prompt: dos avisos en el mismo mensaje son uno de más.
+    #:
+    #: Por qué viaja por el contexto y no se lee del entorno dentro de `agentes.py`: ese
+    #: módulo no conoce la `Config` de la corrida, y una segunda lectura del entorno serían
+    #: dos fuentes para el mismo valor, que es como se rompió antes el teléfono del canal de
+    #: privacidad. Su default es `PENDIENTE`, el lado seguro: quien no lo pase tiene la frase.
+    politica_datos_url: str = "PENDIENTE"
+
     #: Conversación.
     turno_actual: int = 0
 

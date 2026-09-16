@@ -92,6 +92,64 @@ número y espera `VENTANA_SILENCIO_SEGUNDOS` (20) sin mensajes nuevos, con tope 
   la última en caer: con la clave del modelo, dos pacientes distintos pidiendo el mismo
   bloque generaban la misma cadena y **ambos salían confirmados sobre un solo cupo**.
 
+## El aviso de la política — se marca DESPUÉS, y la 21 dice lo contrario
+
+Es la trampa más fácil de «corregir» de todo el módulo, porque contradice de frente a un no
+negociable que está dos líneas más arriba en el mismo archivo. Las dos son correctas: lo que
+cambia es qué se pierde al fallar.
+
+- **El aviso se marca DESPUÉS de que `enviar_texto` vuelva bien. Un recordatorio se marca
+  ANTES (no negociable 21).** En el recordatorio el riesgo es mandar el mismo mensaje dos
+  veces: marcar después significa que un fallo entre el envío y el marcado lo repite sesenta
+  segundos más tarde, y ninguna de las siete guardas lo detecta. En el aviso el riesgo es el
+  contrario: marcar antes deja en `consentimientos` la constancia de un aviso que un
+  `ReadTimeout` impidió que saliera, y **esa constancia es precisamente la prueba legal**.
+  Repetir un aviso es inocuo; falsificar una prueba, no. Si el marcado falla, el turno sigue
+  y el aviso se vuelve a enseñar en el mensaje siguiente: el `try` interno lo traga y solo
+  deja un `log.exception`.
+- **Sale UNA vez en la vida del número, no una por conversación.** El dato viene de
+  `contactos.aviso_mostrado_en`, que no caduca a las 24 h como `conversaciones`: un paciente
+  que escribe cada semana no ve el aviso legal cada semana. Lo decide `_toca_avisar`, que es
+  una función y no un `if` suelto porque sus dos condiciones **son** la política.
+- **Con `politica_datos_url` en `PENDIENTE` el aviso no se emite, y por eso la frase vuelve al
+  prompt condicionada a ese mismo `PENDIENTE`.** Las dos mitades son correctas por separado y
+  juntas dejaban un hueco en el que nadie informaba de la política ni una vez: menos cobertura
+  que antes de que el código emitiera nada. El valor viaja en
+  `ContextoDaniela.politica_datos_url` (default `PENDIENTE`, el lado que avisa) y lo único
+  que lo lee es `agentes.instrucciones_daniela`.
+- **Desde el 16/09/2026 la URL existe, así que en producción manda el código y el bloque del
+  prompt ya no sale.** Vive en `config.POLITICA_DATOS_URL`, en el código y no en el `.env`, y
+  es la única URL del proyecto que lo hace: es un documento público, el día que cambie tiene
+  que quedar en `git log`, y una variable olvidada en un despliegue no puede significar dejar
+  de informar. El `.env` la sigue pudiendo pisar. Ojo con la asimetría de `_opcional`:
+  **vacía cae al valor del código y NO apaga nada**; lo único que apaga es el literal
+  `PENDIENTE`.
+- **`config_falso()` de `tests/test_atencion.py` la blanquea a propósito**, igual que las
+  credenciales de Google y que `scripts/probar_atencion.py`. Sin eso, el pie del aviso se le
+  pega a la respuesta de todas las pruebas de extremo a extremo de ese archivo y de
+  `test_muro.py` —que no van de eso— y vuelven a romperse el día que la URL cambie. Las tres
+  que sí prueban el aviso pasan la URL explícitamente.
+- **Lo que el código NO puede sostener solo: que el documento detrás del enlace siga siendo el
+  que la gente aceptó.** El destino es Drive, y Drive deja subir una versión nueva sobre el
+  mismo archivo sin que el enlace cambie. Por eso cada `politica_version` tiene su PDF
+  congelado con su SHA-256 en `docs/politica/`: es lo que convierte la fila de
+  `consentimientos` en algo contrastable. Ninguna prueba lo caza, y el comando para
+  comprobarlo está en el README de esa carpeta.
+- **El relevo NO lleva aviso, y es un hueco conocido.** `relevo.py` escribe al paciente por su
+  cuenta (`whatsapp.enviar_texto` directo), así que un número cuyo primerísimo contacto lo
+  releve el doctor conversa sin verlo. Se cura solo —el aviso no se marca hasta que sale, así
+  que sale en cuanto Daniela vuelva a contestar— y por eso no se tocó el relevo, que es el
+  subsistema más frágil del proyecto. Si alguna vez deja de curarse solo (por ejemplo, si el
+  relevo pasara a poder cerrar una conversación entera sin devolvérsela a Daniela), hay que
+  cerrarlo ahí.
+- **Lo que prueba el puente es una prueba de Neon, no la suite offline.**
+  `atencion._marcar_aviso` son tres líneas que las pruebas de extremo a extremo sustituyen con
+  `monkeypatch` y que `scripts/probar_atencion.py` apaga con `politica_datos_url=""`. Es el
+  único eslabón entre el envío que salió bien y la fila que se enseña si alguien reclama:
+  `test_contacto_neon.py::test_marcar_aviso_de_atencion_escribe_la_fila_de_verdad` lo llama de
+  verdad, con la URL del esquema de pruebas — abre su propia conexión, así que con la URL de
+  producción escribiría en `public`.
+
 ## El calendario y el interruptor
 
 - **Si el calendario no arranca, Daniela queda con `CalendarioCaido`, nunca con
@@ -232,6 +290,19 @@ estrenar una línea de teléfono. Vive en `reseteo.py`, y `runtime._entregar` lo
   borrado parecería haber funcionado. `agent_messages` no se borra a mano: se va sola por su
   propio `ON DELETE CASCADE`. Lo único de memoria del proceso que hay que sacar aparte es el
   búfer, y de eso se encarga `atencion.olvidar`.
+- **La excepción, y es el punto entero de la migración 019: `/clearstate` resetea el aviso y
+  NUNCA la baja.** `contactos.aviso_mostrado_en` y `politica_version` vuelven a NULL —lo
+  volverá a ver, que es lo correcto en un reseteo—, pero `no_contactar` no se toca y **la fila
+  no se borra jamás**. Si se fuera, resetear a alguien lo devolvería a la lista de
+  contactables sin que nadie se enterara, y ese «no» es del paciente, no del sistema. La
+  bitácora `consentimientos` no se toca en ningún caso, y el `ON DELETE RESTRICT` de su FK lo
+  hace imposible aunque alguien lo intente; el borrado se anota ahí como `rastro_borrado`, con
+  un `WHERE EXISTS` porque un `/clearstate` sobre un número que nunca escribió violaría la FK
+  y tumbaría la transacción entera. Precedente exacto: los ejemplos de casos sin resolver, que
+  se borran **sin** bajar el contador (no negociable 22). Y ese reseteo **no** entra en el
+  dict que devuelve `borrar_rastro`: contarlo como fila borrada dejaría inalcanzable la rama
+  «no había nada que borrar» de `reseteo.confirmacion` en cuanto todo número conocido tuviera
+  fila en `contactos`, y el paciente oiría «borré todo lo tuyo» sobre un número ya limpio.
 - **La lista vacía apaga el comando para todo el mundo, y ese es el default.** Sin números
   listados, `/clearstate` llega a Daniela como cualquier otro texto. Dos pruebas lo vigilan
   (`test_reseteo_cable.py`), y las dos caen al mutar la condición de `_entregar`: sin ellas,

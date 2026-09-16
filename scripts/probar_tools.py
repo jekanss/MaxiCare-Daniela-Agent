@@ -1,4 +1,4 @@
-"""Corre las diez tools contra Neon y un calendario de pruebas, y lo cuenta en claro.
+"""Corre las doce tools contra Neon y un calendario de pruebas, y lo cuenta en claro.
 
     uv run python scripts/probar_tools.py
 
@@ -463,11 +463,44 @@ def corridas(url: str) -> int:
     dice_cancelada = "CANCELADA" in texto_borrada and "clínica" in texto_borrada
     print(f"   borrada: dice por que -> {marca(dice_cancelada)} {texto_borrada.splitlines()[0][:66]}")
 
+    # -- 11. la baja comercial y su revocacion -------------------------------------------
+    # Las dos unicas tools de escritura del proyecto que hasta ahora no habian corrido ni
+    # una vez contra Neon real: todo lo demas de esta tarea son pruebas offline con un doble
+    # de conexion.
+    print("\n11. registrar_no_contactar y revocar_no_contactar")
+
+    def no_contactar_en_neon(telefono: str) -> bool:
+        with persistencia.conectar(url) as conn, conn.cursor() as cur:
+            cur.execute("SELECT no_contactar FROM contactos WHERE telefono = %s", (telefono,))
+            fila = cur.fetchone()
+            return bool(fila and fila[0])
+
+    ctx5 = contexto(url, "573009996006", "Paco Baja")
+
+    asyncio.run(h._registrar_no_contactar(ctx5, "no me escriban mas"))
+    print(f"   queda anotada en Neon -> {marca(no_contactar_en_neon(ctx5.telefono_completo))} "
+          f"contactos.no_contactar = TRUE")
+
+    otra_vez = asyncio.run(h._registrar_no_contactar(ctx5, "no me escriban mas"))
+    print(f"   pedirla dos veces     -> "
+          f"{marca(no_contactar_en_neon(ctx5.telefono_completo) and bool(otra_vez))} "
+          f"no revienta y confirma igual")
+
+    asyncio.run(h._revocar_no_contactar(ctx5, "ya me pueden volver a escribir"))
+    print(f"   la revocacion la baja -> {marca(not no_contactar_en_neon(ctx5.telefono_completo))} "
+          f"contactos.no_contactar = FALSE")
+
+    ctx6 = contexto(url, "573009997007", "Nunca Se Dio De Baja")
+    sin_cambio = asyncio.run(h._revocar_no_contactar(ctx6, None))
+    print(f"   revocar sin haber pedido -> "
+          f"{marca('vuelve a recibir mensajes' not in sin_cambio)} no confirma un cambio "
+          f"que no ocurrio")
+
     print()
     if fallos:
         print(f"{fallos} comprobacion(es) fallaron.")
         return 1
-    print("Las diez tools funcionan. Tres llamadas simultaneas -> exactamente 2 citas.")
+    print("Las doce tools funcionan. Tres llamadas simultaneas -> exactamente 2 citas.")
     return 0
 
 
