@@ -95,6 +95,11 @@ CONFIGURACION_POR_DEFECTO: dict[str, int] = {
     # de la jornada: `leer_configuracion` los usa cuando la tabla todavía no existe.
     "hora_recordatorio_vispera": 18,
     "horas_minimas_para_recordar": 4,
+    # La reactivacion (migracion 021). Mismo motivo que los de la 017: `leer_configuracion` los
+    # usa cuando la tabla todavia no existe.
+    "tope_diario_reactivacion": 20,
+    "max_reactivaciones_12m": 6,
+    "max_seguimientos_fallidos": 2,
 }
 
 RAIZ_PROYECTO = Path(__file__).resolve().parents[2]
@@ -1878,19 +1883,36 @@ def seguimientos_por_despachar(
                    -- tanda son hasta 50. El COALESCE hace explícito que un número sin fila
                    -- de contacto NO está de baja: el LEFT JOIN devuelve NULL, y NULL no es
                    -- FALSE para un `if`.
-                   COALESCE(co.no_contactar, FALSE)       AS no_contactar
+                   COALESCE(co.no_contactar, FALSE)       AS no_contactar,
+                   -- El freno por persona (regla 5, migración 021). Mismo motivo que la baja:
+                   -- sin esta columna, R1 lee `.get(..., 0)` siempre en 0 y pasa sin
+                   -- protegerse -- verde por el motivo equivocado, no porque el freno no haga
+                   -- falta.
+                   COALESCE(co.seguimientos_fallidos, 0)  AS seguimientos_fallidos,
+                   -- El tope anual (regla 8). Cuenta REACTIVACIONES enviadas de verdad en los
+                   -- últimos 12 meses para este teléfono, excluyendo el recordatorio de cita
+                   -- --que no es publicidad y no debe contar para el tope--. Es una subconsulta
+                   -- y no otro JOIN porque lo que hace falta es un conteo por teléfono, no una
+                   -- fila más por cada envío histórico.
+                   (SELECT count(*)
+                      FROM seguimientos s2
+                      JOIN conversaciones cv2 ON cv2.id = s2.conversacion_id
+                     WHERE cv2.telefono = COALESCE(c.telefono, cv.telefono)
+                       AND s2.enviado_en IS NOT NULL
+                       AND s2.enviado_en > %(ahora)s - interval '12 months'
+                       AND s2.tipo <> 'recordatorio_cita')  AS reactivaciones_ultimo_ano
               FROM seguimientos s
               LEFT JOIN citas c           ON c.id  = s.cita_id
               LEFT JOIN conversaciones cv ON cv.id = s.conversacion_id
               LEFT JOIN contactos co      ON co.telefono = COALESCE(c.telefono, cv.telefono)
              WHERE s.enviado_en IS NULL
                AND s.anulado_en IS NULL
-               AND s.fecha_objetivo <= %s
+               AND s.fecha_objetivo <= %(ahora)s
              ORDER BY s.fecha_objetivo
-             LIMIT %s
+             LIMIT %(limite)s
                FOR UPDATE OF s SKIP LOCKED
             """,
-            (ahora, limite),
+            {"ahora": ahora, "limite": limite},
         )
         columnas = [d[0] for d in cur.description]
         return [dict(zip(columnas, fila)) for fila in cur.fetchall()]

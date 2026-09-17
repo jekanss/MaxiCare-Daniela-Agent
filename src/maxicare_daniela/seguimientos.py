@@ -147,6 +147,21 @@ MINUTOS_MINIMOS_ANTES_DE_LA_CITA = 75
 #: Si el paciente escribió hace menos de esto, ya está hablando con Daniela.
 MINUTOS_DE_CONTACTO_RECIENTE = 60
 
+#: La ventana de contacto reciente para una REACTIVACION. Mucho mas ancha que los 60 min del
+#: recordatorio a proposito: un recordatorio de cita le sirve a quien escribio hace tres horas,
+#: y un «hace unos dias nos escribio» a esa misma persona es lo que hace que conteste «??».
+HORAS_DE_CONTACTO_RECIENTE_COMERCIAL = 24
+
+#: Horario propio de la reactivacion, y NO la jornada de la clinica. Si MaxiCare abriera los
+#: domingos, colgar de la jornada dejaria salir publicidad en domingo. Un recordatorio de cita
+#: en domingo esta bien --la cita es real--; un «sigue interesada?» no.
+HORA_APERTURA_COMERCIAL = 9
+HORA_CIERRE_COMERCIAL = 19
+
+#: Defaults de las perillas de la 021. Los vivos salen de `configuracion`.
+MAX_REACTIVACIONES_12M = 6
+MAX_SEGUIMIENTOS_FALLIDOS = 2
+
 #: Los tipos de seguimiento que NO son comerciales, y que por tanto una baja NO apaga.
 #:
 #: Es una lista BLANCA a propósito. `seguimientos.tipo` es texto libre que escribe el modelo
@@ -216,18 +231,26 @@ def decidir(
     ultimo_mensaje: datetime | None,
     ya_salio_a_ese_numero: bool = False,
     hora_vispera: int = HORA_VISPERA_POR_DEFECTO,
+    max_reactivaciones_12m: int = MAX_REACTIVACIONES_12M,
+    max_seguimientos_fallidos: int = MAX_SEGUIMIENTOS_FALLIDOS,
 ) -> Decision:
-    """Las siete guardas, en orden. Es lo que separa un recordatorio de un buzón de spam.
+    """Las doce guardas, en orden. Es lo que separa un recordatorio de un buzón de spam.
 
-    G0 va antes que las siete, y decide sobre la baja comercial: un tipo que no está en
-    `TIPOS_NO_COMERCIALES` se anula si el contacto pidió no ser contactado. Es el orden que
-    pidió MaxiCare por escrito: privacidad -> canal -> criterio -> contacto.
+    G0 va antes que las siete originales, y decide sobre la baja comercial: un tipo que no
+    está en `TIPOS_NO_COMERCIALES` se anula si el contacto pidió no ser contactado. Es el
+    orden que pidió MaxiCare por escrito: privacidad -> canal -> criterio -> contacto.
 
-    El orden importa: las tres primeras son sobre la cita y se saltan si el seguimiento no
-    cuelga de ninguna; las dos siguientes aplazan en vez de anular, porque su motivo deja de
-    ser cierto más tarde; la sexta anula y la séptima aplaza al día siguiente.
+    Las cinco guardas de reactivación (R1-R5) van justo después de G0 y antes del bloque de
+    la cita: todas son exclusivas de un seguimiento SIN cita (`es_reactivacion`), y un
+    recordatorio de cita las atraviesa sin evaluarlas -- por diseño, no por descuido: el
+    apagado y el tope son frenos COMERCIALES y una cita real no es publicidad.
+
+    El orden del resto importa: las tres primeras del bloque de cita son sobre la cita y se
+    saltan si el seguimiento no cuelga de ninguna; las dos siguientes aplazan en vez de
+    anular, porque su motivo deja de ser cierto más tarde; la sexta anula y la séptima
+    aplaza al día siguiente.
     """
-    # G0. La baja comercial, antes que las siete. Es el orden que pidió MaxiCare por escrito:
+    # G0. La baja comercial, antes que las demás. Es el orden que pidió MaxiCare por escrito:
     # privacidad -> canal -> criterio -> contacto.
     #
     # El tipo se mira DENTRO de la condición, y no en un `if` anterior que anule por baja sin
@@ -236,6 +259,49 @@ def decidir(
     # el que pierde es el paciente que SÍ iba a ir.
     if fila.get("tipo") not in TIPOS_NO_COMERCIALES and fila.get("no_contactar"):
         return Decision("anular", "baja_solicitada")
+
+    es_reactivacion = fila.get("tipo") in TIPOS_DE_REACTIVACION
+
+    # R1. El freno por persona. Antes que nada de lo demas: si esta apagado, no importa la hora
+    # ni el retraso. El apagado es del SISTEMA --«a este numero no le sirve que lo
+    # persigamos»-- y no es la baja, que es de la persona y ya la mira G0.
+    if es_reactivacion and fila.get("seguimientos_fallidos", 0) >= max_seguimientos_fallidos:
+        return Decision("anular", "seguimiento_apagado")
+
+    # R2. El tope por persona y ano (regla 8). No es redundante con R1: el contador vuelve a 0
+    # al agendar, asi que quien agenda cada vez lo esquiva siempre. Este es el techo.
+    if es_reactivacion and fila.get("reactivaciones_ultimo_ano", 0) >= max_reactivaciones_12m:
+        return Decision("anular", "tope_anual")
+
+    # R3. El gemelo de G3 para lo que no tiene cita. G3 vive dentro de `if cita_id is not None`
+    # y la reactivacion la atraviesa sin evaluarse: un proceso caido el viernes soltaria el
+    # lunes todos los mensajes atrasados de golpe, «hace unos dias» sobre algo de hace una
+    # semana. Un pico de mensajes viejos es lo que Meta castiga y lo que hace que la gente
+    # reporte. Se anula y no se aplaza: el momento oportuno ya paso, y el barrido lo volvera a
+    # encolar si la persona sigue calificando.
+    if es_reactivacion and ahora - fila["fecha_objetivo"] > timedelta(
+        hours=HORAS_DE_RETRASO_QUE_LO_INVALIDAN
+    ):
+        return Decision("anular", "llego_tarde")
+
+    # R4. Horario propio (regla 6). NO cuelga de `jornada`: ver el comentario de
+    # HORA_APERTURA_COMERCIAL. Aplaza a la proxima apertura comercial, no a la de la clinica.
+    if es_reactivacion:
+        fuera_de_hora = (
+            ahora.hour < HORA_APERTURA_COMERCIAL or ahora.hour >= HORA_CIERRE_COMERCIAL
+        )
+        if ahora.weekday() == 6 or fuera_de_hora:
+            return Decision(
+                "aplazar", "fuera_de_horario_comercial", _proxima_apertura_comercial(ahora)
+            )
+
+    # R5. No pisarle la conversacion (regla 7). 24 h en vez de los 60 min de G6.
+    if (
+        es_reactivacion
+        and ultimo_mensaje is not None
+        and ahora - ultimo_mensaje < timedelta(hours=HORAS_DE_CONTACTO_RECIENTE_COMERCIAL)
+    ):
+        return Decision("anular", "hablo_hace_poco")
 
     cita_estado = fila.get("cita_estado")
     cita_inicio = fila.get("cita_inicio")
@@ -352,6 +418,29 @@ def _proxima_apertura(ahora: datetime, jornada: Jornada) -> datetime:
     )
 
 
+def _proxima_apertura_comercial(ahora: datetime) -> datetime:
+    """La siguiente franja 9:00-19:00 que no caiga en domingo.
+
+    Deliberadamente NO mira la `Jornada`: el horario comercial es propio (ver
+    HORA_APERTURA_COMERCIAL). Si la clinica cerrara un lunes festivo, un «sigue interesada?»
+    ese lunes es inocuo; lo que no es inocuo es un domingo a las siete de la manana.
+    """
+    candidato = ahora
+    if candidato.hour >= HORA_CIERRE_COMERCIAL:
+        candidato = (candidato + timedelta(days=1)).replace(
+            hour=HORA_APERTURA_COMERCIAL, minute=0, second=0, microsecond=0
+        )
+    elif candidato.hour < HORA_APERTURA_COMERCIAL:
+        candidato = candidato.replace(
+            hour=HORA_APERTURA_COMERCIAL, minute=0, second=0, microsecond=0
+        )
+    while candidato.weekday() == 6:
+        candidato = (candidato + timedelta(days=1)).replace(
+            hour=HORA_APERTURA_COMERCIAL, minute=0, second=0, microsecond=0
+        )
+    return candidato
+
+
 def jornada_zona():
     """La zona de Bogotá, importada tarde para no crear un ciclo con `herramientas`."""
     from .herramientas import ZONA_BOGOTA
@@ -458,6 +547,8 @@ async def despachar(
         # constante de respaldo en vez de leerla dejaría la ventana calculada contra un valor
         # que ya no es el vigente.
         hora_vispera = configuracion.get("hora_recordatorio_vispera", HORA_VISPERA_POR_DEFECTO)
+        max_12m = configuracion.get("max_reactivaciones_12m", MAX_REACTIVACIONES_12M)
+        max_fallidos = configuracion.get("max_seguimientos_fallidos", MAX_SEGUIMIENTOS_FALLIDOS)
 
         filas = await asyncio.to_thread(
             persistencia.seguimientos_por_despachar, conn, ahora=momento_actual, limite=limite
@@ -477,6 +568,8 @@ async def despachar(
                 ultimo_mensaje=ultimo,
                 ya_salio_a_ese_numero=telefono in numeros_de_esta_tanda,
                 hora_vispera=hora_vispera,
+                max_reactivaciones_12m=max_12m,
+                max_seguimientos_fallidos=max_fallidos,
             )
 
             if decision.accion == "anular":
