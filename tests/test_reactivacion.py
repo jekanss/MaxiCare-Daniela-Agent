@@ -37,13 +37,47 @@ def test_el_vocabulario_del_codigo_y_el_de_la_migracion_no_se_separan():
     """El CHECK de la 021 y esta constante son dos listas del mismo vocabulario.
 
     Si se separan, el codigo deja pasar un tipo que la base rechaza y el INSERT revienta la
-    transaccion del turno entero.
+    transaccion del turno entero. Va en las DOS direcciones: que cada tipo del codigo este en
+    el SQL, y que el SQL no tenga uno de mas que el codigo no conozca. Con solo la primera
+    mitad, un quinto valor colado en el CHECK (a mano, en un despliegue) pasaba desapercibido:
+    la base lo aceptaria y el codigo seguiria sin poder pedirlo ni reconocerlo.
     """
+    import re
     from pathlib import Path
 
     sql = Path("migraciones/021_reactivacion.sql").read_text(encoding="utf-8")
+
     for tipo in s.TIPOS_DE_SEGUIMIENTO:
         assert f"'{tipo}'" in sql, f"{tipo} no esta en el CHECK de la 021"
+
+    match = re.search(r"tipo IN \(([^)]*)\)", sql, re.DOTALL)
+    assert match, "no se encontro el bloque `tipo IN (...)` del CHECK en la 021"
+    tipos_del_sql = set(re.findall(r"'(\w+)'", match.group(1)))
+    assert tipos_del_sql == s.TIPOS_DE_SEGUIMIENTO, (
+        "el CHECK de la 021 y `TIPOS_DE_SEGUIMIENTO` tienen valores distintos -- "
+        f"sql={tipos_del_sql} codigo={s.TIPOS_DE_SEGUIMIENTO}"
+    )
+
+
+def test_el_literal_de_la_tool_no_se_separa_de_lo_que_el_modelo_puede_pedir():
+    """El `Literal` de la firma de `programar_seguimiento` es una TERCERA lista del mismo
+    vocabulario, y nada la ataba a `TIPOS_QUE_EL_MODELO_PUEDE_PEDIR`.
+
+    Sin esta prueba: alguien suma un tipo nuevo a la constante y al CHECK de la 021, las
+    pruebas de vocabulario quedan en verde, y el `Literal` se queda con el enum viejo -- el
+    SDK le sigue enseñando al modelo el schema de antes y el tipo nuevo no se puede pedir
+    NUNCA, sin un solo error en ningun log.
+
+    Se compara contra `params_json_schema`, el esquema que el SDK arma a partir del `Literal`
+    y que es literalmente lo que el modelo ve -- no contra el codigo fuente del tipo, que
+    podria tener el enum correcto y aun asi fallar por como `function_tool` lo serializa.
+    """
+    from maxicare_daniela import herramientas as h
+
+    enum_del_modelo = set(
+        h.programar_seguimiento.params_json_schema["properties"]["tipo"]["enum"]
+    )
+    assert enum_del_modelo == s.TIPOS_QUE_EL_MODELO_PUEDE_PEDIR
 
 
 def test_la_tool_rechaza_un_tipo_que_no_existe():

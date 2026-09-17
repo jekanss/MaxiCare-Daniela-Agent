@@ -364,8 +364,12 @@ def corridas(url: str) -> int:
     print(f"   estado guardado       -> {marca('guardado' in estado)} {estado}")
 
     objetivo = hora(72)
-    primero = asyncio.run(h._programar_seguimiento(ctx, "recordatorio_cita", objetivo.isoformat()))
-    repetido = asyncio.run(h._programar_seguimiento(ctx, "recordatorio_cita", objetivo.isoformat()))
+    # `reactivacion_sin_agendar`, no `recordatorio_cita`: desde la tarea 2 de la reactivación
+    # de leads, ese tipo salió de lo que se puede pedir por esta tool -- lo emite el código al
+    # crear o mover la cita-- y con el viejo las dos llamadas de abajo devolvían "Ese tipo de
+    # seguimiento no existe..." antes de tocar la base.
+    primero = asyncio.run(h._programar_seguimiento(ctx, "reactivacion_sin_agendar", objetivo.isoformat()))
+    repetido = asyncio.run(h._programar_seguimiento(ctx, "reactivacion_sin_agendar", objetivo.isoformat()))
     print(f"   seguimiento           -> {marca('programado' in primero)} {primero[:55]}")
     print(f"   el mismo otra vez     -> {marca('ya estaba' in repetido)} no se duplica")
 

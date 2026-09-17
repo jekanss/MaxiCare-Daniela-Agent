@@ -1420,13 +1420,17 @@ async def registrar_estado_oportunidad(
 async def _programar_seguimiento(
     ctx: ContextoDaniela, tipo: str, fecha_objetivo: str
 ) -> str:
-    # El vocabulario cerrado. Va ANTES de la baja y antes de la fecha porque es lo unico que
-    # protege el portillo de G0: `recordatorio_cita` esta en `TIPOS_NO_COMERCIALES`, asi que un
-    # tipo disfrazado se salta la comprobacion de la baja entera. Y `recordatorio_cita` no se
-    # encola desde aqui NUNCA: lo emite el codigo al crear o mover la cita (no negociable 21),
-    # asi que dejarselo al modelo solo abre esa puerta y no cierra ninguna.
-    if tipo not in seguimientos.TIPOS_QUE_EL_BARRIDO_ENCOLA:
-        permitidos = ", ".join(sorted(seguimientos.TIPOS_QUE_EL_BARRIDO_ENCOLA))
+    # El vocabulario cerrado, con la puerta del MODELO y no la del barrido: son dos listas a
+    # propósito (`seguimientos.TIPOS_QUE_EL_MODELO_PUEDE_PEDIR`), y esta es la única que
+    # `recordatorio_cita` no atraviesa jamás. Va ANTES de la baja y antes de la fecha porque es
+    # lo primero que hay que decidir: con `recordatorio_cita` fuera de esta lista, ya no hace
+    # falta comprobar la baja para ese tipo --no hay tipo disfrazado que colar-- y lo que
+    # sostiene la mitad no-comercial de la 25 (que un recordatorio SÍ sale con la baja puesta)
+    # es el otro camino, el que nunca pasa por aquí: `crear_cita`/`reprogramar_cita` llaman a
+    # `persistencia.insertar_seguimiento(tipo="recordatorio_cita", ...)` directo, sin consultar
+    # `ctx.pidio_no_contacto`, más G0 (`seguimientos.decidir`) al despachar.
+    if tipo not in seguimientos.TIPOS_QUE_EL_MODELO_PUEDE_PEDIR:
+        permitidos = ", ".join(sorted(seguimientos.TIPOS_QUE_EL_MODELO_PUEDE_PEDIR))
         return (
             f"Ese tipo de seguimiento no existe. Los que puedes programar son: {permitidos}. "
             "Los recordatorios de una cita los programa el sistema solo."
@@ -1439,10 +1443,11 @@ async def _programar_seguimiento(
     # Se devuelve texto en vez de lanzar: el modelo tiene que saber por qué no se programó,
     # o lo intentará otra vez con otra fecha.
     #
-    # `ctx.pidio_no_contacto` sale de `contactos`, nunca del modelo, y el tipo se mira contra
-    # la MISMA lista blanca del despachador: un recordatorio de cita se programa igual, que
-    # es justo lo que la baja no puede apagar (no negociable 25).
-    if ctx.pidio_no_contacto and tipo not in seguimientos.TIPOS_NO_COMERCIALES:
+    # `ctx.pidio_no_contacto` sale de `contactos`, nunca del modelo. Ya no hace falta mirar el
+    # tipo contra `TIPOS_NO_COMERCIALES` aquí: todo lo que llega a esta línea viene de
+    # `TIPOS_QUE_EL_MODELO_PUEDE_PEDIR`, que es puramente comercial -- `recordatorio_cita` ya
+    # se rechazó arriba, con baja o sin ella --, así que la condición es incondicional.
+    if ctx.pidio_no_contacto:
         return (
             "Este paciente pidió que no le escribieran más, así que no se programó nada "
             "comercial. No se lo ofrezcas ni se lo menciones. El recordatorio de una cita "

@@ -188,6 +188,16 @@ TIPOS_DE_SEGUIMIENTO = TIPOS_DE_REACTIVACION | {TIPO_RECORDATORIO}
 #: forma de saber quien no vino, y encolarlo mandaria «no pudo asistir» a quien si fue.
 TIPOS_QUE_EL_BARRIDO_ENCOLA = frozenset({TIPO_SIN_AGENDAR, TIPO_CANCELADA})
 
+#: Los que el MODELO puede pedir por `programar_seguimiento`. Hoy tiene los MISMOS dos valores
+#: que `TIPOS_QUE_EL_BARRIDO_ENCOLA`, y es a propósito que sean dos constantes y no una: son
+#: dos actores distintos -- el barrido de la fase 8 y la tool que llama el modelo en medio de
+#: una conversación -- y coincidir hoy no significa que tengan que moverse juntos mañana. El
+#: día que la fase 8 escriba `citas.asistio` y alguien añada `TIPO_NO_ASISTIO` al barrido para
+#: encenderlo, tocar solo esa lista no le abre al modelo la puerta de pedir «no pudo asistir»
+#: sobre alguien que sí fue -- que es exactamente un reporte. Con una sola constante para los
+#: dos, esa apertura pasaría en silencio y ninguna prueba lo notaría.
+TIPOS_QUE_EL_MODELO_PUEDE_PEDIR = frozenset({TIPO_SIN_AGENDAR, TIPO_CANCELADA})
+
 
 @dataclass(frozen=True)
 class Decision:

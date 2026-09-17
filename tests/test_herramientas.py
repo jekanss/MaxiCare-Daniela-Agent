@@ -1984,9 +1984,18 @@ def test_crear_cita_programa_el_recordatorio_sin_que_el_modelo_lo_pida(monkeypat
     Hasta hoy el recordatorio dependía de que el modelo llamara a `programar_seguimiento`, y ni
     el prompt de `agentes.py` ni `crear_cita` la mencionaban. En la práctica la cola estaba
     vacía: la tool existía desde la fase 3 y nadie la llamaba.
+
+    `pidio_no_contacto=True`: es la única prueba del nivel `herramientas` que combina la baja
+    con la emisión de un recordatorio, y por eso es la que sostiene la mitad no-comercial del
+    no negociable 25 en esta capa. `crear_cita` llama a `persistencia.insertar_seguimiento`
+    directo, sin pasar por `ctx.pidio_no_contacto` en ningún punto del camino -- si alguien le
+    sumara un `if ctx.pidio_no_contacto: cuando_recordar = None` creyendo que respeta la baja,
+    esta prueba es la que lo cazaría.
     """
     programados: list[dict] = []
-    ctx = contexto(ahora=datetime(2026, 9, 14, 9, 0, tzinfo=h.ZONA_BOGOTA))
+    ctx = contexto(
+        ahora=datetime(2026, 9, 14, 9, 0, tzinfo=h.ZONA_BOGOTA), pidio_no_contacto=True
+    )
 
     async def base_falsa(_ctx, trabajo):
         return trabajo(BaseFalsa())
@@ -2547,10 +2556,22 @@ def test_recordatorio_de_cita_no_se_encola_por_esta_via_ni_siquiera_sin_baja(mon
     assert "no existe" in texto.lower()
 
 
-def test_la_guarda_de_la_baja_usa_LA_MISMA_lista_blanca_que_el_despachador():
-    """Dos listas para el mismo hecho acaban divergiendo, y divergir aquí significa que la
-    tool programa lo que el despachador anula --o, peor, al revés--."""
-    assert "recordatorio_cita" in seguimientos.TIPOS_NO_COMERCIALES
+def test_la_guarda_de_la_baja_es_incondicional_PORQUE_lo_que_el_modelo_pide_es_siempre_comercial():
+    """Reemplaza a `test_la_guarda_de_la_baja_usa_LA_MISMA_lista_blanca_que_el_despachador`,
+    que comparaba `_programar_seguimiento` contra `TIPOS_NO_COMERCIALES` -- una comparación
+    que dejó de significar nada en cuanto `recordatorio_cita` salió por completo de
+    `TIPOS_QUE_EL_MODELO_PUEDE_PEDIR`: desde entonces la comprobación de la baja en la tool
+    ya no mira el tipo, es un `if ctx.pidio_no_contacto:` a secas.
+
+    Lo que hace que esa incondicionalidad sea segura -- y lo que esta prueba sostiene -- es
+    que las dos constantes no se solapen: si algún día alguien mete en
+    `TIPOS_QUE_EL_MODELO_PUEDE_PEDIR` un tipo que también esté en `TIPOS_NO_COMERCIALES`, la
+    baja empezaría a bloquear una excepción real (o, al revés, un tipo comercial se colaría
+    como exento) sin que ninguna otra prueba lo note.
+    """
+    assert seguimientos.TIPOS_QUE_EL_MODELO_PUEDE_PEDIR.isdisjoint(
+        seguimientos.TIPOS_NO_COMERCIALES
+    )
 
 
 # ==========================================================================================
