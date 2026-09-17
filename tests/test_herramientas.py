@@ -560,9 +560,11 @@ def test_el_seguimiento_mira_el_reloj_DEL_TURNO_y_no_el_de_la_maquina(monkeypatc
 
     monkeypatch.setattr(h, "_con_base", base_falsa)
 
-    # Futuro para el reloj de la máquina, pasado para el turno.
+    # Futuro para el reloj de la máquina, pasado para el turno. `reactivacion_sin_agendar` y
+    # no `recordatorio_cita`: desde la tarea 2, ese tipo ya no es encolable por esta vía --lo
+    # emite el código al crear o mover la cita-- y esta prueba no es sobre el vocabulario.
     texto = asyncio.run(
-        h._programar_seguimiento(ctx, "recordatorio_cita", "2026-12-01T09:00")
+        h._programar_seguimiento(ctx, "reactivacion_sin_agendar", "2026-12-01T09:00")
     )
 
     assert "ya pasó" in texto
@@ -2481,7 +2483,8 @@ def test_no_se_programa_nada_sobre_una_conversacion_que_tiene_un_doctor(monkeypa
     monkeypatch.setattr(h, "_con_base", base_falsa)
 
     futuro = (ctx.ahora + timedelta(days=2)).isoformat()
-    texto = asyncio.run(h._programar_seguimiento(ctx, "recordatorio_cita", futuro))
+    # `reactivacion_sin_agendar`: `recordatorio_cita` ya no es encolable por esta vía (tarea 2).
+    texto = asyncio.run(h._programar_seguimiento(ctx, "reactivacion_sin_agendar", futuro))
 
     assert "No se programó nada" in texto
     assert "Dr. Martínez" in texto
@@ -2491,7 +2494,9 @@ def test_no_se_programa_un_seguimiento_hacia_atras():
     ctx = contexto()
     pasado = (ctx.ahora - timedelta(days=1)).isoformat()
 
-    texto = asyncio.run(h._programar_seguimiento(ctx, "reactivacion", pasado))
+    # `reactivacion_sin_agendar` y no `reactivacion` a secas: ese tipo nunca existió en el
+    # vocabulario cerrado de la tarea 2.
+    texto = asyncio.run(h._programar_seguimiento(ctx, "reactivacion_sin_agendar", pasado))
 
     assert "ya pasó" in texto
 
@@ -2513,27 +2518,33 @@ def test_con_la_baja_puesta_lo_comercial_NO_LLEGA_A_INSERTARSE(monkeypatch):
     monkeypatch.setattr(h, "_con_base", base_prohibida)
 
     futuro = (ctx.ahora + timedelta(days=2)).isoformat()
-    texto = asyncio.run(h._programar_seguimiento(ctx, "reactivacion", futuro))
+    # `reactivacion_sin_agendar` y no `reactivacion` a secas: ese tipo nunca existió en el
+    # vocabulario cerrado de la tarea 2.
+    texto = asyncio.run(h._programar_seguimiento(ctx, "reactivacion_sin_agendar", futuro))
 
     assert "no le escribieran más" in texto
     assert "no se programó nada comercial" in texto
 
 
-def test_con_la_baja_puesta_el_recordatorio_de_una_cita_SI_se_programa(monkeypatch):
-    """La otra mitad, y la que importa: pedir que no te manden publicidad no es renunciar a
-    que te avisen de tu propia cita. Las dos van juntas porque el fallo que interesa es que
-    alguien las una (no negociable 25)."""
-    ctx = contexto(pidio_no_contacto=True)
+def test_recordatorio_de_cita_no_se_encola_por_esta_via_ni_siquiera_sin_baja(monkeypatch):
+    """La tarea 2 sacó `recordatorio_cita` de lo que el modelo puede pedir por esta tool: lo
+    emite el CÓDIGO al crear o mover la cita (`crear_cita`/`reprogramar_cita`, con
+    `persistencia.insertar_seguimiento` directo), nunca `_programar_seguimiento`. Esta prueba
+    reemplaza a la que existía --que esperaba justo lo contrario, que la baja no le aplicaba a
+    `recordatorio_cita` PORQUE se podía programar por aquí-- porque esa premisa ya no es
+    cierta: ahora se rechaza con baja o sin ella, antes de tocar la base.
+    """
+    ctx = contexto()
 
-    async def base_falsa(_ctx, trabajo):
-        return (None, True)
+    async def base_prohibida(_ctx, trabajo):
+        raise AssertionError("no se puede tocar la base pidiendo un tipo que no se encola")
 
-    monkeypatch.setattr(h, "_con_base", base_falsa)
+    monkeypatch.setattr(h, "_con_base", base_prohibida)
 
     futuro = (ctx.ahora + timedelta(days=2)).isoformat()
     texto = asyncio.run(h._programar_seguimiento(ctx, "recordatorio_cita", futuro))
 
-    assert "programado" in texto
+    assert "no existe" in texto.lower()
 
 
 def test_la_guarda_de_la_baja_usa_LA_MISMA_lista_blanca_que_el_despachador():

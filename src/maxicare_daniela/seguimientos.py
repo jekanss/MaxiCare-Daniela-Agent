@@ -169,6 +169,25 @@ MINUTOS_DE_CONTACTO_RECIENTE = 60
 #: docstring de la tool, que ya no le ofrece al modelo `'recordatorio_cita'` como ejemplo.
 TIPOS_NO_COMERCIALES = frozenset({"recordatorio_cita"})
 
+#: Los cuatro tipos que existen. El CHECK `ck_seguimientos_tipo` de la migracion 021 tiene la
+#: MISMA lista: son dos caras de un vocabulario, y `test_el_vocabulario_del_codigo_y_el_de_la_
+#: migracion_no_se_separan` las mantiene juntas. Sin el cierre, `tipo` es TEXT que escribe el
+#: modelo, y un `recordatorio_cita` inventado atraviesa G0 con el paciente de baja.
+TIPO_RECORDATORIO = "recordatorio_cita"
+TIPO_SIN_AGENDAR = "reactivacion_sin_agendar"
+TIPO_CANCELADA = "reactivacion_cancelada"
+
+#: Declarado y SIN disparador: nadie escribe `citas.asistio` hasta que cierre la fase 8. Existe
+#: aqui para que encenderlo sea cambiar una constante y no volver a tocar la base.
+TIPO_NO_ASISTIO = "reactivacion_no_asistio"
+
+TIPOS_DE_REACTIVACION = frozenset({TIPO_SIN_AGENDAR, TIPO_CANCELADA, TIPO_NO_ASISTIO})
+TIPOS_DE_SEGUIMIENTO = TIPOS_DE_REACTIVACION | {TIPO_RECORDATORIO}
+
+#: Los que el BARRIDO puede encolar hoy. `TIPO_NO_ASISTIO` no esta: sin `citas.asistio` no hay
+#: forma de saber quien no vino, y encolarlo mandaria «no pudo asistir» a quien si fue.
+TIPOS_QUE_EL_BARRIDO_ENCOLA = frozenset({TIPO_SIN_AGENDAR, TIPO_CANCELADA})
+
 
 @dataclass(frozen=True)
 class Decision:

@@ -54,7 +54,7 @@ import html
 import logging
 from datetime import datetime, timedelta
 from functools import partial
-from typing import Any, Callable
+from typing import Any, Callable, Literal
 
 from agents import RunContextWrapper, function_tool
 
@@ -1420,6 +1420,18 @@ async def registrar_estado_oportunidad(
 async def _programar_seguimiento(
     ctx: ContextoDaniela, tipo: str, fecha_objetivo: str
 ) -> str:
+    # El vocabulario cerrado. Va ANTES de la baja y antes de la fecha porque es lo unico que
+    # protege el portillo de G0: `recordatorio_cita` esta en `TIPOS_NO_COMERCIALES`, asi que un
+    # tipo disfrazado se salta la comprobacion de la baja entera. Y `recordatorio_cita` no se
+    # encola desde aqui NUNCA: lo emite el codigo al crear o mover la cita (no negociable 21),
+    # asi que dejarselo al modelo solo abre esa puerta y no cierra ninguna.
+    if tipo not in seguimientos.TIPOS_QUE_EL_BARRIDO_ENCOLA:
+        permitidos = ", ".join(sorted(seguimientos.TIPOS_QUE_EL_BARRIDO_ENCOLA))
+        return (
+            f"Ese tipo de seguimiento no existe. Los que puedes programar son: {permitidos}. "
+            "Los recordatorios de una cita los programa el sistema solo."
+        )
+
     # La baja comercial, EN CÓDIGO y no solo en el prompt. `seguimientos.decidir` ya la
     # recoge con G0 al despachar, así que sin esto no sale nada -- pero entonces lo único
     # que impide INSERTAR la fila es que el modelo obedezca una instrucción, y en este
@@ -1477,7 +1489,9 @@ async def _programar_seguimiento(
 
 @function_tool(failure_error_function=_fallo_seguimiento)
 async def programar_seguimiento(
-    wrapper: RunContextWrapper[ContextoDaniela], tipo: str, fecha_objetivo: str
+    wrapper: RunContextWrapper[ContextoDaniela],
+    tipo: Literal["reactivacion_sin_agendar", "reactivacion_cancelada"],
+    fecha_objetivo: str,
 ) -> str:
     """Deja programado un seguimiento comercial para más adelante.
 
@@ -1486,7 +1500,8 @@ async def programar_seguimiento(
     aquí — los programa el sistema solo al crear o mover la cita.
 
     Args:
-        tipo: qué clase de seguimiento, por ejemplo 'reactivacion'.
+        tipo: 'reactivacion_sin_agendar' si preguntó y no agendó, 'reactivacion_cancelada'
+            si canceló y no volvió a pedir fecha.
         fecha_objetivo: cuándo debe salir, en ISO y hora de Bogotá.
     """
     return await _programar_seguimiento(wrapper.context, tipo, fecha_objetivo)
