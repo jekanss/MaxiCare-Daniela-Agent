@@ -969,6 +969,10 @@ async def _crear_cita(ctx: ContextoDaniela, solicitud: SolicitudCita) -> str:
                     "no se duplica",
                     id_cita,
                 )
+        # El contador vuelve a cero: agendar es justo la prueba de que el seguimiento SÍ
+        # servía. Va con `commit=False` para que viaje en la misma transacción que la cita:
+        # si la cita se deshace, esto se deshace con ella.
+        persistencia.reiniciar_seguimientos_fallidos(conn, ctx.telefono_completo, commit=False)
         conn.commit()
         return (id_cita, paciente_id)
 

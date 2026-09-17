@@ -2713,6 +2713,53 @@ def pedir_baja(
     return cambio
 
 
+def sumar_seguimiento_fallido(conn, telefono: str) -> int:
+    """Suma uno al contador de series de seguimiento que no sirvieron. Devuelve el nuevo valor.
+
+    NO es la baja y no se le parece: esto lo decide el sistema --«a este número no le sirve que
+    lo persigamos»-- y `no_contactar` lo decide la persona. Por eso esto vive solo en
+    `contactos`, no escribe una línea en `consentimientos`, y `/clearstate` SÍ lo resetea.
+
+    El `WHERE` va por teléfono y no tiene vuelta atrás: aflojarlo apaga el seguimiento de la
+    cartera entera. `test_el_contador_no_alcanza_a_otro_telefono` lo vigila.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE contactos
+               SET seguimientos_fallidos = seguimientos_fallidos + 1,
+                   ultimo_seguimiento_en = now(),
+                   actualizado_en = now()
+             WHERE telefono = %s
+         RETURNING seguimientos_fallidos
+            """,
+            (telefono,),
+        )
+        fila = cur.fetchone()
+    conn.commit()
+    return fila[0] if fila else 0
+
+
+def reiniciar_seguimientos_fallidos(conn, telefono: str, *, commit: bool = True) -> None:
+    """Devuelve el contador a cero. Lo llama `crear_cita`: alguien que ignoró dos veces y al
+    final vino demostró lo contrario de lo que el contador supone.
+
+    `commit=False` para que el reset viaje en la MISMA transacción que la cita, igual que el
+    recordatorio. Si la cita se deshace, el reset se deshace con ella.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE contactos
+               SET seguimientos_fallidos = 0, actualizado_en = now()
+             WHERE telefono = %s AND seguimientos_fallidos > 0
+            """,
+            (telefono,),
+        )
+    if commit:
+        conn.commit()
+
+
 def revocar_baja(
     conn, telefono: str, *, origen: str = "paciente", detalle: str | None = None
 ) -> bool:
@@ -2889,10 +2936,16 @@ def borrar_rastro(conn, telefono: str, *, conservar_wamid: str | None = None) ->
             # dejaría esa rama inalcanzable en cuanto todo número conocido tenga fila en
             # `contactos` -- el reseteo pasaría a "borrar" siempre al menos 1, y el paciente
             # oiría «borré todo lo tuyo» sobre un número que ya estaba limpio.
+            # `seguimientos_fallidos` y `ultimo_seguimiento_en` van en el mismo `UPDATE`: ese
+            # contador es del SISTEMA, no de la persona -- lo contrario exacto del
+            # `no_contactar` de dos párrafos más abajo, que es de la persona y por eso NO se
+            # toca aquí. Tampoco entra en `borradas`, por la misma razón que el aviso: no es
+            # un borrado, y contarlo falsearía la rama «no había nada que borrar».
             cur.execute(
                 """
                 UPDATE contactos
                    SET aviso_mostrado_en = NULL, politica_version = NULL,
+                       seguimientos_fallidos = 0, ultimo_seguimiento_en = NULL,
                        actualizado_en = now()
                  WHERE telefono = %(tel)s
                 """,

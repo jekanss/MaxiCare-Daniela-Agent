@@ -890,6 +890,9 @@ def test_agendar_registra_al_paciente_y_lo_deja_verificado(monkeypatch):
     # Lo mismo que en `_descripcion_del_evento`: esta prueba mira la ficha del paciente, no
     # la cola, pero `guardar` corre entero contra los dobles.
     monkeypatch.setattr(h.persistencia, "insertar_seguimiento", lambda conn, **kw: True)
+    monkeypatch.setattr(
+        h.persistencia, "reiniciar_seguimientos_fallidos", lambda conn, telefono, **kw: None
+    )
 
     texto = asyncio.run(
         h._crear_cita(
@@ -1144,6 +1147,10 @@ def _descripcion_del_evento(monkeypatch, ctx, solicitud) -> str:
     # pruebas no miran la cola, pero sí corren `guardar` de verdad: sin el doble, la
     # inserción llegaría a `BaseFalsa` buscando un cursor.
     monkeypatch.setattr(h.persistencia, "insertar_seguimiento", lambda conn, **kw: True)
+    # Lo mismo desde la tarea 5: el reset del contador corre dentro de la misma transacción.
+    monkeypatch.setattr(
+        h.persistencia, "reiniciar_seguimientos_fallidos", lambda conn, telefono, **kw: None
+    )
 
     asyncio.run(h._crear_cita(ctx, solicitud))
     (descripcion,) = ctx.calendario.descripciones.values()
@@ -2012,6 +2019,9 @@ def test_crear_cita_programa_el_recordatorio_sin_que_el_modelo_lo_pida(monkeypat
         return True
 
     monkeypatch.setattr(persistencia, "insertar_seguimiento", _insertar)
+    monkeypatch.setattr(
+        persistencia, "reiniciar_seguimientos_fallidos", lambda conn, telefono, **kw: None
+    )
 
     texto = asyncio.run(
         h._crear_cita(
@@ -2057,6 +2067,9 @@ def test_una_cita_a_dos_horas_no_deja_recordatorio(monkeypatch):
         persistencia,
         "insertar_seguimiento",
         lambda conn, **kw: programados.append(kw) or True,
+    )
+    monkeypatch.setattr(
+        persistencia, "reiniciar_seguimientos_fallidos", lambda conn, telefono, **kw: None
     )
 
     asyncio.run(
