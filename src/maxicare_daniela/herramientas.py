@@ -2070,6 +2070,44 @@ async def _revocar_no_contactar(ctx: ContextoDaniela, nota: str | None) -> str:
     return "Anotado: vuelve a recibir mensajes nuestros. Confírmaselo en una línea."
 
 
+async def _cerrar_seguimiento(ctx: ContextoDaniela, nota: str | None) -> str:
+    """El núcleo. Anula lo pendiente y sube el contador. **Nunca marca la baja**: ver D2 --
+    «ya no me interesa esta consulta» no es «no me escriban nunca más», y de las dos es la
+    única que no se deshace sin que la persona vuelva a pedirlo. Marcar la baja aquí quemaría
+    a un paciente por una frase que no dijo.
+    """
+
+    def trabajo(conn):
+        anulados = persistencia.anular_reactivaciones_vivas(
+            conn, ctx.telefono_completo, motivo="el_paciente_dijo_que_no"
+        )
+        persistencia.sumar_seguimiento_fallido(conn, ctx.telefono_completo)
+        return anulados
+
+    await _con_base(ctx, trabajo)
+    return (
+        "Anotado: no se le vuelve a escribir sobre esta consulta. Si tiene una cita agendada, "
+        "su recordatorio le sigue llegando. Si lo que quiere es no recibir NINGÚN mensaje "
+        "comercial nunca más, esa es otra cosa y se registra aparte."
+    )
+
+
+@function_tool(failure_error_function=_fallo_seguimiento)
+async def cerrar_seguimiento(
+    wrapper: RunContextWrapper[ContextoDaniela], nota: str
+) -> str:
+    """Cierra el seguimiento de esta consulta porque el paciente dijo que ya no le interesa.
+
+    Úsala cuando responda que no a un mensaje de seguimiento nuestro, incluido el botón
+    'Ya no, gracias'. NO la uses si lo que pide es no recibir ningún mensaje más: eso es la
+    baja y tiene su propia herramienta.
+
+    Args:
+        nota: lo que dijo el paciente, en sus palabras.
+    """
+    return await _cerrar_seguimiento(wrapper.context, nota)
+
+
 @function_tool(failure_error_function=_fallo_privacidad)
 async def revocar_no_contactar(
     wrapper: RunContextWrapper[ContextoDaniela],
@@ -2090,9 +2128,9 @@ async def revocar_no_contactar(
 # El conjunto -- lo que `agentes.py` importará en la fase 4
 # ==========================================================================================
 
-#: Las nueve del plan, en el orden de `herramientas[]`, más `consultar_citas`, y las dos de
-#: la baja comercial al final: ninguna de las tres está en el plan y por eso no se cuelan
-#: entre las nueve.
+#: Las nueve del plan, en el orden de `herramientas[]`, más `consultar_citas`, y las tres de
+#: la baja comercial y la reactivación al final: ninguna de las cuatro está en el plan y por
+#: eso no se cuelan entre las nueve.
 TODAS = (
     consultar_base_conocimiento,
     consultar_disponibilidad,
@@ -2106,6 +2144,7 @@ TODAS = (
     consultar_citas,
     registrar_no_contactar,
     revocar_no_contactar,
+    cerrar_seguimiento,
 )
 
 __all__ = [
@@ -2114,6 +2153,7 @@ __all__ = [
     "MAX_INTENTOS_IDENTIFICACION",
     "ZONA_BOGOTA",
     "cancelar_cita",
+    "cerrar_seguimiento",
     "consultar_base_conocimiento",
     "consultar_citas",
     "consultar_disponibilidad",

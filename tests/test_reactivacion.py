@@ -814,3 +814,56 @@ def test_parametros_de_un_tipo_desconocido_cae_al_lado_ESTRECHO_no_al_de_cuatro_
         tratamiento="Ortodoncia",
     )
     assert s.parametros_de(fila) == ["Marcela"]
+
+
+# ==========================================================================================
+# Tarea 6: «Ya no, gracias» cierra la serie.
+# ==========================================================================================
+
+
+def test_cerrar_seguimiento_anula_lo_pendiente_y_sube_el_contador():
+    import asyncio
+    from unittest.mock import MagicMock
+
+    from maxicare_daniela import herramientas as h
+    from tests.test_herramientas import contexto
+
+    llamadas = {}
+
+    def _anular(conn, telefono, *, motivo):
+        llamadas["anular"] = (telefono, motivo)
+        return 1
+
+    def _sumar(conn, telefono):
+        llamadas["sumar"] = telefono
+        return 1
+
+    async def _con_base_falsa(ctx, trabajo):
+        # `_con_base` real es `async def` -- un lambda sincrono aqui haria que
+        # `await _con_base(...)` reventara con `object no puede usarse en 'await'`
+        # sin llegar a probar nada de `_cerrar_seguimiento`.
+        return trabajo(MagicMock())
+
+    ctx = contexto()
+    with pytest.MonkeyPatch().context() as mp:
+        mp.setattr(h.persistencia, "anular_reactivaciones_vivas", _anular)
+        mp.setattr(h.persistencia, "sumar_seguimiento_fallido", _sumar)
+        mp.setattr(h, "_con_base", _con_base_falsa)
+        asyncio.run(h._cerrar_seguimiento(ctx, "ya no me interesa"))
+
+    assert llamadas["anular"][0] == ctx.telefono_completo
+    assert llamadas["sumar"] == ctx.telefono_completo
+
+
+def test_cerrar_seguimiento_NO_marca_la_baja():
+    """D2: «ya no me interesa esta consulta» no es «no me escriban nunca mas».
+
+    Marcar la baja aqui quema a un paciente por una frase que no dijo, y es lo unico de los
+    dos que no se deshace sin que la persona lo pida.
+    """
+    import inspect
+
+    from maxicare_daniela import herramientas as h
+
+    fuente = inspect.getsource(h._cerrar_seguimiento)
+    assert "pedir_baja" not in fuente

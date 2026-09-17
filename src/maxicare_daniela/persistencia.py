@@ -1842,6 +1842,37 @@ def anular_seguimientos_de_cita(
     return anulados
 
 
+def anular_reactivaciones_vivas(conn, telefono: str, *, motivo: str) -> int:
+    """Anula los seguimientos de reactivación pendientes de ESE teléfono. Devuelve cuántos.
+
+    Va por teléfono y no por conversación a propósito: la conversación caduca a las 24 h y el
+    segundo intento de una serie sale a los 7 días, o sea desde OTRA conversación. Colgarlo de
+    `id_conversacion` dejaría vivo justo el mensaje que el paciente acaba de rechazar.
+
+    NO toca `recordatorio_cita`: quien dice «ya no me interesa» a una reactivación no está
+    renunciando a que le avisen de su propia cita.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE seguimientos
+               SET anulado_en = now(), motivo_anulacion = %(motivo)s
+             WHERE id IN (
+                    SELECT s.id FROM seguimientos s
+                      JOIN conversaciones cv ON cv.id = s.conversacion_id
+                     WHERE cv.telefono = %(tel)s
+                       AND s.tipo <> 'recordatorio_cita'
+                       AND s.enviado_en IS NULL
+                       AND s.anulado_en IS NULL
+             )
+            """,
+            {"tel": telefono, "motivo": motivo[:200]},
+        )
+        anulados = cur.rowcount
+    conn.commit()
+    return anulados
+
+
 def seguimientos_por_despachar(
     conn, *, ahora: datetime, limite: int = 50
 ) -> list[dict[str, Any]]:

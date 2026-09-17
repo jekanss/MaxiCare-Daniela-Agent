@@ -87,7 +87,8 @@ def test_daniela_tiene_las_nueve_tools_del_plan_la_decima_y_la_baja_comercial():
     puede salir de ninguna otra.
 
     `registrar_no_contactar` y `revocar_no_contactar` tampoco están en el plan: son la baja
-    comercial, añadida el 16/09/2026.
+    comercial, añadida el 16/09/2026. `cerrar_seguimiento` tampoco: es el cierre de una serie
+    de reactivación, añadido el 17/09/2026 (tarea 6).
     """
     nombres = {t.name for t in agentes.daniela.tools}
 
@@ -104,6 +105,7 @@ def test_daniela_tiene_las_nueve_tools_del_plan_la_decima_y_la_baja_comercial():
         "consultar_citas",
         "registrar_no_contactar",
         "revocar_no_contactar",
+        "cerrar_seguimiento",
     }
 
 
@@ -739,7 +741,7 @@ def test_el_modelo_recibe_las_tools_y_las_instrucciones():
     correr(agentes.daniela, "hola", ctx, guion)
 
     recibido = guion.recibido[0]
-    assert len(recibido["tools"]) == 12
+    assert len(recibido["tools"]) == 13
     assert "MaxiCare" in recibido["instrucciones"]
 
 
@@ -931,6 +933,17 @@ def test_el_prompt_nombra_las_dos_tools_de_la_baja_comercial():
 
 def test_el_prompt_manda_callar_el_seguimiento_a_quien_lo_nego():
     assert "no lo ofreces, no lo insinúas y no lo mencionas" in agentes.INSTRUCCIONES_DANIELA
+
+
+def test_el_prompt_manda_el_no_ambiguo_al_lado_barato():
+    """Tarea 6: el «no» a un seguimiento nuestro es `cerrar_seguimiento`, no la baja.
+
+    Sin esto, el prompt seguía sin mencionar la tool nueva y el modelo no tenía ninguna
+    instrucción para decidir entre las dos cuando el paciente solo dice «no gracias».
+    """
+    texto = agentes.INSTRUCCIONES_DANIELA
+    assert "cerrar_seguimiento" in texto
+    assert "Ya no, gracias" in texto
 
 
 def test_el_telefono_de_privacidad_del_prompt_es_el_que_perdona_el_guardrail():

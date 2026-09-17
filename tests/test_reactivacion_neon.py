@@ -13,7 +13,7 @@ Escribe en el esquema `pruebas_reactivacion`, que se crea y se borra aquí. Nunc
 from __future__ import annotations
 
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pytest
 
@@ -133,3 +133,28 @@ def test_clearstate_resetea_el_contador_pero_no_la_baja(conexion_pruebas):
     contacto = persistencia.leer_contacto(conexion_pruebas, TELEFONO)
     assert contacto["seguimientos_fallidos"] == 0
     assert contacto["no_contactar"] is True
+
+
+# ==========================================================================================
+# La anulación por teléfono (tarea 6)
+# ==========================================================================================
+
+
+def test_cerrar_anula_el_segundo_intento_que_vive_en_otra_conversacion(conexion_pruebas):
+    """La razón entera de que vaya por teléfono.
+
+    La serie empieza en la conversación A; a los 7 días esa conversación ya caducó y el
+    segundo intento sigue colgando de ella. Si la anulación fuera por `id_conversacion` de la
+    conversación VIVA, no lo alcanzaría -- y el paciente que acaba de decir que no recibiría
+    el mensaje siete días después.
+    """
+    conv_a = persistencia.asegurar_conversacion(conexion_pruebas, telefono=TELEFONO)
+    persistencia.insertar_seguimiento(
+        conexion_pruebas, id_conversacion=conv_a, tipo="reactivacion_sin_agendar",
+        fecha_objetivo=AHORA + timedelta(days=7), clave_idempotencia="k-2",
+    )
+    persistencia.asegurar_conversacion(conexion_pruebas, telefono=TELEFONO)  # la viva, otra
+    anulados = persistencia.anular_reactivaciones_vivas(
+        conexion_pruebas, TELEFONO, motivo="el_paciente_dijo_que_no"
+    )
+    assert anulados == 1, "el segundo intento de la serie sobrevivió al «no»"
