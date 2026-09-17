@@ -1998,8 +1998,15 @@ def test_crear_cita_programa_el_recordatorio_sin_que_el_modelo_lo_pida(monkeypat
     directo, sin pasar por `ctx.pidio_no_contacto` en ningún punto del camino -- si alguien le
     sumara un `if ctx.pidio_no_contacto: cuando_recordar = None` creyendo que respeta la baja,
     esta prueba es la que lo cazaría.
+
+    I1 (ronda de revisión sobre la parada D): el doble de `reiniciar_seguimientos_fallidos`
+    ahora REGISTRA la llamada, y esta prueba comprueba con QUÉ teléfono se hizo -- no solo que
+    `crear_cita` no reventó. Con un doble que solo silenciaba el `AttributeError`
+    (`lambda conn, telefono, **kw: None`), borrar la línea del reset en `_crear_cita` dejaba
+    la suite entera en verde: la ausencia de la llamada era indistinguible de su presencia.
     """
     programados: list[dict] = []
+    reinicios: list[str] = []
     ctx = contexto(
         ahora=datetime(2026, 9, 14, 9, 0, tzinfo=h.ZONA_BOGOTA), pidio_no_contacto=True
     )
@@ -2019,9 +2026,11 @@ def test_crear_cita_programa_el_recordatorio_sin_que_el_modelo_lo_pida(monkeypat
         return True
 
     monkeypatch.setattr(persistencia, "insertar_seguimiento", _insertar)
-    monkeypatch.setattr(
-        persistencia, "reiniciar_seguimientos_fallidos", lambda conn, telefono, **kw: None
-    )
+
+    def _reiniciar(conn, telefono, **kw):
+        reinicios.append(telefono)
+
+    monkeypatch.setattr(persistencia, "reiniciar_seguimientos_fallidos", _reiniciar)
 
     texto = asyncio.run(
         h._crear_cita(
@@ -2047,6 +2056,10 @@ def test_crear_cita_programa_el_recordatorio_sin_que_el_modelo_lo_pida(monkeypat
     # La clave la arma `ctx.clave`, nunca el modelo: lleva el id de la conversación delante.
     assert programados[0]["clave_idempotencia"].startswith("conv-1:")
     assert "da-igual" not in programados[0]["clave_idempotencia"]
+    # I1: agendar SÍ reinicia el contador, y lo hace con el teléfono de quien agendó -- no con
+    # ningún otro. Quitar la línea del reset en `_crear_cita`, o mover el `conn.commit()` por
+    # delante de ella, deja esto en rojo.
+    assert reinicios == [ctx.telefono_completo]
 
 
 def test_una_cita_a_dos_horas_no_deja_recordatorio(monkeypatch):

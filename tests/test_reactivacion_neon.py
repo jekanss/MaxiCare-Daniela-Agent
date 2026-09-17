@@ -102,6 +102,26 @@ def test_el_contador_sube_y_apaga(conexion_pruebas):
     assert persistencia.sumar_seguimiento_fallido(conexion_pruebas, TELEFONO) == 2
 
 
+def test_sumar_seguimiento_fallido_asegura_la_fila_como_sus_hermanas(conexion_pruebas):
+    """I3 (ronda de revision sobre la parada D): sin `asegurar_contacto` adentro, esta funcion
+    es la unica de sus hermanas (`pedir_baja`, `revocar_baja`) que se pierde en silencio
+    cuando la fila todavia no existe -- el `UPDATE ... WHERE telefono = %s` no encuentra nada
+    que tocar y el `RETURNING` no devuelve fila.
+
+    En WhatsApp no muerde porque `atencion._leer_estado` ya asegura el contacto antes de
+    llamar al modelo. Pero el chat web del panel (`runtime.py`) NO pasa por ahi: sin este
+    arreglo, la primera vez que alguien prueba "ya no, gracias" desde el panel, Daniela
+    confirma el cierre y el contador se queda en cero -- un freno que se da por ejercitado sin
+    haberlo sido. Aqui NO se llama a `asegurar_contacto` primero, a proposito: es justo el
+    escenario que el hallazgo describe.
+    """
+    assert persistencia.leer_contacto(conexion_pruebas, TELEFONO) is None
+    assert persistencia.sumar_seguimiento_fallido(conexion_pruebas, TELEFONO) == 1
+    contacto = persistencia.leer_contacto(conexion_pruebas, TELEFONO)
+    assert contacto is not None, "la fila nunca se creo: la llamada se perdio en silencio"
+    assert contacto["seguimientos_fallidos"] == 1
+
+
 def test_agendar_lo_devuelve_a_cero(conexion_pruebas):
     persistencia.asegurar_contacto(conexion_pruebas, TELEFONO)
     persistencia.sumar_seguimiento_fallido(conexion_pruebas, TELEFONO)
@@ -153,8 +173,48 @@ def test_cerrar_anula_el_segundo_intento_que_vive_en_otra_conversacion(conexion_
         conexion_pruebas, id_conversacion=conv_a, tipo="reactivacion_sin_agendar",
         fecha_objetivo=AHORA + timedelta(days=7), clave_idempotencia="k-2",
     )
-    persistencia.asegurar_conversacion(conexion_pruebas, telefono=TELEFONO)  # la viva, otra
+    conv_b = persistencia.asegurar_conversacion(conexion_pruebas, telefono=TELEFONO)  # la viva
+    # 3 pequeña: la prueba entera depende de que `asegurar_conversacion` NUNCA sea un
+    # get-or-create (no negociable 5, el nombre miente). Si alguna vez lo fuera, `conv_b`
+    # sería igual a `conv_a` y la prueba degeneraría en silencio a "una sola conversación",
+    # perdiendo justo lo que dice medir: que la anulación alcanza una conversación DISTINTA.
+    assert conv_b != conv_a, "asegurar_conversacion dejó de insertar siempre una fila nueva"
     anulados = persistencia.anular_reactivaciones_vivas(
         conexion_pruebas, TELEFONO, motivo="el_paciente_dijo_que_no"
     )
     assert anulados == 1, "el segundo intento de la serie sobrevivió al «no»"
+
+
+def test_cerrar_no_se_lleva_por_delante_el_recordatorio_de_una_cita(conexion_pruebas):
+    """I2 (ronda de revisión sobre la parada D): la única línea de esta parada con
+    consecuencia clínica.
+
+    Sin el `AND s.tipo <> 'recordatorio_cita'` del WHERE, un paciente con cita mañana que dice
+    «ya no me interesa» sobre una promoción se lleva por delante el recordatorio de SU PROPIA
+    cita -- exactamente el intercambio que el no negociable 25 prohíbe («la baja es comercial:
+    no apaga el recordatorio de una cita»). `anular_seguimientos_de_cita` no entra aquí: ese
+    recordatorio cuelga de una reactivación cualquiera, no de una cita, así que la única
+    guarda que lo protege es esta.
+    """
+    conv = persistencia.asegurar_conversacion(conexion_pruebas, telefono=TELEFONO)
+    persistencia.insertar_seguimiento(
+        conexion_pruebas, id_conversacion=conv, tipo="recordatorio_cita",
+        fecha_objetivo=AHORA + timedelta(hours=3), clave_idempotencia="k-recordatorio",
+    )
+    persistencia.insertar_seguimiento(
+        conexion_pruebas, id_conversacion=conv, tipo="reactivacion_sin_agendar",
+        fecha_objetivo=AHORA + timedelta(days=7), clave_idempotencia="k-reactivacion",
+    )
+
+    anulados = persistencia.anular_reactivaciones_vivas(
+        conexion_pruebas, TELEFONO, motivo="el_paciente_dijo_que_no"
+    )
+
+    assert anulados == 1, "tenía que anular SOLO la reactivación, no las dos filas"
+    with conexion_pruebas.cursor() as cur:
+        cur.execute(
+            "SELECT anulado_en FROM seguimientos WHERE tipo = 'recordatorio_cita' "
+            "AND clave_idempotencia = 'k-recordatorio'"
+        )
+        (anulado_en,) = cur.fetchone()
+    assert anulado_en is None, "el recordatorio de la cita quedó anulado por un «no» ajeno"

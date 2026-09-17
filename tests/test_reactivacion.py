@@ -822,6 +822,13 @@ def test_parametros_de_un_tipo_desconocido_cae_al_lado_ESTRECHO_no_al_de_cuatro_
 
 
 def test_cerrar_seguimiento_anula_lo_pendiente_y_sube_el_contador():
+    """1 pequeña (ronda de revisión sobre la parada D): el motivo tiene que ser el LITERAL
+    exacto del código, no cualquier cadena. Verificado por mutación: cambiar
+    `"el_paciente_dijo_que_no"` por otra cosa en `_cerrar_seguimiento` dejaba esta prueba en
+    verde antes de que se afirmara `llamadas["anular"][1]`. Es el no negociable 2 aplicado
+    aquí: el motivo que acaba en `seguimientos.motivo_anulacion` lo escribe el CÓDIGO, nunca
+    el modelo -- el modelo solo aporta `nota`, que ni siquiera viaja hasta la base.
+    """
     import asyncio
     from unittest.mock import MagicMock
 
@@ -852,6 +859,7 @@ def test_cerrar_seguimiento_anula_lo_pendiente_y_sube_el_contador():
         asyncio.run(h._cerrar_seguimiento(ctx, "ya no me interesa"))
 
     assert llamadas["anular"][0] == ctx.telefono_completo
+    assert llamadas["anular"][1] == "el_paciente_dijo_que_no"
     assert llamadas["sumar"] == ctx.telefono_completo
 
 
@@ -860,10 +868,16 @@ def test_cerrar_seguimiento_NO_marca_la_baja():
 
     Marcar la baja aqui quema a un paciente por una frase que no dijo, y es lo unico de los
     dos que no se deshace sin que la persona lo pida.
+
+    Corrige una imprecision del informe de la parada D: la version anterior de esta prueba
+    solo inspeccionaba `_cerrar_seguimiento`, y el informe afirmaba -de mas- que tambien
+    cubria `anular_reactivaciones_vivas`. Ahora sí cubre las dos, que es lo unico que hace
+    cierta la conclusion "ningun camino marca la baja".
     """
     import inspect
 
     from maxicare_daniela import herramientas as h
+    from maxicare_daniela import persistencia
 
-    fuente = inspect.getsource(h._cerrar_seguimiento)
-    assert "pedir_baja" not in fuente
+    assert "pedir_baja" not in inspect.getsource(h._cerrar_seguimiento)
+    assert "pedir_baja" not in inspect.getsource(persistencia.anular_reactivaciones_vivas)

@@ -81,6 +81,11 @@ from .herramientas import TODAS
 #: `config.TELEFONO_PRIVACIDAD`, la misma constante de la que `guardrails` deriva los dígitos
 #: que borra antes de contar cifras. Con el número escrito a mano en los dos sitios, cambiar
 #: solo este devolvía el tripwire intermitente que la excepción del guardrail vino a cerrar.
+#:
+#: El rótulo «Ya no, gracias» que aparece más abajo no es un ejemplo inventado: es el texto
+#: EXACTO del botón negativo de las tres plantillas de reactivación, especificado en
+#: `docs/plantillas-meta-reactivacion.md`. Si Meta obliga a cambiarlo, este prompt y ese
+#: documento se mueven juntos.
 INSTRUCCIONES_DANIELA = f"""\
 Eres Daniela, de MaxiCare (clínica dental en Puente Largo, Bogotá). Hablas español \
 colombiano, tuteas siempre —nunca «usted»— y das las horas en formato am/pm. Tu meta no es \

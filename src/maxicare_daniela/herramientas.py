@@ -440,6 +440,23 @@ def _fallo_privacidad(ctx: RunContextWrapper[ContextoDaniela], error: Exception)
     )
 
 
+def _fallo_cerrar_seguimiento(ctx: RunContextWrapper[Any], error: Exception) -> str:
+    """5 pequeña (ronda de revisión sobre la parada D): `_fallo_seguimiento` está escrito para
+    `programar_seguimiento` («no se pudo programar el seguimiento») y esa frase es falsa por
+    partida doble en un fallo de `cerrar_seguimiento`, que no programa nada -- anula lo
+    pendiente y sube el contador. Es la vecina de `_fallo_privacidad`, no la de
+    `programar_seguimiento`: el «no» de un paciente que se pierde por un fallo de base es la
+    misma situación que una baja que se pierde -- alguien tiene que ir a anotarlo a mano-- y
+    por eso usa `log.exception`, no `log.error` como sus hermanas de arriba.
+    """
+    log.exception("cerrar_seguimiento falló: %s", error)
+    return (
+        "No se pudo registrar todavía que no siga esta consulta. NO le digas al paciente que "
+        "quedó anotado: no es cierto. Dile que lo estás resolviendo y escala a los doctores "
+        "para que alguien lo anote a mano: esto NO se deja pasar en silencio."
+    )
+
+
 # ==========================================================================================
 # 1. consultar_base_conocimiento
 # ==========================================================================================
@@ -2092,15 +2109,16 @@ async def _cerrar_seguimiento(ctx: ContextoDaniela, nota: str | None) -> str:
     )
 
 
-@function_tool(failure_error_function=_fallo_seguimiento)
+@function_tool(failure_error_function=_fallo_cerrar_seguimiento)
 async def cerrar_seguimiento(
     wrapper: RunContextWrapper[ContextoDaniela], nota: str
 ) -> str:
     """Cierra el seguimiento de esta consulta porque el paciente dijo que ya no le interesa.
 
     Úsala cuando responda que no a un mensaje de seguimiento nuestro, incluido el botón
-    'Ya no, gracias'. NO la uses si lo que pide es no recibir ningún mensaje más: eso es la
-    baja y tiene su propia herramienta.
+    'Ya no, gracias' -- ver `docs/plantillas-meta-reactivacion.md`, el rótulo exacto de los
+    tres botones negativos aprobados por Meta. NO la uses si lo que pide es no recibir ningún
+    mensaje más: eso es la baja y tiene su propia herramienta.
 
     Args:
         nota: lo que dijo el paciente, en sus palabras.

@@ -1,4 +1,4 @@
-"""Corre las doce tools contra Neon y un calendario de pruebas, y lo cuenta en claro.
+"""Corre las trece tools contra Neon y un calendario de pruebas, y lo cuenta en claro.
 
     uv run python scripts/probar_tools.py
 
@@ -500,11 +500,65 @@ def corridas(url: str) -> int:
           f"{marca('vuelve a recibir mensajes' not in sin_cambio)} no confirma un cambio "
           f"que no ocurrio")
 
+    # -- 12. cerrar_seguimiento (tarea 6) -------------------------------------------------
+    # La tool 13, y la unica escritura de esta tarea contra Neon de verdad: `probar_tools.py`
+    # es el unico script que ejercita `guardar()`/las tools de escritura contra la base real,
+    # y es justo donde el hallazgo I1 de la ronda de revision senalo que un reset borrado en
+    # `_crear_cita` no lo cazaba ni la suite offline ni -hasta ahora- este script.
+    print("\n12. cerrar_seguimiento")
+
+    def contacto_de_neon(telefono: str) -> dict:
+        with persistencia.conectar(url) as conn:
+            return persistencia.asegurar_contacto(conn, telefono)
+
+    def seguimiento_anulado_en_neon(clave: str) -> bool:
+        with persistencia.conectar(url) as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT anulado_en FROM seguimientos WHERE clave_idempotencia = %s", (clave,)
+            )
+            fila = cur.fetchone()
+            return bool(fila and fila[0] is not None)
+
+    ctx7 = contexto(url, "573009995005", "Deja De Insistir")
+    clave_reactivacion = "probar-tools-cerrar-seguimiento"
+    with persistencia.conectar(url) as conn:
+        persistencia.insertar_seguimiento(
+            conn,
+            id_conversacion=ctx7.id_conversacion,
+            tipo="reactivacion_sin_agendar",
+            fecha_objetivo=ctx7.ahora + timedelta(days=7),
+            clave_idempotencia=clave_reactivacion,
+        )
+    # I3: `leer_contacto`, no `asegurar_contacto`, para el "antes". `contexto()` de arriba solo
+    # toca `pacientes`, así que este número TODAVIA no tiene fila en `contactos` -- exactamente
+    # el hueco que I3 señaló para el chat web del panel, que tampoco la asegura antes de
+    # llamar. Con `asegurar_contacto` aquí se crearía la fila de antemano y la comprobación
+    # dejaría de poder distinguir "sumar_seguimiento_fallido la aseguró" de "ya existía".
+    with persistencia.conectar(url) as conn:
+        sin_fila_previa = persistencia.leer_contacto(conn, ctx7.telefono_completo) is None
+    print(f"   sin fila previa       -> {marca(sin_fila_previa)} "
+          f"el numero aun no tiene fila en contactos")
+
+    asyncio.run(h._cerrar_seguimiento(ctx7, "ya no me interesa"))
+
+    despues = contacto_de_neon(ctx7.telefono_completo)
+    print(f"   anula el seguimiento -> {marca(seguimiento_anulado_en_neon(clave_reactivacion))} "
+          f"queda con anulado_en puesto")
+    # I3: parte de `sin_fila_previa`, no de un contador leido de antemano -- si
+    # `sumar_seguimiento_fallido` no asegurara la fila, esta llamada la habria perdido en
+    # silencio (el UPDATE no encuentra a quien tocar) y `despues` seguiria en 0, no en 1.
+    print(f"   sube el contador     -> "
+          f"{marca(sin_fila_previa and despues['seguimientos_fallidos'] == 1)} "
+          f"seguimientos_fallidos quedo en {despues['seguimientos_fallidos']} pese a no tener "
+          f"fila previa en contactos")
+    print(f"   NO marca la baja     -> {marca(despues['no_contactar'] is False)} "
+          f"contactos.no_contactar sigue en FALSE")
+
     print()
     if fallos:
         print(f"{fallos} comprobacion(es) fallaron.")
         return 1
-    print("Las doce tools funcionan. Tres llamadas simultaneas -> exactamente 2 citas.")
+    print("Las trece tools funcionan. Tres llamadas simultaneas -> exactamente 2 citas.")
     return 0
 
 

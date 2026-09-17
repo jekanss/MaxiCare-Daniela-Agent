@@ -2744,7 +2744,7 @@ def pedir_baja(
     return cambio
 
 
-def sumar_seguimiento_fallido(conn, telefono: str) -> int:
+def sumar_seguimiento_fallido(conn, telefono: str, *, commit: bool = True) -> int:
     """Suma uno al contador de series de seguimiento que no sirvieron. Devuelve el nuevo valor.
 
     NO es la baja y no se le parece: esto lo decide el sistema --«a este número no le sirve que
@@ -2753,7 +2753,22 @@ def sumar_seguimiento_fallido(conn, telefono: str) -> int:
 
     El `WHERE` va por teléfono y no tiene vuelta atrás: aflojarlo apaga el seguimiento de la
     cartera entera. `test_el_contador_no_alcanza_a_otro_telefono` lo vigila.
+
+    Empieza por `asegurar_contacto`, igual que sus hermanas `pedir_baja` y `revocar_baja`: sin
+    fila padre, el `UPDATE` de abajo no toca ninguna fila y la llamada se pierde en silencio.
+    En WhatsApp no muerde hoy porque `atencion._leer_estado` ya asegura el contacto antes de
+    llamar al modelo, pero el chat web del panel (`runtime.py`) NO pasa por ahí: sin este
+    `asegurar_contacto`, la primera vez que alguien prueba «ya no, gracias» desde el panel
+    Daniela confirmaría el cierre y el contador se quedaría en cero -- un freno que se da por
+    ejercitado sin haberlo sido. `asegurar_contacto` hace su propio `commit()`: eso no rompe
+    nada, porque asegurar que la fila exista es una precondición idempotente, no una escritura
+    que tenga que deshacerse junto con el resto.
+
+    `commit=False` para el barrido de la parada siguiente (tarea 7), que tiene que subir este
+    contador y marcar `seguimientos.contabilizado_en` en la MISMA transacción: sin eso, una
+    caída entre las dos escrituras cuenta dos veces la misma serie contra el freno de la 021.
     """
+    asegurar_contacto(conn, telefono)
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -2767,8 +2782,16 @@ def sumar_seguimiento_fallido(conn, telefono: str) -> int:
             (telefono,),
         )
         fila = cur.fetchone()
-    conn.commit()
-    return fila[0] if fila else 0
+    if commit:
+        conn.commit()
+    if fila is None:
+        # Imposible salvo bug, con el `asegurar_contacto` de arriba ya hecho: o la fila
+        # existía, o se acaba de crear. Devolver 0 aquí confundiría «no había fila» con «el
+        # contador de verdad está en cero», que es justo la ambigüedad que el hallazgo I3
+        # señaló -- mejor reventar alto que mentir sobre cuántas veces se le insistió a
+        # alguien.
+        raise RuntimeError(f"no se pudo sumar el seguimiento fallido de {telefono}")
+    return fila[0]
 
 
 def reiniciar_seguimientos_fallidos(conn, telefono: str, *, commit: bool = True) -> None:
