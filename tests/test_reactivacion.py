@@ -18,6 +18,47 @@ def momento(dia: int, hora: int, minuto: int = 0) -> datetime:
     return datetime(2026, 9, dia, hora, minuto, tzinfo=ZONA_BOGOTA)
 
 
+async def _despachar_con(filas, *, whatsapp, plantillas, ahora, monkeypatch=None):
+    """Corre un ciclo de `despachar` con la base entera doblada.
+
+    Se dobla `persistencia` y no la base: lo que se prueba es la DECISION y el reparto de
+    plantillas, no el SQL. El SQL lo prueban las de `-m neon`.
+
+    OJO: NO dobla `persistencia.contar_enviados_hoy` -- esa funcion no existe hoy. Es del tope
+    DIARIO, que es del barrido (parada siguiente de este plan) y no del despachador. Doblar un
+    atributo que no existe revienta con `AttributeError` antes de probar nada (Ruling C2).
+    """
+    import pytest as _pytest
+    from maxicare_daniela import persistencia
+
+    mp = monkeypatch or _pytest.MonkeyPatch()
+
+    class _ConexionFalsa:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def commit(self): pass
+        def close(self): pass
+
+    mp.setattr(persistencia, "conectar", lambda url: _ConexionFalsa())
+    mp.setattr(persistencia, "leer_configuracion", lambda conn: {})
+    mp.setattr(persistencia, "seguimientos_por_despachar", lambda conn, **k: list(filas))
+    mp.setattr(persistencia, "ultimo_mensaje_del_paciente", lambda conn, telefono: None)
+    mp.setattr(persistencia, "marcar_seguimiento_enviado", lambda conn, id_seguimiento: True)
+    mp.setattr(persistencia, "anular_seguimiento", lambda conn, i, **k: None)
+    mp.setattr(persistencia, "aplazar_seguimiento", lambda conn, i, **k: None)
+    mp.setattr(persistencia, "anotar_recordatorio_en_conversacion", lambda conn, i, **k: None)
+    try:
+        return await s.despachar(
+            database_url="postgresql://no-se-usa",
+            whatsapp=whatsapp,
+            jornada=JORNADA,
+            plantillas=plantillas,
+            ahora=ahora,
+        )
+    finally:
+        mp.undo()
+
+
 def test_el_vocabulario_no_deja_inventar_un_tipo():
     assert "inventado" not in s.TIPOS_DE_SEGUIMIENTO
 
@@ -465,3 +506,76 @@ def test_el_freno_no_alcanza_al_recordatorio_de_una_cita_ni_tampoco_r3bis():
     )
     decision = s.decidir(fila, ahora=momento(16, 18), jornada=JORNADA, ultimo_mensaje=None)
     assert decision.accion == "enviar"
+
+
+# -- Tarea 4: el despacho multiplantilla ----------------------------------------------------
+#
+# La puerta `sin_plantilla` anulaba TODO lo que llegara a "enviar" sin `cita_inicio`. Esa
+# puerta era lo que hacia inofensivo cualquier fallo de las guardas de arriba: mientras no
+# hubiera plantilla para una reactivacion, no podia salir nada por WhatsApp aunque las seis
+# guardas fallaran todas a la vez. Estas pruebas cubren lo que la sustituye.
+
+
+def test_la_reactivacion_manda_UN_hueco_y_es_el_nombre_de_pila():
+    """Marketing quito el tratamiento a proposito: es un dato de salud y una notificacion se
+    lee en la pantalla de bloqueo. Si esta funcion devolviera cuatro huecos, Meta rechaza el
+    envio y ademas se filtraria."""
+    parametros = s.parametros_de(fila_de_reactivacion(nombre_completo="Marcela Rios Gomez"))
+    assert parametros == ["Marcela"]
+
+
+def test_el_recordatorio_de_cita_sigue_mandando_sus_cuatro_huecos():
+    fila = fila_de_reactivacion(
+        tipo=s.TIPO_RECORDATORIO, cita_id="cita-1",
+        cita_inicio=momento(17, 9), tratamiento="Limpieza",
+    )
+    assert s.parametros_de(fila) == ["Marcela", "jueves 17/9", "09:00", "Limpieza"]
+
+
+def test_sin_plantilla_para_ese_tipo_no_se_manda_y_no_se_marca():
+    """Si falta la plantilla de un tipo, esa fila NO se marca como enviada: se queda pendiente
+    hasta que la plantilla exista. Marcarla la perderia para siempre."""
+    import asyncio
+
+    enviados: list[dict] = []
+
+    class _WhatsAppFalso:
+        async def enviar_plantilla(self, telefono, **k):
+            enviados.append(k)
+            return "wamid.X"
+
+    recuento = asyncio.run(
+        _despachar_con(
+            [fila_de_reactivacion()],
+            whatsapp=_WhatsAppFalso(),
+            plantillas={s.TIPO_RECORDATORIO: "recordatorio_cita"},  # falta la de reactivacion
+            ahora=momento(16, 11),
+        )
+    )
+    assert enviados == []
+    assert recuento["enviados"] == 0
+
+
+def test_cada_tipo_usa_SU_plantilla():
+    import asyncio
+
+    enviados: list[dict] = []
+
+    class _WhatsAppFalso:
+        async def enviar_plantilla(self, telefono, **k):
+            enviados.append(k)
+            return "wamid.X"
+
+    asyncio.run(
+        _despachar_con(
+            [fila_de_reactivacion()],
+            whatsapp=_WhatsAppFalso(),
+            plantillas={
+                s.TIPO_RECORDATORIO: "recordatorio_cita",
+                s.TIPO_SIN_AGENDAR: "reactivacion_sin_agendar",
+            },
+            ahora=momento(16, 11),
+        )
+    )
+    assert enviados[0]["plantilla"] == "reactivacion_sin_agendar"
+    assert enviados[0]["parametros"] == ["Marcela"]

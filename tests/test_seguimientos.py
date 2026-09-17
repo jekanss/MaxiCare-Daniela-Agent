@@ -377,7 +377,7 @@ def test_los_cuatro_huecos_de_la_plantilla_salen_en_hora_de_bogota(monkeypatch):
 
     # Jueves 17/9/2026, 9:00 en Bogotá == 14:00 UTC.
     utc = datetime(2026, 9, 17, 14, 0, tzinfo=timezone.utc)
-    huecos = s._parametros_del_recordatorio(
+    huecos = s.parametros_de(
         {
             "cita_inicio": utc,
             "nombre_completo": "Ana Gómez",
@@ -389,9 +389,11 @@ def test_los_cuatro_huecos_de_la_plantilla_salen_en_hora_de_bogota(monkeypatch):
 
 def test_sin_cita_los_dos_huecos_de_fecha_quedan_en_pendiente():
     """La regla dura 3 es para el código, no un permiso para mandarle el marcador a un
-    paciente: `despachar` anula la fila antes de llegar al canal. Esto solo fija que la
-    función no se inventa una fecha plausible si la recibe vacía."""
-    huecos = s._parametros_del_recordatorio(
+    paciente: `despachar` anula la fila (recordatorio) o la deja pendiente (reactivación)
+    antes de llegar al canal. Esto solo fija que la función no se inventa una fecha plausible
+    si la recibe vacía -- y que un `tipo` ausente (como aquí) cae en la rama de RECORDATORIO,
+    la única que tiene fecha y hora que rellenar."""
+    huecos = s.parametros_de(
         {"cita_inicio": None, "nombre_completo": None, "tratamiento": None}
     )
     assert huecos == ["paciente", "PENDIENTE", "PENDIENTE", "su cita"]
@@ -493,7 +495,7 @@ def test_abrir_y_cerrar_la_conexion_no_corren_en_el_bucle_de_eventos(monkeypatch
                 database_url="postgresql://no-se-usa",
                 whatsapp=None,
                 jornada=JORNADA,
-                plantilla="",
+                plantillas={},
                 ahora=momento(16, 18),
             )
 
@@ -543,7 +545,7 @@ def test_el_idioma_de_la_plantilla_llega_hasta_meta(monkeypatch):
             database_url="postgresql://no-se-usa",
             whatsapp=_WhatsAppFalso(),
             jornada=JORNADA,
-            plantilla="recordatorio_cita",
+            plantillas={s.TIPO_RECORDATORIO: "recordatorio_cita"},
             idioma="es_CO",
             ahora=momento(16, 18),
         )
@@ -594,7 +596,7 @@ def test_el_despachador_marca_antes_de_enviar(monkeypatch):
             database_url="postgresql://no-se-usa",
             whatsapp=_WhatsAppFalso(),
             jornada=JORNADA,
-            plantilla="recordatorio_cita",
+            plantillas={s.TIPO_RECORDATORIO: "recordatorio_cita"},
             ahora=momento(16, 18),
         )
     )
@@ -645,7 +647,7 @@ def test_sin_plantilla_configurada_decide_pero_no_manda(monkeypatch):
             database_url="postgresql://no-se-usa",
             whatsapp=_WhatsAppFalso(),
             jornada=JORNADA,
-            plantilla="",
+            plantillas={},
             ahora=momento(16, 18),
         )
     )
@@ -697,7 +699,7 @@ def test_el_despachador_lee_la_hora_de_vispera_de_la_configuracion(monkeypatch):
             database_url="postgresql://no-se-usa",
             whatsapp=_WhatsAppFalso(),
             jornada=JORNADA,
-            plantilla="recordatorio_cita",
+            plantillas={s.TIPO_RECORDATORIO: "recordatorio_cita"},
             ahora=momento(16, 19),
         )
     )
@@ -705,13 +707,12 @@ def test_el_despachador_lee_la_hora_de_vispera_de_la_configuracion(monkeypatch):
     assert recuento == {"enviados": 1, "anulados": 0, "aplazados": 0, "fallidos": 0}
 
 
-def test_un_seguimiento_sin_cita_se_anula_por_falta_de_plantilla_y_no_se_manda(monkeypatch):
-    """Un seguimiento sin cita (p. ej. una reactivación) llega a "enviar" -G1-G3 se saltan sin
-    cita que mirar, ver `test_un_seguimiento_sin_cita_se_salta_las_tres_primeras_guardas`- pero
-    la plantilla que manda `despachar` es LA DE RECORDATORIO DE CITA. Sin `cita_inicio`,
-    mandarla dejaría al paciente leyendo el literal "PENDIENTE" por WhatsApp: no es una regla
-    de negocio, es que hoy no existe una plantilla para este tipo. Se anula con un motivo
-    propio, no se manda, y el canal ni se toca.
+def test_un_recordatorio_de_cita_sin_cita_inicio_se_anula_por_fila_rota(monkeypatch):
+    """Un `TIPO_RECORDATORIO` que llega a "enviar" sin `cita_inicio` es una fila ROTA, no una
+    que espera plantilla: sin la hora no hay con qué rellenar los huecos 2 y 3 de la plantilla
+    de cuatro huecos, y mandarla dejaría al paciente leyendo el literal "PENDIENTE" por
+    WhatsApp. Esto sigue anulándose con motivo propio (`sin_cita`) aunque la plantilla SÍ esté
+    configurada -- es la mitad de la vieja puerta `sin_plantilla` que la tarea 4 conservó.
     """
     import asyncio
 
@@ -725,9 +726,7 @@ def test_un_seguimiento_sin_cita_se_anula_por_falta_de_plantilla_y_no_se_manda(m
     monkeypatch.setattr(
         persistencia,
         "seguimientos_por_despachar",
-        lambda conn, **k: [
-            fila(cita_id=None, cita_inicio=None, cita_estado=None, tipo=s.TIPO_SIN_AGENDAR)
-        ],
+        lambda conn, **k: [fila(cita_inicio=None)],
     )
     monkeypatch.setattr(
         persistencia, "ultimo_mensaje_del_paciente", lambda conn, telefono: None
@@ -748,14 +747,75 @@ def test_un_seguimiento_sin_cita_se_anula_por_falta_de_plantilla_y_no_se_manda(m
             database_url="postgresql://no-se-usa",
             whatsapp=_WhatsAppFalso(),
             jornada=JORNADA,
-            plantilla="recordatorio_cita",
+            plantillas={s.TIPO_RECORDATORIO: "recordatorio_cita"},
             ahora=momento(16, 18),
         )
     )
 
-    assert anuladas == [(1, "sin_plantilla")]
+    assert anuladas == [(1, "sin_cita")]
     assert mandados == []
     assert recuento == {"enviados": 0, "anulados": 1, "aplazados": 0, "fallidos": 0}
+
+
+def test_una_reactivacion_sin_plantilla_configurada_queda_pendiente_y_no_se_anula(monkeypatch):
+    """La otra mitad de la vieja puerta `sin_plantilla`: una reactivación (sin cita, así que
+    G1-G3 se saltan -ver `test_un_seguimiento_sin_cita_se_salta_las_tres_primeras_guardas`-)
+    que llega a "enviar" sin que su tipo tenga plantilla configurada NO se anula ni se marca:
+    se queda pendiente hasta que Meta la apruebe. Anularla obligaría al barrido a volver a
+    decidir sobre alguien que ya calificó; marcarla la perdería para siempre.
+    """
+    import asyncio
+
+    from maxicare_daniela import persistencia, seguimientos as s
+
+    anuladas: list[tuple[int, str]] = []
+    marcadas: list[int] = []
+    mandados: list[str] = []
+
+    monkeypatch.setattr(persistencia, "conectar", lambda url: _ConexionFalsa())
+    monkeypatch.setattr(persistencia, "leer_configuracion", lambda conn: {})
+    monkeypatch.setattr(
+        persistencia,
+        "seguimientos_por_despachar",
+        lambda conn, **k: [
+            fila(cita_id=None, cita_inicio=None, cita_estado=None, tipo=s.TIPO_SIN_AGENDAR)
+        ],
+    )
+    monkeypatch.setattr(
+        persistencia, "ultimo_mensaje_del_paciente", lambda conn, telefono: None
+    )
+    monkeypatch.setattr(
+        persistencia,
+        "anular_seguimiento",
+        lambda conn, id_seguimiento, *, motivo: anuladas.append((id_seguimiento, motivo)),
+    )
+    monkeypatch.setattr(
+        persistencia,
+        "marcar_seguimiento_enviado",
+        lambda conn, id_seguimiento: marcadas.append(id_seguimiento) or True,
+    )
+
+    class _WhatsAppFalso:
+        async def enviar_plantilla(self, telefono, **k):
+            mandados.append(telefono)
+            return "wamid.X"
+
+    recuento = asyncio.run(
+        s.despachar(
+            database_url="postgresql://no-se-usa",
+            whatsapp=_WhatsAppFalso(),
+            jornada=JORNADA,
+            # Falta justo la de TIPO_SIN_AGENDAR: hoy, con las tres de reactivación sin
+            # aprobar por Meta, este diccionario es el que arma `runtime.py` de verdad.
+            plantillas={s.TIPO_RECORDATORIO: "recordatorio_cita"},
+            ahora=momento(16, 18),
+        )
+    )
+
+    assert anuladas == []
+    assert marcadas == []
+    assert mandados == []
+    assert recuento == {"enviados": 0, "anulados": 0, "aplazados": 0, "fallidos": 0}
 
 
 def test_una_fila_que_decidir_anula_no_toca_el_canal(monkeypatch):
@@ -794,7 +854,7 @@ def test_una_fila_que_decidir_anula_no_toca_el_canal(monkeypatch):
             database_url="postgresql://no-se-usa",
             whatsapp=_WhatsAppFalso(),
             jornada=JORNADA,
-            plantilla="recordatorio_cita",
+            plantillas={s.TIPO_RECORDATORIO: "recordatorio_cita"},
             ahora=momento(16, 18),
         )
     )
@@ -840,7 +900,7 @@ def test_una_fila_que_decidir_aplaza_no_toca_el_canal(monkeypatch):
             database_url="postgresql://no-se-usa",
             whatsapp=_WhatsAppFalso(),
             jornada=JORNADA,
-            plantilla="recordatorio_cita",
+            plantillas={s.TIPO_RECORDATORIO: "recordatorio_cita"},
             ahora=momento(16, 18),
         )
     )
@@ -897,7 +957,7 @@ def test_los_intentos_agotados_marcan_fallido_y_no_se_pierden(monkeypatch):
             database_url="postgresql://no-se-usa",
             whatsapp=_WhatsAppQueSiempreFalla(),
             jornada=JORNADA,
-            plantilla="recordatorio_cita",
+            plantillas={s.TIPO_RECORDATORIO: "recordatorio_cita"},
             ahora=momento(16, 18),
         )
     )

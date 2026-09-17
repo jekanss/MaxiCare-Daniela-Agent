@@ -7,7 +7,7 @@ Es el paso que va entre «Meta aprobó la plantilla» y `bash scripts/desplegar.
 base de datos en ningún momento: ni lee `seguimientos` ni escribe una fila. Lo único que hace
 es armar los cuatro huecos y llamar a Meta.
 
-**Los parámetros salen de `seguimientos._parametros_del_recordatorio`, no de aquí.** Es
+**Los parámetros salen de `seguimientos.parametros_de`, no de aquí.** Es
 deliberado y es lo único que hace que esta prueba valga: escribir los cuatro literales a mano
 comprobaría que Meta acepta *una* plantilla, no que acepta la que manda el despachador. Con el
 formateador de verdad, un orden de huecos cambiado o la conversión de zona rota se ven en el
@@ -49,7 +49,7 @@ _ERRORES = {
     ),
     132000: (
         "el número de huecos que mandamos no coincide con el que Meta aprobó. La plantilla\n"
-        "      tiene cuatro variables; `_parametros_del_recordatorio` devuelve otra cantidad."
+        "      tiene cuatro variables; `parametros_de` devuelve otra cantidad."
     ),
     132005: "el texto de algún hueco es más largo de lo que Meta admite.",
     132007: "el texto de algún hueco viola el formato de la plantilla (saltos de línea, tabs).",
@@ -153,7 +153,7 @@ async def _mostrar_estado(config: Config) -> int:
 
 
 async def _enviar(config: Config, telefono: str) -> int:
-    parametros = seguimientos._parametros_del_recordatorio(_fila_de_ejemplo())
+    parametros = seguimientos.parametros_de(_fila_de_ejemplo())
     print("  Los cuatro huecos, como los arma el despachador:")
     for i, valor in enumerate(parametros, start=1):
         print(f"    {{{{{i}}}}} = {valor!r}")

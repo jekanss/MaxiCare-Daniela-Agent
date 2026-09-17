@@ -205,8 +205,9 @@ HORAS_DE_ESPERA_QUE_INVALIDAN_UN_APLAZAMIENTO_SOSTENIDO = 96
 #: **El portillo que esta lista tiene abierto, dicho y no escondido:** un `tipo='recordatorio_
 #: cita'` salido de `programar_seguimiento` atraviesa G0 sin mirarla aunque el paciente esté de
 #: baja. Hoy no sale nada por ahí --esa tool nunca pone `cita_id`, y el despachador anula con
-#: `sin_plantilla` todo lo que llegue sin `cita_inicio`--, así que el portillo está abierto
-#: pero no da a ninguna parte. Lo estrecha `herramientas._programar_seguimiento`, que comprueba
+#: `sin_cita` (antes `sin_plantilla`) todo `TIPO_RECORDATORIO` que llegue sin `cita_inicio`--,
+#: así que el portillo está abierto pero no da a ninguna parte. Lo estrecha
+#: `herramientas._programar_seguimiento`, que comprueba
 #: `ctx.pidio_no_contacto` contra esta misma lista antes de insertar, y el docstring de la
 #: tool, que no le ofrece al modelo `'recordatorio_cita'` como ejemplo.
 TIPOS_NO_COMERCIALES = frozenset({"recordatorio_cita"})
@@ -530,8 +531,27 @@ SEGUNDOS_ENTRE_INTENTOS = 2.0
 _DIAS = ("lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo")
 
 
-def _parametros_del_recordatorio(fila: dict[str, Any]) -> list[str]:
-    """Los cuatro huecos de la plantilla, en el orden en que Meta los aprobó.
+def parametros_de(fila: dict[str, Any]) -> list[str]:
+    """Los huecos de la plantilla de ESA fila, en el orden en que Meta los aprobó.
+
+    Dos plantillas con distinto número de huecos: el recordatorio de cita lleva cuatro y las
+    tres de reactivación llevan UNO. Mandar cuatro a una plantilla de uno no es un detalle
+    cosmético --Meta rechaza el envío-- y mandar el tratamiento a una de reactivación sería
+    además una filtración: es un dato de salud y una notificación de WhatsApp se lee en la
+    pantalla de bloqueo. Marketing lo quitó a propósito el 15/09/2026.
+
+    Pública (antes `_parametros_del_recordatorio`, privada): la dobla `scripts/probar_
+    plantilla.py`, y quien le cambie la firma rompe ese script en silencio -- `pytest -q` no
+    lo corre.
+    """
+    nombre = (fila.get("nombre_completo") or "").split(" ")[0] or "paciente"
+    if fila.get("tipo") in TIPOS_DE_REACTIVACION:
+        return [nombre]
+    return _parametros_del_recordatorio(fila, nombre)
+
+
+def _parametros_del_recordatorio(fila: dict[str, Any], nombre: str) -> list[str]:
+    """Los cuatro huecos de la plantilla de recordatorio, en el orden en que Meta los aprobó.
 
     Cambiar este orden no cambia la plantilla: manda otro dato en otro hueco, y el paciente lee
     una hora donde esperaba su nombre.
@@ -548,9 +568,11 @@ def _parametros_del_recordatorio(fila: dict[str, Any]) -> list[str]:
     - **Los huecos 2 y 3 son datos distintos**: el 2 es la fecha y el 3 la hora. Un formateador
       que devuelva las dos juntas deja la plantilla diciendo «su cita el jueves 17/9 a las
       09:00 a las 09:00 para Limpieza».
+
+    El nombre entra ya calculado (desde `parametros_de`) para que el `split` del nombre
+    completo viva en un solo sitio.
     """
     inicio = fila["cita_inicio"]
-    nombre = (fila.get("nombre_completo") or "").split(" ")[0] or "paciente"
     local = inicio.astimezone(jornada_zona()) if inicio else None
     return [
         nombre,
@@ -565,7 +587,7 @@ async def despachar(
     database_url: str,
     whatsapp: Any | None,
     jornada: Jornada,
-    plantilla: str,
+    plantillas: dict[str, str],
     idioma: str = "es",
     ahora: datetime | None = None,
     limite: int = 50,
@@ -576,9 +598,13 @@ async def despachar(
     `ctx.ahora` en las tools, y la razón por la que esto se puede probar sin esperar a las seis
     de la tarde.
 
-    `plantilla` vacía apaga el ENVÍO sin apagar la decisión: las guardas corren, las anulaciones
-    y los aplazamientos se escriben, y no sale un solo mensaje. Es lo que permite comprobar en
-    producción que decide bien antes de arriesgar un WhatsApp.
+    `plantillas` es UNA por tipo (`TIPOS_DE_SEGUIMIENTO`), no una sola: el recordatorio de cita
+    lleva cuatro huecos y las tres de reactivación llevan uno, así que no hay una plantilla
+    única que sirva para todas. Una entrada vacía o ausente apaga el ENVÍO de ESE tipo sin
+    apagar la decisión: las guardas corren, las anulaciones y los aplazamientos se escriben, y
+    la fila queda pendiente hasta que exista la plantilla. Es lo que permite comprobar en
+    producción que decide bien antes de arriesgar un WhatsApp -- y hoy, con las tres de
+    reactivación sin aprobar por Meta, es el estado normal para tres de los cuatro tipos.
 
     `idioma` viaja junto a la plantilla y sale de `configuracion`, no de aquí: Meta rechaza el
     envío entero (error 132001) si el código no coincide EXACTAMENTE con el de la traducción
@@ -656,18 +682,20 @@ async def despachar(
                 recuento["aplazados"] += 1
                 continue
 
-            # A partir de aquí `decision.accion == "enviar"`. Un seguimiento sin cita (p. ej.
-            # una reactivación) llega hasta aquí porque G1-G3 se saltan sin cita que mirar (ver
-            # `decidir`), pero la plantilla que manda este despachador es LA DE RECORDATORIO DE
-            # CITA: sin fecha ni hora que meter en sus huecos, mandarla dejaría al paciente
-            # leyendo el literal "PENDIENTE" por WhatsApp -la regla dura 3 es para el código,
-            # nunca fue permiso para mandarle el marcador a un paciente-. No es una regla de
-            # negocio que decida no avisarle: es que HOY no existe una plantilla para este tipo
-            # de seguimiento. Se anula -no se pierde, queda visible en la tabla con su motivo-
-            # hasta que exista una.
-            if fila.get("cita_inicio") is None:
+            # A partir de aquí `decision.accion == "enviar"`. La plantilla de ESTE tipo. Antes
+            # había una sola y todo lo que no tuviera `cita_inicio` se anulaba con
+            # `sin_plantilla`; esa puerta es la que hoy hace inofensivo el portillo de `tipo`,
+            # cerrado ya por la 021 y la tool -- ver `TIPOS_NO_COMERCIALES` y las guardas R1-R5.
+            nombre_plantilla = plantillas.get(fila.get("tipo") or "")
+
+            # Un recordatorio de cita sin `cita_inicio` es una fila ROTA, no una que espera
+            # plantilla: sin la hora no hay con qué rellenar los huecos 2 y 3, y mandarla
+            # dejaría al paciente leyendo el literal "PENDIENTE" por WhatsApp -la regla dura 3
+            # es para el código, nunca fue permiso para mandarle el marcador a un paciente-.
+            # Esto sigue anulándose, a diferencia de una reactivación sin plantilla (más abajo).
+            if fila.get("tipo") == TIPO_RECORDATORIO and fila.get("cita_inicio") is None:
                 await asyncio.to_thread(
-                    persistencia.anular_seguimiento, conn, fila["id"], motivo="sin_plantilla"
+                    persistencia.anular_seguimiento, conn, fila["id"], motivo="sin_cita"
                 )
                 recuento["anulados"] += 1
                 continue
@@ -675,19 +703,24 @@ async def despachar(
             if telefono:
                 # G7 se apoya en que este número YA tiene (o está a punto de tener) un
                 # recordatorio en esta tanda. Se anota aquí, antes de mirar si hay plantilla o
-                # canal, para que el modo "decide y no manda" (`plantilla == ""`) agrupe igual
+                # canal, para que el modo "decide y no manda" (plantilla vacía) agrupe igual
                 # que agruparía con el canal encendido: si se anotara solo tras un envío que
                 # salió bien, dos citas del mismo número decidirían las dos "enviar" con la
                 # plantilla apagada, que no es la decisión que se tomaría con la plantilla
                 # puesta.
                 numeros_de_esta_tanda.add(telefono)
 
-            if not plantilla or whatsapp is None or not telefono:
+            # Sin plantilla configurada para ESTE tipo, la fila NO se marca ni se anula: se
+            # queda pendiente hasta que Meta apruebe. Marcarla la perdería para siempre, y
+            # anularla obligaría al barrido a volver a decidir sobre alguien que ya calificó
+            # -- es el estado de comprobación deliberado de las tres plantillas de reactivación
+            # mientras ninguna esté aprobada (Ruling C4).
+            if not nombre_plantilla or whatsapp is None or not telefono:
                 log.info(
-                    "seguimiento %s: decidido ENVIAR y no se manda (plantilla o canal sin "
-                    "configurar). El despachador decide, el canal está apagado, y la fila "
+                    "seguimiento %s (%s): decidido ENVIAR y no se manda (plantilla o canal "
+                    "sin configurar). El despachador decide, el canal está apagado, y la fila "
                     "SIGUE pendiente -no se marca- para cuando exista la plantilla.",
-                    fila["id"],
+                    fila["id"], fila.get("tipo"),
                 )
                 continue
 
@@ -711,8 +744,8 @@ async def despachar(
                 try:
                     await whatsapp.enviar_plantilla(
                         telefono,
-                        plantilla=plantilla,
-                        parametros=_parametros_del_recordatorio(fila),
+                        plantilla=nombre_plantilla,
+                        parametros=parametros_de(fila),
                         idioma=idioma,
                     )
                     fallo = None

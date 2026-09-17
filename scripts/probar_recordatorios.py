@@ -189,7 +189,7 @@ def cuatro_cancelar_anula_el_recordatorio(conn, ctx, id_cita: str) -> None:
 
 
 def cinco_el_despachador_decide_sin_enviar(conn, url: str, ctx) -> None:
-    """Con `plantilla=""` el despachador corre entero y no manda nada. Es el modo con el que
+    """Con `plantillas={}` el despachador corre entero y no manda nada. Es el modo con el que
     se cuelga en producción para ver que decide bien antes de arriesgar un WhatsApp.
 
     El RECUENTO por sí solo no demuestra nada: cuando `despachar` decide "enviar" y la
@@ -254,7 +254,7 @@ def cinco_el_despachador_decide_sin_enviar(conn, url: str, ctx) -> None:
             database_url=url,
             whatsapp=None,
             jornada=ctx.jornada,
-            plantilla="",
+            plantillas={},
             ahora=fecha_objetivo,
         )
     )

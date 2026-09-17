@@ -2050,7 +2050,12 @@ async def _despachar_recordatorios_sin_parar() -> None:
                     cierre_sabado=operativa.get("hora_cierre_sabado", 15),
                     atiende_domingo=bool(operativa.get("atiende_domingo", 0)),
                 ),
-                plantilla=config.plantilla_recordatorio,
+                plantillas={
+                    seguimientos.TIPO_RECORDATORIO: config.plantilla_recordatorio,
+                    seguimientos.TIPO_SIN_AGENDAR: config.plantilla_sin_agendar,
+                    seguimientos.TIPO_CANCELADA: config.plantilla_cancelada,
+                    seguimientos.TIPO_NO_ASISTIO: config.plantilla_no_asistio,
+                },
                 idioma=config.plantilla_recordatorio_idioma,
             )
             if any(recuento.values()):
@@ -2069,10 +2074,21 @@ async def _arrancar_despacho_de_recordatorios() -> None:
     if not config.database_url:
         log.info("sin base configurada: no arranca el despacho de recordatorios")
         return
-    if not config.plantilla_recordatorio:
+    # `MAXICARE_PLANTILLA_NO_ASISTIO` no entra en este aviso: `TIPO_NO_ASISTIO` no lo encola el
+    # barrido todavia (sin `citas.asistio` no hay como saber quien no vino, ver seguimientos.py),
+    # asi que avisar de su plantilla ausente hoy seria ruido sobre un tipo que nunca se genera.
+    faltantes = [
+        nombre for nombre, valor in (
+            ("MAXICARE_PLANTILLA_RECORDATORIO", config.plantilla_recordatorio),
+            ("MAXICARE_PLANTILLA_SIN_AGENDAR", config.plantilla_sin_agendar),
+            ("MAXICARE_PLANTILLA_CANCELADA", config.plantilla_cancelada),
+        ) if not valor
+    ]
+    if faltantes:
         log.warning(
-            "MAXICARE_PLANTILLA_RECORDATORIO vacía: el despachador decidirá y NO enviará. "
-            "Es el modo de comprobación; para enviar de verdad hace falta la plantilla de Meta."
+            "sin plantilla para %s: el despachador decidirá y NO enviará esos tipos. "
+            "Es el modo de comprobación; para enviar hace falta la aprobación de Meta.",
+            ", ".join(faltantes),
         )
     _tarea_de_recordatorios = asyncio.create_task(_despachar_recordatorios_sin_parar())
 

@@ -432,6 +432,19 @@ class Config:
     #: `es` es el default más probable y por eso mismo no es una comprobación.
     plantilla_recordatorio_idioma: str = "es"
 
+    #: Las tres de reactivación. Vacías --su default-- dejan su tipo SIN enviar: el despachador
+    #: decide igual y la fila se queda pendiente. Es el mismo modo de comprobación que
+    #: `plantilla_recordatorio`, y aquí es además el estado normal hasta que Meta apruebe.
+    #: Los nombres exactos que hay que pedir están en `docs/plantillas-meta-reactivacion.md`.
+    plantilla_sin_agendar: str = ""
+    plantilla_cancelada: str = ""
+    plantilla_no_asistio: str = ""
+
+    #: El interruptor de pánico (regla 10). `0` apaga el BARRIDO entero sin redesplegar: deja
+    #: de encolar gente nueva y todo lo demás --recordatorios de cita, atención, relevo-- sigue
+    #: igual. `!= "0"` y no `== "1"` porque el default es encendido, como `daniela_responde`.
+    reactivacion_encendida: bool = True
+
     #: La dirección donde vive la política de tratamiento de datos que el paciente ve en su
     #: primer mensaje. El literal `PENDIENTE` APAGA el aviso: sale el mensaje limpio y no se
     #: registra nada. Dejó de ser el default el 16/09/2026.
@@ -477,6 +490,10 @@ class Config:
             plantilla_recordatorio_idioma=_opcional(
                 "MAXICARE_PLANTILLA_RECORDATORIO_IDIOMA", "es"
             ),
+            plantilla_sin_agendar=_opcional("MAXICARE_PLANTILLA_SIN_AGENDAR"),
+            plantilla_cancelada=_opcional("MAXICARE_PLANTILLA_CANCELADA"),
+            plantilla_no_asistio=_opcional("MAXICARE_PLANTILLA_NO_ASISTIO"),
+            reactivacion_encendida=_opcional("MAXICARE_REACTIVACION", "1") != "0",
             politica_datos_url=_opcional("MAXICARE_POLITICA_DATOS_URL", POLITICA_DATOS_URL),
             politica_datos_version=_opcional(
                 "MAXICARE_POLITICA_DATOS_VERSION", POLITICA_DATOS_VERSION
