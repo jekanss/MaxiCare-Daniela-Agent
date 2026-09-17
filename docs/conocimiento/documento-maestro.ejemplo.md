@@ -95,3 +95,47 @@ es algo que el sistema no puede afirmarle a un paciente todavía.
 
 De qué fuentes salió cada cosa —qué manual, qué conversación, qué fecha— para que dentro de
 un año se sepa a quién preguntarle cuando un dato deje de cuadrar.
+
+A esos dos se suma el formato de base de conocimiento llenado por la clínica, el formato de base de conocimiento llenado por el equipo médico, que aporta el contenido conversacional consolidado en la **sección 6**: descripciones, indicaciones, manejo del dolor, casos especiales, objeciones y diferenciales. No aporta tarifas. Ante diferencias entre ese formato y las fichas de la sección 2, manda la ficha, y el conflicto queda anotado en la sección 6.2.
+
+## 6. Contenido conversacional por tratamiento
+
+Origen: el formato de base de conocimiento llenado por la clínica, el formato «Base de Conocimiento — Tratamientos» que llenó el equipo médico de MaxiCare. Aporta lo que los dos manuales anteriores no traían: cómo se le explica cada tratamiento a un paciente, qué se le responde cuando pregunta si duele y cómo se contesta cada objeción. **No aporta ni una tarifa nueva**, y ninguna de las entradas derivadas de él contiene un precio.
+
+### 6.1 Qué se incorporó
+
+Siete conceptos por tratamiento, sobre los once que ya tienen ficha de precio:
+
+| Concepto | Qué contiene |
+| --- | --- |
+| `que_es` | Definición del procedimiento en lenguaje de paciente. |
+| `para_quien` | Indicación y problema que resuelve, cerrando siempre en que la candidatura se define en valoración. |
+| `dolor` | Qué se siente durante y después. Es la pregunta más frecuente del canal. |
+| `limite_edad` | Edad mínima o máxima, cuando la ficha la define. |
+| `caso_especial` | Los «¿qué pasa si...?» que el equipo redactó para cada tratamiento. |
+| `objeciones` | Objeción del paciente y la respuesta que la clínica aprobó. |
+| `diferencial` | Por qué hacerlo en MaxiCare, y materiales o tecnología empleados. |
+
+En `_general` se agregaron `redes` (Instagram), `especialidades` (las cinco que se atienden internamente) y `diferencial` (atención integral, calidad humana y nuevas tecnologías).
+
+Excepciones: **bichectomía no lleva `para_quien`**, porque su fila `indicacion` ya dice lo mismo y el par `(tratamiento, concepto)` es único. Tampoco existen las cuatro entradas de la sección 6.3. Donde el formato dejó el campo vacío, la fila no existe: así `formatear_conocimiento` devuelve «SIN DATO DOCUMENTADO», que es el comportamiento correcto y no un hueco silencioso.
+
+### 6.2 Qué se dejó fuera, deliberadamente
+
+1. **La sección «Ejemplo Formato Lleno».** El propio documento la encabeza con «AQUÍ LES PEGO UN FORMATO COMPLETADO CON IA SOLO COMO A MODO DE EJEMPLO», y está sembrada de marcas «⚠️ COMPLETAR». No es una afirmación de MaxiCare sobre sí misma. Sus cifras contradicen además las fichas reales —sábados hasta las 12:00 m., blanqueamiento de 60–90 minutos, cordales de 30–60 minutos— y en cada conflicto manda la ficha, como fija la sección 5.
+2. **El benchmark de precios del mercado Bogotá 2026.** Son rangos de la competencia, no tarifas de MaxiCare. Una fila con esas cifras las volvería citables por el agente y las dejaría autorizadas frente al guardrail de cifras.
+3. **Los diferenciales sin respaldo de la sección 4 del formato**: «respuesta en menos de 5 minutos» y «el 90% de los pacientes dicen que fue más fácil de lo esperado». La propia columna contigua del documento los marca como «lo que nos falta saber», es decir, la clínica todavía no los ha sostenido con datos.
+4. **Endodoncia y prótesis.** El formato las nombra, pero cada campo suyo dice «COMPLETAR». Siguen sin una sola fila, por la sección 2.12.
+
+### 6.3 Las cuatro entradas que se dejaron fuera
+
+Estas cuatro no entraron a la base. Cada una choca con algo que este documento ya había marcado, y MaxiCare no ha firmado ninguna. Mientras no existan como fila, `consultar_base_conocimiento` devuelve «SIN DATO DOCUMENTADO» para ese concepto y Daniela escala, que es lo que se busca: se prefirió el silencio a una promesa advertida.
+
+| Entrada descartada | Por qué |
+| --- | --- |
+| `cordales/objeciones` | La respuesta a «es muy caro» ofrece un plan de pago, y la única financiación confirmada es la de ortodoncia (punto 9 de la sección 4). |
+| `cordales/caso_especial` | Promete tratar «sin costo adicional» la afectación de un diente vecino y la segunda cita cuando la cirugía se suspende, sin documentar alcance ni condiciones (punto 1). |
+| `implantes/caso_especial` | Repite la cobertura por falta de osteointegración «sin costo adicional» que el punto 3 ya había pedido confirmar. |
+| `blanqueamiento/objeciones` | Afirma en absoluto que el blanqueamiento profesional «no daña el esmalte ni debilita los dientes», sin condiciones ni excepciones (punto 1). |
+
+Para incorporarlas hace falta que MaxiCare defina alcance y condiciones de cada cobertura; el texto original está en el formato de base de conocimiento, sección del tratamiento correspondiente.

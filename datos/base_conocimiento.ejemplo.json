@@ -21,7 +21,8 @@
     "tratamiento": "_general",
     "concepto": "equipo_por_confirmar",
     "contenido": "Especialidad y años de experiencia; nombre por confirmar con la clínica.",
-    "aprobado": false
+    "aprobado": false,
+    "nota_pendiente": "Lo que falta por confirmar con la clínica sobre «equipo_por_confirmar»."
   },
   {
     "tratamiento": "_general",
@@ -45,7 +46,8 @@
     "tratamiento": "_general",
     "concepto": "medios_pago",
     "contenido": "Medios de pago aceptados.",
-    "aprobado": false
+    "aprobado": false,
+    "nota_pendiente": "Lo que falta por confirmar con la clínica sobre «medios_pago»."
   },
   {
     "tratamiento": "_general",
@@ -69,6 +71,24 @@
     "tratamiento": "_general",
     "concepto": "confirmacion_de_cita",
     "contenido": "Cómo se confirma una cita y qué pasa si no se confirma.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "_general",
+    "concepto": "redes",
+    "contenido": "Redes sociales y sitio web de la clínica.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "_general",
+    "concepto": "especialidades",
+    "contenido": "Especialidades que la clínica atiende internamente.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "_general",
+    "concepto": "diferencial",
+    "contenido": "Qué hace distinta a la clínica frente a otras de la zona.",
     "aprobado": true
   },
   {
@@ -105,12 +125,43 @@
     "tratamiento": "cordales",
     "concepto": "control",
     "contenido": "Cuándo es el control posterior.",
-    "aprobado": false
+    "aprobado": false,
+    "nota_pendiente": "Lo que falta por confirmar con la clínica sobre «control»."
   },
   {
     "tratamiento": "cordales",
     "concepto": "cuidados",
     "contenido": "Indicaciones posteriores al procedimiento.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "cordales",
+    "concepto": "que_es",
+    "contenido": "En qué consiste el tratamiento, explicado para el paciente.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "cordales",
+    "concepto": "para_quien",
+    "contenido": "A quién se le indica el tratamiento y qué problema resuelve.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "cordales",
+    "concepto": "dolor",
+    "contenido": "Qué siente el paciente durante y después del procedimiento.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "cordales",
+    "concepto": "limite_edad",
+    "contenido": "Si hay edad mínima o máxima para el tratamiento.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "cordales",
+    "concepto": "diferencial",
+    "contenido": "Por qué hacerse el tratamiento en esta clínica y con qué materiales se trabaja.",
     "aprobado": true
   },
   {
@@ -123,7 +174,8 @@
     "tratamiento": "implantes",
     "concepto": "paquetes",
     "contenido": "Dos unidades: $000.000; tres: $000.000; cuatro: $000.000.",
-    "aprobado": false
+    "aprobado": false,
+    "nota_pendiente": "Lo que falta por confirmar con la clínica sobre «paquetes»."
   },
   {
     "tratamiento": "implantes",
@@ -153,12 +205,49 @@
     "tratamiento": "implantes",
     "concepto": "garantia",
     "contenido": "Cobertura y plazo de la garantía, y qué la invalida.",
-    "aprobado": false
+    "aprobado": false,
+    "nota_pendiente": "Lo que falta por confirmar con la clínica sobre «garantia»."
   },
   {
     "tratamiento": "implantes",
     "concepto": "cuidados",
     "contenido": "Indicaciones posteriores al procedimiento.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "implantes",
+    "concepto": "que_es",
+    "contenido": "En qué consiste el tratamiento, explicado para el paciente.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "implantes",
+    "concepto": "para_quien",
+    "contenido": "A quién se le indica el tratamiento y qué problema resuelve.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "implantes",
+    "concepto": "dolor",
+    "contenido": "Qué siente el paciente durante y después del procedimiento.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "implantes",
+    "concepto": "limite_edad",
+    "contenido": "Si hay edad mínima o máxima para el tratamiento.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "implantes",
+    "concepto": "diferencial",
+    "contenido": "Por qué hacerse el tratamiento en esta clínica y con qué materiales se trabaja.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "implantes",
+    "concepto": "objeciones",
+    "contenido": "Las objeciones más frecuentes del paciente y cómo las responde la clínica.",
     "aprobado": true
   },
   {
@@ -183,7 +272,8 @@
     "tratamiento": "blanqueamiento",
     "concepto": "incluye",
     "contenido": "Qué cubre el precio: valoración, procedimiento, controles.",
-    "aprobado": false
+    "aprobado": false,
+    "nota_pendiente": "Lo que falta por confirmar con la clínica sobre «incluye»."
   },
   {
     "tratamiento": "blanqueamiento",
@@ -195,6 +285,42 @@
     "tratamiento": "blanqueamiento",
     "concepto": "cuidados",
     "contenido": "Indicaciones posteriores al procedimiento.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "blanqueamiento",
+    "concepto": "que_es",
+    "contenido": "En qué consiste el tratamiento, explicado para el paciente.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "blanqueamiento",
+    "concepto": "para_quien",
+    "contenido": "A quién se le indica el tratamiento y qué problema resuelve.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "blanqueamiento",
+    "concepto": "dolor",
+    "contenido": "Qué siente el paciente durante y después del procedimiento.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "blanqueamiento",
+    "concepto": "limite_edad",
+    "contenido": "Si hay edad mínima o máxima para el tratamiento.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "blanqueamiento",
+    "concepto": "diferencial",
+    "contenido": "Por qué hacerse el tratamiento en esta clínica y con qué materiales se trabaja.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "blanqueamiento",
+    "concepto": "caso_especial",
+    "contenido": "Qué pasa en los casos especiales más frecuentes de este tratamiento.",
     "aprobado": true
   },
   {
@@ -243,7 +369,50 @@
     "tratamiento": "ortodoncia",
     "concepto": "retenedores",
     "contenido": "Qué retenedores se entregan y cuánto cuestan aparte.",
-    "aprobado": false
+    "aprobado": false,
+    "nota_pendiente": "Lo que falta por confirmar con la clínica sobre «retenedores»."
+  },
+  {
+    "tratamiento": "ortodoncia",
+    "concepto": "que_es",
+    "contenido": "En qué consiste el tratamiento, explicado para el paciente.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "ortodoncia",
+    "concepto": "para_quien",
+    "contenido": "A quién se le indica el tratamiento y qué problema resuelve.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "ortodoncia",
+    "concepto": "dolor",
+    "contenido": "Qué siente el paciente durante y después del procedimiento.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "ortodoncia",
+    "concepto": "limite_edad",
+    "contenido": "Si hay edad mínima o máxima para el tratamiento.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "ortodoncia",
+    "concepto": "diferencial",
+    "contenido": "Por qué hacerse el tratamiento en esta clínica y con qué materiales se trabaja.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "ortodoncia",
+    "concepto": "caso_especial",
+    "contenido": "Qué pasa en los casos especiales más frecuentes de este tratamiento.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "ortodoncia",
+    "concepto": "objeciones",
+    "contenido": "Las objeciones más frecuentes del paciente y cómo las responde la clínica.",
+    "aprobado": true
   },
   {
     "tratamiento": "diseno_sonrisa",
@@ -273,7 +442,50 @@
     "tratamiento": "diseno_sonrisa",
     "concepto": "garantia",
     "contenido": "Cobertura y plazo de la garantía, y qué la invalida.",
-    "aprobado": false
+    "aprobado": false,
+    "nota_pendiente": "Lo que falta por confirmar con la clínica sobre «garantia»."
+  },
+  {
+    "tratamiento": "diseno_sonrisa",
+    "concepto": "que_es",
+    "contenido": "En qué consiste el tratamiento, explicado para el paciente.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "diseno_sonrisa",
+    "concepto": "para_quien",
+    "contenido": "A quién se le indica el tratamiento y qué problema resuelve.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "diseno_sonrisa",
+    "concepto": "dolor",
+    "contenido": "Qué siente el paciente durante y después del procedimiento.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "diseno_sonrisa",
+    "concepto": "limite_edad",
+    "contenido": "Si hay edad mínima o máxima para el tratamiento.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "diseno_sonrisa",
+    "concepto": "diferencial",
+    "contenido": "Por qué hacerse el tratamiento en esta clínica y con qué materiales se trabaja.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "diseno_sonrisa",
+    "concepto": "caso_especial",
+    "contenido": "Qué pasa en los casos especiales más frecuentes de este tratamiento.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "diseno_sonrisa",
+    "concepto": "objeciones",
+    "contenido": "Las objeciones más frecuentes del paciente y cómo las responde la clínica.",
+    "aprobado": true
   },
   {
     "tratamiento": "microdiseno",
@@ -297,7 +509,50 @@
     "tratamiento": "microdiseno",
     "concepto": "garantia",
     "contenido": "Cobertura y plazo de la garantía, y qué la invalida.",
-    "aprobado": false
+    "aprobado": false,
+    "nota_pendiente": "Lo que falta por confirmar con la clínica sobre «garantia»."
+  },
+  {
+    "tratamiento": "microdiseno",
+    "concepto": "que_es",
+    "contenido": "En qué consiste el tratamiento, explicado para el paciente.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "microdiseno",
+    "concepto": "para_quien",
+    "contenido": "A quién se le indica el tratamiento y qué problema resuelve.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "microdiseno",
+    "concepto": "dolor",
+    "contenido": "Qué siente el paciente durante y después del procedimiento.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "microdiseno",
+    "concepto": "limite_edad",
+    "contenido": "Si hay edad mínima o máxima para el tratamiento.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "microdiseno",
+    "concepto": "diferencial",
+    "contenido": "Por qué hacerse el tratamiento en esta clínica y con qué materiales se trabaja.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "microdiseno",
+    "concepto": "caso_especial",
+    "contenido": "Qué pasa en los casos especiales más frecuentes de este tratamiento.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "microdiseno",
+    "concepto": "objeciones",
+    "contenido": "Las objeciones más frecuentes del paciente y cómo las responde la clínica.",
+    "aprobado": true
   },
   {
     "tratamiento": "coronas",
@@ -327,7 +582,50 @@
     "tratamiento": "coronas",
     "concepto": "garantia",
     "contenido": "Cobertura y plazo de la garantía, y qué la invalida.",
-    "aprobado": false
+    "aprobado": false,
+    "nota_pendiente": "Lo que falta por confirmar con la clínica sobre «garantia»."
+  },
+  {
+    "tratamiento": "coronas",
+    "concepto": "que_es",
+    "contenido": "En qué consiste el tratamiento, explicado para el paciente.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "coronas",
+    "concepto": "para_quien",
+    "contenido": "A quién se le indica el tratamiento y qué problema resuelve.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "coronas",
+    "concepto": "dolor",
+    "contenido": "Qué siente el paciente durante y después del procedimiento.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "coronas",
+    "concepto": "limite_edad",
+    "contenido": "Si hay edad mínima o máxima para el tratamiento.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "coronas",
+    "concepto": "diferencial",
+    "contenido": "Por qué hacerse el tratamiento en esta clínica y con qué materiales se trabaja.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "coronas",
+    "concepto": "caso_especial",
+    "contenido": "Qué pasa en los casos especiales más frecuentes de este tratamiento.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "coronas",
+    "concepto": "objeciones",
+    "contenido": "Las objeciones más frecuentes del paciente y cómo las responde la clínica.",
+    "aprobado": true
   },
   {
     "tratamiento": "periodoncia",
@@ -345,6 +643,48 @@
     "tratamiento": "periodoncia",
     "concepto": "duracion",
     "contenido": "00 a 00 minutos por sesión.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "periodoncia",
+    "concepto": "que_es",
+    "contenido": "En qué consiste el tratamiento, explicado para el paciente.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "periodoncia",
+    "concepto": "para_quien",
+    "contenido": "A quién se le indica el tratamiento y qué problema resuelve.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "periodoncia",
+    "concepto": "dolor",
+    "contenido": "Qué siente el paciente durante y después del procedimiento.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "periodoncia",
+    "concepto": "limite_edad",
+    "contenido": "Si hay edad mínima o máxima para el tratamiento.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "periodoncia",
+    "concepto": "diferencial",
+    "contenido": "Por qué hacerse el tratamiento en esta clínica y con qué materiales se trabaja.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "periodoncia",
+    "concepto": "caso_especial",
+    "contenido": "Qué pasa en los casos especiales más frecuentes de este tratamiento.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "periodoncia",
+    "concepto": "objeciones",
+    "contenido": "Las objeciones más frecuentes del paciente y cómo las responde la clínica.",
     "aprobado": true
   },
   {
@@ -369,7 +709,50 @@
     "tratamiento": "gingivectomia",
     "concepto": "garantia",
     "contenido": "Cobertura y plazo de la garantía, y qué la invalida.",
-    "aprobado": false
+    "aprobado": false,
+    "nota_pendiente": "Lo que falta por confirmar con la clínica sobre «garantia»."
+  },
+  {
+    "tratamiento": "gingivectomia",
+    "concepto": "que_es",
+    "contenido": "En qué consiste el tratamiento, explicado para el paciente.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "gingivectomia",
+    "concepto": "para_quien",
+    "contenido": "A quién se le indica el tratamiento y qué problema resuelve.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "gingivectomia",
+    "concepto": "dolor",
+    "contenido": "Qué siente el paciente durante y después del procedimiento.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "gingivectomia",
+    "concepto": "limite_edad",
+    "contenido": "Si hay edad mínima o máxima para el tratamiento.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "gingivectomia",
+    "concepto": "diferencial",
+    "contenido": "Por qué hacerse el tratamiento en esta clínica y con qué materiales se trabaja.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "gingivectomia",
+    "concepto": "caso_especial",
+    "contenido": "Qué pasa en los casos especiales más frecuentes de este tratamiento.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "gingivectomia",
+    "concepto": "objeciones",
+    "contenido": "Las objeciones más frecuentes del paciente y cómo las responde la clínica.",
+    "aprobado": true
   },
   {
     "tratamiento": "bichectomia",
@@ -411,7 +794,44 @@
     "tratamiento": "bichectomia",
     "concepto": "garantia",
     "contenido": "Cobertura y plazo de la garantía, y qué la invalida.",
-    "aprobado": false
+    "aprobado": false,
+    "nota_pendiente": "Lo que falta por confirmar con la clínica sobre «garantia»."
+  },
+  {
+    "tratamiento": "bichectomia",
+    "concepto": "que_es",
+    "contenido": "En qué consiste el tratamiento, explicado para el paciente.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "bichectomia",
+    "concepto": "dolor",
+    "contenido": "Qué siente el paciente durante y después del procedimiento.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "bichectomia",
+    "concepto": "limite_edad",
+    "contenido": "Si hay edad mínima o máxima para el tratamiento.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "bichectomia",
+    "concepto": "diferencial",
+    "contenido": "Por qué hacerse el tratamiento en esta clínica y con qué materiales se trabaja.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "bichectomia",
+    "concepto": "caso_especial",
+    "contenido": "Qué pasa en los casos especiales más frecuentes de este tratamiento.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "bichectomia",
+    "concepto": "objeciones",
+    "contenido": "Las objeciones más frecuentes del paciente y cómo las responde la clínica.",
+    "aprobado": true
   },
   {
     "tratamiento": "limpieza",
@@ -423,7 +843,8 @@
     "tratamiento": "limpieza",
     "concepto": "profesional",
     "contenido": "Especialidad que realiza el procedimiento.",
-    "aprobado": false
+    "aprobado": false,
+    "nota_pendiente": "Lo que falta por confirmar con la clínica sobre «profesional»."
   },
   {
     "tratamiento": "limpieza",
@@ -435,6 +856,48 @@
     "tratamiento": "limpieza",
     "concepto": "frecuencia",
     "contenido": "Cada cuánto se recomienda repetir el tratamiento.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "limpieza",
+    "concepto": "que_es",
+    "contenido": "En qué consiste el tratamiento, explicado para el paciente.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "limpieza",
+    "concepto": "para_quien",
+    "contenido": "A quién se le indica el tratamiento y qué problema resuelve.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "limpieza",
+    "concepto": "dolor",
+    "contenido": "Qué siente el paciente durante y después del procedimiento.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "limpieza",
+    "concepto": "limite_edad",
+    "contenido": "Si hay edad mínima o máxima para el tratamiento.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "limpieza",
+    "concepto": "diferencial",
+    "contenido": "Por qué hacerse el tratamiento en esta clínica y con qué materiales se trabaja.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "limpieza",
+    "concepto": "caso_especial",
+    "contenido": "Qué pasa en los casos especiales más frecuentes de este tratamiento.",
+    "aprobado": true
+  },
+  {
+    "tratamiento": "limpieza",
+    "concepto": "objeciones",
+    "contenido": "Las objeciones más frecuentes del paciente y cómo las responde la clínica.",
     "aprobado": true
   }
 ]

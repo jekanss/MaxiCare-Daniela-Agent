@@ -23,6 +23,16 @@ explícitamente al modelo estimar y le manda escalar.
 Agregar una fila de precio para cualquiera de los dos rompe el primer objetivo del
 proyecto. `tests/test_base_conocimiento.py` falla si aparece.
 
+# Dos orígenes, una sola transcripción
+
+Las filas de precio, duración, inclusiones y garantías salen de las secciones 1 a 4 del
+documento maestro. Las de `que_es`, `para_quien`, `dolor`, `limite_edad`, `caso_especial`,
+`objeciones` y `diferencial` salen de su **sección 6**, que consolida el formato de base de
+conocimiento que llenó el equipo médico. La 6.2 dice qué se dejó fuera de ese formato y por
+qué: la parte redactada con IA, el benchmark de la competencia y los diferenciales que la
+propia clínica marcó como no verificados. Nada de eso se reincorpora sin leer antes esa
+sección.
+
 # Los tres estados de un dato
 
 | Estado | Cómo se escribe | Qué ve el paciente |
@@ -50,8 +60,13 @@ Tras editar: `uv run pytest -q tests/test_base_conocimiento.py` y luego
 `datos/base_conocimiento.json` y el documento maestro del que sale llevan la direccion de
 la sede, los nombres de los odontologos y las tarifas: son datos del cliente, y estan en
 `.gitignore` por la misma razon que `.env`. Lo versionado son los ejemplos de al lado, que
-conservan las 73 entradas con su `tratamiento` y su `concepto` --el esquema-- y sustituyen
+conservan las 148 entradas con su `tratamiento` y su `concepto` --el esquema-- y sustituyen
 el `contenido`.
+
+**El ejemplo tiene que pasar las pruebas igual que el real.** Es la copia que arranca un
+clon, así que toda fila suya con `aprobado: false` necesita su `nota_pendiente`, aunque el
+texto sea genérico: sin ella `test_toda_fila_no_aprobada_explica_que_falta` falla en la
+primera corrida de un repositorio recién clonado. Estuvo fallando hasta el 16/09/2026.
 
 En un clon nuevo, antes de `inicializar_base.py`:
 
