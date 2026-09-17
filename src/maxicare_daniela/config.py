@@ -424,13 +424,23 @@ class Config:
     plantilla_recordatorio: str = ""
 
     #: El código de idioma EXACTO con el que la traducción está registrada en el Business
-    #: Manager. No es cosmético y no admite un valor aproximado: si no coincide al carácter,
-    #: Meta rechaza el envío entero con el error 132001 («template name does not exist in the
-    #: translation») y una plantilla creada como `es_CO` no acepta `es`. Cableado en el código
-    #: eso sería el 100 % de los recordatorios fallando, con rastro solo en el log y en una
-    #: columna que nadie mira. PENDIENTE: el código real, que sale de la aprobación de Meta;
-    #: `es` es el default más probable y por eso mismo no es una comprobación.
-    plantilla_recordatorio_idioma: str = "es"
+    #: Manager, **para las CUATRO plantillas** (I2, ronda 1 de revisión: el campo se llamaba
+    #: `plantilla_recordatorio_idioma` y `runtime.py` ya lo pasaba a las cuatro, así que el
+    #: nombre mentía sobre su propio alcance). No es cosmético y no admite un valor
+    #: aproximado: si no coincide al carácter, Meta rechaza el envío entero con el error
+    #: 132001 («template name does not exist in the translation») y una plantilla creada como
+    #: `es_CO` no acepta `es`. **Las cuatro plantillas tienen que estar registradas en Meta con
+    #: este MISMO código.** Si alguna quedara con otro, esa plantilla fallaría al 100% de sus
+    #: envíos -y como la fila se marca ANTES de enviar (no negociable 21), cada una se pierde
+    #: para siempre y el doctor recibe un aviso de fallo por cada una-, con rastro solo en el
+    #: log y en una columna que nadie mira. Hoy no es un fallo vivo: el documento de plantillas
+    #: (`docs/plantillas-meta-reactivacion.md`) fija `es` (Spanish) para las tres de
+    #: reactivación, igual que la de recordatorio. PENDIENTE: el código real, que sale de la
+    #: aprobación de Meta; `es` es el default más probable y por eso mismo no es una
+    #: comprobación. La variable de entorno conserva su nombre viejo
+    #: (`MAXICARE_PLANTILLA_RECORDATORIO_IDIOMA`) a propósito: ya está en el `.env` del VPS, y
+    #: renombrarla la habría dejado sin efecto en el primer despliegue sin que nadie lo notara.
+    plantillas_idioma: str = "es"
 
     #: Las tres de reactivación. Vacías --su default-- dejan su tipo SIN enviar: el despachador
     #: decide igual y la fila se queda pendiente. Es el mismo modo de comprobación que
@@ -440,9 +450,13 @@ class Config:
     plantilla_cancelada: str = ""
     plantilla_no_asistio: str = ""
 
-    #: El interruptor de pánico (regla 10). `0` apaga el BARRIDO entero sin redesplegar: deja
-    #: de encolar gente nueva y todo lo demás --recordatorios de cita, atención, relevo-- sigue
-    #: igual. `!= "0"` y no `== "1"` porque el default es encendido, como `daniela_responde`.
+    #: El interruptor de pánico (regla 10), para cuando exista el BARRIDO que encola
+    #: (parada siguiente de este plan). `0` apagará el barrido entero sin redesplegar: dejará
+    #: de encolar gente nueva y todo lo demás --recordatorios de cita, atención, relevo--
+    #: seguirá igual. **AVISO (M2, ronda 1 de revisión): HOY no hay ningún barrido corriendo,
+    #: así que ponerlo a `0` ahora no apaga nada.** Sin error en ningún log que lo diga -- el
+    #: mismo patrón que el webhook de Telegram sin activar (CLAUDE.md). `!= "0"` y no `== "1"`
+    #: porque el default es encendido, como `daniela_responde`.
     reactivacion_encendida: bool = True
 
     #: La dirección donde vive la política de tratamiento de datos que el paciente ve en su
@@ -487,7 +501,10 @@ class Config:
             telegram_chat_doctores=_opcional("MAXICARE_TELEGRAM_CHAT_DOCTORES"),
             telegram_webhook_secret=_opcional("MAXICARE_TELEGRAM_WEBHOOK_SECRET"),
             plantilla_recordatorio=_opcional("MAXICARE_PLANTILLA_RECORDATORIO"),
-            plantilla_recordatorio_idioma=_opcional(
+            # El nombre de la variable de entorno NO cambia (I2): ya está en el `.env` del
+            # VPS con este nombre, y gobierna las cuatro plantillas desde antes de este
+            # rename -- ver el comentario del campo.
+            plantillas_idioma=_opcional(
                 "MAXICARE_PLANTILLA_RECORDATORIO_IDIOMA", "es"
             ),
             plantilla_sin_agendar=_opcional("MAXICARE_PLANTILLA_SIN_AGENDAR"),

@@ -2056,7 +2056,7 @@ async def _despachar_recordatorios_sin_parar() -> None:
                     seguimientos.TIPO_CANCELADA: config.plantilla_cancelada,
                     seguimientos.TIPO_NO_ASISTIO: config.plantilla_no_asistio,
                 },
-                idioma=config.plantilla_recordatorio_idioma,
+                idioma=config.plantillas_idioma,
             )
             if any(recuento.values()):
                 log.info("recordatorios: %s", recuento)

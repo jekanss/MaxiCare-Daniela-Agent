@@ -18,7 +18,9 @@ def momento(dia: int, hora: int, minuto: int = 0) -> datetime:
     return datetime(2026, 9, dia, hora, minuto, tzinfo=ZONA_BOGOTA)
 
 
-async def _despachar_con(filas, *, whatsapp, plantillas, ahora, monkeypatch=None):
+async def _despachar_con(
+    filas, *, whatsapp, plantillas, ahora, monkeypatch=None, marcadas=None, anuladas=None,
+):
     """Corre un ciclo de `despachar` con la base entera doblada.
 
     Se dobla `persistencia` y no la base: lo que se prueba es la DECISION y el reparto de
@@ -27,6 +29,14 @@ async def _despachar_con(filas, *, whatsapp, plantillas, ahora, monkeypatch=None
     OJO: NO dobla `persistencia.contar_enviados_hoy` -- esa funcion no existe hoy. Es del tope
     DIARIO, que es del barrido (parada siguiente de este plan) y no del despachador. Doblar un
     atributo que no existe revienta con `AttributeError` antes de probar nada (Ruling C2).
+
+    `marcadas` y `anuladas`, si se pasa una lista, registran cada `id_seguimiento` (y su
+    motivo, para `anuladas`) que los dobles de `marcar_seguimiento_enviado` y
+    `anular_seguimiento` reciben (I3, ronda 1 de revisión): sin esto los dobles solo
+    devolvían `None`/`True` sin dejar rastro, y una prueba que afirma "y no se marca" -o que
+    exige un motivo concreto de anulación- no puede fallar por eso -- una aserción sobre una
+    AUSENCIA no distingue "se decidió no hacerlo" de "el doble no lo habría contado de todas
+    formas" (`.claude/rules/pruebas.md`).
     """
     import pytest as _pytest
     from maxicare_daniela import persistencia
@@ -39,12 +49,21 @@ async def _despachar_con(filas, *, whatsapp, plantillas, ahora, monkeypatch=None
         def commit(self): pass
         def close(self): pass
 
+    def _marcar(conn, id_seguimiento):
+        if marcadas is not None:
+            marcadas.append(id_seguimiento)
+        return True
+
+    def _anular(conn, id_seguimiento, **k):
+        if anuladas is not None:
+            anuladas.append((id_seguimiento, k.get("motivo")))
+
     mp.setattr(persistencia, "conectar", lambda url: _ConexionFalsa())
     mp.setattr(persistencia, "leer_configuracion", lambda conn: {})
     mp.setattr(persistencia, "seguimientos_por_despachar", lambda conn, **k: list(filas))
     mp.setattr(persistencia, "ultimo_mensaje_del_paciente", lambda conn, telefono: None)
-    mp.setattr(persistencia, "marcar_seguimiento_enviado", lambda conn, id_seguimiento: True)
-    mp.setattr(persistencia, "anular_seguimiento", lambda conn, i, **k: None)
+    mp.setattr(persistencia, "marcar_seguimiento_enviado", _marcar)
+    mp.setattr(persistencia, "anular_seguimiento", _anular)
     mp.setattr(persistencia, "aplazar_seguimiento", lambda conn, i, **k: None)
     mp.setattr(persistencia, "anotar_recordatorio_en_conversacion", lambda conn, i, **k: None)
     try:
@@ -172,6 +191,18 @@ def fila_de_reactivacion(**cambios) -> dict:
     que puede tener una `fecha_objetivo` lejanísima y aun así no haberse aplazado jamás. Las
     pruebas de R3bis (más abajo) son las únicas que lo pasan explícito, simulando que la fila
     YA se atascó al menos una vez.
+
+    `nombre_completo=None` por defecto, y NO a mano (hallazgo CRÍTICO de la ronda 1 de
+    revisión de la tarea 4): esa columna sale de `LEFT JOIN citas`, y **toda fila de
+    reactivación tiene `cita_id` NULL** -una fila de reactivación CON `cita_id` la anularía
+    G1-, así que el SELECT real NUNCA le da un valor a esta columna en una fila así. La
+    versión anterior de esta fábrica la fijaba a `"Marcela Rios"`, un valor que el SELECT no
+    puede producir para esta fila, y eso dejaba pasar en verde una prueba
+    (`test_la_reactivacion_manda_UN_hueco_y_es_el_nombre_de_pila`) que en producción habría
+    fallado: el 100% de las reactivaciones salían con el respaldo "paciente". El nombre para
+    el hueco sale ahora de `nombre_perfil` -el nombre de perfil de WhatsApp, la única fuente
+    que existe de verdad para un lead que nunca agendó- y `nombre_ficha` queda en `None`
+    porque tampoco tiene ficha en `pacientes` -eso solo lo tiene quien ya agendó alguna vez.
     """
     base = dict(
         id=1,
@@ -182,7 +213,9 @@ def fila_de_reactivacion(**cambios) -> dict:
         aplazado_desde=None,
         intentos=0,
         telefono="573001112233",
-        nombre_completo="Marcela Rios",
+        nombre_completo=None,
+        nombre_ficha=None,
+        nombre_perfil="Marcela Rios",
         tratamiento=None,
         cita_inicio=None,
         cita_estado=None,
@@ -519,14 +552,59 @@ def test_el_freno_no_alcanza_al_recordatorio_de_una_cita_ni_tampoco_r3bis():
 def test_la_reactivacion_manda_UN_hueco_y_es_el_nombre_de_pila():
     """Marketing quito el tratamiento a proposito: es un dato de salud y una notificacion se
     lee en la pantalla de bloqueo. Si esta funcion devolviera cuatro huecos, Meta rechaza el
-    envio y ademas se filtraria."""
-    parametros = s.parametros_de(fila_de_reactivacion(nombre_completo="Marcela Rios Gomez"))
+    envio y ademas se filtraria.
+
+    Se fija por `nombre_perfil` -y NO por `nombre_completo`, hallazgo CRITICO de la ronda 1 de
+    revision-: `nombre_completo` sale de `LEFT JOIN citas`, y toda fila de reactivacion tiene
+    `cita_id` NULL, asi que el SELECT real jamas le da un valor. Fijarlo a mano aqui habria
+    tapado otra vez el mismo defecto que esta prueba existe para cazar.
+    """
+    parametros = s.parametros_de(fila_de_reactivacion(nombre_perfil="Marcela Rios Gomez"))
     assert parametros == ["Marcela"]
 
 
-def test_el_recordatorio_de_cita_sigue_mandando_sus_cuatro_huecos():
+def test_la_reactivacion_prefiere_la_ficha_de_pacientes_sobre_el_perfil():
+    """Quien ya agendo alguna vez -TIPO_CANCELADA, TIPO_NO_ASISTIO- tiene ficha en `pacientes`,
+    y esa ficha es mas confiable que el nombre de perfil de WhatsApp: es la que el paciente dio
+    al agendar, no un apodo o el nombre de un negocio."""
     fila = fila_de_reactivacion(
-        tipo=s.TIPO_RECORDATORIO, cita_id="cita-1",
+        tipo=s.TIPO_NO_ASISTIO, nombre_ficha="Ana Perez", nombre_perfil="Anita <3",
+    )
+    assert s.parametros_de(fila) == ["Ana"]
+
+
+def test_la_ficha_marcada_NOMBRE_PENDIENTE_no_cuenta_como_nombre():
+    """Regla dura 12: esa ficha no es una ficha. Si se usara, la reactivacion diria "Hola
+    PENDIENTE" -- peor que el respaldo "paciente" que esta ronda elimino."""
+    from maxicare_daniela import persistencia
+
+    fila = fila_de_reactivacion(
+        nombre_ficha=persistencia.NOMBRE_PENDIENTE, nombre_perfil="Marcela",
+    )
+    assert s.parametros_de(fila) == ["Marcela"]
+
+
+def test_una_reactivacion_sin_ningun_nombre_usable_no_se_manda():
+    """Un nombre de perfil que es solo un emoji -o vacio, o puro simbolo- no tiene ninguna
+    letra: `parametros_de` devuelve `None` y `despachar` la anula en vez de mandar "Hola 🌸"
+    o "Hola paciente". Ante la duda, no se manda."""
+    fila = fila_de_reactivacion(nombre_ficha=None, nombre_perfil="🌸")
+    assert s.parametros_de(fila) is None
+
+
+def test_un_nombre_de_perfil_vacio_o_solo_espacios_tampoco_es_usable():
+    for perfil in (None, "", "   "):
+        fila = fila_de_reactivacion(nombre_ficha=None, nombre_perfil=perfil)
+        assert s.parametros_de(fila) is None, repr(perfil)
+
+
+def test_el_recordatorio_de_cita_sigue_mandando_sus_cuatro_huecos():
+    """A diferencia de una reactivacion, un recordatorio de verdad SI trae `nombre_completo`:
+    sale de `citas`, que lo declara `NOT NULL`, y por eso este es el unico test del archivo
+    que necesita fijarlo a mano -- el default de `fila_de_reactivacion` lo deja en `None` a
+    proposito (ver su docstring)."""
+    fila = fila_de_reactivacion(
+        tipo=s.TIPO_RECORDATORIO, cita_id="cita-1", nombre_completo="Marcela Rios",
         cita_inicio=momento(17, 9), tratamiento="Limpieza",
     )
     assert s.parametros_de(fila) == ["Marcela", "jueves 17/9", "09:00", "Limpieza"]
@@ -534,10 +612,17 @@ def test_el_recordatorio_de_cita_sigue_mandando_sus_cuatro_huecos():
 
 def test_sin_plantilla_para_ese_tipo_no_se_manda_y_no_se_marca():
     """Si falta la plantilla de un tipo, esa fila NO se marca como enviada: se queda pendiente
-    hasta que la plantilla exista. Marcarla la perderia para siempre."""
+    hasta que la plantilla exista. Marcarla la perderia para siempre.
+
+    I3 (ronda 1 de revision): el doble de `marcar_seguimiento_enviado` ahora REGISTRA cada
+    llamada (`marcadas`), y esta prueba comprueba la lista vacia -- no solo que no se mando
+    nada por WhatsApp. Sin eso, "y no se marca" era una afirmacion que el doble viejo no podia
+    dejar en rojo aunque `despachar` marcara la fila: el doble devolvia `True` sin rastro.
+    """
     import asyncio
 
     enviados: list[dict] = []
+    marcadas: list[int] = []
 
     class _WhatsAppFalso:
         async def enviar_plantilla(self, telefono, **k):
@@ -550,9 +635,11 @@ def test_sin_plantilla_para_ese_tipo_no_se_manda_y_no_se_marca():
             whatsapp=_WhatsAppFalso(),
             plantillas={s.TIPO_RECORDATORIO: "recordatorio_cita"},  # falta la de reactivacion
             ahora=momento(16, 11),
+            marcadas=marcadas,
         )
     )
     assert enviados == []
+    assert marcadas == []
     assert recuento["enviados"] == 0
 
 
@@ -579,3 +666,80 @@ def test_cada_tipo_usa_SU_plantilla():
     )
     assert enviados[0]["plantilla"] == "reactivacion_sin_agendar"
     assert enviados[0]["parametros"] == ["Marcela"]
+
+
+def test_una_reactivacion_sin_nombre_usable_se_anula_y_no_se_manda_ni_se_marca():
+    """El hallazgo CRITICO de principio a fin, contra `despachar` completo: con la plantilla
+    puesta Y sin ningun nombre usable, la fila se ANULA -no se manda "Hola paciente", y no se
+    deja pendiente para siempre (acumularia basura que el despachador relee cada 60 s sin
+    ninguna salida posible)."""
+    import asyncio
+
+    enviados: list[dict] = []
+    anuladas: list[tuple[int, str]] = []
+    marcadas: list[int] = []
+
+    class _WhatsAppFalso:
+        async def enviar_plantilla(self, telefono, **k):
+            enviados.append(k)
+            return "wamid.X"
+
+    recuento = asyncio.run(
+        _despachar_con(
+            [fila_de_reactivacion(nombre_ficha=None, nombre_perfil="🌸")],
+            whatsapp=_WhatsAppFalso(),
+            plantillas={
+                s.TIPO_RECORDATORIO: "recordatorio_cita",
+                s.TIPO_SIN_AGENDAR: "reactivacion_sin_agendar",
+            },
+            ahora=momento(16, 11),
+            marcadas=marcadas,
+            anuladas=anuladas,
+        )
+    )
+
+    assert enviados == []
+    assert marcadas == []
+    assert anuladas == [(1, "sin_nombre")]
+    assert recuento == {"enviados": 0, "anulados": 1, "aplazados": 0, "fallidos": 0}
+
+
+def test_un_tipo_desconocido_sin_cita_inicio_se_anula_fail_closed():
+    """M3 (ronda 1 de revision): antes de acotar la fila ROTA a `TIPO_RECORDATORIO`, un `tipo`
+    fuera de las tres reactivaciones conocidas -invalido, o uno futuro que el CHECK NOT VALID
+    de la 021 no alcanza a rechazar- y sin `cita_inicio` se quedaba pendiente PARA SIEMPRE: el
+    despachador lo releeria cada 60 s sin dejar rastro del motivo. Ahora cierra fail-closed
+    contra `TIPOS_DE_REACTIVACION`, la misma polaridad que `es_reactivacion` en `decidir`."""
+    import asyncio
+
+    anuladas: list[tuple[int, str]] = []
+
+    class _WhatsAppFalso:
+        async def enviar_plantilla(self, telefono, **k):
+            return "wamid.X"
+
+    recuento = asyncio.run(
+        _despachar_con(
+            [fila_de_reactivacion(tipo="un_tipo_que_no_existe", cita_inicio=None)],
+            whatsapp=_WhatsAppFalso(),
+            plantillas={s.TIPO_RECORDATORIO: "recordatorio_cita"},
+            ahora=momento(16, 11),
+            anuladas=anuladas,
+        )
+    )
+
+    assert anuladas == [(1, "sin_cita")]
+    assert recuento == {"enviados": 0, "anulados": 1, "aplazados": 0, "fallidos": 0}
+
+
+def test_parametros_de_un_tipo_desconocido_cae_al_lado_ESTRECHO_no_al_de_cuatro_huecos():
+    """I1 (ronda 1 de revision): la polaridad estaba al reves. La version anterior mandaba
+    CUATRO huecos con el tratamiento dentro -un dato de salud- a todo lo que no fuera una de
+    las tres reactivaciones CONOCIDAS por su lado explicito, asi que un `tipo` invalido o uno
+    futuro caia del lado que SI manda el tratamiento. Ahora el lado por defecto es el
+    estrecho: un hueco, sin tratamiento, igual que cualquier reactivacion."""
+    fila = fila_de_reactivacion(
+        tipo="un_tipo_que_no_existe", nombre_ficha=None, nombre_perfil="Marcela",
+        tratamiento="Ortodoncia",
+    )
+    assert s.parametros_de(fila) == ["Marcela"]

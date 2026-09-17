@@ -531,7 +531,52 @@ SEGUNDOS_ENTRE_INTENTOS = 2.0
 _DIAS = ("lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo")
 
 
-def parametros_de(fila: dict[str, Any]) -> list[str]:
+def _nombre_de_reactivacion(fila: dict[str, Any]) -> str | None:
+    """El nombre para el ÚNICO hueco de una reactivación, en cascada de tres fuentes.
+
+    `citas.nombre_completo` -> la ficha de `pacientes` -> el nombre de perfil de WhatsApp
+    (`mensajes_entrantes.nombre_perfil`), en ese orden -- el mismo que arma el SELECT de
+    `persistencia.seguimientos_por_despachar`. Hallazgo crítico de la ronda 1 de revisión:
+    **toda fila de reactivación tiene `cita_id` NULL** (`programar_seguimiento` nunca lo pone,
+    y una fila CON `cita_id` la anularía G1), así que el primer eslabón (`nombre_completo`,
+    que sale del `LEFT JOIN` a `citas`) siempre estaba en NULL para estas filas y
+    `parametros_de` caía a su respaldo `"paciente"` el 100% de las veces -- la firma exacta de
+    un mensaje masivo, medida por el revisor contra el SELECT real.
+
+    Un lead que preguntó y no agendó normalmente NO tiene ficha (`crear_cita` es quien la
+    registra), así que el segundo eslabón solo resuelve algo para quien ya agendó alguna vez
+    (`TIPO_CANCELADA`, `TIPO_NO_ASISTIO`). Para el resto, el único dato que existe es el
+    nombre de perfil que la persona misma escribió en WhatsApp -- texto libre, sin garantía
+    de forma.
+
+    Devuelve `None` si ninguna fuente da un nombre usable: **ante la duda, no se manda.**
+    """
+    citas_nombre = fila.get("nombre_completo")
+    if citas_nombre:
+        return citas_nombre
+
+    ficha = fila.get("nombre_ficha")
+    # El marcador de la regla dura 12: una ficha con ese nombre no cuenta como nombre, cae al
+    # siguiente eslabón. `NOMBRE_PENDIENTE` es el literal ASCII "PENDIENTE" -- si se colara
+    # aquí, la reactivación saldría diciendo "Hola PENDIENTE", peor que "Hola paciente".
+    if ficha and ficha != persistencia.NOMBRE_PENDIENTE:
+        return ficha
+
+    # `nombre_perfil` es texto libre que la persona eligió en su WhatsApp: puede ser un
+    # nombre, un apodo, el nombre de un negocio, un emoji suelto o una frase. El criterio es
+    # deliberadamente conservador y no busca la regla perfecta -- basta con que no mande
+    # "Hola 🌸": exige al menos una letra (`str.isalpha()`, que sí reconoce acentos y eñes) en
+    # el texto ya recortado. Un emoji, una cadena de puntuación o un campo vacío no la tienen
+    # y quedan fuera; un apodo o un nombre de negocio sí la tienen y pasan -- son menos
+    # naturales que un nombre de pila, pero siguen siendo un saludo con nombre y no uno vacío.
+    perfil = (fila.get("nombre_perfil") or "").strip()
+    if perfil and any(caracter.isalpha() for caracter in perfil):
+        return perfil
+
+    return None
+
+
+def parametros_de(fila: dict[str, Any]) -> list[str] | None:
     """Los huecos de la plantilla de ESA fila, en el orden en que Meta los aprobó.
 
     Dos plantillas con distinto número de huecos: el recordatorio de cita lleva cuatro y las
@@ -540,14 +585,31 @@ def parametros_de(fila: dict[str, Any]) -> list[str]:
     además una filtración: es un dato de salud y una notificación de WhatsApp se lee en la
     pantalla de bloqueo. Marketing lo quitó a propósito el 15/09/2026.
 
+    Devuelve `None` cuando una reactivación no tiene NINGÚN nombre usable (ver
+    `_nombre_de_reactivacion`): `despachar` lo trata como una fila rota, igual que un
+    recordatorio sin `cita_inicio`, y la anula en vez de mandar "Hola paciente".
+
     Pública (antes `_parametros_del_recordatorio`, privada): la dobla `scripts/probar_
     plantilla.py`, y quien le cambie la firma rompe ese script en silencio -- `pytest -q` no
     lo corre.
     """
-    nombre = (fila.get("nombre_completo") or "").split(" ")[0] or "paciente"
-    if fila.get("tipo") in TIPOS_DE_REACTIVACION:
-        return [nombre]
-    return _parametros_del_recordatorio(fila, nombre)
+    tipo = fila.get("tipo")
+    # I1 (ronda 1 de revisión): la polaridad estaba al revés. La versión anterior mandaba al
+    # lado de CUATRO huecos con el tratamiento dentro todo lo que NO fuera una de las tres
+    # reactivaciones conocidas -fail OPEN-, así que un `tipo` inválido o uno futuro que el
+    # CHECK NOT VALID de la 021 no alcanza a rechazar se filtraba un dato de salud a una
+    # notificación de WhatsApp. Ahora el lado por defecto es el ESTRECHO (un hueco, sin
+    # tratamiento) y solo el recordatorio de cita -- o un `tipo` ausente, que es como llegan
+    # las filas de prueba que no fijan esa clave, p. ej. `scripts/probar_plantilla.py`
+    # `_fila_de_ejemplo()` -- usan los cuatro huecos.
+    if tipo in TIPOS_NO_COMERCIALES or tipo is None:
+        nombre = (fila.get("nombre_completo") or "").split(" ")[0] or "paciente"
+        return _parametros_del_recordatorio(fila, nombre)
+
+    nombre = _nombre_de_reactivacion(fila)
+    if nombre is None:
+        return None
+    return [nombre.split(" ")[0] or "paciente"]
 
 
 def _parametros_del_recordatorio(fila: dict[str, Any], nombre: str) -> list[str]:
@@ -688,14 +750,38 @@ async def despachar(
             # cerrado ya por la 021 y la tool -- ver `TIPOS_NO_COMERCIALES` y las guardas R1-R5.
             nombre_plantilla = plantillas.get(fila.get("tipo") or "")
 
-            # Un recordatorio de cita sin `cita_inicio` es una fila ROTA, no una que espera
-            # plantilla: sin la hora no hay con qué rellenar los huecos 2 y 3, y mandarla
+            # Fila ROTA #1: cualquier tipo que NO sea una reactivación conocida -el
+            # recordatorio de cita, un `tipo` ausente en una fila de prueba, o uno inválido o
+            # futuro que se cuele por delante del CHECK NOT VALID de la 021- y que llegue sin
+            # `cita_inicio` no tiene con qué rellenar sus huecos de fecha y hora; mandarla
             # dejaría al paciente leyendo el literal "PENDIENTE" por WhatsApp -la regla dura 3
             # es para el código, nunca fue permiso para mandarle el marcador a un paciente-.
-            # Esto sigue anulándose, a diferencia de una reactivación sin plantilla (más abajo).
-            if fila.get("tipo") == TIPO_RECORDATORIO and fila.get("cita_inicio") is None:
+            # M3 (ronda 1 de revisión): antes de acotar esto a `TIPO_RECORDATORIO`, ese caso
+            # se quedaba pendiente PARA SIEMPRE si nadie migraba el `tipo` a mano -el
+            # despachador lo releería cada 60 s sin dejar rastro del motivo-. Ahora cierra
+            # fail-closed contra la lista de reactivaciones CONOCIDAS (`TIPOS_DE_REACTIVACION`,
+            # la misma polaridad que `es_reactivacion` en `decidir`), no contra un tipo suelto.
+            if fila.get("tipo") not in TIPOS_DE_REACTIVACION and fila.get("cita_inicio") is None:
                 await asyncio.to_thread(
                     persistencia.anular_seguimiento, conn, fila["id"], motivo="sin_cita"
+                )
+                recuento["anulados"] += 1
+                continue
+
+            # Fila ROTA #2, y el hallazgo CRÍTICO de la ronda 1: una reactivación sin NINGÚN
+            # nombre usable para su único hueco (ver `_nombre_de_reactivacion`). Sin esto,
+            # `parametros_de` caía a su respaldo `"paciente"` y el 100% de las reactivaciones
+            # salían con "Hola paciente" -- la firma de un mensaje masivo, y el desempate de
+            # este proyecto es que nadie reporte el número. Se anula, no se deja pendiente: el
+            # nombre no va a aparecer solo con el paso del tiempo, y dejarla pendiente
+            # acumularía basura que el despachador relee cada 60 s sin ninguna salida posible.
+            # El barrido de la parada siguiente puede volver a encolar a esta misma persona si
+            # alguna vez deja un nombre usable (agenda, o vuelve a escribirle a Daniela con el
+            # perfil puesto).
+            parametros = parametros_de(fila)
+            if parametros is None:
+                await asyncio.to_thread(
+                    persistencia.anular_seguimiento, conn, fila["id"], motivo="sin_nombre"
                 )
                 recuento["anulados"] += 1
                 continue
@@ -745,7 +831,7 @@ async def despachar(
                     await whatsapp.enviar_plantilla(
                         telefono,
                         plantilla=nombre_plantilla,
-                        parametros=parametros_de(fila),
+                        parametros=parametros,
                         idioma=idioma,
                     )
                     fallo = None

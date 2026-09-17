@@ -402,7 +402,104 @@ def test_la_cola_trae_lo_que_el_despachador_necesita_para_decidir(conexion_prueb
         "id", "conversacion_id", "cita_id", "tipo", "fecha_objetivo", "intentos",
         "telefono", "nombre_completo", "tratamiento", "cita_inicio", "cita_estado",
         "tomada_por", "seguimientos_fallidos", "reactivaciones_ultimo_ano", "aplazado_desde",
+        # `nombre_ficha` y `nombre_perfil`: hallazgo CRÍTICO de la ronda 1 de revisión de la
+        # tarea 4. Sin ellas, una reactivación (`cita_id` NULL) no tenía de dónde sacar un
+        # nombre real -`nombre_completo` sale de `citas`, y con `cita_id` NULL siempre es
+        # NULL- y `seguimientos.parametros_de` caía a su respaldo "paciente" siempre.
+        "nombre_ficha", "nombre_perfil",
     }
+
+
+def test_la_cascada_de_nombre_trae_la_ficha_y_el_perfil_cuando_existen(conexion_pruebas):
+    """El corazón del hallazgo CRÍTICO, contra Postgres de verdad: ninguna prueba offline
+    ejercita el `LEFT JOIN` a `pacientes` ni la subconsulta a `mensajes_entrantes` -van
+    dobladas con un diccionario en `tests/test_reactivacion.py`-, así que un error de SQL, un
+    nombre de columna que cambie, o un JOIN que multiplique filas solo revienta o miente aquí.
+
+    Una reactivación (`cita_id` NULL) para un teléfono que SÍ tiene ficha -ya agendó alguna
+    vez, el caso de `TIPO_CANCELADA`/`TIPO_NO_ASISTIO`- y que además dejó un nombre de perfil
+    distinto en su último mensaje de WhatsApp. La prioridad entre los dos (`_nombre_de_
+    reactivacion` prefiere la ficha) es Python y ya está probada offline; esto prueba que el
+    SQL le entrega las DOS columnas con el valor correcto, sin que el `LEFT JOIN` a
+    `pacientes` -sobre una columna `UNIQUE`- multiplique la fila.
+    """
+    telefono = "573000000199"
+    id_paciente = persistencia.asegurar_paciente(
+        conexion_pruebas, nombre_completo="Ana Perez", telefono=telefono
+    )
+    id_conversacion = persistencia.asegurar_conversacion(
+        conexion_pruebas, telefono=telefono, paciente_id=id_paciente
+    )
+    with conexion_pruebas.cursor() as cur:
+        cur.execute(
+            "INSERT INTO mensajes_entrantes (wamid, telefono, nombre_perfil, tipo) "
+            "VALUES (%s, %s, %s, 'text')",
+            ("wamid-cascada-ficha", telefono, "Anita <3"),
+        )
+    conexion_pruebas.commit()
+
+    objetivo = datetime(2026, 9, 16, 18, 0, tzinfo=ZONA_BOGOTA)
+    persistencia.insertar_seguimiento(
+        conexion_pruebas,
+        id_conversacion=id_conversacion,
+        tipo="reactivacion_no_asistio",
+        fecha_objetivo=objetivo,
+        clave_idempotencia=f"{id_conversacion}:cascada:1",
+    )
+
+    filas = persistencia.seguimientos_por_despachar(
+        conexion_pruebas, ahora=objetivo + timedelta(hours=1)
+    )
+    fila = next(f for f in filas if str(f["conversacion_id"]) == id_conversacion)
+
+    assert fila["nombre_completo"] is None       # cita_id NULL: el LEFT JOIN a citas no da nada
+    assert fila["nombre_ficha"] == "Ana Perez"
+    assert fila["nombre_perfil"] == "Anita <3"
+
+
+def test_la_cascada_de_nombre_usa_el_perfil_MAS_RECIENTE_y_no_ficha_si_no_hay(conexion_pruebas):
+    """Dos mitades del mismo hallazgo, en un solo montaje:
+
+    1. Un lead que NUNCA agendó -el caso normal de `TIPO_SIN_AGENDAR`- no tiene fila en
+       `pacientes`: `nombre_ficha` viene NULL, tal como lee `_nombre_de_reactivacion` para
+       caer al siguiente eslabón.
+    2. Con DOS mensajes del mismo teléfono en momentos distintos, la subconsulta tiene que
+       traer el `nombre_perfil` del MÁS RECIENTE (`ORDER BY recibido_en DESC LIMIT 1`), no
+       cualquiera de los dos ni el primero que encuentre. Sin el `ORDER BY`, esto pasaría en
+       verde la mitad de las veces según el orden físico en que Postgres devuelva las filas.
+    """
+    telefono = "573000000198"
+    id_conversacion = persistencia.asegurar_conversacion(conexion_pruebas, telefono=telefono)
+    with conexion_pruebas.cursor() as cur:
+        cur.execute(
+            "INSERT INTO mensajes_entrantes (wamid, telefono, nombre_perfil, tipo, recibido_en) "
+            "VALUES (%s, %s, %s, 'text', %s)",
+            ("wamid-cascada-viejo", telefono, "Nombre Viejo", datetime(2026, 9, 1, 9, 0, tzinfo=ZONA_BOGOTA)),
+        )
+        cur.execute(
+            "INSERT INTO mensajes_entrantes (wamid, telefono, nombre_perfil, tipo, recibido_en) "
+            "VALUES (%s, %s, %s, 'text', %s)",
+            ("wamid-cascada-nuevo", telefono, "Nombre Nuevo", datetime(2026, 9, 15, 9, 0, tzinfo=ZONA_BOGOTA)),
+        )
+    conexion_pruebas.commit()
+
+    objetivo = datetime(2026, 9, 16, 18, 0, tzinfo=ZONA_BOGOTA)
+    persistencia.insertar_seguimiento(
+        conexion_pruebas,
+        id_conversacion=id_conversacion,
+        tipo="reactivacion_sin_agendar",
+        fecha_objetivo=objetivo,
+        clave_idempotencia=f"{id_conversacion}:cascada:2",
+    )
+
+    filas = persistencia.seguimientos_por_despachar(
+        conexion_pruebas, ahora=objetivo + timedelta(hours=1)
+    )
+    fila = next(f for f in filas if str(f["conversacion_id"]) == id_conversacion)
+
+    assert fila["nombre_completo"] is None
+    assert fila["nombre_ficha"] is None
+    assert fila["nombre_perfil"] == "Nombre Nuevo"
 
 
 TEL_TOPE_ANUAL = "573001112295"

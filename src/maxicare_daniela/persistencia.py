@@ -1849,7 +1849,11 @@ def seguimientos_por_despachar(
 
     El `LEFT JOIN` a `citas` y a `conversaciones` no es una optimización: sin él, cada guarda
     sería una consulta más por fila, y el barrido de las 6 p. m. --que es cuando salen todos
-    los recordatorios del día a la vez-- haría cientos de viajes a Neon.
+    los recordatorios del día a la vez-- haría cientos de viajes a Neon. El `LEFT JOIN` a
+    `pacientes` y la subconsulta a `mensajes_entrantes` son la cascada de nombre de una
+    reactivación (`nombre_ficha`, `nombre_perfil`; ver `seguimientos._nombre_de_reactivacion`),
+    añadidos en la ronda 1 de revisión de la tarea 4 tras medir que el 100% de esas filas
+    salía con "Hola paciente".
 
     `FOR UPDATE ... SKIP LOCKED` es lo que permite que dos instancias no manden el mismo
     recordatorio dos veces -pero solo HASTA el primer `commit` de la conexión que hizo esta
@@ -1878,6 +1882,27 @@ def seguimientos_por_despachar(
                    COALESCE(c.telefono, cv.telefono)      AS telefono,
                    c.nombre_completo, c.tratamiento, c.inicio AS cita_inicio,
                    c.estado AS cita_estado, cv.tomada_por,
+                   -- El nombre para el ÚNICO hueco de una reactivación (hallazgo CRÍTICO,
+                   -- ronda 1 de revisión de la tarea 4). `c.nombre_completo` de arriba
+                   -- SIEMPRE es NULL para estas filas -toda reactivación tiene `cita_id`
+                   -- NULL, o G1 la habría anulado-, así que sin esto `seguimientos.
+                   -- parametros_de` caía a su respaldo "paciente" siempre: la firma exacta
+                   -- de un mensaje masivo. Dos fuentes más, en cascada
+                   -- (`seguimientos._nombre_de_reactivacion` decide el orden):
+                   --   1. La ficha de `pacientes`. Solo existe si la persona ya agendó
+                   --      alguna vez -`crear_cita` es quien la registra-, así que resuelve
+                   --      `TIPO_CANCELADA` y `TIPO_NO_ASISTIO` pero no un lead que nunca
+                   --      agendó (`TIPO_SIN_AGENDAR`, el caso normal de la reactivación).
+                   --   2. El nombre de perfil de WhatsApp, el ÚNICO dato que existe para
+                   --      ese lead: el más reciente que dejó en `mensajes_entrantes`, texto
+                   --      libre que la persona escribió ella misma.
+                   p.nombre_completo                       AS nombre_ficha,
+                   (SELECT me.nombre_perfil
+                      FROM mensajes_entrantes me
+                     WHERE me.telefono = COALESCE(c.telefono, cv.telefono)
+                       AND me.nombre_perfil IS NOT NULL
+                     ORDER BY me.recibido_en DESC
+                     LIMIT 1)                              AS nombre_perfil,
                    -- La baja comercial. Entra como columna de este SELECT --que ya hace el
                    -- LEFT JOIN para sacar el teléfono-- y no como una consulta por fila: una
                    -- tanda son hasta 50. El COALESCE hace explícito que un número sin fila
@@ -1912,6 +1937,9 @@ def seguimientos_por_despachar(
               LEFT JOIN citas c           ON c.id  = s.cita_id
               LEFT JOIN conversaciones cv ON cv.id = s.conversacion_id
               LEFT JOIN contactos co      ON co.telefono = COALESCE(c.telefono, cv.telefono)
+              -- `pacientes.telefono` es UNIQUE (migración 001): este LEFT JOIN no multiplica
+              -- filas, a lo sumo una coincidencia por teléfono.
+              LEFT JOIN pacientes p       ON p.telefono  = COALESCE(c.telefono, cv.telefono)
              WHERE s.enviado_en IS NULL
                AND s.anulado_en IS NULL
                AND s.fecha_objetivo <= %(ahora)s

@@ -105,7 +105,7 @@ async def _waba_ids(token: str) -> list[str]:
 async def _mostrar_estado(config: Config) -> int:
     """Lee la plantilla en Meta y la contrasta con el `.env`. No manda ningún mensaje."""
     nombre = config.plantilla_recordatorio
-    idioma = config.plantilla_recordatorio_idioma
+    idioma = config.plantillas_idioma
     print(f"  .env dice: plantilla='{nombre}'  idioma='{idioma}'")
     if not nombre:
         print("  FALLA: MAXICARE_PLANTILLA_RECORDATORIO está vacía. El despachador no mandaría.")
@@ -165,7 +165,7 @@ async def _enviar(config: Config, telefono: str) -> int:
             telefono,
             plantilla=config.plantilla_recordatorio,
             parametros=parametros,
-            idioma=config.plantilla_recordatorio_idioma,
+            idioma=config.plantillas_idioma,
         )
     except ErrorDeCanal as e:
         crudo = str(e)
