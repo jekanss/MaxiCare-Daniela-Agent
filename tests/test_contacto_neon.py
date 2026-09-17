@@ -421,7 +421,9 @@ def test_clearstate_borra_el_aviso_pero_NUNCA_la_baja(conexion_pruebas):
     assert fila["no_contactar"] is True, "ESTO es lo que no puede pasar nunca"
 
 
-def test_clearstate_no_toca_la_bitacora_y_anota_el_borrado(conexion_pruebas):
+def test_clearstate_conserva_los_hechos_de_la_bitacora_y_anota_el_borrado(conexion_pruebas):
+    """Ninguna fila se va. Lo que se redacta es la frase del paciente, y solo eso: ver
+    `test_clearstate_redacta_la_frase_del_paciente_y_conserva_el_hecho`."""
     persistencia.asegurar_contacto(conexion_pruebas, TEL)
     persistencia.pedir_baja(conexion_pruebas, TEL)
 
@@ -434,6 +436,56 @@ def test_clearstate_no_toca_la_bitacora_y_anota_el_borrado(conexion_pruebas):
         eventos = [f[0] for f in cur.fetchall()]
 
     assert eventos == ["baja_solicitada", "rastro_borrado"]
+
+
+def test_clearstate_redacta_la_frase_del_paciente_y_conserva_el_hecho(conexion_pruebas):
+    """La política v2.0 reconoce en su §13 el derecho a solicitar la supresión de datos, y
+    `detalle` es lo único de esta tabla que guarda algo del paciente: su frase, tal cual,
+    escrita por el modelo. El borrado la retira.
+
+    Lo que la Ley 1581 pide acreditar --qué evento ocurrió, cuándo, quién lo pidió y sobre
+    qué versión de la política-- no depende de esa frase y no se toca. Sin esto, el
+    documento publicado prometía algo que el esquema impedía.
+    """
+    persistencia.asegurar_contacto(conexion_pruebas, TEL)
+    persistencia.marcar_aviso_mostrado(conexion_pruebas, TEL, version="politica-2026-09")
+    persistencia.pedir_baja(
+        conexion_pruebas, TEL, detalle="no me escriban mas, este es mi numero del trabajo"
+    )
+
+    persistencia.borrar_rastro(conexion_pruebas, TEL)
+
+    with conexion_pruebas.cursor() as cur:
+        cur.execute(
+            """
+            SELECT evento, origen, politica_version, detalle, ocurrido_en IS NOT NULL
+              FROM consentimientos WHERE telefono = %s ORDER BY id
+            """,
+            (TEL,),
+        )
+        filas = cur.fetchall()
+
+    assert [f[3] for f in filas] == [None, None, None], "la frase del paciente se va entera"
+    assert [f[0] for f in filas] == ["aviso_mostrado", "baja_solicitada", "rastro_borrado"]
+    assert [f[1] for f in filas] == ["codigo", "paciente", "codigo"]
+    assert filas[0][2] == "politica-2026-09", "la versión acreditada NO se toca"
+    assert all(f[4] for f in filas), "las fechas siguen ahí: son la mitad de la prueba"
+
+
+def test_la_redaccion_no_alcanza_a_otro_telefono(conexion_pruebas):
+    """Un `UPDATE` sobre una tabla cuya clave es el teléfono y que NUNCA se restaura: si el
+    `WHERE` se afloja, el borrado de un número se lleva por delante la frase de otro, y no
+    hay de dónde recuperarla."""
+    persistencia.pedir_baja(conexion_pruebas, TEL, detalle="el mio")
+    persistencia.pedir_baja(conexion_pruebas, TEL_VECINO, detalle="el del vecino")
+
+    persistencia.borrar_rastro(conexion_pruebas, TEL)
+
+    with conexion_pruebas.cursor() as cur:
+        cur.execute(
+            "SELECT detalle FROM consentimientos WHERE telefono = %s", (TEL_VECINO,)
+        )
+        assert [f[0] for f in cur.fetchall()] == ["el del vecino"]
 
 
 def test_clearstate_sobre_un_numero_sin_contacto_no_revienta(conexion_pruebas):

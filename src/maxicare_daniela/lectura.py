@@ -175,6 +175,131 @@ def _guardar_tema(database_url: str, telefono: str, tema: int, abierto: bool = F
 
 
 # ==========================================================================================
+# El rescate: lo único que abre un hilo sin que llegue un archivo
+# ==========================================================================================
+
+#: Cuánto atrás se miran los textos sin archivar. La conversación caduca a las 24 h, así que
+#: más allá no es «lo que este paciente venía diciendo», es arqueología de otro asunto.
+HORAS_DE_RESCATE = 24
+
+#: Tope de frases volcadas. Telegram corta un mensaje en 4096 caracteres y lo RECHAZA
+#: entero si se pasa: un volcado demasiado largo no se recorta, se pierde.
+TOPE_FRASES_RESCATE = 20
+
+
+async def rescatar_hilo(
+    *, telefono: str, nombre_perfil: str | None, database_url: str, telegram
+) -> int | None:
+    """Abre el hilo de ese número si no lo tiene, y vuelca lo que escribió mientras no había.
+
+    **Es la única puerta por la que algo que no es un archivo abre un hilo**, y el no
+    negociable 14 sigue en pie para todo lo demás: un texto suelto no lo abre. Lo que cambia
+    es quién decide, y el filtro es el ESCALAMIENTO, no el texto: un número equivocado no
+    hace escalar a Daniela, así que no estrena expediente. El paciente con dolor, sí.
+
+    El agujero que tapa, medido en producción el 16/09/2026: entre que un número se queda sin
+    hilo --`/clearstate` lo borra, o alguien borra el tema-- y que un archivo se lo vuelva a
+    abrir, sus textos no se archivan en ninguna parte. Cuatro mensajes seguidos, «Quiero
+    sacarme una muela» y «Duele mucho?» entre ellos, quedaron con `telegram_message_id` NULL
+    y no llegaron a ningún sitio. Lo único que el doctor vio de esa persona fue el
+    escalamiento en el General, cuyo resumen parafrasea lo que había preguntado: desde fuera
+    se lee exactamente como si los mensajes del paciente hubieran caído en el General.
+
+    Idempotente por construcción: lo volcado queda con su `telegram_message_id`, así que la
+    consulta deja de devolverlo y el siguiente escalamiento no lo repite.
+
+    **Nunca propaga.** Lo llama un escalamiento, y un escalamiento que revienta por no haber
+    podido archivar un «buenas tardes» deja a un paciente esperando a un doctor que no se
+    entera. Si algo falla, los textos siguen pendientes y el próximo escalamiento reintenta.
+    """
+    try:
+        tema = await asegurar_tema(
+            telefono=telefono,
+            nombre_perfil=nombre_perfil,
+            database_url=database_url,
+            telegram=telegram,
+        )
+    except Exception:  # noqa: BLE001
+        log.exception("no se pudo abrir el hilo de %s para el rescate", telefono)
+        return None
+    if not tema:
+        return None
+
+    try:
+        pendientes = await asyncio.to_thread(_textos_sin_archivar, database_url, telefono)
+    except Exception:  # noqa: BLE001
+        log.exception("no se pudieron leer los textos sin archivar de %s", telefono)
+        return tema
+    if not pendientes:
+        return tema
+
+    # Un solo mensaje con todas las frases, no uno por frase: son mudas, pero veinte
+    # depósitos seguidos convierten el expediente en un muro por el que hay que bajar.
+    cuerpo = "\n".join(f"• {html.escape(texto)}" for _, texto in pendientes)
+    aviso = (
+        "📝 <b>Lo que escribió antes de que existiera este hilo</b>\n"
+        "<i>No se había podido archivar en ninguna parte.</i>\n\n"
+        f"{cuerpo}"
+    )
+    try:
+        message_id = await telegram.enviar_mensaje(aviso, tema_id=tema, silencioso=True)
+    except Exception:  # noqa: BLE001
+        log.exception("no se pudo volcar lo pendiente de %s en su hilo", telefono)
+        return tema
+
+    # Marcar va DESPUÉS del envío, como el aviso de la política y al revés que un
+    # recordatorio: aquí el riesgo es dejar constancia de un volcado que nunca salió --y
+    # perder esas frases para siempre--, no repetirlo. Repetir un volcado es inocuo.
+    try:
+        await asyncio.to_thread(
+            _marcar_archivados, database_url, [w for w, _ in pendientes], message_id
+        )
+    except Exception:  # noqa: BLE001
+        log.exception("el volcado de %s salió pero no quedó marcado; podría repetirse", telefono)
+    return tema
+
+
+def _textos_sin_archivar(database_url: str, telefono: str) -> list[tuple[str, str]]:
+    """Los textos de ese número que se procesaron sin llegar a ningún hilo.
+
+    `telegram_message_id IS NULL` junto a `fallo IS NULL` es exactamente la firma que deja
+    `ingesta`: «se procesó sin reenviar: es un texto y su número no tiene tema». Un mensaje
+    con `fallo` NO entra: ese sí se intentó entregar y se registró como perdido, y volcarlo
+    aquí lo borraría del índice por el que se vigila lo que de verdad falló.
+    """
+    with persistencia.conectar(database_url) as conn, conn.cursor() as cur:
+        cur.execute(
+            f"""
+            SELECT wamid, texto
+              FROM mensajes_entrantes
+             WHERE telefono = %s
+               AND telegram_message_id IS NULL
+               AND fallo IS NULL
+               AND texto IS NOT NULL
+               AND texto <> ''
+               AND recibido_en > now() - interval '{HORAS_DE_RESCATE} hours'
+             ORDER BY recibido_en
+             LIMIT {TOPE_FRASES_RESCATE}
+            """,
+            (telefono,),
+        )
+        return [(w, x) for w, x in cur.fetchall()]
+
+
+def _marcar_archivados(database_url: str, wamids: list[str], message_id: int) -> None:
+    """Deja constancia de dónde acabó cada frase volcada. Es lo que hace idempotente al
+    rescate: con `telegram_message_id` puesto, `_textos_sin_archivar` deja de devolverla."""
+    if not wamids:
+        return
+    with persistencia.conectar(database_url) as conn, conn.cursor() as cur:
+        cur.execute(
+            "UPDATE mensajes_entrantes SET telegram_message_id = %s WHERE wamid = ANY(%s)",
+            (message_id, list(wamids)),
+        )
+        conn.commit()
+
+
+# ==========================================================================================
 # El lector
 # ==========================================================================================
 

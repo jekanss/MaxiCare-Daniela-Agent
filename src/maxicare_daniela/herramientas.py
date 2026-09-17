@@ -1610,6 +1610,35 @@ async def _escalar_a_doctores(
         teclado=_teclado_relevo(ctx.id_conversacion),
     )
 
+    # Y el hilo del paciente, si no lo tiene. Es la ÚNICA puerta por la que algo que no
+    # es un archivo abre un hilo, y el no negociable 14 sigue en pie para lo demás: lo
+    # que decide no es el texto, es el escalamiento. Un número equivocado no hace
+    # escalar a Daniela; el paciente con dolor, sí. Lo que el paciente escribió mientras
+    # no tenía hilo se vuelca ahí -- si no, la única huella suya en todo Telegram es
+    # este aviso del General, y el doctor que entra a su expediente lo encuentra vacío.
+    # Nunca propaga: `rescatar_hilo` se traga lo suyo.
+    # Import diferido: `lectura` importa `agentes`, que importa este módulo. Arriba sería
+    # un ciclo; aquí no, porque para cuando esta función corre todo está ya cargado.
+    from . import lectura, relevo
+
+    tema = await lectura.rescatar_hilo(
+        telefono=ctx.telefono_completo,
+        nombre_perfil=ctx.nombre_paciente,
+        database_url=ctx.database_url,
+        telegram=canal,
+    )
+
+    # Y la puerta ahí mismo, que es donde el doctor está mirando. El aviso del General es la
+    # garantía; este es el que se ve sin salir del expediente. Ver
+    # `relevo.ofrecer_la_puerta_en_el_hilo`: baja el motivo y el botón, nunca el resumen.
+    if tema:
+        await relevo.ofrecer_la_puerta_en_el_hilo(
+            telegram=canal,
+            tema=tema,
+            telefono=ctx.telefono_completo,
+            motivo=solicitud.motivo,
+        )
+
     def anotar(conn) -> None:
         persistencia.anotar_telegram_en_escalamiento(conn, escalamiento_id, message_id)
 

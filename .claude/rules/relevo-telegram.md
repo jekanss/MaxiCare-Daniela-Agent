@@ -267,6 +267,291 @@ daría por bueno sin crear ninguno y cada archivo futuro de esa persona fallarí
 depositarse, para siempre y en silencio. Olvidarlo hace que el siguiente archivo le abra un
 hilo nuevo, que es la recuperación correcta.
 
+## Un ESCALAMIENTO abre el hilo. Un texto sigue sin abrirlo (16/09/2026)
+
+El no negociable 14 dice que un texto va mudo al tema de su paciente «o a ninguna parte si no
+tiene tema — nunca lo crea: eso es del primer archivo». Sigue siendo cierto, y la razón sigue
+en pie: cada «hola» de un número equivocado estrenaría expediente.
+
+Pero había una ventana sin dueño. Entre que un número se queda sin hilo y que un archivo se
+lo vuelva a abrir, **sus textos no se archivan en ninguna parte**. Medido en producción:
+
+    23:57  /clearstate                   -> borra la fila de temas_telegram
+    23:57  "Hola buenas noches"          -> telegram_message_id NULL, a ningún sitio
+    23:57  "Quiero sacarme una muela"    -> a ningún sitio
+    23:57  "Duele mucho?"                -> a ningún sitio
+    23:58  escalamiento dato_faltante    -> al GENERAL
+    23:59  el botón del relevo abre el hilo nuevo
+
+Lo único que el doctor vio de esa persona fue el escalamiento del General, cuyo resumen
+parafrasea lo que acababa de preguntar. **De ahí venía el informe de que «los mensajes del
+paciente caen en el General»: no caían ahí, no caían en ninguna parte**, y el escalamiento
+era la única huella. El expediente del paciente, entretanto, vacío.
+
+`lectura.rescatar_hilo` es ahora la única puerta por la que algo que no es un archivo abre un
+hilo. Lo que decide **no es el texto, es el escalamiento**: un número equivocado no hace
+escalar a Daniela, así que no estrena expediente; el paciente con dolor, sí. Cuelga de los
+dos sitios que escalan --`herramientas._escalar_a_doctores`, la tool, y
+`runtime._avisar_a_doctores`, la red de seguridad-- porque el turno puede escalar por
+cualquiera de los dos (no negociable 26).
+
+Cuatro decisiones que parecen de estilo y no lo son:
+
+- **Un solo mensaje con todas las frases**, no uno por frase. Son mudas, pero veinte
+  depósitos seguidos convierten el expediente en un muro por el que hay que bajar.
+- **Se marca DESPUÉS de enviar**, como el aviso de la política (no negociable 24) y al revés
+  que un recordatorio (21). Aquí el riesgo es dejar constancia de un volcado que nunca salió
+  --y perder esas frases para siempre--; repetir un volcado es inocuo.
+- **`fallo IS NULL` en la consulta.** Un mensaje con `fallo` sí se intentó entregar y está
+  registrado como perdido: volcarlo aquí lo borraría del índice por el que se vigila lo que
+  de verdad falló.
+- **El HTML se escapa.** `enviar_mensaje` va en `parse_mode=HTML` y RECHAZA el mensaje
+  entero si no cierra: un paciente que escriba «me duele el <3» dejaría el rescate en nada.
+
+Idempotente por construcción: lo volcado queda con su `telegram_message_id`, así que
+`_textos_sin_archivar` deja de devolverlo y el siguiente escalamiento no lo repite.
+
+**`/clearstate` sí borra el tema en Telegram, y funciona.** Se comprobó el 16/09/2026 porque
+parecía lo contrario: `reseteo.resetear` llama a `telegram.borrar_tema` y el log dijo
+`tema_borrado=True`. El bot tiene `can_delete_messages` y `can_manage_topics`. Lo que sí
+falla a veces es el borrado de los mensajes sueltos previos (`message to delete not found`),
+y da igual: el tema se los lleva a todos.
+
+## La puerta va a los DOS sitios, y el General no basta (17/09/2026)
+
+El doctor no vive en el General. Vive en el hilo del paciente: ahí ve llegar sus mensajes y
+ahí está su expediente. El escalamiento colgaba «Hablar yo con el paciente» **solo en el
+General**, así que un doctor mirando el hilo veía al paciente insistir sin ninguna señal de
+que Daniela había pedido ayuda, y sin nada que pulsar.
+
+El caso, reconstruido de `escalamientos`, de los logs del VPS y de la API de Telegram:
+
+    06:32  paciente: "me quiero sacar una muela"
+    06:33  escalamiento dato_faltante -> General, msg 689, CON botón
+    06:34  el doctor lo pulsa; habla con el paciente
+    06:35  "Listo, que siga Daniela" -> relevo cerrado (devuelto_por_doctor)
+           el doctor BORRA el hilo Y BORRA el mensaje 689 del General
+    06:37  cuatro preguntas del paciente -> "su número no tiene tema", a ningún sitio
+    06:40  escalamiento excepcion_comercial -> General, msg 713, CON botón
+           rescatar_hilo recrea el hilo (714) y vuelca las cuatro frases (716)
+
+Todo funcionó. El sistema mandó la puerta nueva --comprobado con `editMessageReplyMarkup`
+contra la API: el 689 responde `message to edit not found` (borrado) y el 713 responde
+`message is not modified ... exactly the same` (vivo, con el botón puesto)--. Pero cayó en el
+General, y el doctor estaba en el hilo. Desde su lado, el sistema había dejado de ofrecerle
+tomar la conversación.
+
+**Y se salvó por casualidad:** el motivo cambió (`dato_faltante` -> `excepcion_comercial`).
+Con el mismo motivo, `escalamiento_vivo_con_motivo` habría callado el aviso --el del 06:33
+seguía con `respondido_en` NULL pese a que un humano lo atendió y lo devolvió-- y con el
+aviso se habría callado **también el hilo**, porque `rescatar_hilo` cuelga de él. Ver el no
+negociable 26 y `persistencia.marcar_escalamientos_respondidos`.
+
+`relevo.ofrecer_la_puerta_en_el_hilo` lo cierra, y la cuelgan los dos sitios que escalan.
+Cuatro decisiones:
+
+- **Al hilo baja el motivo y el botón, NUNCA el resumen ni la pregunta.** Los escribe el
+  modelo para los doctores: son la deliberación del caso, y su sitio es el General. Que
+  `relevar_mensaje` filtre por `is_bot` --lo que escribe el bot no se le reenvía al paciente--
+  hace esto seguro, pero no es la razón de recortarlo: un expediente no es el sitio de la
+  deliberación aunque nadie de fuera pueda leerlo. Lo fija
+  `test_el_escalamiento_deja_la_puerta_en_el_hilo_DEL_PACIENTE_pero_no_el_resumen`, junto a
+  `test_el_escalamiento_va_al_tema_general_y_nunca_al_del_paciente`, que no se tocó.
+- **El botón va por TELÉFONO (`teclado_tomar`, `PREFIJO_TOMAR_TEL`), no por id de
+  conversación.** Este mensaje se queda en el expediente para siempre y una conversación
+  caduca a las 24 h: con el id dentro, pulsarlo al día siguiente contestaría «esa conversación
+  ya no existe». El del General sí va por id (`teclado_tomar_conversacion`): ahí el aviso es
+  del turno que acaba de escalar.
+- **Suena.** Segunda y última excepción a la NOTA DEL SILENCIO de `canales.py`, tras la
+  bienvenida del relevo. Un aviso mudo en un hilo que el doctor no tiene abierto no avisa.
+- **No propaga.** El escalamiento ya salió por el General, que es la garantía; esta es la
+  puerta cómoda, no la única.
+
+Y la red de seguridad (`runtime._avisar_a_doctores`) mandaba su aviso al General **sin
+teclado**, al revés que la tool. Ese camino corre justo cuando el modelo no llamó a ninguna
+tool --el turno se rompió solo, o cerró con la bandera puesta--: el aviso de los casos en que
+el sistema menos sabe qué hacer era el único que llegaba sin puerta. Hoy los dos usan
+`relevo.teclado_tomar_conversacion`.
+
+## El botón que aparecía y no servía: `reabrir_tema` sobre un hilo borrado (17/09/2026)
+
+La puerta de la sección anterior no bastaba, y el motivo estaba un paso más allá: **el botón
+aparecía, y al pulsarlo el relevo se deshacía.** Medido en producción:
+
+    08:32:32  turno 5 escalado por clinico          ← el botón sale
+    08:32:35  ERROR  no se pudo abrir el hilo de +57...; se deshace el relevo
+              ErrorDeCanal: Telegram no reabrió el tema: Bad Request: TOPIC_ID_INVALID
+
+El doctor había borrado el hilo. La fila de `temas_telegram` seguía apuntando al `topic_id`
+muerto —borrar un tema no emite ningún evento, y `barrer` solo sondea a quien está EN RELEVO,
+así que fuera de un relevo nadie la limpia—. `_tema_abierto_para` llamaba a `reabrir_tema`,
+Telegram rechazaba, y `activar` lo trataba como «no hay hilo»: deshacía el relevo entero.
+
+**Y el segundo intento fallaba igual.** Ese camino cierra con `_cerrar_en_base` directo, no
+con `relevo.cerrar`, así que **no llama a `olvidar_tema`**: la fila muerta se quedaba puesta
+hasta que por casualidad llegara un texto del paciente y fuera `ingesta` quien la olvidara.
+Desde el lado del doctor: «no puedo volver a tomar la conversación», indefinidamente.
+
+Dos piezas, una por capa:
+
+- **`canales.reabrir_tema` lanza `HiloInvalido`**, no un `ErrorDeCanal` cualquiera, cuando
+  `es_hilo_invalido` reconoce el rechazo. Quien llama tiene que poder distinguir «Telegram
+  falló» de «alguien borró este hilo»: la reacción es opuesta.
+- **`_tema_abierto_para` lo olvida y abre uno nuevo.** Un hilo borrado no es un fallo: es un
+  hilo que hay que rehacer. Misma reacción que `ingesta` ante `HiloInvalido` y que `cerrar`
+  con `tema_perdido`. Faltaba justo en el único camino por el que el doctor entra.
+
+**`crear_tema` sigue SIN `try`**, y la asimetría es la que importa: si tampoco se puede crear,
+eso sí es un fallo de Telegram y quien llama tiene que deshacer el relevo. Es la diferencia
+entre «no hay hilo» y «no hay Telegram», y `test_si_el_hilo_no_se_puede_abrir_el_relevo_se_
+deshace` sigue vigilando ese lado.
+
+**La lección repetida:** ninguna suite offline vio esto, porque el doble de Telegram responde
+lo que se le diga. Lo que lo destapó fue un ejercicio real y los logs del VPS. La prueba que
+lo fija ahora dobla httpx con la respuesta LITERAL de Telegram
+(`test_reabrir_un_tema_borrado_lanza_HiloInvalido_y_no_un_error_cualquiera`), con su falso
+positivo al lado: un `not enough rights` tiene que seguir llegando como `ErrorDeCanal`, o cada
+tropiezo pasajero de Telegram le abriría un hilo nuevo a un paciente cuyo expediente está vivo.
+
+## Y la otra mitad del mismo renglón: el tema que YA estaba abierto (17/09/2026)
+
+El arreglo de arriba dejó la puerta cerrada solo a medias, y lo destapó la comprobación de
+punta a punta del ciclo entero --no la suite--: `reopenForumTopic` sobre un tema que **ya
+está abierto** responde `Bad Request: TOPIC_NOT_MODIFIED`, y eso subía como `ErrorDeCanal`
+genérico. Mismo desenlace exacto que el hilo borrado: `_tema_abierto_para` lo propaga,
+`activar` lo lee como «no hay hilo» y **deshace el relevo entero** --esta vez con el hilo del
+paciente perfectamente vivo delante--.
+
+La incoherencia estaba a la vista: **`estado_del_tema` y `reabrir_tema` llaman al MISMO
+`reopenForumTopic`**, y la tabla medida que vive en el docstring de `estado_del_tema` ya
+decía que `TOPIC_NOT_MODIFIED` es «abierto». Una de las dos sondas lo leía como un sí y la
+otra como un fallo.
+
+`TOPIC_NOT_MODIFIED` es un SÍ. Lo que `reabrir_tema` promete no es «haber cambiado algo», es
+**dejar el tema abierto**, y ese es justo el estado al que se llega. Ahora devuelve sin lanzar.
+
+Cómo se llega a un tema abierto fuera de un relevo, que no es un caso de laboratorio:
+
+- un doctor lo reabre a mano en Telegram --el mismo doctor que borra topics a mano--;
+- `lectura.asegurar_tema` no consiguió cerrarlo al crearlo (`quedo_abierto`, que ya se
+  registra como ERROR porque deja un canal hacia el paciente sin vigilar);
+- el cierre del relevo anterior falló en `cerrar_tema` --`cerrar` lo registra y sigue--.
+
+Lo fija `test_reabrir_un_tema_QUE_YA_ESTABA_ABIERTO_no_es_un_fallo`, con la respuesta literal
+de Telegram doblada en httpx. **Y la lección, otra vez la misma:** las dos mitades de este
+renglón las encontró recorrer el ciclo completo contra la API de verdad, no el doble.
+
+## Lo que de verdad rompía el ciclo: el AVISO borrado del General (17/09/2026)
+
+Las tres secciones de arriba arreglan el hilo. Ninguna arregla el caso que el doctor
+reportaba, y los logs del VPS lo dijeron a la primera:
+
+    09:14:07  relevo cerrado (devuelto_por_doctor)      ← «Que siga Daniela»
+    09:14:22  escalamiento 127, telegram_message_id=855 ← el aviso sale, con su botón
+              (el doctor borra el topic Y borra el 855 del General)
+    09:15:23  turno 3 ... ya tiene un escalamiento por clinico; no se repite
+    09:16:16  turno 4 ... ya tiene un escalamiento por clinico; no se repite
+
+`escalamiento_vivo_con_motivo` calla todo escalamiento del mismo motivo mientras haya uno
+«delante del doctor y sin responder», y eso lo medía por `telegram_message_id IS NOT NULL`.
+**Esa premisa se cae en cuanto el doctor borra el mensaje** --que es lo que hace para dejar el
+General limpio de un paciente ya atendido--. La fila 127 siguió diciendo «lo tiene delante»
+con el 855 ya borrado, y a partir de ahí se calló TODO durante las 24 h de vida de la
+conversación: sin aviso, sin botón y **sin hilo**, porque `rescatar_hilo` cuelga del aviso.
+
+Es el mismo fallo por tercera vez, y conviene decirlo así de claro: **el sistema daba por
+vivo un objeto de Telegram porque algún día lo estuvo.** Borrar un mensaje no emite ningún
+evento, igual que borrar un tema.
+
+Ahora la guarda tiene dos mitades, y `runtime._el_doctor_ya_lo_tiene_delante` las junta:
+
+1. **La base** (`escalamiento_vivo_con_motivo`, que ya no devuelve un `bool` sino
+   `(telegram_message_id, lo tomó un doctor)`).
+2. **Telegram** (`canales.aviso_sigue_puesto`), que es `editMessageReplyMarkup` con el MISMO
+   teclado: si el mensaje está igual responde `message is not modified` y **no toca nada**.
+   Sonda sin rastro, como `reopenForumTopic`. Si responde `message to edit not found`, lo
+   borraron y el siguiente aviso SALE.
+
+Dos cosas que no se pueden mover:
+
+- **Un aviso ya TOMADO no se sondea.** `relevo.activar` le cambia el teclado al mensaje del
+  General por el enlace «Ir al hilo» y marca `relevo_activado` (un BOOLEAN, no una marca de
+  tiempo --lo cazó la suite de Neon--). Sondear ahí con el teclado de tomar le devolvería el
+  botón a una conversación que alguien ya tiene.
+- **Ante la duda se AVISA.** `aviso_sigue_puesto` devuelve `None` cuando Telegram no contesta,
+  y eso no se toma por «sigue puesto». Un aviso de más es ruido; uno de menos es un paciente
+  con dolor que nadie ve, y el principio que decide los empates de este proyecto está escrito.
+
+**Y esto NO reabre el ruido del 16/09.** Lo que se calla sigue siendo lo mismo: un aviso que
+el doctor tiene delante sin responder. Lo único que cambia es que ahora «tenerlo delante» se
+comprueba en vez de suponerse.
+
+## La ventana de los segundos: un tema borrado que todavía dice que sí (17/09/2026)
+
+Medido contra la API recorriendo el ciclo entero: durante **varios segundos** después de
+`deleteForumTopic`, Telegram sigue respondiendo `ok: true` a `reopenForumTopic` --«lo he
+reabierto»-- mientras `sendMessage` sobre ese mismo tema ya rechaza con `message thread not
+found`. Los ~3 s que decía el docstring de `estado_del_tema` se quedan cortos.
+
+En esa ventana `_tema_abierto_para` da el hilo muerto por bueno --no tiene con qué verlo-- y
+la bienvenida revienta. El `except` de fuera de `activar` se lo tragaba y dejaba **el peor
+estado posible: `tomada_por` puesto --Daniela callada-- y ningún hilo por el que hablarle al
+paciente**, sin que nadie se entere hasta que el barrido corta por tiempo agotado.
+
+No es de laboratorio: es exactamente lo que hace un doctor que borra el topic y sigue
+probando con el mismo paciente. `activar` reintenta UNA vez --olvidar la fila, crear tema,
+bienvenida-- y si el segundo intento también falla, eso sí es Telegram y el relevo se deshace.
+Lo fija `test_si_la_bienvenida_cae_en_un_hilo_MUERTO_el_relevo_se_rehace_en_uno_NUEVO`.
+
+## El barrido solo mira relevos VIVOS, y ahí quedaba el agujero (16/09/2026)
+
+La sección de arriba resuelve el hilo borrado **de un paciente en relevo**: lo sondea
+`barrer`, cierra con `tema_perdido` y llama a `persistencia.olvidar_tema`. Pero `barrer`
+itera sobre `_activos`, que filtra por `tomada_por IS NOT NULL`.
+
+**El hilo de alguien que NO está en relevo no lo sondeaba nadie.** Y como borrar un tema no
+emite ningún evento, la fila de `temas_telegram` se quedaba apuntando a un `topic_id` muerto
+para siempre. El propio docstring de `olvidar_tema` ya describía la consecuencia palabra por
+palabra —«cada archivo que mandara esa persona fallaría al depositarse. Para siempre, y en
+silencio»— pero solo se cerraba la puerta del relevo.
+
+Lo que se midió contra la API el 16/09/2026, y por qué importa cada fila:
+
+    tema ABIERTO                 -> deposita
+    tema CERRADO                 -> deposita  (el bot es admin: es el estado NORMAL)
+    tema CERRADO + silencioso    -> deposita
+    tema BORRADO                 -> "Bad Request: message thread not found"
+
+La tercera fila es la que impide el arreglo ingenuo: **los temas de paciente se crean
+cerrados**, así que tratar «cerrado» como «muerto» le borraría el expediente a todos. Y la
+cuarta descarta la otra sospecha: Telegram **no** degrada al General por su cuenta, rechaza.
+
+Ahora `canales.es_hilo_invalido` mira el rechazo y `enviar_mensaje`/`enviar_archivo` lanzan
+`HiloInvalido`, que hereda de `ErrorDeCanal` —todo lo que ya lo capturaba sigue igual—.
+`ingesta` reacciona distinto según qué llegue, y la asimetría es deliberada:
+
+| Llega | Qué pasa |
+|---|---|
+| Un **texto** | Se olvida el hilo y **no se archiva**. Un texto nunca abre hilo (no negociable 14), y mandarlo al General es justo lo que ese no negociable prohíbe. |
+| Un **archivo** | Se olvida el hilo y **cae al General**, sonando. Degradar es aceptable; perder el archivo no. |
+
+Dos detalles que parecen de estilo y no lo son. El texto **no se marca como fallo**: el
+estado al que llega es el del número sin tema, que es normal y ya tiene su registro
+(`reenviado_en` puesta, `telegram_message_id` nulo); marcarlo llenaría de falsos positivos el
+índice por el que se vigila lo que de verdad se perdió. Y en la rama del archivo se reasigna
+`tema = None`, de donde cuelgan las otras tres decisiones: dónde deposita el lector, que el
+envío suene, y que **no** salga el aviso «están en su tema» —porque ya no es verdad—.
+
+`es_hilo_invalido` compara contra una lista corta y explícita, nunca contra un «not found»
+suelto: un error de permisos o un límite de tasa son pasajeros, y tratarlos como hilo muerto
+costaría un expediente.
+
+**Ninguna prueba offline cubre el eslabón con la API.** Las cuatro de
+`tests/test_ingesta.py` doblan Telegram, así que prueban la reacción, no el reconocimiento
+del rechazo real. Quien toque `es_hilo_invalido` o `_HILO_MUERTO` mide contra el grupo de
+verdad: crear tema, borrarlo, esperar los ~3 s que Telegram tarda en enterarse, y comprobar
+que sale `HiloInvalido` y no un `ErrorDeCanal` genérico.
+
 ## Cuatro salidas, no tres — y la cuarta es cerrar el hilo
 
 Cerrar el tema a mano **es** devolver el control, y es el gesto que sale natural al terminar

@@ -62,7 +62,7 @@ from datetime import datetime
 from typing import Any
 
 from . import persistencia
-from .canales import _TIPO_WHATSAPP_DE_TELEGRAM
+from .canales import _TIPO_WHATSAPP_DE_TELEGRAM, HiloInvalido
 from .contratos import ZONA_BOGOTA
 from .lectura import nombre_del_tema
 
@@ -151,6 +151,30 @@ def teclado_devolver(id_conversacion: str) -> dict:
     }
 
 
+def teclado_tomar_conversacion(id_conversacion: str) -> dict:
+    """«Hablar yo con el paciente», colgado de un escalamiento. La puerta de entrada al relevo.
+
+    Vive aquí y no en `herramientas` porque **la cuelgan los dos caminos de escalamiento** —la
+    tool que llama el modelo y la red de seguridad de `runtime._avisar_a_doctores`— y hasta el
+    17/09/2026 solo la tenía el primero. El segundo corre justo cuando el modelo NO llamó a
+    ninguna tool: el turno se rompió solo, o cerró con la bandera puesta. O sea, el aviso de
+    los casos en que el sistema menos sabe qué hacer era el único que llegaba sin puerta.
+
+    Va por id de CONVERSACIÓN y no por teléfono, al revés que `teclado_tomar`, porque aquí ya
+    hay conversación: es la que acaba de escalar. Ver `PREFIJO_TOMAR_TEL` para el otro caso.
+    """
+    return {
+        "inline_keyboard": [
+            [
+                {
+                    "text": "Hablar yo con el paciente",
+                    "callback_data": f"{PREFIJO_TOMAR}{id_conversacion}",
+                }
+            ]
+        ]
+    }
+
+
 def teclado_tomar(telefono: str) -> dict:
     """«Hablar yo con el paciente», colgado del aviso de archivos. Ver `PREFIJO_TOMAR_TEL`."""
     return {
@@ -163,6 +187,66 @@ def teclado_tomar(telefono: str) -> dict:
             ]
         ]
     }
+
+
+async def ofrecer_la_puerta_en_el_hilo(
+    *, telegram, tema: int, telefono: str, motivo: str
+) -> None:
+    """Cuelga «Hablar yo con el paciente» en el hilo del paciente. Nunca propaga.
+
+    ------------------------------------------------------------------------------------
+    Por qué el General no basta
+    ------------------------------------------------------------------------------------
+
+    El doctor no vive en el General: vive en el hilo del paciente, que es donde ve llegar sus
+    mensajes y donde está su expediente. El escalamiento colgaba la puerta SOLO en el General,
+    así que un doctor mirando el hilo veía al paciente insistir sin ninguna señal de que
+    Daniela ya había pedido ayuda, y sin nada que pulsar.
+
+    Medido el 17/09/2026: el doctor cerró un relevo, borró el hilo y borró el mensaje del
+    escalamiento en el General. Cuando el paciente volvió a escalar, el sistema mandó un aviso
+    nuevo con su botón --comprobado contra la API de Telegram: el mensaje sigue vivo y con el
+    botón puesto-- pero cayó en el General, y el doctor estaba mirando el hilo. Desde su lado,
+    el sistema había dejado de ofrecerle tomar la conversación.
+
+    ------------------------------------------------------------------------------------
+    Lo que NO baja al hilo, y esa es la mitad importante
+    ------------------------------------------------------------------------------------
+
+    **Ni el resumen ni la pregunta.** Los escribe el modelo para los doctores y son la
+    discusión interna del caso; el sitio del diseño donde eso vive es el General. Aquí va lo
+    mínimo para saber que hay que entrar: el motivo y el botón. La separación que defiende
+    `test_el_escalamiento_va_al_tema_general_y_nunca_al_del_paciente` se mantiene entera.
+
+    Que `relevar_mensaje` filtre por `is_bot` --lo que escribe el bot nunca se le reenvía al
+    paciente-- hace esto seguro, pero no es la razón de recortarlo: un expediente no es el
+    sitio de la deliberación aunque nadie de fuera pueda leerlo.
+
+    ------------------------------------------------------------------------------------
+    Dos detalles que parecen menores y no lo son
+    ------------------------------------------------------------------------------------
+
+    **El botón va por TELÉFONO (`teclado_tomar`), no por id de conversación.** Este mensaje se
+    queda en el expediente para siempre y una conversación caduca a las 24 h: con el id
+    dentro, pulsarlo al día siguiente contestaría «esa conversación ya no existe».
+    `PREFIJO_TOMAR_TEL` resuelve la conversación viva en el momento del clic.
+
+    **Suena**, y es la segunda excepción a la NOTA DEL SILENCIO de `canales.py` --la primera
+    es la bienvenida del relevo--. Un aviso mudo en un hilo que el doctor no tiene abierto no
+    avisa de nada, y este es justo el mensaje que existe para que se entere.
+    """
+    try:
+        await telegram.enviar_mensaje(
+            f"🚨 <b>Daniela pidió ayuda con este paciente</b> · {_escapar(str(motivo))}\n"
+            "El detalle está en el General. Para hablarle tú, toca el botón.",
+            tema_id=tema,
+            teclado=teclado_tomar(telefono),
+            silencioso=False,
+        )
+    except Exception:  # noqa: BLE001 -- el escalamiento ya salió por el General, que es la
+        # garantía. Esta es la puerta cómoda, no la única: propagar convertiría un fallo de
+        # Telegram en un escalamiento perdido.
+        log.warning("el hilo de +%s se quedó sin la puerta al relevo", telefono, exc_info=True)
 
 
 def teclado_hubo_cita(id_conversacion: str) -> dict:
@@ -212,6 +296,11 @@ def _activar_en_base(database_url: str, id_conversacion: str, doctor: str) -> st
 def _cerrar_en_base(database_url: str, id_conversacion: str, motivo: str) -> bool:
     with persistencia.conectar(database_url) as conn:
         return persistencia.cerrar_relevo(conn, id_conversacion, motivo=motivo)
+
+
+def _marcar_escalamientos_respondidos(database_url: str, id_conversacion: str) -> int:
+    with persistencia.conectar(database_url) as conn:
+        return persistencia.marcar_escalamientos_respondidos(conn, id_conversacion)
 
 
 def _tema_de(database_url: str, telefono: str) -> int | None:
@@ -385,7 +474,32 @@ async def _tema_abierto_para(
         log.info("el relevo abrió el tema %s para +%s, que no tenía", tema, telefono)
         return tema
 
-    await telegram.reabrir_tema(tema)
+    try:
+        await telegram.reabrir_tema(tema)
+    except HiloInvalido:
+        # El doctor borró el hilo a mano. Telegram no emite ningún evento al borrar un tema,
+        # así que este rechazo es la ÚNICA noticia que va a llegar nunca -- y llega justo
+        # aquí, en el único camino por el que un doctor entra a hablar con el paciente.
+        #
+        # Medido en producción el 17/09/2026 a las 08:32:35: esto subía como `ErrorDeCanal`
+        # genérico, `activar` lo trataba como «no hay hilo» y **deshacía el relevo entero**.
+        # Y como ese camino cierra con `_cerrar_en_base` directo --no con `cerrar`, que sí
+        # olvida-- la fila muerta se quedaba: el segundo intento fallaba igual, y el tercero,
+        # hasta que por casualidad llegara un texto y fuera `ingesta` quien la olvidara.
+        # Desde el lado del doctor, «no puedo volver a tomar la conversación».
+        #
+        # Un hilo borrado no es un fallo: es un hilo que hay que rehacer. Misma reacción que
+        # `ingesta` ante `HiloInvalido` y que `cerrar` con `tema_perdido` -- olvidar y seguir.
+        log.warning("el hilo %s de +%s ya no existe; se olvida y se abre uno nuevo", tema, telefono)
+        await asyncio.to_thread(_olvidar_tema, database_url, telefono)
+        # Sin `try`: si tampoco se puede CREAR, eso sí es un fallo de Telegram y quien llama
+        # tiene que deshacer el relevo. Es la diferencia entre «no hay hilo» y «no hay
+        # Telegram».
+        tema = await telegram.crear_tema(nombre_del_tema(telefono, None))
+        await asyncio.to_thread(_guardar_tema_abierto, database_url, telefono, tema)
+        log.info("el relevo abrió el tema %s para +%s, que tenía uno borrado", tema, telefono)
+        return tema
+
     await asyncio.to_thread(_marcar_abierto, database_url, telefono, True)
     return tema
 
@@ -571,14 +685,43 @@ async def activar(
             )
             return
 
-        bienvenida = await telegram.enviar_mensaje(
-            _texto_de_bienvenida(doctor, cierre_relevo_minutos, doctor_id),
-            tema_id=tema,
-            teclado=teclado_devolver(id_conversacion),
-            # El ÚNICO sitio del proyecto que manda un tema de paciente a sonar. Ver la NOTA
-            # DEL SILENCIO de `canales.py`: es esta notificación la que lleva al doctor.
-            silencioso=False,
-        )
+        async def _dar_la_bienvenida(en_el_tema: int) -> int:
+            return await telegram.enviar_mensaje(
+                _texto_de_bienvenida(doctor, cierre_relevo_minutos, doctor_id),
+                tema_id=en_el_tema,
+                teclado=teclado_devolver(id_conversacion),
+                # El ÚNICO sitio del proyecto que manda un tema de paciente a sonar. Ver la
+                # NOTA DEL SILENCIO de `canales.py`: es esta notificación la que lleva al
+                # doctor.
+                silencioso=False,
+            )
+
+        try:
+            bienvenida = await _dar_la_bienvenida(tema)
+        except HiloInvalido:
+            # La ventana que `_tema_abierto_para` no puede ver. Medido contra la API el
+            # 17/09/2026: durante VARIOS SEGUNDOS después de `deleteForumTopic`, Telegram
+            # sigue respondiendo `ok: true` a `reopenForumTopic` --o sea, «lo he reabierto»--
+            # mientras `sendMessage` sobre ese mismo tema ya rechaza. Así que el hilo pasa
+            # por vivo arriba y se descubre muerto aquí, al escribir.
+            #
+            # Sin esto, el `except` de fuera se lo tragaba y dejaba el PEOR estado posible:
+            # `tomada_por` puesto --Daniela callada-- y ningún hilo por el que hablarle al
+            # paciente. Nadie se entera hasta que el barrido corta por tiempo agotado.
+            #
+            # Misma reacción que en todas partes: un hilo muerto es un hilo que hay que
+            # rehacer. Un solo reintento, y sobre un tema recién creado: si ESTE también
+            # falla, es Telegram y quien llama deshace el relevo.
+            log.warning(
+                "el hilo %s de +%s aceptó que lo reabrieran pero no acepta texto; se olvida "
+                "y se abre uno nuevo",
+                tema,
+                telefono,
+            )
+            await asyncio.to_thread(_olvidar_tema, database_url, telefono)
+            tema = await telegram.crear_tema(nombre_del_tema(telefono, None))
+            await asyncio.to_thread(_guardar_tema_abierto, database_url, telefono, tema)
+            bienvenida = await _dar_la_bienvenida(tema)
 
         # Anclado, porque este mensaje lleva el botón de salida y es el PRIMERO del hilo.
         # Sin esto, el doctor que ha hablado veinte frases tiene que subir hasta arriba del
@@ -1439,6 +1582,23 @@ async def cerrar(
         await asyncio.to_thread(_marcar_cierre, database_url, id_conversacion, None)
     except Exception:  # noqa: BLE001
         log.warning("el diálogo de cierre de %s quedó puesto", id_conversacion)
+
+    # Un humano atendió el asunto y lo dio por terminado: deja de estar pendiente. Va DENTRO
+    # del `if cerrado` --nunca antes-- porque un cierre que no ocurre no puede dar por
+    # respondido nada. El porqué entero, en `persistencia.marcar_escalamientos_respondidos`:
+    # sin esta marca, lo que venga después con el mismo motivo se queda sin aviso, sin botón
+    # y sin hilo. Falla en silencio a propósito: el relevo YA está cerrado, y perder la marca
+    # solo cuesta un aviso de más, que es el lado bueno en el que equivocarse.
+    try:
+        await asyncio.to_thread(
+            _marcar_escalamientos_respondidos, database_url, id_conversacion
+        )
+    except Exception:  # noqa: BLE001
+        log.warning(
+            "los escalamientos de %s siguen contando como pendientes; el próximo aviso del "
+            "mismo motivo podría callarse",
+            id_conversacion,
+        )
 
     # Lo único que cruza el muro hacia Daniela. Ver `_avisar_a_daniela`.
     await _avisar_a_daniela(

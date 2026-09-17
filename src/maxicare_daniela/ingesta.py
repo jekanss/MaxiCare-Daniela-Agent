@@ -27,7 +27,7 @@ from . import persistencia
 # Solo por el teclado del botón. `relevo` importa `lectura`, `persistencia` y `canales`, y
 # NUNCA `ingesta`: no hay ciclo, y `tests/test_estructura.py` vigila que siga sin haberlo.
 from . import relevo as relevo_mod
-from .canales import ErrorDeCanal, Telegram, WhatsApp
+from .canales import ErrorDeCanal, HiloInvalido, Telegram, WhatsApp
 
 log = logging.getLogger("maxicare.ingesta")
 
@@ -388,13 +388,39 @@ async def procesar_mensaje(
             # Silencioso SOLO si cae en el tema del paciente. Si no hay tema, el archivo va
             # al General --es el caso del número que todavía no es paciente-- y ahí tiene
             # que sonar: nadie va a abrir un hilo que no existe para encontrarlo.
-            telegram_id = await telegram.enviar_archivo(
-                archivo,
-                tipo_whatsapp=m.tipo,
-                pie=pie,
-                tema_id=destino,
-                silencioso=bool(tema) and not en_relevo,
-            )
+            try:
+                telegram_id = await telegram.enviar_archivo(
+                    archivo,
+                    tipo_whatsapp=m.tipo,
+                    pie=pie,
+                    tema_id=destino,
+                    silencioso=bool(tema) and not en_relevo,
+                )
+            except HiloInvalido as e:
+                # Alguien borró el hilo de esta persona. Telegram no lo avisa por ningún
+                # evento, y `relevo.barrer` solo lo sondea si está EN RELEVO, así que este
+                # rechazo es la única noticia que va a llegar nunca. Se olvida la fila --si
+                # no, cada archivo suyo se estrella contra el mismo hilo muerto, para
+                # siempre-- y el archivo cae al General.
+                #
+                # `tema = None` no es cosmético: de ahí cuelgan las tres decisiones de
+                # abajo. El lector deposita su lectura donde cayó el archivo, el envío
+                # suena --nadie va a abrir un hilo que ya no existe para encontrarlo-- y el
+                # aviso «están en su tema» NO se manda, porque ya no es verdad.
+                log.warning(
+                    "el hilo de %s ya no existe (%s); se olvida y el archivo va al General",
+                    m.telefono,
+                    e,
+                )
+                await asyncio.to_thread(_olvidar_tema, database_url, m.telefono)
+                tema, destino = None, tema_general
+                telegram_id = await telegram.enviar_archivo(
+                    archivo,
+                    tipo_whatsapp=m.tipo,
+                    pie=pie,
+                    tema_id=destino,
+                    silencioso=False,
+                )
             # A partir de aquí el archivo YA está entregado. Nada de lo que sigue —el aviso
             # al General, el arranque del lector— puede convertir esta entrega en un fallo,
             # así que el aviso queda en su propio try/except y el lector arranca ANTES de
@@ -472,9 +498,27 @@ async def procesar_mensaje(
                 # `_en_relevo` solo se consulta si hay tema; sin tema no hay dónde sonar y
                 # la consulta sería una ida a Neon para no usar el resultado.
                 en_relevo = await asyncio.to_thread(_en_relevo, database_url, m.telefono)
-                telegram_id = await telegram.enviar_mensaje(
-                    componer_aviso(m), tema_id=tema, silencioso=not en_relevo
-                )
+                try:
+                    telegram_id = await telegram.enviar_mensaje(
+                        componer_aviso(m), tema_id=tema, silencioso=not en_relevo
+                    )
+                except HiloInvalido as e:
+                    # El hilo ya no existe. Se olvida para que el PRIMER ARCHIVO que llegue
+                    # después abra uno nuevo, y este texto no se archiva en ninguna parte:
+                    # un texto nunca abre hilo (no negociable 14) y reencaminarlo al General
+                    # sería justo lo que ese no negociable prohíbe.
+                    #
+                    # No se marca fallo a propósito. El estado al que llega es el del número
+                    # sin tema, que es normal y ya tiene su registro: `reenviado_en` puesta
+                    # y `telegram_message_id` nulo. Marcarlo llenaría de falsos positivos el
+                    # índice por el que se vigila lo que de verdad se perdió.
+                    log.warning(
+                        "el hilo de %s ya no existe (%s); se olvida y su texto no se archiva",
+                        m.telefono,
+                        e,
+                    )
+                    await asyncio.to_thread(_olvidar_tema, database_url, m.telefono)
+                    telegram_id = None
             tamano = None
 
     except ErrorDeCanal as e:
@@ -548,6 +592,27 @@ def _tema_existente(database_url: str, telefono: str) -> int | None:
     except Exception:  # noqa: BLE001
         log.exception("no se pudo consultar el tema de %s; su texto no se archiva", telefono)
         return None
+
+
+def _olvidar_tema(database_url: str, telefono: str) -> None:
+    """Borra la fila de `temas_telegram` de ese número. No propaga nunca.
+
+    Se llama cuando Telegram acaba de decir que el hilo no existe. Es la MISMA recuperación
+    que `relevo.cerrar` hace con el motivo `tema_perdido`, por la misma razón, pero llega por
+    la otra puerta: aquella la dispara el barrido y solo mira relevos vivos
+    (`tomada_por IS NOT NULL`), así que el hilo borrado de un paciente que no está en relevo
+    no lo miraba nadie.
+
+    Si la base no responde se sigue igual: el mensaje ya está entregado o ya está decidido
+    que no se archiva, y perder el turno del paciente por no haber podido borrar una fila
+    sería un precio absurdo. Lo único que se pierde es la recuperación, que volverá a
+    intentarse con el próximo mensaje de esa persona.
+    """
+    try:
+        with persistencia.conectar(database_url) as conn:
+            persistencia.olvidar_tema(conn, telefono)
+    except Exception:  # noqa: BLE001
+        log.exception("no se pudo olvidar el hilo muerto de %s", telefono)
 
 
 def _en_relevo(database_url: str, telefono: str) -> bool:

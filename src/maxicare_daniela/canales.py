@@ -43,6 +43,43 @@ class ErrorDeCanal(RuntimeError):
     """
 
 
+class HiloInvalido(ErrorDeCanal):
+    """El `message_thread_id` al que se escribía ya no existe: alguien borró ese tema.
+
+    Es un `ErrorDeCanal` a propósito --todo lo que ya lo captura sigue capturándolo-- pero
+    con nombre propio porque exige una reacción distinta de cualquier otro rechazo: el resto
+    se reintenta o se registra, y este obliga a OLVIDAR la fila de `temas_telegram`. Sin eso
+    el sistema no se recupera nunca, y el docstring de `persistencia.olvidar_tema` ya lo
+    decía: cada mensaje futuro de esa persona se estrella contra el mismo hilo muerto.
+
+    `relevo.barrer` ya lo resolvía, pero solo para quien está EN RELEVO: itera sobre
+    `tomada_por IS NOT NULL`. Fuera de un relevo nadie sondea nada, porque **Telegram no
+    emite ningún evento cuando alguien borra un tema**.
+    """
+
+
+#: Lo que dice Telegram cuando el hilo ya no existe. Medido contra la API el 16/09/2026:
+#: `sendMessage` con un `message_thread_id` inexistente responde «Bad Request: message
+#: thread not found»; los métodos de foro responden `TOPIC_ID_INVALID`. Un tema CERRADO no
+#: entra aquí y no debe: el bot es administrador y sigue depositando en él -- de hecho todos
+#: los temas de paciente se crean cerrados, así que confundir los dos casos borraría el
+#: expediente de cada paciente que tiene el hilo como debe estar.
+_HILO_MUERTO = ("message thread not found", "topic_id_invalid", "thread not found")
+
+
+def es_hilo_invalido(descripcion: str | None) -> bool:
+    """¿Ese rechazo de Telegram significa «ese tema ya no existe»?
+
+    Se compara contra una lista corta y explícita, nunca con un «not found» suelto: un error
+    de permisos o un límite de tasa son pasajeros, y tratarlos como hilo muerto le costaría
+    el expediente a un paciente cuyo hilo está perfectamente vivo.
+    """
+    if not descripcion:
+        return False
+    bajo = descripcion.lower()
+    return any(marca in bajo for marca in _HILO_MUERTO)
+
+
 @dataclass(frozen=True)
 class ArchivoDescargado:
     contenido: bytes
@@ -430,7 +467,10 @@ class Telegram:
             r = await cliente.post(self._url("sendMessage"), json=cuerpo)
         datos = r.json()
         if not datos.get("ok"):
-            raise ErrorDeCanal(f"Telegram rechazó el mensaje: {datos.get('description')}")
+            descripcion = datos.get("description")
+            if es_hilo_invalido(descripcion):
+                raise HiloInvalido(f"Telegram rechazó el mensaje: {descripcion}")
+            raise ErrorDeCanal(f"Telegram rechazó el mensaje: {descripcion}")
         return datos["result"]["message_id"]
 
     async def enviar_archivo(
@@ -460,9 +500,10 @@ class Telegram:
             r = await cliente.post(self._url(metodo), data=datos_form, files=archivos)
         datos = r.json()
         if not datos.get("ok"):
-            raise ErrorDeCanal(
-                f"Telegram rechazó el archivo ({metodo}): {datos.get('description')}"
-            )
+            descripcion = datos.get("description")
+            if es_hilo_invalido(descripcion):
+                raise HiloInvalido(f"Telegram rechazó el archivo ({metodo}): {descripcion}")
+            raise ErrorDeCanal(f"Telegram rechazó el archivo ({metodo}): {descripcion}")
         return datos["result"]["message_id"]
 
     async def crear_tema(self, nombre: str) -> int:
@@ -542,7 +583,27 @@ class Telegram:
             r = await cliente.post(self._url("reopenForumTopic"), json=cuerpo)
         datos = r.json()
         if not datos.get("ok"):
-            raise ErrorDeCanal(f"Telegram no reabrió el tema: {datos.get('description')}")
+            descripcion = datos.get("description")
+            # `HiloInvalido` y no un `ErrorDeCanal` cualquiera cuando el tema ya no existe:
+            # quien llama tiene que poder distinguir «Telegram falló» de «alguien borró este
+            # hilo», porque la reacción es opuesta --reintentar frente a olvidar la fila y
+            # abrir uno nuevo--. Medido en producción el 17/09/2026: el doctor borró el hilo,
+            # pulsó «Hablar yo con el paciente» y esto llegaba como `ErrorDeCanal` genérico,
+            # así que `relevo.activar` deshacía el relevo entero. Hereda de `ErrorDeCanal`:
+            # todo lo que ya lo capturaba sigue igual.
+            if es_hilo_invalido(descripcion):
+                raise HiloInvalido(f"Telegram no reabrió el tema: {descripcion}")
+            # `TOPIC_NOT_MODIFIED` es un SÍ: el tema existe y ya estaba abierto, que es
+            # exactamente lo que esta función promete dejar. `estado_del_tema` ya lo lee así
+            # --devuelve "abierto"-- y las dos sondas llaman al MISMO `reopenForumTopic`.
+            # Tratarlo como fallo reabría el agujero del 17/09/2026 por la otra puerta:
+            # `_tema_abierto_para` lo propaga y `activar` deshace el relevo entero, con el
+            # hilo del paciente vivo delante. Pasa cuando un doctor reabre el tema a mano,
+            # cuando `asegurar_tema` no consiguió cerrarlo al crearlo, o cuando falló el
+            # cierre del relevo anterior.
+            if "TOPIC_NOT_MODIFIED" in str(descripcion).upper():
+                return
+            raise ErrorDeCanal(f"Telegram no reabrió el tema: {descripcion}")
 
     async def responder_callback(
         self, callback_id: str, texto: str = "", *, alerta: bool = False
@@ -691,6 +752,59 @@ class Telegram:
         if "TOPIC_NOT_MODIFIED" in descripcion:
             return "abierto"
         log.warning("no se pudo comprobar el tema %s: %s", tema_id, datos.get("description"))
+        return None
+
+    async def aviso_sigue_puesto(self, mensaje_id: int, teclado: dict) -> bool | None:
+        """¿Ese mensaje sigue en el grupo? `None` si no se pudo averiguar.
+
+        **Borrar un mensaje no emite ningún evento**, exactamente igual que borrar un tema
+        (ver `estado_del_tema`). Y el sistema dependía de que el aviso siguiera puesto: la
+        guarda `persistencia.escalamiento_vivo_con_motivo` calla todo escalamiento del mismo
+        motivo mientras haya uno «delante del doctor y sin responder», y eso lo mide por
+        `telegram_message_id IS NOT NULL`. En cuanto el doctor borra ese mensaje --que es lo
+        que hace para dejar el General limpio-- la premisa es falsa y el silencio dura las
+        24 h de la conversación: ni aviso, ni botón, ni hilo. Medido en producción el
+        17/09/2026 sobre el aviso 855.
+
+        POR QUÉ `editMessageReplyMarkup` CON EL MISMO TECLADO, y no otra cosa: por lo que NO
+        hace. Si el mensaje está igual, Telegram responde `message is not modified` y no toca
+        nada -- ni mensaje de servicio, ni notificación, ni reordenar el General. Es la misma
+        clase de sonda sin rastro que `reopenForumTopic`, y el teclado tiene que ser el mismo
+        que le puso quien mandó el aviso, o la llamada sí tendría efecto.
+
+        Devuelve:
+
+        - `True`  — sigue puesto. También cuando responde `ok: true`: existía con otro
+          teclado y se le acaba de poner el que toca. Lo que importa aquí es que el mensaje
+          está, no cuál era su teclado.
+        - `False` — el doctor lo borró.
+        - `None`  — no se pudo saber. Un 429 o un timeout no es un mensaje borrado; quien
+          llama decide, y en `runtime` decide AVISAR: callar una alerta clínica porque
+          Telegram tuvo un mal minuto es el error caro de los dos.
+        """
+        cuerpo = {
+            "chat_id": self._chat_id,
+            "message_id": mensaje_id,
+            "reply_markup": teclado,
+        }
+        try:
+            async with httpx.AsyncClient(timeout=TIMEOUT_NORMAL) as cliente:
+                r = await cliente.post(self._url("editMessageReplyMarkup"), json=cuerpo)
+            datos = r.json()
+        except (httpx.HTTPError, ValueError):
+            return None
+        if datos.get("ok"):
+            return True
+        descripcion = str(datos.get("description") or "").lower()
+        if "not modified" in descripcion:
+            return True
+        if "message to edit not found" in descripcion:
+            return False
+        log.warning(
+            "no se pudo comprobar si el aviso %s sigue en el General: %s",
+            mensaje_id,
+            datos.get("description"),
+        )
         return None
 
     async def anclar_mensaje(self, mensaje_id: int) -> None:

@@ -117,7 +117,13 @@ una —qué se midió, qué costó— está en la regla que cubre ese archivo.
 14. **Al General solo va lo que le pide algo al doctor, y la señal de alarma es `reenviado_en`
    NULL, no `telegram_message_id` NULL.** Un texto va mudo al tema de su paciente, o a ninguna
    parte si no tiene tema —nunca lo crea: eso es del primer archivo—. El aviso de archivos
-   suena UNA vez por tanda (`_primer_archivo_de_la_tanda`, 24 h).
+   suena UNA vez por tanda (`_primer_archivo_de_la_tanda`, 24 h). **Y un escalamiento va a los
+   DOS sitios**: al General con su resumen, y al hilo del paciente solo con el motivo y el
+   botón (`relevo.ofrecer_la_puerta_en_el_hilo`, que SUENA — segunda y última excepción al
+   silencio del hilo, tras la bienvenida del relevo). El doctor mira el hilo, no el General:
+   con la puerta solo en el General, un doctor que borró su mensaje da por hecho que el
+   sistema dejó de ofrecerle tomar la conversación. El resumen y la pregunta NO bajan al
+   hilo: son la deliberación, y su sitio es el General.
 15. **El relevo tiene UNA puerta de salida, y `/webhook/telegram` se cierra cuando falta el
    secreto.** `conversaciones.tomada_por` puesto significa Daniela callada **y** tema abierto:
    las dos dejan de ser verdad juntas, por `relevo.cerrar` con uno de los tres motivos del
@@ -143,7 +149,13 @@ una —qué se midió, qué costó— está en la regla que cubre ese archivo.
    cerrar por `tema_perdido` el hilo se OLVIDA (`persistencia.olvidar_tema`), no se marca
    cerrado. Ninguna prueba offline lo caza: quien toque la sonda corre
    `scripts/probar_relevo.py`. Y el `tratamiento` se guarda tal cual, **sin validar contra la
-   lista viva** — única excepción del proyecto.
+   lista viva** — única excepción del proyecto. **Y un tema borrado sigue diciendo que sí
+   durante varios segundos**: `reopenForumTopic` responde `ok: true` mientras `sendMessage`
+   ya rechaza, así que `activar` reintenta UNA vez --olvidar, crear, bienvenida-- cuando la
+   bienvenida cae en un hilo muerto. Sin eso quedaba `tomada_por` puesto y ningún hilo:
+   Daniela callada y nadie hablando con el paciente. Y `reabrir_tema` distingue TRES cosas,
+   no dos: `HiloInvalido` si el tema no existe, éxito si `TOPIC_NOT_MODIFIED` --ya estaba
+   abierto, que es lo que promete-- y `ErrorDeCanal` para lo demás.
 20. **Para una cita que YA existe manda Google Calendar, no Neon.**
    `herramientas._sincronizar_con_calendar` la contrasta en cada `consultar_citas` y corrige
    Neon: **antes de cortar el pasado**, dejando la fila quieta si hay `ErrorDeCalendario` (un
@@ -205,20 +217,32 @@ una —qué se midió, qué costó— está en la regla que cubre ese archivo.
    asunto siga abierto. La clave `escalamiento:{turno}` no puede pararlo --y no debe: congelada,
    el doctor se entera del primero y de ninguno más--, así que cada turno se volvía un Telegram
    al General con el texto entero de lo que se le respondió al paciente. Cuatro en seis minutos
-   el 16/09/2026. Lo para `persistencia.escalamiento_vivo_con_motivo`, con sus tres condiciones:
+   el 16/09/2026. Lo para `persistencia.escalamiento_vivo_con_motivo`, con sus condiciones:
    **entregado** (`telegram_message_id` NO nulo, o se quemaría al INTENTAR y volvería el agujero
    de la 6A), **sin responder**, y **mismo motivo** --sin esta última se callaría el
    `dato_faltante` que viene detrás de un `clinico`, que es justo el que pedía algo nuevo--. Va
    ANTES del INSERT: la fila tampoco se escribe, o `telegram_message_id` NULL dejaría de
    significar «el Telegram no salió». El prompt ya decía «escalas una vez por asunto» y no
-   bastó: la guarda va en el código, como la baja de la 25. **Solo silencia la RED DE
-   SEGURIDAD, nunca la tool**: `herramientas._escalar_a_doctores` escribe su fila y manda su
+   bastó: la guarda va en el código, como la baja de la 25. **Y «delante del doctor» se
+   COMPRUEBA, no se supone**: borrar un mensaje no emite ningún evento --como borrar un tema--,
+   así que la guarda le pregunta a Telegram con `canales.aviso_sigue_puesto`
+   (`editMessageReplyMarkup` con el mismo teclado: si sigue igual, «not modified» y no toca
+   nada). El doctor borraba el aviso del General para dejar la bandeja limpia y el sistema
+   seguía creéndolo vivo: sin aviso, sin botón y sin hilo durante 24 h (17/09/2026, aviso 855).
+   Un aviso ya TOMADO (`relevo_activado`, que es BOOLEAN) no se sondea --su teclado ya es el
+   enlace al hilo-- y ante la duda se AVISA, que es el lado barato de equivocarse. **Solo
+   silencia la RED DE SEGURIDAD, nunca la tool**: `herramientas._escalar_a_doctores` escribe su fila y manda su
    propio Telegram sin pasar por `_registrar_escalamiento`, así que lo que el modelo escala de
    verdad --llamando-- sale siempre, y lo único que se calla es el flanco que dejó encendido
    sin llamar a nadie. Ahí está la frontera con la seguridad clínica, y quien mueva esta guarda
-   a un sitio por el que pase la tool la cruza. Dos cosas más que saber: `respondido_en` **hoy
-   no la escribe nadie** --la condición está para cuando se marque-- así que el alcance real es
-   un aviso por motivo y por conversación, y una conversación caduca a las 24 h. **Y un aviso
+   a un sitio por el que pase la tool la cruza. Dos cosas más que saber: **`respondido_en` la
+   escribe `relevo.cerrar`, y solo él** --desde el 17/09/2026; antes no la escribía nadie y el
+   silencio duraba las 24 h de la conversación aunque un doctor ya hubiera atendido el asunto
+   EN PERSONA y lo hubiera devuelto--. Cerrar el relevo es el ciclo completo, no `relevo_activado`
+   (que se pone al TOMAR y por eso no vale): contrastado contra las filas del caso medido, el
+   ruido del 16/09 se produjo con el relevo aún sin cerrar, así que esta marca no lo deja pasar.
+   Lo que devuelve es solo lo que llega DESPUÉS del cierre, y sin ella no volvía ni el aviso, ni
+   el botón, **ni el hilo** --`rescatar_hilo` cuelga del aviso que se calla--. **Y un aviso
    que se calla NO se
    cuenta como interrupción**: `_avisar_a_doctores` devuelve un booleano que viaja en
    `Resultado.doctor_avisado` hasta `atencion`, porque la pantalla imprime «se interrumpió al

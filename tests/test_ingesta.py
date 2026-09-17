@@ -1172,3 +1172,321 @@ def test_un_quick_reply_sin_rotulo_cae_al_payload():
     })
     [m] = extraer_mensajes(payload)
     assert m.texto == "Confirmar"
+
+
+# ==========================================================================================
+# El hilo que alguien borró a mano
+# ==========================================================================================
+#
+# `relevo.barrer` recupera el hilo muerto de un paciente EN RELEVO: sondea con
+# `estado_del_tema`, cierra con motivo `tema_perdido` y llama a `persistencia.olvidar_tema`.
+# Pero `barrer` itera sobre `tomada_por IS NOT NULL`, así que un hilo borrado fuera de un
+# relevo no lo mira nadie: Telegram no emite ningún evento al borrar un tema.
+#
+# La fila de `temas_telegram` se quedaba apuntando a un `topic_id` muerto y cada mensaje de
+# esa persona se estrellaba contra «message thread not found». Para siempre, y en silencio
+# --exactamente lo que el docstring de `olvidar_tema` predice--. Medido contra la API el
+# 16/09/2026: un tema inexistente NO se degrada al General, se rechaza.
+
+
+def test_telegram_distingue_el_hilo_muerto_de_cualquier_otro_rechazo():
+    """Sin esta distinción, el arreglo olvidaría el hilo ante un error de permisos o un
+    límite de tasa, y cada tropiezo pasajero le borraría el expediente a un paciente."""
+    from maxicare_daniela.canales import ErrorDeCanal, HiloInvalido, es_hilo_invalido
+
+    assert es_hilo_invalido("Bad Request: message thread not found")
+    assert es_hilo_invalido("Bad Request: TOPIC_ID_INVALID")
+    assert not es_hilo_invalido("Bad Request: not enough rights")
+    assert not es_hilo_invalido("Too Many Requests: retry after 30")
+    # Tiene que poder atraparse como `ErrorDeCanal`: todo lo que ya lo captura sigue igual.
+    assert issubclass(HiloInvalido, ErrorDeCanal)
+
+
+@pytest.mark.parametrize(
+    "descripcion, esperado",
+    [
+        ("Bad Request: TOPIC_ID_INVALID", "HiloInvalido"),
+        ("Bad Request: not enough rights", "ErrorDeCanal"),
+    ],
+    ids=["hilo_borrado", "fallo_pasajero"],
+)
+def test_reabrir_un_tema_borrado_lanza_HiloInvalido_y_no_un_error_cualquiera(
+    descripcion, esperado
+):
+    """La línea de la que dependía que el doctor pudiera volver a entrar.
+
+    Medido en producción el 17/09/2026 a las 08:32:35. El doctor había borrado el hilo; al
+    pulsar «Hablar yo con el paciente», `reopenForumTopic` respondió `TOPIC_ID_INVALID`, esto
+    subió como `ErrorDeCanal` genérico y `relevo.activar` **deshizo el relevo entero**. El
+    botón aparecía y no servía para nada.
+
+    Las dos mitades importan, y por eso son dos casos: un hilo borrado hay que rehacerlo, y
+    un error de permisos o un límite de tasa NO -- tratarlos igual le abriría un hilo nuevo a
+    un paciente cuyo expediente está perfectamente vivo, cada vez que Telegram tosa.
+    """
+    import asyncio
+    import httpx
+
+    from maxicare_daniela.canales import ErrorDeCanal, HiloInvalido, Telegram
+
+    def responder(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"ok": False, "description": descripcion})
+
+    transporte = httpx.MockTransport(responder)
+    original = httpx.AsyncClient
+
+    class ClienteFalso(original):
+        def __init__(self, *a, **kw):
+            kw["transport"] = transporte
+            super().__init__(*a, **kw)
+
+    httpx.AsyncClient = ClienteFalso
+    try:
+        tg = Telegram("token-falso", "-1001234567890")
+        with pytest.raises(ErrorDeCanal) as caido:
+            asyncio.run(tg.reabrir_tema(123))
+    finally:
+        httpx.AsyncClient = original
+
+    es_hilo_muerto = isinstance(caido.value, HiloInvalido)
+    assert es_hilo_muerto == (esperado == "HiloInvalido"), (
+        f"{descripcion!r} tenía que llegar como {esperado}"
+    )
+
+
+def test_reabrir_un_tema_QUE_YA_ESTABA_ABIERTO_no_es_un_fallo():
+    """`TOPIC_NOT_MODIFIED` es un sí, no un no: el tema existe y ya estaba abierto.
+
+    Lo que `reabrir_tema` promete es dejar el tema abierto, y ese es justo el estado al que
+    se llega. Tratarlo como error vuelve a abrir el agujero del 17/09/2026 por la otra
+    puerta: `relevo._tema_abierto_para` lo propaga, `activar` lo lee como «no hay hilo» y
+    **deshace el relevo entero** -- el mismo «el botón aparece y no sirve», con el hilo del
+    paciente intacto delante.
+
+    No es un caso de laboratorio: un tema está abierto cuando un doctor lo reabrió a mano,
+    cuando `lectura.asegurar_tema` no consiguió cerrarlo al crearlo (`quedo_abierto`), o
+    cuando el cierre del relevo anterior falló al cerrar el tema. `estado_del_tema` ya lo
+    lee así --devuelve `"abierto"`-- y las dos sondas usan el MISMO `reopenForumTopic`: que
+    una de ellas lo llamara fallo era la incoherencia.
+    """
+    import asyncio
+    import httpx
+
+    from maxicare_daniela.canales import Telegram
+
+    def responder(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, json={"ok": False, "description": "Bad Request: TOPIC_NOT_MODIFIED"}
+        )
+
+    transporte = httpx.MockTransport(responder)
+    original = httpx.AsyncClient
+
+    class ClienteFalso(original):
+        def __init__(self, *a, **kw):
+            kw["transport"] = transporte
+            super().__init__(*a, **kw)
+
+    httpx.AsyncClient = ClienteFalso
+    try:
+        tg = Telegram("token-falso", "-1001234567890")
+        # No lanza: el postestado que promete la función --tema abierto-- ya se cumple.
+        asyncio.run(tg.reabrir_tema(123))
+    finally:
+        httpx.AsyncClient = original
+
+
+@pytest.mark.parametrize(
+    "respuesta, esperado",
+    [
+        ({"ok": False, "description": "Bad Request: message is not modified"}, True),
+        ({"ok": False, "description": "Bad Request: message to edit not found"}, False),
+        ({"ok": True, "result": {"message_id": 855}}, True),
+        ({"ok": False, "description": "Too Many Requests: retry after 30"}, None),
+    ],
+    ids=["sigue_puesto", "el_doctor_lo_borro", "existe_con_otro_teclado", "no_se_pudo_saber"],
+)
+def test_preguntarle_a_telegram_si_el_aviso_del_General_sigue_ahi(respuesta, esperado):
+    """La tercera cosa que Telegram no avisa: **borrar un mensaje tampoco emite evento.**
+
+    Igual que borrar un tema. Y el sistema dependía de que el aviso siguiera puesto: la
+    guarda `escalamiento_vivo_con_motivo` calla todo escalamiento del mismo motivo mientras
+    haya uno «delante del doctor sin responder», y mide eso por `telegram_message_id IS NOT
+    NULL`. En cuanto el doctor borra ese mensaje, la premisa es falsa y el silencio dura las
+    24 h de la conversación: ni aviso, ni botón, ni hilo.
+
+    La sonda es `editMessageReplyMarkup` con el MISMO teclado, y se eligió por lo que NO
+    hace: si el mensaje está igual, Telegram responde «not modified» y **no toca nada**. No
+    deja mensaje de servicio, no reordena el General, no notifica a nadie.
+
+    Los cuatro casos, que son los cuatro que manda Telegram:
+
+    - «not modified» -> sigue puesto, con su botón. Se calla, que es lo correcto.
+    - «message to edit not found» -> lo borraron. NO se calla.
+    - `ok: true` -> existía con otro teclado, y se le acaba de poner el que toca. Sigue
+      puesto: no se calla por eso, pero el aviso existe.
+    - cualquier otra cosa -> `None`, no se sabe. Quien llama decide, y decide avisar:
+      callar una alerta clínica porque Telegram tuvo un mal minuto es el error caro.
+    """
+    import asyncio
+    import httpx
+
+    from maxicare_daniela.canales import Telegram
+
+    def responder(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=respuesta)
+
+    transporte = httpx.MockTransport(responder)
+    original = httpx.AsyncClient
+
+    class ClienteFalso(original):
+        def __init__(self, *a, **kw):
+            kw["transport"] = transporte
+            super().__init__(*a, **kw)
+
+    httpx.AsyncClient = ClienteFalso
+    try:
+        tg = Telegram("token-falso", "-1001234567890")
+        visto = asyncio.run(tg.aviso_sigue_puesto(855, {"inline_keyboard": [[]]}))
+    finally:
+        httpx.AsyncClient = original
+
+    assert visto is esperado, f"{respuesta} tenía que leerse como {esperado}"
+
+
+def test_un_texto_contra_un_hilo_borrado_olvida_el_hilo_y_no_cuenta_como_fallo(monkeypatch):
+    """El texto no se archiva --un texto nunca abre hilo, no negociable 14-- pero el hilo
+    muerto se olvida, así que el primer archivo que llegue después abre uno nuevo.
+
+    Y NO se marca como fallo: el estado al que se llega es el del número sin tema, que es
+    normal y ya tiene su registro (`reenviado_en` puesta, `telegram_message_id` nulo).
+    """
+    import asyncio
+
+    from maxicare_daniela import ingesta
+    from maxicare_daniela.canales import HiloInvalido
+
+    _sin_base(monkeypatch)
+    monkeypatch.setattr(ingesta, "_tema_existente", lambda url, tel: 777)
+
+    olvidados: list[str] = []
+    monkeypatch.setattr(ingesta, "_olvidar_tema", lambda url, tel: olvidados.append(tel))
+
+    fallos: list[str] = []
+    monkeypatch.setattr(ingesta, "_marcar_fallo", lambda url, w, e: fallos.append(e))
+
+    class TelegramConHiloMuerto(TelegramConTemas):
+        async def enviar_mensaje(self, texto, *, tema_id=None, teclado=None, silencioso=False):
+            if tema_id == 777:
+                raise HiloInvalido("Telegram rechazó el mensaje: message thread not found")
+            return await super().enviar_mensaje(
+                texto, tema_id=tema_id, teclado=teclado, silencioso=silencioso
+            )
+
+    tg = TelegramConHiloMuerto()
+    m = MensajeEntrante(
+        wamid="wamid-texto-hilo-muerto",
+        telefono="573001112233",
+        nombre_perfil="Ana Perez",
+        tipo="text",
+        texto="Hola, sigo esperando",
+    )
+    res = asyncio.run(
+        ingesta.procesar_mensaje(
+            m, whatsapp=WhatsAppConArchivo(), telegram=tg,
+            database_url="postgresql://x", tema_general=0,
+        )
+    )
+
+    assert olvidados == ["573001112233"], "el hilo muerto tiene que olvidarse"
+    assert fallos == [], "un hilo borrado no es un fallo de entrega del mensaje"
+    assert res.reenviado is False
+    assert tg.mensajes == [], "el texto NO se reencamina a ninguna parte"
+
+
+def test_un_archivo_contra_un_hilo_borrado_olvida_el_hilo_y_cae_al_general(monkeypatch):
+    """Con el archivo la regla es la contraria: degradar es aceptable, perderlo no.
+
+    Va al General --sonando, porque ya no hay hilo donde reposar-- y el hilo muerto se
+    olvida para que el siguiente archivo abra uno nuevo.
+    """
+    import asyncio
+
+    from maxicare_daniela import ingesta, lectura
+    from maxicare_daniela.canales import HiloInvalido
+
+    _sin_base(monkeypatch)
+    monkeypatch.setattr(lectura, "asegurar_tema", _devuelve_async(777))
+    monkeypatch.setattr(ingesta.lectura_mod, "vale_la_pena_leer", lambda tipo, tam: False)
+
+    olvidados: list[str] = []
+    monkeypatch.setattr(ingesta, "_olvidar_tema", lambda url, tel: olvidados.append(tel))
+
+    fallos: list[str] = []
+    monkeypatch.setattr(ingesta, "_marcar_fallo", lambda url, w, e: fallos.append(e))
+
+    class TelegramConHiloMuerto(TelegramConTemas):
+        async def enviar_archivo(
+            self, archivo, *, tipo_whatsapp, pie, tema_id=None, silencioso=False
+        ):
+            if tema_id == 777:
+                raise HiloInvalido("Telegram rechazó el archivo: message thread not found")
+            return await super().enviar_archivo(
+                archivo, tipo_whatsapp=tipo_whatsapp, pie=pie,
+                tema_id=tema_id, silencioso=silencioso,
+            )
+
+    tg = TelegramConHiloMuerto()
+    res = asyncio.run(
+        ingesta.procesar_mensaje(
+            _mensaje_con_foto(), whatsapp=WhatsAppConArchivo(), telegram=tg,
+            database_url="postgresql://x", tema_general=0,
+        )
+    )
+
+    assert olvidados == ["573001112233"], "el hilo muerto tiene que olvidarse"
+    assert fallos == [], "el archivo se entregó: no es un fallo"
+    assert res.reenviado is True
+    assert tg.archivos == [("radio.jpg", 0)], "el archivo tiene que acabar en el General"
+    assert tg.archivos_con_silencio[0][2] is False, (
+        "en el General suena: nadie va a abrir un hilo que ya no existe para encontrarlo"
+    )
+
+
+def test_otro_rechazo_de_telegram_sigue_siendo_un_fallo_y_no_borra_el_hilo(monkeypatch):
+    """La contraparte del primero: un error que NO es de hilo inválido no puede costarle el
+    expediente a un paciente."""
+    import asyncio
+
+    from maxicare_daniela import ingesta
+    from maxicare_daniela.canales import ErrorDeCanal
+
+    _sin_base(monkeypatch)
+    monkeypatch.setattr(ingesta, "_tema_existente", lambda url, tel: 777)
+
+    olvidados: list[str] = []
+    monkeypatch.setattr(ingesta, "_olvidar_tema", lambda url, tel: olvidados.append(tel))
+    fallos: list[str] = []
+    monkeypatch.setattr(ingesta, "_marcar_fallo", lambda url, w, e: fallos.append(e))
+
+    class TelegramCaido(TelegramConTemas):
+        async def enviar_mensaje(self, texto, *, tema_id=None, teclado=None, silencioso=False):
+            raise ErrorDeCanal("Telegram rechazó el mensaje: not enough rights")
+
+    m = MensajeEntrante(
+        wamid="wamid-texto-sin-derechos",
+        telefono="573001112233",
+        nombre_perfil="Ana Perez",
+        tipo="text",
+        texto="Hola",
+    )
+    res = asyncio.run(
+        ingesta.procesar_mensaje(
+            m, whatsapp=WhatsAppConArchivo(), telegram=TelegramCaido(),
+            database_url="postgresql://x", tema_general=0,
+        )
+    )
+
+    assert olvidados == [], "un error de permisos NO puede borrar el hilo del paciente"
+    assert len(fallos) == 1 and "not enough rights" in fallos[0]
+    assert res.reenviado is False

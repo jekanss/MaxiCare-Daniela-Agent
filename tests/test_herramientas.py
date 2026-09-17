@@ -2640,6 +2640,61 @@ def test_el_escalamiento_va_al_tema_general_y_nunca_al_del_paciente(monkeypatch)
     assert "Hablar yo con el paciente" in str(enviado["teclado"])
 
 
+def test_el_escalamiento_deja_la_puerta_en_el_hilo_DEL_PACIENTE_pero_no_el_resumen(monkeypatch):
+    """La otra mitad de la prueba de arriba, y la que arregla el caso del 17/09/2026.
+
+    El doctor no vive en el General: vive en el hilo del paciente, que es donde ve llegar sus
+    mensajes. Hasta hoy el escalamiento solo colgaba la puerta en el General, así que un
+    doctor mirando el hilo veía al paciente insistir sin ninguna señal de que Daniela ya había
+    pedido ayuda -- y sin nada que pulsar. Medido: borró el hilo y el mensaje del General, y
+    dio por hecho que el sistema había dejado de ofrecerle tomar la conversación.
+
+    Lo que va al hilo es **solo la puerta**: motivo y botón. El resumen y la pregunta son la
+    discusión interna entre doctores y se quedan en el General, que es de lo que habla
+    `test_el_escalamiento_va_al_tema_general_y_nunca_al_del_paciente`. Esa separación no se
+    toca; lo que se añade es un aviso operativo sin contenido clínico.
+
+    El botón va por TELÉFONO (`teclado_tomar`) y no por id de conversación: este mensaje se
+    queda en el expediente para siempre, y una conversación caduca a las 24 h. Con el id
+    dentro, pulsarlo al día siguiente contestaría «esa conversación ya no existe».
+    """
+    ctx = contexto(topic_id=99, tema_general=0, nombre_paciente="Ana Gómez")
+    telegram = TelegramFalso()
+
+    async def base_falsa(_ctx, trabajo):
+        return 5
+
+    async def hilo_falso(**_kwargs):
+        return 99
+
+    monkeypatch.setattr(h, "_con_base", base_falsa)
+    from maxicare_daniela import lectura
+
+    monkeypatch.setattr(lectura, "rescatar_hilo", hilo_falso)
+
+    asyncio.run(
+        h._escalar_a_doctores(
+            ctx,
+            SolicitudEscalamiento(
+                motivo="clinico",
+                resumen_para_doctor="Pregunta por una lesión que ve en su radiografía.",
+                pregunta_concreta="¿Se puede responder algo de esto por WhatsApp?",
+                clave_idempotencia="conv-1:3",
+            ),
+            telegram=telegram,
+        )
+    )
+
+    en_el_hilo = [e for e in telegram.enviados if e["tema_id"] == 99]
+    assert en_el_hilo, "el hilo del paciente se quedó sin ninguna puerta al relevo"
+    aviso = en_el_hilo[0]
+    assert "Hablar yo con el paciente" in str(aviso["teclado"])
+    assert ctx.telefono_completo in str(aviso["teclado"]), "el botón tiene que ir por teléfono"
+    # Y el muro sigue en pie: la discusión interna no baja al expediente del paciente.
+    assert "lesión que ve en su radiografía" not in aviso["texto"]
+    assert "responder algo de esto por WhatsApp" not in aviso["texto"]
+
+
 def test_el_mismo_turno_no_escala_dos_veces(monkeypatch):
     """A la cuarta alerta repetida el doctor deja de mirarlas, y ahí muere el escalamiento."""
     ctx = contexto()

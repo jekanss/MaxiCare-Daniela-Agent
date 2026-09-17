@@ -375,7 +375,7 @@ def test_un_escalamiento_sin_telegram_se_distingue_de_uno_ya_avisado(esquema, co
 def test_un_asunto_que_el_doctor_ya_tiene_delante_y_sin_responder_no_se_repite(
     esquema, contexto_de
 ):
-    """Las tres condiciones de `escalamiento_vivo_con_motivo`, contra el SQL de verdad.
+    """Las condiciones de `escalamiento_vivo_con_motivo`, contra el SQL de verdad.
 
     Lo que cierra: el modelo deja `requiere_escalamiento` en `true` turno tras turno
     mientras el asunto sigue abierto, y como la clave de idempotencia es por TURNO, cada
@@ -407,24 +407,26 @@ def test_un_asunto_que_el_doctor_ya_tiene_delante_y_sin_responder_no_se_repite(
         vivo = persistencia.escalamiento_vivo_con_motivo
 
         # Nada escrito todavía: no hay ningún asunto vivo.
-        assert vivo(conn, ctx.id_conversacion, "clinico") is False
+        assert vivo(conn, ctx.id_conversacion, "clinico") is None
 
         # La fila existe, pero el Telegram NO salió. Eso no es un aviso que repetir: es un
         # aviso que FALTA, y tiene que seguir saliendo. Es el falso positivo de esta prueba:
         # sin este caso, quitarle el `IS NOT NULL` a la consulta la dejaría en verde.
         primero = _escribir(2, "clinico")
-        assert vivo(conn, ctx.id_conversacion, "clinico") is False
+        assert vivo(conn, ctx.id_conversacion, "clinico") is None
 
         # Ya salió: a partir de aquí el doctor lo tiene delante.
         persistencia.anotar_telegram_en_escalamiento(conn, primero, 611)
-        assert vivo(conn, ctx.id_conversacion, "clinico") is True
+        # Devuelve el mensaje del General --con el que se le pregunta a Telegram si sigue
+        # ahí-- y si algún doctor llegó a tomarlo, que aquí todavía no.
+        assert vivo(conn, ctx.id_conversacion, "clinico") == (611, False)
 
         # Otro motivo es otro asunto, y ese sí pasa.
-        assert vivo(conn, ctx.id_conversacion, "dato_faltante") is False
+        assert vivo(conn, ctx.id_conversacion, "dato_faltante") is None
 
         # Otra conversación tampoco se contagia. (`conversacion_id` es UUID en la 001, así
         # que una cadena cualquiera no llega ni a comparar: revienta en el driver.)
-        assert vivo(conn, str(uuid.uuid4()), "clinico") is False
+        assert vivo(conn, str(uuid.uuid4()), "clinico") is None
 
         # Y en cuanto el doctor responde, el asunto se cierra: lo que venga después es nuevo.
         with conn.cursor() as cur:
@@ -432,7 +434,69 @@ def test_un_asunto_que_el_doctor_ya_tiene_delante_y_sin_responder_no_se_repite(
                 "UPDATE escalamientos SET respondido_en = now() WHERE id = %s", (primero,)
             )
         conn.commit()
-        assert vivo(conn, ctx.id_conversacion, "clinico") is False
+        assert vivo(conn, ctx.id_conversacion, "clinico") is None
+
+        # Y el segundo valor: en cuanto un doctor pulsa el botón, `relevo.activar` marca
+        # `relevo_activado`. Con eso puesto no se sondea a Telegram --el aviso ya sirvió, y
+        # su teclado ya no es el de tomar--, así que esta consulta tiene que decirlo.
+        segundo = _escribir(7, "clinico")
+        persistencia.anotar_telegram_en_escalamiento(conn, segundo, 612)
+        persistencia.marcar_relevo_activado(conn, 612)
+        assert vivo(conn, ctx.id_conversacion, "clinico") == (612, True)
+
+
+def test_cerrar_un_relevo_deja_de_callar_lo_que_venga_despues(esquema, contexto_de):
+    """El ciclo entero contra el SQL de verdad: escalar, avisar, atender, y volver a escalar.
+
+    Es la mitad que la suite offline no puede ver. Allí `marcar_escalamientos_respondidos` va
+    doblada con un espía, así que un `WHERE` mal escrito --el `conversacion_id` cambiado por
+    `id`, un `AND` de más-- pasaría en verde y el síntoma en producción sería el de siempre:
+    el doctor atiende al paciente, lo devuelve, y el sistema se calla el siguiente aviso del
+    mismo motivo durante 24 h. Sin aviso no hay botón, y sin el aviso tampoco se recrea el
+    hilo, porque `rescatar_hilo` cuelga de él.
+
+    Medido el 17/09/2026 sobre +573196842471. Ver `persistencia.marcar_escalamientos_respondidos`.
+    """
+    ctx = contexto_de("573001110012", "Sora Relevo Cerrado")
+    otra = contexto_de("573001110013", "Sora De Al Lado")
+
+    with persistencia.conectar(esquema) as conn:
+        vivo = persistencia.escalamiento_vivo_con_motivo
+
+        primero = persistencia.insertar_escalamiento(
+            conn,
+            id_conversacion=ctx.id_conversacion,
+            motivo="dato_faltante",
+            resumen="Pregunta por el proceso para sacarse una muela.",
+            pregunta="¿Qué le decimos?",
+            clave_idempotencia=ctx.clave("escalamiento", 1),
+        )
+        persistencia.anotar_telegram_en_escalamiento(conn, primero, 689)
+        # El de la conversación de al lado, para ver que el UPDATE no se lo lleva por delante.
+        vecino = persistencia.insertar_escalamiento(
+            conn,
+            id_conversacion=otra.id_conversacion,
+            motivo="dato_faltante",
+            resumen="Otro paciente, otro asunto.",
+            pregunta="¿Y este?",
+            clave_idempotencia=otra.clave("escalamiento", 1),
+        )
+        persistencia.anotar_telegram_en_escalamiento(conn, vecino, 690)
+
+        # El doctor lo tiene delante: mientras no lo atienda, repetirlo es ruido.
+        assert vivo(conn, ctx.id_conversacion, "dato_faltante") == (689, False)
+
+        # Toma el relevo, habla con el paciente y lo devuelve. Eso es `relevo.cerrar`.
+        assert persistencia.marcar_escalamientos_respondidos(conn, ctx.id_conversacion) == 1
+
+        # Y ahora el mismo motivo vuelve a pasar: es un asunto nuevo, no una repetición.
+        assert vivo(conn, ctx.id_conversacion, "dato_faltante") is None
+        # Sin tocar al de al lado, que sigue esperando a su doctor.
+        assert vivo(conn, otra.id_conversacion, "dato_faltante") == (690, False)
+
+        # Idempotente: el cierre corre dos veces --el doctor pulsa «Listo» en el mismo minuto
+        # en que el barrido lo da por vencido-- y la segunda no encuentra nada que marcar.
+        assert persistencia.marcar_escalamientos_respondidos(conn, ctx.id_conversacion) == 0
 
 
 def test_un_seguimiento_no_se_programa_dos_veces(esquema, contexto_de):

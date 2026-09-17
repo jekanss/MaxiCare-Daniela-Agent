@@ -798,3 +798,144 @@ def test_la_lectura_que_sale_a_telegram_va_formateada_y_conserva_el_emoji():
     assert tema == 777
     assert texto.startswith("📄 <b>Remision externa · Medicina interna")
     assert "<b>Piden:</b>" in texto
+
+
+# ==========================================================================================
+# El rescate: un escalamiento SÍ abre el hilo
+# ==========================================================================================
+#
+# Un texto no abre hilo (no negociable 14) y la razón sigue en pie: cada «hola» de un número
+# equivocado estrenaría expediente. Pero entre que el número se queda sin hilo --lo borra
+# `/clearstate`, o alguien borra el tema-- y que algo se lo vuelva a abrir, sus textos no se
+# archivan en ninguna parte.
+#
+# Medido en producción el 16/09/2026: cuatro mensajes seguidos de un paciente sin hilo
+# --«Quiero sacarme una muela», «Duele mucho?»-- quedaron con `telegram_message_id` NULL y
+# no llegaron a ningún sitio. Lo único que el doctor vio de esa persona fue el escalamiento
+# en el General, cuyo resumen parafrasea lo que había preguntado: desde fuera se lee como si
+# los mensajes del paciente hubieran «caído en el General».
+#
+# El escalamiento es el filtro correcto para abrir el hilo, y no el texto: un número
+# equivocado no hace escalar a Daniela, así que no estrena expediente.
+
+
+class TelegramQueRecibe(TelegramDeTemas):
+    """`TelegramDeTemas` más el envío, que es lo que el rescate mide."""
+
+    def __init__(self, **kw) -> None:
+        super().__init__(**kw)
+        self.enviados: list[tuple[str, int | None, bool]] = []
+
+    async def enviar_mensaje(self, texto, *, tema_id=None, teclado=None, silencioso=False) -> int:
+        self.enviados.append((texto, tema_id, silencioso))
+        return 5000 + len(self.enviados)
+
+
+def _sin_pendientes(monkeypatch, pendientes):
+    """Dobla las dos consultas que el rescate hace sobre `mensajes_entrantes`."""
+    marcados: list[tuple[tuple[str, ...], int]] = []
+    monkeypatch.setattr(lectura, "_textos_sin_archivar", lambda url, tel: list(pendientes))
+    monkeypatch.setattr(
+        lectura,
+        "_marcar_archivados",
+        lambda url, wamids, mid: marcados.append((tuple(wamids), mid)),
+    )
+    return marcados
+
+
+def test_al_escalar_sin_hilo_se_abre_y_se_vuelca_lo_que_el_paciente_habia_escrito(monkeypatch):
+    """El caso medido: los cuatro mensajes tienen que acabar en el expediente."""
+    import asyncio
+
+    BaseDeTemas(tema=None).instalar(monkeypatch)
+    tg = TelegramQueRecibe()
+    marcados = _sin_pendientes(monkeypatch, [
+        ("wamid-1", "Hola buenas noches"),
+        ("wamid-2", "Quiero sacarme una muela"),
+        ("wamid-3", "Duele mucho?"),
+    ])
+
+    tema = asyncio.run(
+        lectura.rescatar_hilo(
+            telefono="573001112233", nombre_perfil="Jean",
+            database_url="postgresql://x", telegram=tg,
+        )
+    )
+
+    assert tema == 901, "tiene que haber abierto el hilo"
+    assert len(tg.enviados) == 1, "un solo mensaje con todo, no un timbre por frase"
+    texto, tema_id, silencioso = tg.enviados[0]
+    assert tema_id == 901
+    assert silencioso is True, "el hilo es un expediente: se deposita mudo"
+    for frase in ("Hola buenas noches", "Quiero sacarme una muela", "Duele mucho?"):
+        assert frase in texto
+    assert texto.index("Hola buenas noches") < texto.index("Duele mucho?"), "en orden"
+    assert marcados == [(("wamid-1", "wamid-2", "wamid-3"), 5001)], (
+        "cada mensaje volcado queda marcado, o el siguiente escalamiento lo repetiría"
+    )
+
+
+def test_sin_nada_pendiente_el_rescate_no_escribe_nada(monkeypatch):
+    """Lo que hace idempotente al rescate: ya volcado es `telegram_message_id` NO nulo, así
+    que la consulta deja de devolverlo y el segundo escalamiento no repite el volcado."""
+    import asyncio
+
+    BaseDeTemas(tema=777).instalar(monkeypatch)
+    tg = TelegramQueRecibe()
+    marcados = _sin_pendientes(monkeypatch, [])
+
+    tema = asyncio.run(
+        lectura.rescatar_hilo(
+            telefono="573001112233", nombre_perfil="Jean",
+            database_url="postgresql://x", telegram=tg,
+        )
+    )
+
+    assert tema == 777
+    assert tg.enviados == []
+    assert marcados == []
+    assert tg.creados == [], "ya tenía hilo: no se abre otro"
+
+
+def test_si_el_hilo_no_se_puede_abrir_el_rescate_se_traga_el_fallo(monkeypatch):
+    """Nunca propaga. Lo llama un escalamiento, y un escalamiento que revienta por no haber
+    podido archivar un «buenas tardes» deja a un paciente sin doctor."""
+    import asyncio
+
+    from maxicare_daniela.canales import ErrorDeCanal
+
+    BaseDeTemas(tema=None).instalar(monkeypatch)
+    tg = TelegramQueRecibe(falla_al_crear=ErrorDeCanal("Telegram caido"))
+    marcados = _sin_pendientes(monkeypatch, [("wamid-1", "Duele mucho?")])
+
+    tema = asyncio.run(
+        lectura.rescatar_hilo(
+            telefono="573001112233", nombre_perfil="Jean",
+            database_url="postgresql://x", telegram=tg,
+        )
+    )
+
+    assert tema is None
+    assert tg.enviados == [], "sin hilo no hay dónde volcar"
+    assert marcados == [], "y nada se marca como archivado: sigue pendiente"
+
+
+def test_el_volcado_escapa_el_html_del_paciente(monkeypatch):
+    """`enviar_mensaje` va en `parse_mode=HTML` y RECHAZA el mensaje entero si no cierra.
+    Un paciente que escriba «me duele el <3» dejaría el rescate en nada."""
+    import asyncio
+
+    BaseDeTemas(tema=None).instalar(monkeypatch)
+    tg = TelegramQueRecibe()
+    _sin_pendientes(monkeypatch, [("wamid-1", "me duele el <3 & la muela")])
+
+    asyncio.run(
+        lectura.rescatar_hilo(
+            telefono="573001112233", nombre_perfil="Jean",
+            database_url="postgresql://x", telegram=tg,
+        )
+    )
+
+    texto = tg.enviados[0][0]
+    assert "&lt;3" in texto and "&amp;" in texto
+    assert "<3" not in texto

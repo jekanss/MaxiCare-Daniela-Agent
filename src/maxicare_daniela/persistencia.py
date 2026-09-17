@@ -2100,8 +2100,14 @@ def escalamiento_pendiente_de_aviso(conn, clave_idempotencia: str) -> int | None
     return fila[0] if fila else None
 
 
-def escalamiento_vivo_con_motivo(conn, id_conversacion: str, motivo: str) -> bool:
-    """¿Ya hay un escalamiento de ESE motivo delante del doctor y sin responder?
+def escalamiento_vivo_con_motivo(
+    conn, id_conversacion: str, motivo: str
+) -> tuple[int, bool] | None:
+    """El escalamiento de ESE motivo que el doctor ya tiene delante y sin responder.
+
+    Devuelve `(telegram_message_id, lo tomó un doctor)`, o `None` si no hay ninguno. Devolvía
+    un `bool`, y el `message_id` es lo que permite ir a PREGUNTARLE a Telegram si ese aviso
+    sigue existiendo -- ver el tercer punto de las condiciones.
 
     ------------------------------------------------------------------------------------
     Para qué existe: el escalamiento rancio
@@ -2132,12 +2138,22 @@ def escalamiento_vivo_con_motivo(conn, id_conversacion: str, motivo: str) -> boo
       duplicado. Sin esto, la clave se quemaría al INTENTAR y no al CONSEGUIR, y un 5xx de
       Telegram dejaría al paciente «escalado» en una tabla que nadie mira.
     - **`respondido_en IS NULL`** -- si el doctor ya contestó, ese asunto se cerró y lo que
-      venga después es nuevo, aunque el motivo se repita. **Hoy esa columna NO la escribe
-      nadie** (`escalamientos` solo recibe `telegram_message_id` y `relevo_activado`), así
-      que de momento esta condición no descarta nada: está aquí para el día que se marque, y
-      decirlo es más honesto que fingir que ya cierra el ciclo. Y NO vale `relevo_activado`
+      venga después es nuevo, aunque el motivo se repita. La escribe `relevo.cerrar`, y solo él
+      (17/09/2026): un doctor tomó la conversación, habló con el paciente y la devolvió.
+      Antes no la escribía nadie y el silencio duraba las 24 h aunque el asunto estuviera
+      atendido EN PERSONA. Y NO vale `relevo_activado`
       en su lugar: en el caso medido el doctor tomó el relevo en el turno 2 y lo devolvió, y
       los turnos 3 y 4 son justo los que hay que callar.
+    - **y el aviso TIENE QUE SEGUIR EN EL GENERAL**, cosa que este SQL no puede saber. Por
+      eso devuelve el `telegram_message_id` en vez de un `bool`: quien llama le pregunta a
+      Telegram con `canales.aviso_sigue_puesto`. **Borrar un mensaje no emite ningún
+      evento**, igual que borrar un tema, así que la fila sigue diciendo «lo tiene delante»
+      después de que el doctor lo haya borrado -- y eso callaba TODO lo que viniera después
+      durante las 24 h de la conversación. Medido el 17/09/2026 sobre el aviso 855.
+      El segundo valor, `relevo_activado` (un BOOLEAN, no una marca de tiempo), evita
+      sondear un aviso que
+      ya sirvió: ahí el teclado del General es el enlace «Ir al hilo», y la sonda se lo
+      cambiaría por el botón de tomar una conversación que alguien ya tiene.
 
     ------------------------------------------------------------------------------------
     Cuánto silencia esto de verdad, dicho para que nadie lo descubra solo
@@ -2164,13 +2180,62 @@ def escalamiento_vivo_con_motivo(conn, id_conversacion: str, motivo: str) -> boo
     """
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT 1 FROM escalamientos "
+            "SELECT telegram_message_id, COALESCE(relevo_activado, FALSE) FROM escalamientos "
             "WHERE conversacion_id = %s AND motivo = %s "
             "  AND telegram_message_id IS NOT NULL AND respondido_en IS NULL "
-            "LIMIT 1",
+            "ORDER BY id DESC LIMIT 1",
             (id_conversacion, motivo),
         )
-        return cur.fetchone() is not None
+        fila = cur.fetchone()
+        return (fila[0], bool(fila[1])) if fila else None
+
+
+def marcar_escalamientos_respondidos(conn, id_conversacion: str) -> int:
+    """Da por respondidos los escalamientos vivos de esa conversación. Devuelve cuántos.
+
+    La escribe UNA sola cosa: `relevo.cerrar`. Un doctor tomó la conversación, habló con el
+    paciente y la devolvió -- eso es exactamente lo que `respondido_en` significa desde la
+    migración 001, y hasta el 17/09/2026 no la ponía nadie.
+
+    ------------------------------------------------------------------------------------
+    Qué se rompía sin esto
+    ------------------------------------------------------------------------------------
+
+    `escalamiento_vivo_con_motivo` pregunta por `respondido_en IS NULL`. Con la columna
+    muerta, un escalamiento que un humano ya había atendido y cerrado seguía contando como
+    «delante del doctor y sin responder» durante las 24 h que vive la conversación, y callaba
+    todo aviso posterior del mismo motivo. Y no solo el aviso: `runtime._avisar_a_doctores`
+    sale antes de llamar a `lectura.rescatar_hilo`, así que al callarse el aviso **tampoco se
+    recreaba el hilo del paciente**. El doctor que había borrado el hilo se quedaba sin las
+    dos puertas a la vez.
+
+    Medido el 17/09/2026 sobre +573196842471: relevo tomado por `dato_faltante` y devuelto a
+    los 100 segundos. Lo que salvó el caso fue que el escalamiento siguiente cambió de motivo.
+
+    ------------------------------------------------------------------------------------
+    Por qué esto NO reabre el ruido que se calló el día antes
+    ------------------------------------------------------------------------------------
+
+    `escalamiento_vivo_con_motivo` advierte que «NO vale `relevo_activado` en su lugar», y
+    tiene razón: esa columna se pone al TOMAR. Esta se pone al CERRAR, que es otra cosa --el
+    ciclo completo, con un humano decidiendo que terminó--. Contrastado contra las filas del
+    caso medido (conversación 5807c84b, escalamientos 99/101/103/105): el ruido del 16/09 se
+    produjo con el relevo todavía sin cerrar o sin haber existido, así que esta marca no lo
+    habría dejado pasar. Lo único que devuelve es lo que llega DESPUÉS del cierre.
+
+    `respondido_en IS NULL` en el `WHERE` y no un `UPDATE` a secas: el cierre puede correr dos
+    veces --las salidas del relevo se solapan-- y la marca tiene que conservar la hora del
+    primero, que es cuando el asunto se atendió de verdad.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE escalamientos SET respondido_en = now() "
+            " WHERE conversacion_id = %s AND respondido_en IS NULL",
+            (id_conversacion,),
+        )
+        marcados = cur.rowcount
+    conn.commit()
+    return marcados
 
 
 def anotar_telegram_en_escalamiento(conn, escalamiento_id: int, message_id: int) -> None:
@@ -2493,7 +2558,11 @@ def anotar_consentimiento(
     version: str | None = None,
     detalle: str | None = None,
 ) -> None:
-    """Una línea en la bitácora. Solo se añade: nada la modifica ni la borra.
+    """Una línea en la bitácora. Nada la borra, y solo una cosa la modifica.
+
+    Esa cosa es `borrar_rastro`, que pone `detalle` en NULL --la frase del paciente-- y deja
+    intacto todo lo demás. Es el derecho de supresión de la política §13, y es la única
+    excepción: ninguna fila se va, ningún otro campo cambia.
 
     No hace `commit()` a propósito -- las tres funciones de abajo la llaman dentro de su
     propia transacción, para que el estado y su rastro entren o no entren juntos. Un estado
@@ -2755,6 +2824,34 @@ def borrar_rastro(conn, telefono: str, *, conservar_wamid: str | None = None) ->
                    SET aviso_mostrado_en = NULL, politica_version = NULL,
                        actualizado_en = now()
                  WHERE telefono = %(tel)s
+                """,
+                parametros,
+            )
+
+            # La frase que el paciente dejó al pedir la baja, y lo ÚNICO de esta tabla que
+            # es suyo: `detalle` lo escribe el modelo copiando lo que la persona dijo. Todo
+            # lo demás --qué evento fue, cuándo, quién lo pidió, sobre qué versión de la
+            # política-- es el hecho, y el hecho es justo lo que la Ley 1581 pide poder
+            # acreditar. Así que se redacta la frase y se conserva la fila.
+            #
+            # Sin esto, la política publicada prometía en su §13 el derecho a «solicitar la
+            # supresión de datos» y el esquema lo impedía: la FK es `ON DELETE RESTRICT` y
+            # ninguna ruta de borrado tocaba la bitácora. Un documento que promete lo que el
+            # sistema no puede cumplir es peor que no prometerlo.
+            #
+            # El `WHERE` va por teléfono y esto NO tiene vuelta atrás: aflojarlo se lleva por
+            # delante la frase de otra persona y no hay de dónde recuperarla.
+            # `test_la_redaccion_no_alcanza_a_otro_telefono` lo vigila.
+            #
+            # Tampoco entra en `borradas`, por lo mismo que el reseteo del aviso de aquí
+            # arriba: no se borró ninguna fila, y contarlo como borrada le diría al paciente
+            # que se retiró algo que sigue ahí.
+            cur.execute(
+                """
+                UPDATE consentimientos
+                   SET detalle = NULL
+                 WHERE telefono = %(tel)s
+                   AND detalle IS NOT NULL
                 """,
                 parametros,
             )

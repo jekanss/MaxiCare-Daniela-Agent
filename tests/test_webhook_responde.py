@@ -55,6 +55,7 @@ from maxicare_daniela import (  # noqa: E402
     herramientas,
     ingesta,
     persistencia,
+    relevo,
     runtime,
 )
 from maxicare_daniela.calendario import (  # noqa: E402
@@ -491,12 +492,20 @@ def test_atencion_tampoco_cae_a_un_doble_con_las_credenciales_vacias():
 
 
 class TelegramFalso:
-    def __init__(self) -> None:
+    def __init__(self, aviso_sigue: bool | None = True) -> None:
         self.enviados: list[dict] = []
+        #: Qué contesta la sonda de `aviso_sigue_puesto`. `True` es «el aviso sigue en el
+        #: General», que es el caso normal; `False` es «el doctor lo borró».
+        self._aviso_sigue = aviso_sigue
+        self.sondeados: list[int] = []
 
     async def enviar_mensaje(self, texto, *, tema_id=None, teclado=None, silencioso=False) -> int:
         self.enviados.append({"texto": texto, "tema_id": tema_id, "teclado": teclado})
         return 4242
+
+    async def aviso_sigue_puesto(self, mensaje_id: int, teclado: dict) -> bool | None:
+        self.sondeados.append(mensaje_id)
+        return self._aviso_sigue
 
 
 class ConexionFalsa:
@@ -540,7 +549,7 @@ def base_falsa(monkeypatch) -> list[dict]:
     # con un `AttributeError` que `_avisar_a_doctores` se traga -- y el síntoma sería «no
     # salió ningún Telegram», que es exactamente lo que estas pruebas creen estar midiendo.
     monkeypatch.setattr(
-        persistencia, "escalamiento_vivo_con_motivo", lambda conn, id_conversacion, motivo: False
+        persistencia, "escalamiento_vivo_con_motivo", lambda conn, id_conversacion, motivo: None
     )
     return registradas
 
@@ -624,7 +633,7 @@ def test_un_turno_que_ya_escalo_no_manda_un_segundo_telegram(monkeypatch):
     # --promete no propagar-- y no sale ningún Telegram: la prueba pasaba EN VERDE midiendo
     # un error en vez de la deduplicación. Verde por el motivo equivocado es peor que rojo.
     monkeypatch.setattr(
-        persistencia, "escalamiento_vivo_con_motivo", lambda conn, id_conversacion, motivo: False
+        persistencia, "escalamiento_vivo_con_motivo", lambda conn, id_conversacion, motivo: None
     )
     monkeypatch.setattr(
         persistencia, "escalamiento_pendiente_de_aviso", lambda _conn, clave: None
@@ -656,7 +665,7 @@ def test_un_escalamiento_escrito_pero_NUNCA_avisado_se_reintenta(monkeypatch):
     # Falso, y no por comodidad: la fila de esta prueba se quedó SIN `telegram_message_id`,
     # y la consulta de verdad exige que lo tenga. Es la misma frontera que mide la prueba.
     monkeypatch.setattr(
-        persistencia, "escalamiento_vivo_con_motivo", lambda conn, id_conversacion, motivo: False
+        persistencia, "escalamiento_vivo_con_motivo", lambda conn, id_conversacion, motivo: None
     )
     # La clave ya existe: `insertar_escalamiento` no escribe nada.
     monkeypatch.setattr(persistencia, "insertar_escalamiento", lambda _conn, **kw: None)
@@ -689,7 +698,7 @@ def test_un_escalamiento_YA_avisado_no_se_reintenta(monkeypatch):
     # por asunto en `True` el Telegram se callaría por el otro motivo. Ver el comentario de
     # `test_un_turno_que_ya_escalo_no_manda_un_segundo_telegram`.
     monkeypatch.setattr(
-        persistencia, "escalamiento_vivo_con_motivo", lambda conn, id_conversacion, motivo: False
+        persistencia, "escalamiento_vivo_con_motivo", lambda conn, id_conversacion, motivo: None
     )
     monkeypatch.setattr(
         persistencia, "escalamiento_pendiente_de_aviso", lambda _conn, clave: None
@@ -723,7 +732,9 @@ def test_un_asunto_que_el_doctor_YA_TIENE_sin_responder_no_se_repite_al_turno_si
     monkeypatch.setattr(runtime, "_telegram", telegram)
     monkeypatch.setattr(persistencia, "conectar", lambda url: ConexionFalsa())
     monkeypatch.setattr(
-        persistencia, "escalamiento_vivo_con_motivo", lambda conn, id_conversacion, motivo: True
+        persistencia,
+        "escalamiento_vivo_con_motivo",
+        lambda conn, id_conversacion, motivo: (855, False),
     )
     monkeypatch.setattr(
         persistencia,
@@ -738,6 +749,120 @@ def test_un_asunto_que_el_doctor_YA_TIENE_sin_responder_no_se_repite_al_turno_si
         "se escribió una fila que nadie iba a avisar: `telegram_message_id` NULL dejaría de "
         "significar «el Telegram no salió»"
     )
+
+
+def test_un_aviso_que_el_doctor_BORRO_del_General_no_calla_el_siguiente(monkeypatch):
+    """El bug reportado, medido en producción el 17/09/2026 sobre el aviso 855.
+
+    La guarda del turno rancio mide «lo tiene delante» con `telegram_message_id IS NOT NULL`.
+    Esa premisa se cae en cuanto el doctor **borra el mensaje del General**, que es justo lo
+    que hace para dejar la bandeja limpia de un paciente ya atendido -- y Telegram no emite
+    ningún evento al borrar un mensaje, igual que no lo emite al borrar un tema.
+
+    Lo medido: escalamiento 127, `telegram_message_id=855`, `respondido_en` NULL porque
+    nadie llegó a pulsar su botón. El doctor borró el 855. A partir de ahí los turnos 3 y 4
+    se callaron, y se habrían callado todos durante las 24 h de vida de la conversación: sin
+    aviso, sin botón y **sin hilo** --`rescatar_hilo` cuelga del aviso que se calla--. Desde
+    fuera: «Daniela escala y en Telegram no vuelve a salir nada».
+
+    Es el mismo fallo que el tema borrado y que el tema reabierto, por tercera vez: el
+    sistema da por vivo un objeto de Telegram porque algún día lo estuvo.
+    """
+    ctx = _contexto()
+    telegram = TelegramFalso(aviso_sigue=False)  # el doctor borró el 855
+    escritas: list[dict] = []
+
+    monkeypatch.setattr(runtime, "_telegram", telegram)
+    monkeypatch.setattr(persistencia, "conectar", lambda url: ConexionFalsa())
+    monkeypatch.setattr(
+        persistencia,
+        "escalamiento_vivo_con_motivo",
+        lambda conn, id_conversacion, motivo: (855, False),
+    )
+    monkeypatch.setattr(
+        persistencia, "insertar_escalamiento", lambda _conn, **kw: escritas.append(kw) or 12
+    )
+    monkeypatch.setattr(
+        persistencia, "anotar_telegram_en_escalamiento", lambda conn, eid, mid: None
+    )
+
+    avisado = asyncio.run(
+        runtime._avisar_a_doctores(ctx, "clinico", "Sigo sin poder resolver esto.")
+    )
+
+    assert telegram.sondeados == [855], "no se le preguntó a Telegram si el aviso seguía ahí"
+    assert len(telegram.enviados) == 1, (
+        "el doctor borró el aviso y el sistema siguió creímdolo vivo: se calló el siguiente"
+    )
+    assert telegram.enviados[0]["teclado"] == relevo.teclado_tomar_conversacion(
+        ctx.id_conversacion
+    ), "el aviso nuevo tiene que traer el botón, o el doctor no puede tomar la conversación"
+    assert escritas, "sin fila no hay nada que marcar como respondido después"
+    assert avisado is True
+
+
+def test_un_aviso_que_el_doctor_YA_TOMO_se_calla_sin_preguntarle_a_telegram(monkeypatch):
+    """La otra cara, y la que impide que la sonda estropee un relevo vivo.
+
+    Cuando un doctor pulsa el botón, `relevo.activar` le cambia el teclado al mensaje del
+    General por el enlace «Ir al hilo» y marca la fila con `relevo_activado`. Sondear ahí
+    con el teclado de tomar no solo sobra --se sabe que el aviso sirvió-- sino que le
+    devolvería el botón «Hablar yo con el paciente» a una conversación que alguien ya tiene.
+
+    Por eso la guarda devuelve también si el aviso fue TOMADO, y con eso puesto se calla
+    directamente: no hay nada que comprobar.
+    """
+    ctx = _contexto()
+    telegram = TelegramFalso()
+    escritas: list[dict] = []
+
+    monkeypatch.setattr(runtime, "_telegram", telegram)
+    monkeypatch.setattr(persistencia, "conectar", lambda url: ConexionFalsa())
+    monkeypatch.setattr(
+        persistencia,
+        "escalamiento_vivo_con_motivo",
+        lambda conn, id_conversacion, motivo: (855, True),
+    )
+    monkeypatch.setattr(
+        persistencia, "insertar_escalamiento", lambda _conn, **kw: escritas.append(kw) or 12
+    )
+
+    avisado = asyncio.run(runtime._avisar_a_doctores(ctx, "clinico", "Sigo igual."))
+
+    assert telegram.sondeados == [], "se sondeó un aviso que ya había servido"
+    assert telegram.enviados == []
+    assert escritas == []
+    assert avisado is False
+
+
+def test_si_no_se_puede_saber_si_el_aviso_sigue_ahi_se_AVISA(monkeypatch):
+    """El lado del que hay que equivocarse, y no es el del silencio.
+
+    `aviso_sigue_puesto` devuelve `None` cuando Telegram no contesta o contesta algo que no
+    se sabe leer. Tomarlo por «sigue puesto» significa callar una alerta clínica por un mal
+    minuto de la red; tomarlo por «lo borraron» significa, como mucho, un aviso repetido.
+
+    El principio que decide el empate está escrito en el proyecto: la seguridad clínica
+    prevalece. Un aviso de más es ruido; uno de menos es un paciente con dolor que nadie ve.
+    """
+    ctx = _contexto()
+    telegram = TelegramFalso(aviso_sigue=None)
+
+    monkeypatch.setattr(runtime, "_telegram", telegram)
+    monkeypatch.setattr(persistencia, "conectar", lambda url: ConexionFalsa())
+    monkeypatch.setattr(
+        persistencia,
+        "escalamiento_vivo_con_motivo",
+        lambda conn, id_conversacion, motivo: (855, False),
+    )
+    monkeypatch.setattr(persistencia, "insertar_escalamiento", lambda _conn, **kw: 13)
+    monkeypatch.setattr(
+        persistencia, "anotar_telegram_en_escalamiento", lambda conn, eid, mid: None
+    )
+
+    asyncio.run(runtime._avisar_a_doctores(ctx, "clinico", "Sigo sin poder resolver esto."))
+
+    assert len(telegram.enviados) == 1, "ante la duda se calló una alerta clínica"
 
 
 def test_un_motivo_DISTINTO_si_pasa_aunque_el_anterior_siga_sin_responder(monkeypatch):
@@ -756,7 +881,7 @@ def test_un_motivo_DISTINTO_si_pasa_aunque_el_anterior_siga_sin_responder(monkey
     monkeypatch.setattr(
         persistencia,
         "escalamiento_vivo_con_motivo",
-        lambda conn, id_conversacion, motivo: motivo == "clinico",
+        lambda conn, id_conversacion, motivo: (855, False) if motivo == "clinico" else None,
     )
     monkeypatch.setattr(persistencia, "insertar_escalamiento", lambda _conn, **kw: 11)
     monkeypatch.setattr(
@@ -830,7 +955,7 @@ def test_en_un_turno_de_verdad_el_doctor_recibe_UN_telegram_y_no_dos(monkeypatch
     # Esta prueba mide la deduplicación POR TURNO (la clave). La de por asunto se mide
     # aparte; doblarla en falso aquí deja a la vista lo que esta prueba vino a ver.
     monkeypatch.setattr(
-        persistencia, "escalamiento_vivo_con_motivo", lambda conn, id_conversacion, motivo: False
+        persistencia, "escalamiento_vivo_con_motivo", lambda conn, id_conversacion, motivo: None
     )
     monkeypatch.setattr(persistencia, "insertar_escalamiento", insertar_con_deduplicacion)
     monkeypatch.setattr(
@@ -882,6 +1007,60 @@ def test_en_un_turno_de_verdad_el_doctor_recibe_UN_telegram_y_no_dos(monkeypatch
     )
     assert len(telegram.enviados) == 1, (
         "el doctor recibió el mismo escalamiento dos veces; a la cuarta deja de mirarlas"
+    )
+
+
+def test_el_aviso_de_la_red_de_seguridad_lleva_el_boton_de_relevo(monkeypatch, base_falsa):
+    """Un aviso sin puerta no sirve de nada, y esta era la única de las dos que no la tenía.
+
+    Los dos caminos de escalamiento acaban en el mismo sitio --el General-- pero solo la tool
+    colgaba el botón. Este camino corre justo cuando el modelo NO llamó a ninguna tool: el
+    turno se rompió solo, o cerró con la bandera puesta. Es decir, es el aviso de los casos en
+    que el sistema menos sabe qué hacer, y era el que dejaba al doctor mirando un texto sin
+    nada que pulsar.
+
+    Medido el 17/09/2026: el doctor borró el hilo del paciente y el mensaje del escalamiento,
+    y esperaba que al volver a escalar reapareciera la puerta. Por la tool reaparece; por aquí
+    no habría reaparecido nunca.
+    """
+    ctx = _contexto()
+    telegram = TelegramFalso()
+    monkeypatch.setattr(runtime, "_telegram", telegram)
+
+    asyncio.run(runtime._avisar_a_doctores(ctx, "clinico", "Ya te confirmo."))
+
+    teclado = telegram.enviados[0]["teclado"]
+    assert teclado is not None, "el aviso llegó sin botón: el doctor no puede tomar la conversación"
+    boton = teclado["inline_keyboard"][0][0]
+    assert boton["text"] == "Hablar yo con el paciente"
+    assert boton["callback_data"] == f"{relevo.PREFIJO_TOMAR}conv-441"
+
+
+def test_la_red_de_seguridad_tambien_cuelga_la_puerta_en_el_hilo_del_paciente(
+    monkeypatch, base_falsa
+):
+    """La simétrica de la de la tool (`test_herramientas.py`). Los dos caminos de escalamiento
+    tienen que dejar la puerta donde el doctor mira, y este es el que corre cuando el modelo
+    no llamó a nada.
+
+    Igual que allí: al hilo baja el motivo y el botón, nunca el resumen -- eso es del General.
+    """
+    ctx = _contexto()
+    telegram = TelegramFalso()
+    monkeypatch.setattr(runtime, "_telegram", telegram)
+
+    async def hilo_falso(**_kwargs):
+        return 77
+
+    monkeypatch.setattr(runtime.lectura, "rescatar_hilo", hilo_falso)
+
+    asyncio.run(runtime._avisar_a_doctores(ctx, "clinico", "Ya te confirmo."))
+
+    en_el_hilo = [e for e in telegram.enviados if e["tema_id"] == 77]
+    assert en_el_hilo, "el hilo del paciente se quedó sin puerta al relevo"
+    assert "Hablar yo con el paciente" in str(en_el_hilo[0]["teclado"])
+    assert "Ya te confirmo" not in en_el_hilo[0]["texto"], (
+        "lo que se le dijo al paciente es para el General, no para su expediente"
     )
 
 

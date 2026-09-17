@@ -17,7 +17,7 @@ import json
 import pytest
 
 from maxicare_daniela import persistencia, relevo
-from maxicare_daniela.canales import Telegram
+from maxicare_daniela.canales import HiloInvalido, Telegram
 
 CONV = "11111111-2222-3333-4444-555555555555"
 
@@ -28,6 +28,9 @@ avisos: list[tuple[str, str]] = []
 relevos_contados: list[str] = []
 TEL = "573001110101"
 TEMA = 777
+#: El hilo que ya estaba atado al telefono antes de este relevo. Distinto de `TEMA`, que
+#: es el que devuelve `crear_tema`: sin esa diferencia no se ve si se rehizo o se reuso.
+TEMA_VIEJO = 555
 MENSAJE_DEL_GENERAL = 4242
 URL = "postgresql://x"
 
@@ -41,8 +44,21 @@ class TelegramFalso:
     """Apunta todo lo que se le pide. No valida nada: eso lo hacen las aserciones."""
 
     def __init__(
-        self, *, falla_al_crear_tema: bool = False, estado_tema: str | None = "abierto"
+        self,
+        *,
+        falla_al_crear_tema: bool = False,
+        estado_tema: str | None = "abierto",
+        tema_borrado: bool = False,
+        temas_muertos: tuple[int, ...] = (),
     ) -> None:
+        #: Temas que Telegram TODAVIA acepta reabrir --contesta `ok: true`-- pero en los que
+        #: ya no deja escribir. Es la ventana real de unos segundos que hay tras borrar un
+        #: tema, medida el 17/09/2026: `reopenForumTopic` sigue diciendo que si mientras
+        #: `sendMessage` ya rechaza con `message thread not found`.
+        self._temas_muertos = temas_muertos
+        #: El doctor borro el hilo a mano. Telegram no emite ningun evento al borrar un tema,
+        #: asi que el rechazo de `reabrir_tema` es la unica noticia que llega.
+        self._tema_borrado = tema_borrado
         self.comprobados: list[int] = []
         self._estado_tema = estado_tema
         self.mensajes: list[tuple[str, int | None, bool, dict | None]] = []
@@ -62,6 +78,8 @@ class TelegramFalso:
         self._falla_al_crear_tema = falla_al_crear_tema
 
     async def enviar_mensaje(self, texto, *, tema_id=None, teclado=None, silencioso=False) -> int:
+        if tema_id in self._temas_muertos:
+            raise HiloInvalido("Telegram rechazo el mensaje: Bad Request: message thread not found")
         self.mensajes.append((texto, tema_id, silencioso, teclado))
         self.orden.append(f"mensaje:{tema_id}")
         return 900 + len(self.mensajes)
@@ -70,6 +88,10 @@ class TelegramFalso:
         self.callbacks.append((callback_id, texto, alerta))
 
     async def reabrir_tema(self, tema_id) -> None:
+        if self._tema_borrado:
+            # Lo que contesta Telegram de verdad sobre un tema que ya no existe. Medido en
+            # produccion el 17/09/2026: `Bad Request: TOPIC_ID_INVALID`.
+            raise HiloInvalido("Telegram no reabrio el tema: Bad Request: TOPIC_ID_INVALID")
         self.reabiertos.append(tema_id)
 
     async def cerrar_tema(self, tema_id) -> None:
@@ -229,6 +251,10 @@ def _sin_base(monkeypatch):
     # `postgresql://x` y esperan a que el `except` la dé por perdida: cinco segundos de la
     # suite, repartidos donde nadie los busca.
     monkeypatch.setattr(relevo, "_olvidar_tema", lambda url, tel: True)
+    # Igual, y peor: `cerrar` llama a esta SIEMPRE, no solo en el caso del hilo borrado. Sin
+    # doblarla, este archivo pasó de 2 s a 53 s. Las dos pruebas que miran esta marca la
+    # vuelven a doblar con un espía.
+    monkeypatch.setattr(relevo, "_marcar_escalamientos_respondidos", lambda url, conv: 0)
 
     # Lo que cruza el muro hacia Daniela. Doblado con un espía y NO con un `lambda` vacío:
     # varias pruebas de aquí comprueban QUÉ se le inyecta, y sin doblarlo `sesion_de_agente`
@@ -473,6 +499,93 @@ def test_si_el_hilo_no_se_puede_abrir_el_relevo_se_deshace(monkeypatch):
     assert tg.textos_en(0), "nadie se enteró de que el relevo no llegó a activarse"
 
 
+def test_si_el_doctor_BORRO_el_hilo_el_relevo_se_activa_en_uno_NUEVO(monkeypatch):
+    """El caso real, medido en producción el 17/09/2026 a las 08:32:35.
+
+    El doctor cierra un relevo y borra el hilo del paciente para que no le entren más
+    mensajes. La fila de `temas_telegram` se queda apuntando a un `topic_id` muerto --borrar
+    un tema no emite ningún evento, así que nadie se entera--. El paciente vuelve a escalar,
+    el botón aparece, el doctor lo pulsa... y:
+
+        ERROR  no se pudo abrir el hilo de +57...; se deshace el relevo
+        ErrorDeCanal: Telegram no reabrió el tema: Bad Request: TOPIC_ID_INVALID
+
+    **El relevo se deshacía entero.** Y el camino que lo deshacía llama a `_cerrar_en_base`
+    directo, no a `relevo.cerrar`, así que **no olvidaba la fila muerta**: el segundo intento
+    fallaba igual, y el tercero, hasta que por casualidad llegara un texto del paciente y
+    fuera `ingesta` quien la olvidara. Desde el lado del doctor: «no puedo volver a tomar la
+    conversación».
+
+    Un hilo borrado no es un fallo de Telegram: es un hilo que hay que rehacer. Es la misma
+    reacción que ya tenía `ingesta` ante `HiloInvalido` --olvidar y seguir-- y la que
+    `relevo.cerrar` aplica con `tema_perdido`. Faltaba en el único camino por el que el
+    doctor entra.
+    """
+    olvidados: list[str] = []
+    monkeypatch.setattr(
+        relevo, "_olvidar_tema", lambda url, tel: olvidados.append(tel) or True
+    )
+    cierres: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        relevo,
+        "_cerrar_en_base",
+        lambda url, conv, motivo: cierres.append((conv, motivo)) or True,
+    )
+    tg = TelegramFalso(tema_borrado=True)
+
+    _activar(tg, tema_general=0)
+
+    assert cierres == [], "el relevo se deshizo: el doctor no pudo tomar la conversación"
+    assert olvidados == [TEL], "la fila muerta se quedó; el siguiente intento fallaría igual"
+    assert tg.creados, "no se abrió ningún hilo nuevo donde hablarle al paciente"
+    # Y el relevo quedó de verdad activo: bienvenida dentro del hilo nuevo, con su botón.
+    bienvenidas = [m for m in tg.mensajes if m[1] == TEMA]
+    assert bienvenidas, "el hilo nuevo nació sin la bienvenida que ancla el botón de salida"
+
+
+def test_si_la_bienvenida_cae_en_un_hilo_MUERTO_el_relevo_se_rehace_en_uno_NUEVO(monkeypatch):
+    """La ventana que `reabrir_tema` no puede ver, encontrada recorriendo el ciclo de verdad.
+
+    Telegram tarda **varios segundos** en dejar de aceptar operaciones sobre un tema recien
+    borrado. Medido el 17/09/2026 contra la API: justo despues de `deleteForumTopic`,
+    `reopenForumTopic` sigue respondiendo `ok: true` --o sea, «lo he reabierto»-- mientras
+    `sendMessage` sobre ese mismo tema ya rechaza con `message thread not found`.
+
+    En esa ventana `_tema_abierto_para` da el hilo muerto por bueno --no tiene con que verlo--
+    y la bienvenida revienta. El `except` de fuera de `activar` se lo tragaba y dejaba el peor
+    estado posible: **`tomada_por` puesto, Daniela callada, y ningun hilo por el que hablarle
+    al paciente**. Nadie se entera hasta que el barrido corta por tiempo.
+
+    No es de laboratorio: es exactamente lo que hace un doctor que borra el topic y sigue
+    probando con el mismo paciente. La reaccion es la de siempre --un hilo muerto es un hilo
+    que hay que rehacer-- aplicada donde de verdad se descubre, que es al escribir.
+    """
+    olvidados: list[str] = []
+    monkeypatch.setattr(
+        relevo, "_olvidar_tema", lambda url, tel: olvidados.append(tel) or True
+    )
+    cierres: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        relevo,
+        "_cerrar_en_base",
+        lambda url, conv, motivo: cierres.append((conv, motivo)) or True,
+    )
+    # El hilo que hay en la base (TEMA_VIEJO) acepta que lo reabran pero ya no acepta texto.
+    tg = TelegramFalso(temas_muertos=(TEMA_VIEJO,))
+    monkeypatch.setattr(relevo, "_tema_de", lambda url, tel: TEMA_VIEJO)
+
+    _activar(tg, tema_general=0)
+
+    assert cierres == [], "el relevo se deshizo en vez de rehacer el hilo"
+    assert olvidados == [TEL], "la fila muerta se quedo: el siguiente intento fallaria igual"
+    assert tg.creados, "no se abrio ningun hilo nuevo donde hablarle al paciente"
+    bienvenidas = [m for m in tg.mensajes if m[1] == TEMA]
+    assert bienvenidas, (
+        "el doctor quedo con la conversacion tomada y sin hilo: Daniela callada y nadie "
+        "hablandole al paciente"
+    )
+
+
 # ==========================================================================================
 # Doctor -> paciente
 # ==========================================================================================
@@ -621,6 +734,51 @@ def test_cerrar_devuelve_la_conversacion_y_vuelve_a_poner_el_candado():
     assert tg.cerrados == [TEMA]
     despedidas = [m for m in tg.mensajes if m[1] == TEMA]
     assert despedidas and despedidas[0][2] is True, "la despedida sonó: el relevo ya terminó"
+
+
+def test_cerrar_marca_como_respondido_el_escalamiento_que_el_doctor_acaba_de_atender(
+    monkeypatch,
+):
+    """El asunto que un doctor atendió EN PERSONA y devolvió deja de estar pendiente.
+
+    Sin esto, `persistencia.escalamiento_vivo_con_motivo` sigue viendo esa fila como «delante
+    del doctor y sin responder» durante las 24 h que vive la conversación, y calla **todo**
+    aviso posterior del mismo motivo. El doctor habló con el paciente, cerró el relevo, y el
+    sistema seguía creyendo que lo tenía pendiente.
+
+    Medido el 17/09/2026 sobre +573196842471: el doctor tomó el relevo por `dato_faltante`, lo
+    devolvió, y borró el hilo. Le salvó la casualidad de que el escalamiento siguiente cambió
+    de motivo (`excepcion_comercial`); con el mismo motivo no habría vuelto a sonar nada -- ni
+    el aviso, ni el botón, ni el hilo, porque `rescatar_hilo` cuelga del aviso que se calla.
+
+    **Y no reabre el ruido que se calló el 16/09.** Ese ruido (escalamientos 101, 103 y 105 de
+    la conversación 5807c84b) se midió con el relevo TODAVÍA SIN CERRAR o sin haber existido:
+    marcar al cerrar no lo toca. Lo que devuelve es solo lo que viene después de que un humano
+    dio el asunto por terminado.
+    """
+    respondidos: list[str] = []
+    monkeypatch.setattr(
+        relevo, "_marcar_escalamientos_respondidos", lambda url, conv: respondidos.append(conv)
+    )
+
+    assert _cerrar(TelegramFalso()) is True
+
+    assert respondidos == [CONV]
+
+
+def test_un_cierre_que_no_ocurre_no_marca_ningun_escalamiento(monkeypatch):
+    """El falso positivo de la de arriba. `cerrar` es idempotente: la segunda salida devuelve
+    `False` y no puede tocar nada, o el barrido que llega tarde daría por respondido un asunto
+    que el doctor abrió de nuevo entre medias."""
+    monkeypatch.setattr(relevo, "_cerrar_en_base", lambda url, conv, motivo: False)
+    respondidos: list[str] = []
+    monkeypatch.setattr(
+        relevo, "_marcar_escalamientos_respondidos", lambda url, conv: respondidos.append(conv)
+    )
+
+    assert _cerrar(TelegramFalso()) is False
+
+    assert respondidos == []
 
 
 def test_cerrar_dos_veces_no_deja_dos_despedidas(monkeypatch):

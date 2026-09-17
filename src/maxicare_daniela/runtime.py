@@ -59,6 +59,7 @@ from . import (
     contratos,
     conversacion,
     ingesta,
+    lectura,
     panel,
     persistencia,
     relevo,
@@ -753,14 +754,6 @@ def _registrar_escalamiento(
     # tool se reconozcan como el mismo escalamiento.
     clave = ctx.clave("escalamiento", ctx.turno_actual)
     with persistencia.conectar(ctx.database_url) as conn:
-        if persistencia.escalamiento_vivo_con_motivo(conn, ctx.id_conversacion, motivo):
-            log.info(
-                "%s ya tiene un escalamiento por %s delante del doctor y sin responder; "
-                "no se repite",
-                ctx.id_conversacion,
-                motivo,
-            )
-            return None
         nuevo = persistencia.insertar_escalamiento(
             conn,
             id_conversacion=ctx.id_conversacion,
@@ -772,6 +765,61 @@ def _registrar_escalamiento(
         if nuevo is not None:
             return nuevo
         return persistencia.escalamiento_pendiente_de_aviso(conn, clave)
+
+
+def _aviso_vivo(ctx: ContextoDaniela, motivo: str) -> tuple[int, bool] | None:
+    """`(mensaje del General, ya lo tomó un doctor)` del asunto que ya está avisado.
+
+    Sincrónico, como todo lo de `persistencia`. Salió de `_registrar_escalamiento` el
+    17/09/2026 porque la guarda dejó de poder decidirse solo con la base: hace falta
+    preguntarle a Telegram si ese aviso sigue existiendo, y eso es `async`.
+    """
+    with persistencia.conectar(ctx.database_url) as conn:
+        return persistencia.escalamiento_vivo_con_motivo(conn, ctx.id_conversacion, motivo)
+
+
+async def _el_doctor_ya_lo_tiene_delante(ctx: ContextoDaniela, motivo: str) -> bool:
+    """¿Hay un aviso de este asunto delante del doctor AHORA MISMO? Entonces no se repite.
+
+    Las dos mitades de la respuesta, y por qué no basta la primera:
+
+    1. **La base** dice si hay un escalamiento del mismo motivo, entregado y sin responder
+       (`persistencia.escalamiento_vivo_con_motivo`). Esa era toda la guarda hasta hoy.
+    2. **Telegram** dice si ese mensaje sigue en el General. La base no puede saberlo:
+       borrar un mensaje no emite ningún evento, igual que borrar un tema. Medido en
+       producción el 17/09/2026 -- el doctor borró el aviso 855 para dejar el General
+       limpio, la fila siguió diciendo «lo tiene delante», y los turnos 3 y 4 se callaron.
+       Se habrían callado todos durante las 24 h de vida de la conversación: sin aviso, sin
+       botón y sin hilo, porque `rescatar_hilo` cuelga del aviso que se calla.
+
+    Un aviso ya TOMADO no se sondea: se sabe que sirvió, y además su teclado ya no es el de
+    tomar --`activar` lo cambió por el enlace al hilo--, así que la sonda se lo devolvería.
+
+    Ante la duda (`None`: Telegram no contestó, o contestó algo que no se sabe leer) **se
+    avisa**. Un aviso de más es ruido; uno de menos es un paciente con dolor que nadie ve, y
+    el principio que decide los empates en este proyecto es la seguridad clínica.
+    """
+    vivo = await asyncio.to_thread(_aviso_vivo, ctx, motivo)
+    if vivo is None:
+        return False
+
+    mensaje_del_aviso, ya_tomado = vivo
+    if ya_tomado:
+        return True
+
+    sigue = await _telegram.aviso_sigue_puesto(
+        mensaje_del_aviso, relevo.teclado_tomar_conversacion(ctx.id_conversacion)
+    )
+    if sigue is False:
+        log.info(
+            "el aviso %s de %s por %s ya no está en el General --lo borraron--; no calla "
+            "al siguiente",
+            mensaje_del_aviso,
+            ctx.id_conversacion,
+            motivo,
+        )
+        return False
+    return sigue is True
 
 
 def _anotar_telegram(ctx: ContextoDaniela, escalamiento_id: int, message_id: int) -> None:
@@ -844,6 +892,18 @@ async def _avisar_a_doctores(
         )
         pregunta = "¿Alguien puede revisar esta conversación y retomarla si hace falta?"
 
+        # La guarda del asunto rancio. Va ANTES del INSERT --la fila tampoco se escribe, o
+        # `telegram_message_id` NULL dejaría de significar «el Telegram no salió»-- y desde
+        # el 17/09/2026 pregunta también a Telegram: ver `_el_doctor_ya_lo_tiene_delante`.
+        if await _el_doctor_ya_lo_tiene_delante(ctx, motivo):
+            log.info(
+                "%s ya tiene un escalamiento por %s delante del doctor y sin responder; "
+                "no se repite",
+                ctx.id_conversacion,
+                motivo,
+            )
+            return False
+
         escalamiento_id = await asyncio.to_thread(
             _registrar_escalamiento, ctx, motivo, resumen, pregunta
         )
@@ -874,7 +934,40 @@ async def _avisar_a_doctores(
         # respondería `Bad Request: message thread not found`. El aviso no llegaría. Que `0`
         # signifique «el General» es justo lo que `canales.enviar_mensaje` resuelve con su
         # `if tema_id:`.
-        message_id = await _telegram.enviar_mensaje(texto, tema_id=ctx.tema_general)
+        # CON el botón, igual que la tool. Este camino corre cuando el modelo NO llamó a
+        # `escalar_a_doctores` --el turno se rompió solo, o cerró con la bandera puesta--, y
+        # hasta el 17/09/2026 era el único aviso del sistema que llegaba sin puerta: el
+        # doctor leía que Daniela no había podido y no tenía nada que pulsar. Justo el aviso
+        # de los casos en que el sistema menos sabe qué hacer.
+        message_id = await _telegram.enviar_mensaje(
+            texto,
+            tema_id=ctx.tema_general,
+            teclado=relevo.teclado_tomar_conversacion(ctx.id_conversacion),
+        )
+
+        # Y el hilo del paciente, si no lo tiene. Es la ÚNICA puerta por la que algo que no
+        # es un archivo abre un hilo, y el no negociable 14 sigue en pie para lo demás: lo
+        # que decide no es el texto, es el escalamiento. Un número equivocado no hace
+        # escalar a Daniela; el paciente con dolor, sí. Lo que el paciente escribió mientras
+        # no tenía hilo se vuelca ahí -- si no, la única huella suya en todo Telegram es
+        # este aviso del General, y el doctor que entra a su expediente lo encuentra vacío.
+        # Nunca propaga: `rescatar_hilo` se traga lo suyo.
+        tema = await lectura.rescatar_hilo(
+            telefono=ctx.telefono_completo,
+            nombre_perfil=ctx.nombre_paciente,
+            database_url=ctx.database_url,
+            telegram=_telegram,
+        )
+
+        # Y la puerta en el hilo, igual que hace la tool: el doctor mira ahí, no el General.
+        # Ver `relevo.ofrecer_la_puerta_en_el_hilo`.
+        if tema:
+            await relevo.ofrecer_la_puerta_en_el_hilo(
+                telegram=_telegram,
+                tema=tema,
+                telefono=ctx.telefono_completo,
+                motivo=motivo,
+            )
 
         await asyncio.to_thread(_anotar_telegram, ctx, escalamiento_id, message_id)
         return True

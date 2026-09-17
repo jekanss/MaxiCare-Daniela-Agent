@@ -453,3 +453,97 @@ Tres decisiones que valen más que el mecanismo:
 Lo que lo sostiene es el paso 5b de `scripts/probar_calendario.py`, contra Google de verdad,
 porque la mitad que importa no se puede simular: que un evento borrado se distinga de uno
 que no se pudo leer. Es la misma lección que la sonda de Telegram, aprendida el mismo día.
+
+### Lo que cerró el ciclo del relevo, 17/09/2026
+
+El relevo funcionaba una vez. La segunda vez, no —y el doctor no tenía forma de saber por
+qué—. El reporte llegó en una frase: «el doctor le da "Que siga Daniela", borra el topic, y
+si ese paciente vuelve a escalar el botón no vuelve a aparecer».
+
+Debajo había cuatro defectos distintos, y los cuatro son **el mismo error**:
+
+```
+   el sistema daba por vivo un objeto de Telegram porque algún día lo estuvo
+```
+
+Telegram no emite ningún evento al borrar un tema. Tampoco al borrar un mensaje. Eso ya se
+sabía para el tema —la sonda del barrido existe desde el 14/09— pero la lección no estaba
+aplicada en los sitios por los que pasa un doctor de verdad.
+
+**1 · El aviso llegaba sin puerta.** La red de seguridad (`runtime._avisar_a_doctores`, que
+salta cuando el turno se rompe solo y el modelo no llamó a ninguna tool) mandaba el
+escalamiento al General sin botón. Justo el aviso de los casos en que el sistema menos sabe
+qué hacer era el único que llegaba sin nada que pulsar.
+
+**2 · Nadie escribía `respondido_en`.** La guarda que impide el escalamiento rancio exige que
+el asunto siga «sin responder», y esa columna no la escribía nadie: el silencio duraba las
+24 h de la conversación aunque un doctor ya lo hubiera atendido EN PERSONA y devuelto. Ahora
+la escribe `relevo.cerrar`, y solo él —cerrar el relevo es el ciclo completo; `relevo_activado`
+se pone al TOMAR y por eso no vale—. Contrastado contra las filas del ruido del 16/09: aquel
+caso ocurrió con el relevo aún sin cerrar, así que esta marca no lo deja pasar.
+
+**3 · La puerta solo estaba en el General.** El doctor mira el hilo de su paciente, no el
+muro. Un escalamiento va ahora a los dos sitios: al General con su resumen y su deliberación,
+y al hilo con el motivo y el botón, nada más. La transcripción NO baja al hilo.
+
+**4 · El botón aparecía y no servía.** Este es el que rompía el ciclo, y estaba en el log del
+VPS a la primera:
+
+```
+08:32:32  turno 5 escalado por clinico          ← el botón sale
+08:32:35  ERROR  no se pudo abrir el hilo; se deshace el relevo
+          ErrorDeCanal: Telegram no reabrió el tema: Bad Request: TOPIC_ID_INVALID
+```
+
+El doctor había borrado el hilo. `reabrir_tema` subía ese rechazo como un `ErrorDeCanal`
+cualquiera, `activar` lo leía como «no hay hilo» y **deshacía el relevo entero**. Y el segundo
+intento fallaba igual: ese camino cierra con `_cerrar_en_base` directo, no con `relevo.cerrar`,
+así que la fila muerta se quedaba puesta. Desde el lado del doctor, «no puedo volver a tomar
+la conversación», indefinidamente.
+
+Un hilo borrado no es un fallo: es un hilo que hay que rehacer.
+
+#### Y el que de verdad lo rompía: el AVISO borrado
+
+Los cuatro arreglos no bastaron, y el segundo despliegue tampoco. Los logs dijeron por qué:
+
+```
+09:14:07  relevo cerrado (devuelto_por_doctor)      ← «Que siga Daniela»
+09:14:22  escalamiento 127, telegram_message_id=855 ← el aviso sale, con su botón
+          (el doctor borra el topic Y borra el 855 del General)
+09:15:23  turno 3 ... ya tiene un escalamiento por clinico; no se repite
+09:16:16  turno 4 ... ya tiene un escalamiento por clinico; no se repite
+```
+
+La guarda medía «lo tiene delante» con `telegram_message_id IS NOT NULL`. Esa premisa se cae
+en cuanto el doctor borra el mensaje —que es justo lo que hace para dejar la bandeja limpia—.
+La fila seguía diciendo que sí con el 855 ya borrado, y a partir de ahí se calló **todo**
+durante 24 h: sin aviso, sin botón y **sin hilo**, porque la recreación del hilo cuelga del
+aviso que se calla.
+
+Ahora «lo tiene delante» **se comprueba en vez de suponerse**: antes de callar, se le pregunta
+a Telegram si ese mensaje sigue ahí, con `editMessageReplyMarkup` y el mismo teclado —si está
+igual responde «not modified» y no toca nada; sonda sin rastro, como `reopenForumTopic`—.
+
+Lo que NO cambia: si el aviso sigue puesto, el repetido se calla. El ruido del 16/09 no vuelve.
+
+#### Tres decisiones que valen más que el mecanismo
+
+- **Un aviso ya TOMADO no se sondea.** Su teclado ya es el enlace al hilo, y sondearlo con el
+  teclado de tomar le devolvería el botón a una conversación que alguien tiene abierta.
+- **Ante la duda se AVISA.** Si Telegram no contesta, eso no se lee como «sigue puesto». Un
+  aviso de más es ruido; uno de menos es un paciente con dolor que nadie ve, y el principio
+  que decide los empates de este proyecto está escrito en la primera línea de `CLAUDE.md`.
+- **Un tema borrado sigue diciendo que sí durante varios segundos.** Medido: `reopenForumTopic`
+  responde `ok: true` mientras `sendMessage` sobre ese mismo tema ya rechaza. En esa ventana
+  el relevo quedaba tomado y sin hilo —Daniela callada y nadie hablando con el paciente—.
+  `activar` reintenta una vez; si el segundo intento también falla, eso sí es Telegram.
+
+#### Lo que lo sostiene
+
+Ninguna suite offline vio ninguno de los cinco, y no podía: el doble de Telegram responde lo
+que se le diga. Los tres primeros salieron de leer los logs del VPS y las filas de Neon; los
+dos últimos, de **recorrer el ciclo entero contra la API de verdad** —escalar, tomar, cerrar,
+borrar el topic, borrar el botón, volver a escalar, siete vueltas— antes de desplegar. Es la
+misma lección que ya había dejado la sonda del tema y el contraste con Calendar, aprendida una
+vez más: razonar sobre una API no es medirla.
