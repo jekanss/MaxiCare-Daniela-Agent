@@ -1,7 +1,7 @@
 """El despachador de recordatorios, sin base y sin red.
 
-Las siete guardas y las bandas horarias viven aquí porque son decisiones del código, no de
-la base: se prueban en milisegundos y corren siempre. Lo que toca Neon está en
+Las guardas y las bandas horarias viven aquí porque son decisiones del código, no de la
+base: se prueban en milisegundos y corren siempre. Lo que toca Neon está en
 `test_seguimientos_neon.py`, marcado `neon`.
 
 Ningún momento sale del reloj de la máquina: todos entran como parámetro.
@@ -119,6 +119,11 @@ def fila(**cambios) -> dict:
         cita_id="cita-1",
         tipo="recordatorio_cita",
         fecha_objetivo=momento(16, 18),
+        # `creado_en` por defecto es la MISMA fecha que `fecha_objetivo`: por defecto `tipo`
+        # es un recordatorio de cita, así que `es_reactivacion` da `False` y R3bis ni se
+        # evalúa -- pero las pruebas de este archivo que sí ponen un `tipo` de reactivación
+        # (líneas de más abajo) necesitan la clave presente o `fila["creado_en"]` revienta.
+        creado_en=momento(16, 18),
         intentos=0,
         telefono="573001112233",
         nombre_completo="Ana Gómez",
@@ -275,9 +280,22 @@ def test_un_recordatorio_limpio_sale():
 
 
 def test_un_seguimiento_sin_cita_se_salta_las_tres_primeras_guardas():
-    # «Llámenme el lunes»: no cuelga de ninguna cita, así que G1, G2 y G3 no aplican.
+    """«Llámenme el lunes»: no cuelga de ninguna cita, así que G1, G2 y G3 no aplican.
+
+    El `tipo` es del vocabulario cerrado (`TIPO_SIN_AGENDAR`), a propósito y no por
+    casualidad: antes de la ronda 1 de revisión esta prueba usaba `tipo="reactivacion"`
+    -fuera del vocabulario- y pasaba por el motivo EQUIVOCADO. `es_reactivacion` tenía la
+    polaridad al revés (`tipo in TIPOS_DE_REACTIVACION`, falla ABIERTO), así que un tipo
+    inventado hacía que `es_reactivacion` diera `False` y las cinco guardas de reactivación
+    (R1-R5) ni se evaluaran: el "enviar" salía de saltarse TODO, no solo G1-G3. Con la
+    polaridad corregida (`not in TIPOS_NO_COMERCIALES`) esta fila SÍ pasa por R1-R5 -y sigue
+    dando "enviar", porque no tiene nada malo: sin fallidos, sin tope, a tiempo, en horario,
+    sin contacto reciente-. El caso adversario que SÍ debe frenar está en
+    `tests/test_reactivacion.py::test_un_tipo_fuera_del_vocabulario_no_esquiva_las_guardas_
+    de_reactivacion`.
+    """
     d = s.decidir(
-        fila(cita_id=None, cita_inicio=None, cita_estado=None, tipo="reactivacion"),
+        fila(cita_id=None, cita_inicio=None, cita_estado=None, tipo=s.TIPO_SIN_AGENDAR),
         ahora=momento(16, 18),
         jornada=JORNADA,
         ultimo_mensaje=None,
@@ -287,7 +305,7 @@ def test_un_seguimiento_sin_cita_se_salta_las_tres_primeras_guardas():
 
 def test_g0_anula_una_reactivacion_a_quien_pidio_la_baja():
     decision = s.decidir(
-        fila(tipo="reactivacion", cita_id=None, cita_inicio=None, no_contactar=True),
+        fila(tipo=s.TIPO_SIN_AGENDAR, cita_id=None, cita_inicio=None, no_contactar=True),
         ahora=momento(16, 18),
         jornada=JORNADA,
         ultimo_mensaje=None,
@@ -312,9 +330,14 @@ def test_g0_NO_toca_el_recordatorio_de_una_cita():
 
 
 def test_un_tipo_inventado_se_trata_como_comercial():
-    """`seguimientos.tipo` es texto libre que escribe el modelo. La lista blanca falla hacia
-    el lado seguro: lo que no está en ella se comprueba contra la baja. Una lista negra
-    dejaría pasar cualquier invento directo al envío."""
+    """La 021 ya cerró el vocabulario que el MODELO puede pedir (`Literal` +
+    `TIPOS_QUE_EL_MODELO_PUEDE_PEDIR`), así que esto ya no puede pasar por esa vía. Pero el
+    CHECK de esa migración es NOT VALID -no revisa lo que ya estaba en `public` de cuando
+    `tipo` era texto libre-, así que una fila VIEJA con un tipo que nadie reconoce sigue
+    siendo alcanzable, y por eso este caso se deja con un tipo fuera de vocabulario A
+    PROPÓSITO. La lista blanca falla hacia el lado seguro: lo que no está en ella se
+    comprueba contra la baja. Una lista negra dejaría pasar cualquier invento directo al
+    envío."""
     decision = s.decidir(
         fila(tipo="promo_de_diciembre", cita_id=None, cita_inicio=None, no_contactar=True),
         ahora=momento(16, 18),
@@ -328,7 +351,7 @@ def test_un_tipo_inventado_se_trata_como_comercial():
 
 def test_sin_baja_g0_no_hace_nada():
     decision = s.decidir(
-        fila(tipo="reactivacion", cita_id=None, cita_inicio=None, no_contactar=False),
+        fila(tipo=s.TIPO_SIN_AGENDAR, cita_id=None, cita_inicio=None, no_contactar=False),
         ahora=momento(16, 18),
         jornada=JORNADA,
         ultimo_mensaje=None,
@@ -704,7 +727,7 @@ def test_un_seguimiento_sin_cita_se_anula_por_falta_de_plantilla_y_no_se_manda(m
         persistencia,
         "seguimientos_por_despachar",
         lambda conn, **k: [
-            fila(cita_id=None, cita_inicio=None, cita_estado=None, tipo="reactivacion")
+            fila(cita_id=None, cita_inicio=None, cita_estado=None, tipo=s.TIPO_SIN_AGENDAR)
         ],
     )
     monkeypatch.setattr(

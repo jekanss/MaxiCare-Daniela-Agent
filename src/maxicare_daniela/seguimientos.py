@@ -4,7 +4,7 @@
 escribía en ninguna línea del repositorio. Este módulo es quien la lee.
 
 Deliberadamente NO abre conexiones ni habla con Meta por su cuenta: recibe la conexión y los
-canales. Es lo que permite probar las siete guardas en milisegundos y sin señal.
+canales. Es lo que permite probar todas sus guardas en milisegundos y sin señal.
 """
 
 from __future__ import annotations
@@ -162,26 +162,40 @@ HORA_CIERRE_COMERCIAL = 19
 MAX_REACTIVACIONES_12M = 6
 MAX_SEGUIMIENTOS_FALLIDOS = 2
 
+#: Techo total de espera de una reactivacion, medido desde que se CREO (`creado_en`), no desde
+#: `fecha_objetivo` -- que un aplazamiento reescribe. Es el mismo problema que motiva G3 bis,
+#: dos secciones más abajo, aplicado a lo que no tiene cita: ver R3bis para el caso medido.
+#:
+#: El umbral tiene que dejar respirar un aplazamiento legitimo -- creada el viernes en la
+#: tarde y despachada el lunes a la apertura son unas 63 h -- y cortar lo que ya lleva DIAS
+#: dando vueltas, no un fin de semana. 96 h (4 dias) deja ese margen sin abrir la puerta a que
+#: una fila se pasee una semana entera con un relevo sostenido.
+HORAS_DE_ESPERA_TOTAL_QUE_INVALIDAN_UNA_REACTIVACION = 96
+
 #: Los tipos de seguimiento que NO son comerciales, y que por tanto una baja NO apaga.
 #:
-#: Es una lista BLANCA a propósito. `seguimientos.tipo` es texto libre que escribe el modelo
-#: (`programar_seguimiento`), así que con una lista negra de tipos comerciales, cualquier tipo
-#: inventado se colaría directo al envío. Con esta, lo que no está aquí se comprueba contra la
-#: baja: falla hacia el lado seguro.
+#: Es una lista BLANCA a propósito, y del conjunto EXENTO, no del protegido: falla hacia el
+#: lado seguro. La 021 ya cerró el vocabulario que el MODELO puede pedir (`Literal` +
+#: `TIPOS_QUE_EL_MODELO_PUEDE_PEDIR`), pero su CHECK es NOT VALID -- no revisa lo que ya
+#: estaba en `public` cuando `tipo` todavía era texto libre-- así que una fila vieja con un
+#: `tipo` que nadie reconoce sigue siendo alcanzable. Con una lista negra de tipos comerciales,
+#: esa fila se colaría directo al envío. Con esta, lo que no está aquí se comprueba contra la
+#: baja: un tipo desconocido se trata como comercial, no al revés.
 #:
-#: Acotar `tipo` con un `Literal` y un CHECK es trabajo del sub-proyecto D, y entonces esto se
-#: podrá derivar de esa lista en vez de mantenerse a mano.
+#: `es_reactivacion`, en `decidir`, usa la MISMA polaridad y por la MISMA razón: la primera
+#: version usaba `tipo in TIPOS_DE_REACTIVACION` -lista blanca del conjunto GUARDADO, falla
+#: ABIERTO- y una fila con un tipo fuera de las tres constantes conocidas atravesaba las cinco
+#: guardas de reactivación sin que ninguna se evaluara. Medido por el revisor contra el codigo:
+#: `tipo='reactivacion'` (invalido), dos días tarde, freno y tope ya disparados, domingo con la
+#: clínica abierta -> `Decision(accion='enviar')`, con las cinco guardas sin evaluar.
 #:
-#: **El portillo que esta lista tiene abierto, dicho y no escondido:** el tipo lo escribe el
-#: modelo, así que un `tipo='recordatorio_cita'` salido de `programar_seguimiento` atraviesa
-#: G0 sin mirarla aunque el paciente esté de baja. Hoy no sale nada por ahí --esa tool nunca
-#: pone `cita_id`, y el despachador anula con `sin_plantilla` todo lo que llegue sin
-#: `cita_inicio`--, así que el portillo está abierto pero no da a ninguna parte. Lo que lo
-#: abriría de par en par es el sub-proyecto D, que añade plantillas para los tipos sin cita:
-#: ese día, cerrar `tipo` deja de ser una mejora y pasa a ser la condición para que esta
-#: guarda siga siendo cierta. Mientras tanto lo estrecha `herramientas._programar_seguimiento`,
-#: que comprueba `ctx.pidio_no_contacto` contra esta misma lista antes de insertar, y el
-#: docstring de la tool, que ya no le ofrece al modelo `'recordatorio_cita'` como ejemplo.
+#: **El portillo que esta lista tiene abierto, dicho y no escondido:** un `tipo='recordatorio_
+#: cita'` salido de `programar_seguimiento` atraviesa G0 sin mirarla aunque el paciente esté de
+#: baja. Hoy no sale nada por ahí --esa tool nunca pone `cita_id`, y el despachador anula con
+#: `sin_plantilla` todo lo que llegue sin `cita_inicio`--, así que el portillo está abierto
+#: pero no da a ninguna parte. Lo estrecha `herramientas._programar_seguimiento`, que comprueba
+#: `ctx.pidio_no_contacto` contra esta misma lista antes de insertar, y el docstring de la
+#: tool, que no le ofrece al modelo `'recordatorio_cita'` como ejemplo.
 TIPOS_NO_COMERCIALES = frozenset({"recordatorio_cita"})
 
 #: Los cuatro tipos que existen. El CHECK `ck_seguimientos_tipo` de la migracion 021 tiene la
@@ -234,16 +248,18 @@ def decidir(
     max_reactivaciones_12m: int = MAX_REACTIVACIONES_12M,
     max_seguimientos_fallidos: int = MAX_SEGUIMIENTOS_FALLIDOS,
 ) -> Decision:
-    """Las doce guardas, en orden. Es lo que separa un recordatorio de un buzón de spam.
+    """Las guardas del despachador, en orden. Es lo que separa un recordatorio de un buzón
+    de spam.
 
-    G0 va antes que las siete originales, y decide sobre la baja comercial: un tipo que no
-    está en `TIPOS_NO_COMERCIALES` se anula si el contacto pidió no ser contactado. Es el
-    orden que pidió MaxiCare por escrito: privacidad -> canal -> criterio -> contacto.
+    G0 va antes que las demás, y decide sobre la baja comercial: un tipo que no está en
+    `TIPOS_NO_COMERCIALES` se anula si el contacto pidió no ser contactado. Es el orden que
+    pidió MaxiCare por escrito: privacidad -> canal -> criterio -> contacto.
 
-    Las cinco guardas de reactivación (R1-R5) van justo después de G0 y antes del bloque de
-    la cita: todas son exclusivas de un seguimiento SIN cita (`es_reactivacion`), y un
-    recordatorio de cita las atraviesa sin evaluarlas -- por diseño, no por descuido: el
-    apagado y el tope son frenos COMERCIALES y una cita real no es publicidad.
+    Las guardas de reactivación (R1-R5, con R3bis colgando de R3) van justo después de G0 y
+    antes del bloque de la cita: todas son exclusivas de un seguimiento SIN cita
+    (`es_reactivacion`), y un recordatorio de cita las atraviesa sin evaluarlas -- por diseño,
+    no por descuido: el apagado y el tope son frenos COMERCIALES y una cita real no es
+    publicidad.
 
     El orden del resto importa: las tres primeras del bloque de cita son sobre la cita y se
     saltan si el seguimiento no cuelga de ninguna; las dos siguientes aplazan en vez de
@@ -260,7 +276,14 @@ def decidir(
     if fila.get("tipo") not in TIPOS_NO_COMERCIALES and fila.get("no_contactar"):
         return Decision("anular", "baja_solicitada")
 
-    es_reactivacion = fila.get("tipo") in TIPOS_DE_REACTIVACION
+    # `not in TIPOS_NO_COMERCIALES`, y NO `tipo in TIPOS_DE_REACTIVACION`. Es la MISMA
+    # polaridad que G0, dos líneas arriba, y por la misma razón (ver el docstring de
+    # `TIPOS_NO_COMERCIALES`): lista blanca del conjunto EXENTO, que falla hacia el lado
+    # seguro. La primera versión hacía lista blanca del conjunto GUARDADO -falla ABIERTO- y
+    # una fila con un `tipo` fuera de las tres constantes conocidas (alcanzable: el CHECK de
+    # la 021 es NOT VALID y no revisa lo que ya estaba en `public`) atravesaba las cinco
+    # guardas de reactivación sin que ninguna se evaluara.
+    es_reactivacion = fila.get("tipo") not in TIPOS_NO_COMERCIALES
 
     # R1. El freno por persona. Antes que nada de lo demas: si esta apagado, no importa la hora
     # ni el retraso. El apagado es del SISTEMA --«a este numero no le sirve que lo
@@ -283,6 +306,24 @@ def decidir(
         hours=HORAS_DE_RETRASO_QUE_LO_INVALIDAN
     ):
         return Decision("anular", "llego_tarde")
+
+    # R3bis. El gemelo de G3 bis (más abajo), para lo que no tiene cita. `aplazar_seguimiento`
+    # reescribe `fecha_objetivo` en CADA aplazamiento (G4, G5, R4), así que R3 se pone a cero
+    # cada vez -- la reactivación no tenía el ancla equivalente a G3 bis porque no tiene
+    # `cita_inicio`. Medido a mano: creada el viernes a las 18:30 con el relevo puesto,
+    # encadena aplazar (`relevo_activo`, 30 min) -> aplazar (`fuera_de_horario_comercial`) y
+    # sale el sábado a las 09:00 con 14,5 h de deriva real que R3 lee como CERO. Con un relevo
+    # sostenido varios días la cuenta de R3 sigue en cero indefinidamente: la garantía de R3
+    # («el barrido lleva horas caído, no hay avalancha») solo vale para la caída dura.
+    #
+    # `creado_en` es lo único de esta fila que ningún aplazamiento toca, y por eso es la
+    # referencia. Motivo propio y no `llego_tarde`: la clínica tiene que poder distinguir
+    # «llegó tarde una vez» de «lleva días dando vueltas», igual que `llego_tarde` y
+    # `cita_inminente` van separados para el recordatorio de cita.
+    if es_reactivacion and ahora - fila["creado_en"] > timedelta(
+        hours=HORAS_DE_ESPERA_TOTAL_QUE_INVALIDAN_UNA_REACTIVACION
+    ):
+        return Decision("anular", "reactivacion_estancada")
 
     # R4. Horario propio (regla 6). NO cuelga de `jornada`: ver el comentario de
     # HORA_APERTURA_COMERCIAL. Aplaza a la proxima apertura comercial, no a la de la clinica.

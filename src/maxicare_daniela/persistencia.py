@@ -1900,7 +1900,12 @@ def seguimientos_por_despachar(
                      WHERE cv2.telefono = COALESCE(c.telefono, cv.telefono)
                        AND s2.enviado_en IS NOT NULL
                        AND s2.enviado_en > %(ahora)s - interval '12 months'
-                       AND s2.tipo <> 'recordatorio_cita')  AS reactivaciones_ultimo_ano
+                       AND s2.tipo <> 'recordatorio_cita')  AS reactivaciones_ultimo_ano,
+                   -- R3bis (regla 6 de la ronda 1 de revisión). `fecha_objetivo` se reescribe
+                   -- en cada aplazamiento; `creado_en` es lo único de esta fila que ningún
+                   -- aplazamiento toca, y por eso es la referencia contra la que se mide
+                   -- cuánto lleva de verdad dando vueltas una reactivación.
+                   s.creado_en
               FROM seguimientos s
               LEFT JOIN citas c           ON c.id  = s.cita_id
               LEFT JOIN conversaciones cv ON cv.id = s.conversacion_id

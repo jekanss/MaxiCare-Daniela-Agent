@@ -335,11 +335,75 @@ def test_la_cola_trae_lo_que_el_despachador_necesita_para_decidir(conexion_prueb
     )[0]
 
     # Sin estas claves el despachador tendría que hacer una consulta por guarda.
+    #
+    # `seguimientos_fallidos`, `reactivaciones_ultimo_ano` y `creado_en` se sumaron aquí en la
+    # ronda 1 de revisión de la tarea 3 (hallazgo 2): antes de eso, borrar cualquiera de las
+    # tres del SELECT dejaba esta prueba en verde -- las guardas R1/R2/R3bis siguen leyendo
+    # `.get(..., 0)` o revientan de otra forma, así que la ausencia no se nota aquí, solo en
+    # producción, en silencio.
     assert set(fila) >= {
         "id", "conversacion_id", "cita_id", "tipo", "fecha_objetivo", "intentos",
         "telefono", "nombre_completo", "tratamiento", "cita_inicio", "cita_estado",
-        "tomada_por",
+        "tomada_por", "seguimientos_fallidos", "reactivaciones_ultimo_ano", "creado_en",
     }
+
+
+TEL_TOPE_ANUAL = "573001112295"
+
+
+def test_el_tope_anual_cuenta_reactivaciones_enviadas_y_excluye_el_recordatorio(
+    conexion_pruebas,
+):
+    """La subconsulta de `reactivaciones_ultimo_ano` (hallazgo 2 de la ronda 1 de revisión):
+    ninguna prueba offline la ejercita, así que un error de SQL -o una exclusión que se
+    caiga- solo revienta o miente aquí. `-m neon` pasando no demuestra que cuenta bien; esta
+    prueba sí, porque siembra un caso donde contar mal es observable.
+
+    Dos reactivaciones y UN recordatorio de cita, los tres YA ENVIADOS para el MISMO
+    teléfono: si la exclusión de `recordatorio_cita` se cae, R2 (el tope anual) empezaría a
+    contar recordatorios como si fueran publicidad, y a alguien con muchas citas legítimas se
+    le apagaría la reactivación sin que hubiera recibido ni una.
+    """
+    id_conv = persistencia.asegurar_conversacion(
+        conexion_pruebas, telefono=TEL_TOPE_ANUAL, paciente_id=None, canal="whatsapp"
+    )
+    hace_un_mes = datetime.now(ZONA_BOGOTA) - timedelta(days=30)
+
+    tipos_enviados = ["reactivacion_sin_agendar", "reactivacion_cancelada", "recordatorio_cita"]
+    for i, tipo in enumerate(tipos_enviados):
+        persistencia.insertar_seguimiento(
+            conexion_pruebas,
+            id_conversacion=id_conv,
+            tipo=tipo,
+            fecha_objetivo=hace_un_mes,
+            clave_idempotencia=f"tope-anual-{i}",
+        )
+
+    # Hay que marcarlos ENVIADOS de verdad: la subconsulta cuenta sobre `enviado_en IS NOT
+    # NULL`, y `seguimientos_por_despachar` es también cómo se consiguen los ids sin duplicar
+    # el SQL de insertar_seguimiento a mano.
+    pendientes = persistencia.seguimientos_por_despachar(conexion_pruebas, ahora=hace_un_mes)
+    ids_sembrados = [f["id"] for f in pendientes if str(f["conversacion_id"]) == id_conv]
+    assert len(ids_sembrados) == 3
+    for id_seguimiento in ids_sembrados:
+        assert persistencia.marcar_seguimiento_enviado(conexion_pruebas, id_seguimiento)
+
+    # Una cuarta fila, PENDIENTE: las tres de arriba ya tienen `enviado_en` y no volverían en
+    # el SELECT, así que hace falta una viva para poder leer la cuenta desde aquí.
+    persistencia.insertar_seguimiento(
+        conexion_pruebas,
+        id_conversacion=id_conv,
+        tipo="reactivacion_sin_agendar",
+        fecha_objetivo=datetime.now(ZONA_BOGOTA),
+        clave_idempotencia="tope-anual-pendiente",
+    )
+
+    filas = persistencia.seguimientos_por_despachar(
+        conexion_pruebas, ahora=datetime.now(ZONA_BOGOTA)
+    )
+    fila = next(f for f in filas if str(f["conversacion_id"]) == id_conv)
+
+    assert fila["reactivaciones_ultimo_ano"] == 2
 
 
 def test_la_consulta_trae_la_baja_del_contacto(conexion_pruebas):
