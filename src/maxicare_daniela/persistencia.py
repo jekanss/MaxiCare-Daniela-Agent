@@ -2492,7 +2492,8 @@ def rastro_de(conn, telefono: str) -> dict:
 #: exactamente estas claves, así que quien las consuma no depende del orden del SELECT.
 _COLUMNAS_CONTACTO = (
     "telefono, creado_en, actualizado_en, aviso_mostrado_en, politica_version, "
-    "no_contactar, no_contactar_en, no_contactar_origen"
+    "no_contactar, no_contactar_en, no_contactar_origen, "
+    "seguimientos_fallidos, ultimo_seguimiento_en"
 )
 
 
