@@ -126,23 +126,19 @@ def test_la_tool_no_deja_al_modelo_disfrazar_lo_comercial_de_recordatorio():
 def fila_de_reactivacion(**cambios) -> dict:
     """Una fila de la cola SIN cita, que es lo que distingue a la reactivacion.
 
-    `creado_en` por defecto es IGUAL a `fecha_objetivo` -incluido cuando `fecha_objetivo` se
-    pasa en `cambios`-, porque asi nace una reactivacion de verdad: se encola con
-    `fecha_objetivo = ahora`, y las dos solo se separan cuando un aplazamiento reescribe
-    `fecha_objetivo` sin tocar `creado_en` (que es exactamente lo que R3bis vigila). Fijarlo a
-    un valor estatico habria dejado pruebas con `creado_en` DESPUES de `fecha_objetivo`
-    -imposible en una fila real- cada vez que una prueba mueve `fecha_objetivo` a un dia
-    distinto del default. Las pruebas de R3bis piden su propio `creado_en` explicito.
+    `aplazado_desde` por defecto es `None`: así nace una reactivación de verdad, y así se
+    queda mientras nadie la aplace ni una vez -- incluida una programada a dos semanas vista,
+    que puede tener una `fecha_objetivo` lejanísima y aun así no haberse aplazado jamás. Las
+    pruebas de R3bis (más abajo) son las únicas que lo pasan explícito, simulando que la fila
+    YA se atascó al menos una vez.
     """
-    fecha_objetivo = cambios.pop("fecha_objetivo", momento(16, 11))
-    creado_en = cambios.pop("creado_en", fecha_objetivo)
     base = dict(
         id=1,
         conversacion_id="conv-1",
         cita_id=None,
         tipo=s.TIPO_SIN_AGENDAR,
-        fecha_objetivo=fecha_objetivo,
-        creado_en=creado_en,
+        fecha_objetivo=momento(16, 11),
+        aplazado_desde=None,
         intentos=0,
         telefono="573001112233",
         nombre_completo="Marcela Rios",
@@ -367,23 +363,36 @@ def test_un_tipo_fuera_del_vocabulario_no_esquiva_las_guardas_de_reactivacion():
     assert decision.motivo == "seguimiento_apagado"
 
 
-def test_r3bis_una_reactivacion_que_lleva_dias_dando_vueltas_no_sale():
-    """Hallazgo 4 de la ronda 1: R3 se queda ciego cuando `fecha_objetivo` se reaplaza.
+# ==========================================================================================
+# Ronda 2 de revision sobre la parada B: el ancla de R3bis era la equivocada.
+#
+# `creado_en` mide la EDAD TOTAL de la fila, no cuanto lleva atascada sin poder salir. Una
+# reactivacion programada a dos semanas vista (`programar_seguimiento` no le pone cota
+# superior a `fecha_objetivo`) es "vieja" desde que se crea segun `creado_en`, y llegaba
+# PUNTUAL -nunca se aplazo ni una vez-. La version con `creado_en` la anulaba en silencio con
+# un motivo que decia justo lo contrario de lo que habia pasado. El ancla correcta es
+# `aplazado_desde` (migracion 022): NULL mientras la fila nunca se aplazo, fijo desde la
+# PRIMERA vez que algo la frena.
+# ==========================================================================================
+
+
+def test_r3bis_una_reactivacion_que_lleva_dias_atascada_no_sale():
+    """R3 se queda ciego cuando `fecha_objetivo` se reaplaza.
 
     `aplazar_seguimiento` reescribe `fecha_objetivo` en cada aplazamiento (G4, G5, R4), asi
     que R3 -que mide contra `fecha_objetivo`- se pone a cero cada vez. Reproducido a mano: una
-    reactivacion creada el viernes a las 18:30 con el relevo puesto encadena aplazar
-    (`relevo_activo`) -> aplazar (`fuera_de_horario_comercial`) y termina saliendo el sabado a
-    las 09:00 con 14,5 h de deriva real que R3 ve como CERO. Con un relevo sostenido varios
-    dias la cuenta de R3 sigue en cero indefinidamente.
+    reactivacion que se atasca por primera vez el viernes a las 18:30 (relevo puesto) encadena
+    aplazar (`relevo_activo`) -> aplazar (`fuera_de_horario_comercial`) y termina saliendo el
+    sabado a las 09:00 con 14,5 h de deriva real que R3 ve como CERO. Con un relevo sostenido
+    varios dias la cuenta de R3 sigue en cero indefinidamente.
 
     Aqui se simula el resultado de esa deriva sin reproducir la cadena entera de
-    aplazamientos: una fila creada hace 5 dias (`creado_en`) cuya `fecha_objetivo` quedo
-    "fresca" hace una hora, tras el ultimo aplazamiento.
+    aplazamientos: una fila que se atasco por primera vez hace 5 dias (`aplazado_desde`) cuya
+    `fecha_objetivo` quedo "fresca" hace una hora, tras el ultimo aplazamiento.
     """
     decision = s.decidir(
         fila_de_reactivacion(
-            creado_en=momento(12, 11),       # encolada hace 5 dias
+            aplazado_desde=momento(12, 11),  # se atasco por primera vez hace 5 dias
             fecha_objetivo=momento(17, 10),  # "fresca": reaplazada hace 1 h
         ),
         ahora=momento(17, 11),
@@ -395,14 +404,15 @@ def test_r3bis_una_reactivacion_que_lleva_dias_dando_vueltas_no_sale():
 
 
 def test_r3bis_no_corta_un_fin_de_semana_legitimo():
-    """El umbral de R3bis (96 h) tiene que dejar respirar un fin de semana normal: creada el
-    viernes en la tarde y despachada el lunes a la apertura son unas 63 h, menos que el
-    techo. Sin este caso, subir el umbral por error a algo mas estricto que un fin de semana
-    pasaria en silencio: ninguna otra prueba lo notaria."""
+    """El umbral de R3bis (96 h) tiene que dejar respirar un fin de semana normal de relevo
+    sostenido: atascada por primera vez el viernes en la tarde y despachada el lunes a la
+    apertura son unas 63 h, menos que el techo. Sin este caso, subir el umbral por error a
+    algo mas estricto que un fin de semana pasaria en silencio: ninguna otra prueba lo
+    notaria. Es la que impide bajar el umbral de mas."""
     decision = s.decidir(
         fila_de_reactivacion(
-            creado_en=momento(18, 18),      # viernes en la tarde
-            fecha_objetivo=momento(21, 9),  # lunes a la apertura
+            aplazado_desde=momento(18, 18),  # se atasco por primera vez el viernes en la tarde
+            fecha_objetivo=momento(21, 9),   # lunes a la apertura
         ),
         ahora=momento(21, 9),
         jornada=JORNADA,
@@ -411,12 +421,47 @@ def test_r3bis_no_corta_un_fin_de_semana_legitimo():
     assert decision.accion == "enviar"
 
 
+def test_r3bis_no_dispara_si_nunca_se_aplazo_aunque_la_fecha_objetivo_sea_lejana():
+    """El caso que `creado_en` cazaba mal (hallazgo de la ronda 2, ejecutado contra el codigo
+    viejo): una reactivacion programada a DOS SEMANAS vista -`programar_seguimiento` no le
+    pone cota superior a `fecha_objetivo`-, que nunca tuvo que aplazarse ni una vez y llega
+    puntual el dia que le tocaba. `aplazado_desde` sigue en `None` -el default de
+    `fila_de_reactivacion`- y R3bis ni se evalua: no importa cuanta distancia haya entre
+    cuando se creo y su `fecha_objetivo`, porque esta guarda no mira eso."""
+    decision = s.decidir(
+        fila_de_reactivacion(fecha_objetivo=momento(16, 11)),
+        ahora=momento(16, 11),  # llega EXACTO a su fecha_objetivo: nunca se aplazo
+        jornada=JORNADA,
+        ultimo_mensaje=None,
+    )
+    assert decision.accion == "enviar"
+
+
+def test_r3bis_no_dispara_sobre_el_segundo_intento_de_la_tarea_6_a_siete_dias():
+    """El caso concreto que el revisor senalo: la tarea 6 de este plan siembra el segundo
+    intento de la serie con `fecha_objetivo` a 7 dias vista (168 h). 168 > 96 -el umbral de
+    R3bis-, asi que con la version vieja (`creado_en`) esa parada nacia muerta contra esta
+    guarda. Con `aplazado_desde` en `None` -nunca se aplazo- la fila llega puntual y sale."""
+    creada = momento(9, 11)
+    siete_dias_despues = momento(16, 11)
+    assert (siete_dias_despues - creada).total_seconds() / 3600 == 168  # el numero del hallazgo
+
+    decision = s.decidir(
+        fila_de_reactivacion(fecha_objetivo=siete_dias_despues),
+        ahora=siete_dias_despues,  # llega EXACTO: nunca se aplazo
+        jornada=JORNADA,
+        ultimo_mensaje=None,
+    )
+    assert decision.accion == "enviar"
+
+
 def test_el_freno_no_alcanza_al_recordatorio_de_una_cita_ni_tampoco_r3bis():
     """R3bis es una guarda de reactivacion mas: gateada por `es_reactivacion`, igual que
-    R1-R5. Un recordatorio de cita con `creado_en` de hace un mes sigue sin tocarse."""
+    R1-R5. Un recordatorio de cita con `aplazado_desde` de hace un mes -como si llevara
+    atascado todo ese tiempo- sigue sin tocarse."""
     fila = fila_de_reactivacion(
         tipo=s.TIPO_RECORDATORIO, cita_id="cita-1", cita_inicio=momento(17, 9),
-        cita_estado="confirmada", creado_en=momento(1, 0), fecha_objetivo=momento(16, 18),
+        cita_estado="confirmada", aplazado_desde=momento(1, 0), fecha_objetivo=momento(16, 18),
     )
     decision = s.decidir(fila, ahora=momento(16, 18), jornada=JORNADA, ultimo_mensaje=None)
     assert decision.accion == "enviar"

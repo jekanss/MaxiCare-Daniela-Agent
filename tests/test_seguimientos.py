@@ -119,11 +119,10 @@ def fila(**cambios) -> dict:
         cita_id="cita-1",
         tipo="recordatorio_cita",
         fecha_objetivo=momento(16, 18),
-        # `creado_en` por defecto es la MISMA fecha que `fecha_objetivo`: por defecto `tipo`
-        # es un recordatorio de cita, así que `es_reactivacion` da `False` y R3bis ni se
-        # evalúa -- pero las pruebas de este archivo que sí ponen un `tipo` de reactivación
-        # (líneas de más abajo) necesitan la clave presente o `fila["creado_en"]` revienta.
-        creado_en=momento(16, 18),
+        # `aplazado_desde` en `None`: así nace una fila real que nunca se ha aplazado. R3bis
+        # lee esta clave con `.get(...)`, así que ni siquiera haría falta declararla -- se
+        # deja explícita para que quede claro qué significa el default.
+        aplazado_desde=None,
         intentos=0,
         telefono="573001112233",
         nombre_completo="Ana Gómez",

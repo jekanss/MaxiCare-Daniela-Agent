@@ -162,15 +162,28 @@ HORA_CIERRE_COMERCIAL = 19
 MAX_REACTIVACIONES_12M = 6
 MAX_SEGUIMIENTOS_FALLIDOS = 2
 
-#: Techo total de espera de una reactivacion, medido desde que se CREO (`creado_en`), no desde
-#: `fecha_objetivo` -- que un aplazamiento reescribe. Es el mismo problema que motiva G3 bis,
-#: dos secciones más abajo, aplicado a lo que no tiene cita: ver R3bis para el caso medido.
+#: Techo de espera de una reactivacion que YA se aplazo al menos una vez, medido desde
+#: `aplazado_desde` -- la primera vez que no pudo salir, no desde que se creo. Es el mismo
+#: problema que motiva G3 bis, dos secciones más abajo, aplicado a lo que no tiene cita: ver
+#: R3bis para el caso medido.
 #:
-#: El umbral tiene que dejar respirar un aplazamiento legitimo -- creada el viernes en la
-#: tarde y despachada el lunes a la apertura son unas 63 h -- y cortar lo que ya lleva DIAS
-#: dando vueltas, no un fin de semana. 96 h (4 dias) deja ese margen sin abrir la puerta a que
-#: una fila se pasee una semana entera con un relevo sostenido.
-HORAS_DE_ESPERA_TOTAL_QUE_INVALIDAN_UNA_REACTIVACION = 96
+#: **Lo que este umbral cubre: el relevo sostenido.** G4 aplaza 30 min cada vez que
+#: `tomada_por` sigue puesto, así que un relevo que no se cierra encadena aplazamientos
+#: indefinidamente y `aplazado_desde` -fijo desde el primero- es lo único que mide cuánto
+#: lleva la fila sin poder salir de verdad. Un relevo sostenido dos días es una operación
+#: real de la clínica y no debe anularse; uno sostenido varios días ya no es un caso que
+#: convenga dejar vivo indefinidamente. 96 h (4 dias) da margen de sobra al primero sin abrir
+#: la puerta al segundo.
+#:
+#: **Lo que este umbral NO cubre, y no tiene por qué:** una fila que nunca se aplazó -incluida
+#: una programada a dos semanas vista, o la de 7 días de la tarea 6- tiene `aplazado_desde` en
+#: NULL y ni siquiera entra en esta guarda (ver el `is not None` de más abajo). Esa fila puede
+#: ser tan "vieja" como se quiera contra el calendario: lo que importa aquí es si ALGUNA VEZ
+#: quedó atascada, no cuánto falta o cuánto pasó desde que se creó. La primera versión de esta
+#: guarda medía contra `creado_en` -edad total de la fila- y por eso anulaba en silencio una
+#: reactivación de dos semanas que llegaba puntual, con un motivo que decía justo lo
+#: contrario de lo que había pasado.
+HORAS_DE_ESPERA_QUE_INVALIDAN_UN_APLAZAMIENTO_SOSTENIDO = 96
 
 #: Los tipos de seguimiento que NO son comerciales, y que por tanto una baja NO apaga.
 #:
@@ -316,12 +329,25 @@ def decidir(
     # sostenido varios días la cuenta de R3 sigue en cero indefinidamente: la garantía de R3
     # («el barrido lleva horas caído, no hay avalancha») solo vale para la caída dura.
     #
-    # `creado_en` es lo único de esta fila que ningún aplazamiento toca, y por eso es la
-    # referencia. Motivo propio y no `llego_tarde`: la clínica tiene que poder distinguir
-    # «llegó tarde una vez» de «lleva días dando vueltas», igual que `llego_tarde` y
-    # `cita_inminente` van separados para el recordatorio de cita.
-    if es_reactivacion and ahora - fila["creado_en"] > timedelta(
-        hours=HORAS_DE_ESPERA_TOTAL_QUE_INVALIDAN_UNA_REACTIVACION
+    # El ancla es `aplazado_desde` (migración 022), NO `creado_en`. La primera versión de esta
+    # guarda usaba `creado_en` y medía la EDAD TOTAL de la fila, no cuánto lleva atascada: una
+    # reactivación programada a dos semanas vista (`programar_seguimiento` no le pone cota
+    # superior a `fecha_objetivo`) es "vieja" desde que se crea y llegaba puntual, y esa
+    # versión la anulaba en silencio con un motivo que decía justo lo contrario de lo que
+    # había pasado -ejecutado y cazado en la ronda 2 de revisión-. `aplazado_desde` es NULL
+    # mientras la fila nunca se ha aplazado -exactamente esos dos casos- y solo se fija la
+    # PRIMERA vez que algo la frena (`aplazar_seguimiento`, con `COALESCE`), así que mide lo
+    # que la guarda necesita: cuánto lleva sin poder salir, no cuánto lleva existiendo.
+    #
+    # Motivo propio y no `llego_tarde`: la clínica tiene que poder distinguir «llegó tarde una
+    # vez» de «lleva días dando vueltas», igual que `llego_tarde` y `cita_inminente` van
+    # separados para el recordatorio de cita.
+    aplazado_desde = fila.get("aplazado_desde")
+    if (
+        es_reactivacion
+        and aplazado_desde is not None
+        and ahora - aplazado_desde
+        > timedelta(hours=HORAS_DE_ESPERA_QUE_INVALIDAN_UN_APLAZAMIENTO_SOSTENIDO)
     ):
         return Decision("anular", "reactivacion_estancada")
 

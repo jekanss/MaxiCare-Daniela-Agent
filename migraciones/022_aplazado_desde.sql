@@ -1,0 +1,39 @@
+-- =========================================================================================
+-- 022 · El ancla de R3bis, corregida: `aplazado_desde`, no `creado_en`
+--
+-- R3bis (tarea 3, ronda 1 de revisión) nació para tapar un hueco real de R3: R3 mide contra
+-- `fecha_objetivo`, y `aplazar_seguimiento` REESCRIBE `fecha_objetivo` en cada aplazamiento
+-- (G4 por relevo, G5 y R4 por horario). Una reactivación con el relevo puesto encadena
+-- aplazamientos -> `fecha_objetivo` se pone "fresca" cada vez -> R3 lee CERO horas de
+-- retraso indefinidamente, aunque la fila lleve horas o días sin poder salir. Medido a mano:
+-- creada el viernes a las 18:30 con el relevo puesto, dos aplazamientos después sale el
+-- sábado a las 09:00 con 14,5 h de deriva real que R3 ve como cero.
+--
+-- La primera versión de R3bis ancló esa cuenta en `creado_en`. Estaba MAL, y la ronda 2 de
+-- revisión lo cazó con dos casos ejecutados contra el código:
+--
+--   creado 01/09 11:00, fecha_objetivo 15/09 11:00 (14 días vista), llega PUNTUAL
+--     -> Decision(accion='anular', motivo='reactivacion_estancada')
+--   creado 09/09 11:00, fecha_objetivo 14/09 11:00 (5 días vista), llega PUNTUAL
+--     -> Decision(accion='anular', motivo='reactivacion_estancada')
+--
+-- `creado_en` mide la EDAD TOTAL de la fila, no cuánto lleva dando vueltas sin poder salir.
+-- Una reactivación que el modelo programa a dos semanas vista (`programar_seguimiento` no le
+-- pone cota superior a `fecha_objetivo`) es una fila VIEJA desde el minuto uno según
+-- `creado_en`, y llega PUNTUAL: nunca tuvo que aplazarse ni una vez. Anularla en silencio con
+-- un motivo que dice "estancada" es peor que el hueco original -- el paciente no recibe nada
+-- y el motivo miente sobre lo que pasó. Y la tarea 6 de este mismo plan siembra el segundo
+-- intento de la serie a 7 días (168 h > 96 h): con `creado_en`, esa parada nace muerta contra
+-- esta guarda.
+--
+-- El ancla correcta es «desde cuándo esta fila lleva SIN PODER SALIR», que es lo que
+-- `aplazado_desde` guarda: NULL mientras nadie la ha aplazado nunca -incluida una fila
+-- programada a dos semanas vista, que llega puntual y no le concierne a esta guarda- y fijo
+-- desde el PRIMER aplazamiento -no el último- en cuanto algo la frena por primera vez.
+-- `persistencia.aplazar_seguimiento` la escribe con `COALESCE(aplazado_desde, now())`
+-- exactamente por eso: si se sobreescribiera en cada aplazamiento, volveríamos al problema
+-- original que R3bis existe para resolver, solo que con otro nombre de columna.
+-- =========================================================================================
+
+ALTER TABLE seguimientos
+    ADD COLUMN IF NOT EXISTS aplazado_desde TIMESTAMPTZ;

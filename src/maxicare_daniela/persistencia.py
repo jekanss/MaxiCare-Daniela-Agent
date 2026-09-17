@@ -1901,11 +1901,13 @@ def seguimientos_por_despachar(
                        AND s2.enviado_en IS NOT NULL
                        AND s2.enviado_en > %(ahora)s - interval '12 months'
                        AND s2.tipo <> 'recordatorio_cita')  AS reactivaciones_ultimo_ano,
-                   -- R3bis (regla 6 de la ronda 1 de revisión). `fecha_objetivo` se reescribe
-                   -- en cada aplazamiento; `creado_en` es lo único de esta fila que ningún
-                   -- aplazamiento toca, y por eso es la referencia contra la que se mide
-                   -- cuánto lleva de verdad dando vueltas una reactivación.
-                   s.creado_en
+                   -- R3bis (ronda 2 de revisión de la tarea 3, migración 022).
+                   -- `fecha_objetivo` se reescribe en cada aplazamiento; `aplazado_desde` se
+                   -- fija SOLO la primera vez que `aplazar_seguimiento` toca la fila (ver su
+                   -- COALESCE) y queda NULL en la que nunca se aplazó. Es la referencia
+                   -- correcta -a diferencia de `creado_en`, que mide la edad total de la fila
+                   -- y no cuánto lleva atascada: ver el comentario de R3bis en `seguimientos.py`.
+                   s.aplazado_desde
               FROM seguimientos s
               LEFT JOIN citas c           ON c.id  = s.cita_id
               LEFT JOIN conversaciones cv ON cv.id = s.conversacion_id
@@ -1928,7 +1930,7 @@ def marcar_seguimiento_enviado(conn, id_seguimiento: int) -> bool:
 
     No hay transacción que cubra una llamada HTTP a Meta. Si se enviara primero y el proceso
     muriera antes del commit, la fila seguiría pendiente y el barrido de sesenta segundos
-    después mandaría el mismo recordatorio otra vez -- sin que ninguna de las siete guardas lo
+    después mandaría el mismo recordatorio otra vez -- sin que ninguna de sus guardas lo
     detectara, porque todas seguirían diciendo que sí.
 
     Antes marcar y no mandar, que mandar y no marcar.
@@ -1953,11 +1955,24 @@ def marcar_seguimiento_enviado(conn, id_seguimiento: int) -> bool:
 
 def aplazar_seguimiento(conn, id_seguimiento: int, *, hasta: datetime) -> None:
     """Lo mueve en el tiempo sin gastarlo. Es lo que hacen las guardas del relevo y del horario:
-    el motivo por el que no sale ahora deja de ser cierto más tarde."""
+    el motivo por el que no sale ahora deja de ser cierto más tarde.
+
+    También anota `aplazado_desde` (migración 022), con `COALESCE(aplazado_desde, now())` y
+    no `now()` a secas: lo que R3bis necesita es la PRIMERA vez que esta fila no pudo salir,
+    no la última. `fecha_objetivo` se reescribe en CADA aplazamiento -eso es justo lo que
+    hace este UPDATE, dos líneas más abajo- así que con `now()` a secas `aplazado_desde` se
+    reiniciaría junto con ella y R3bis quedaría exactamente tan ciega como R3, solo que con
+    otro nombre de columna.
+    """
     with conn.cursor() as cur:
         cur.execute(
-            "UPDATE seguimientos SET fecha_objetivo = %s WHERE id = %s",
-            (hasta, id_seguimiento),
+            """
+            UPDATE seguimientos
+               SET fecha_objetivo = %(hasta)s,
+                   aplazado_desde = COALESCE(aplazado_desde, now())
+             WHERE id = %(id)s
+            """,
+            {"hasta": hasta, "id": id_seguimiento},
         )
     conn.commit()
 

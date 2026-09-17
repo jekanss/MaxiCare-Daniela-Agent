@@ -318,6 +318,61 @@ def test_un_seguimiento_anulado_no_vuelve_a_la_cola(conexion_pruebas, cita_de_pr
     assert pendiente["id"] not in {r["id"] for r in restantes}
 
 
+def test_aplazar_fija_aplazado_desde_una_sola_vez(conexion_pruebas, cita_de_prueba):
+    """El SQL de `aplazar_seguimiento` (migración 022) contra Postgres de verdad -- ninguna
+    prueba offline lo ejercita, porque las que tocan `despachar` doblan esta función con un
+    diccionario (`tests/test_seguimientos.py`).
+
+    Las dos mitades que R3bis necesita para no repetir el error de la ronda 1: el PRIMER
+    aplazamiento pasa `aplazado_desde` de `NULL` a un instante real, y un SEGUNDO
+    aplazamiento -simulando otra vuelta de G4 o G5- mueve `fecha_objetivo` otra vez pero deja
+    `aplazado_desde` INTACTO. Si el `COALESCE` se cambiara por `now()` a secas, esta prueba
+    fallaría en la segunda mitad y R3bis volvería a quedar tan ciega como R3.
+    """
+    id_cita, id_conversacion = cita_de_prueba
+    objetivo = datetime(2026, 9, 16, 18, 0, tzinfo=ZONA_BOGOTA)
+    persistencia.insertar_seguimiento(
+        conexion_pruebas,
+        id_conversacion=id_conversacion,
+        tipo="reactivacion_sin_agendar",
+        fecha_objetivo=objetivo,
+        clave_idempotencia=f"{id_conversacion}:aplazar:1",
+    )
+    pendiente = persistencia.seguimientos_por_despachar(
+        conexion_pruebas, ahora=objetivo + timedelta(hours=1)
+    )[0]
+    assert pendiente["aplazado_desde"] is None, "una fila recien creada no se ha aplazado nunca"
+
+    primer_aplazamiento = objetivo + timedelta(minutes=30)
+    persistencia.aplazar_seguimiento(conexion_pruebas, pendiente["id"], hasta=primer_aplazamiento)
+
+    tras_el_primero = next(
+        f
+        for f in persistencia.seguimientos_por_despachar(
+            conexion_pruebas, ahora=primer_aplazamiento + timedelta(hours=1)
+        )
+        if f["id"] == pendiente["id"]
+    )
+    assert tras_el_primero["fecha_objetivo"] == primer_aplazamiento
+    assert tras_el_primero["aplazado_desde"] is not None
+    primera_marca = tras_el_primero["aplazado_desde"]
+
+    segundo_aplazamiento = primer_aplazamiento + timedelta(hours=2)
+    persistencia.aplazar_seguimiento(conexion_pruebas, pendiente["id"], hasta=segundo_aplazamiento)
+
+    tras_el_segundo = next(
+        f
+        for f in persistencia.seguimientos_por_despachar(
+            conexion_pruebas, ahora=segundo_aplazamiento + timedelta(hours=1)
+        )
+        if f["id"] == pendiente["id"]
+    )
+    assert tras_el_segundo["fecha_objetivo"] == segundo_aplazamiento
+    assert tras_el_segundo["aplazado_desde"] == primera_marca, (
+        "el segundo aplazamiento no puede reescribir `aplazado_desde`"
+    )
+
+
 def test_la_cola_trae_lo_que_el_despachador_necesita_para_decidir(conexion_pruebas, cita_de_prueba):
     id_cita, id_conversacion = cita_de_prueba
     objetivo = datetime(2026, 9, 16, 18, 0, tzinfo=ZONA_BOGOTA)
@@ -336,15 +391,17 @@ def test_la_cola_trae_lo_que_el_despachador_necesita_para_decidir(conexion_prueb
 
     # Sin estas claves el despachador tendría que hacer una consulta por guarda.
     #
-    # `seguimientos_fallidos`, `reactivaciones_ultimo_ano` y `creado_en` se sumaron aquí en la
-    # ronda 1 de revisión de la tarea 3 (hallazgo 2): antes de eso, borrar cualquiera de las
-    # tres del SELECT dejaba esta prueba en verde -- las guardas R1/R2/R3bis siguen leyendo
-    # `.get(..., 0)` o revientan de otra forma, así que la ausencia no se nota aquí, solo en
-    # producción, en silencio.
+    # `seguimientos_fallidos` y `reactivaciones_ultimo_ano` se sumaron en la ronda 1 de
+    # revisión de la tarea 3 (hallazgo 2); `aplazado_desde` llegó en la ronda 2 (R3bis cambió
+    # de ancla: `creado_en` medía la edad total de la fila y no cuánto llevaba atascada, y
+    # anulaba en silencio una reactivación programada a semanas vista que llegaba puntual).
+    # Antes de esos dos hallazgos, borrar cualquiera de estas columnas del SELECT dejaba esta
+    # prueba en verde -- las guardas R1/R2/R3bis siguen leyendo `.get(...)` o revientan de
+    # otra forma, así que la ausencia no se nota aquí, solo en producción, en silencio.
     assert set(fila) >= {
         "id", "conversacion_id", "cita_id", "tipo", "fecha_objetivo", "intentos",
         "telefono", "nombre_completo", "tratamiento", "cita_inicio", "cita_estado",
-        "tomada_por", "seguimientos_fallidos", "reactivaciones_ultimo_ano", "creado_en",
+        "tomada_por", "seguimientos_fallidos", "reactivaciones_ultimo_ano", "aplazado_desde",
     }
 
 
