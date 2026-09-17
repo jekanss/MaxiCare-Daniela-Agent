@@ -292,7 +292,13 @@ def test_la_cascada_anula_el_recordatorio_de_una_cita_que_se_movio(conexion_prue
     pendientes = persistencia.seguimientos_por_despachar(
         conexion_pruebas, ahora=objetivo + timedelta(hours=1)
     )
-    assert [p for p in pendientes if p["cita_id"] == id_cita] == []
+    # `str(p["cita_id"])`, y NO `p["cita_id"] == id_cita` a secas (hallazgo de la ronda 2 de
+    # revisión, de la misma familia que el `UUID == str` que ya cazamos en las pruebas nuevas
+    # de la cascada de nombre): `citas.id` es `UUID` y psycopg lo devuelve como `uuid.UUID`,
+    # mientras `registrar_cita` -de donde sale `id_cita`- devuelve un `str`. Sin el `str()`,
+    # la comparación es SIEMPRE `False`, la lista filtrada SIEMPRE `[]`, y esta prueba pasaría
+    # en verde aunque `anular_seguimientos_de_cita` no anulara nada.
+    assert [p for p in pendientes if str(p["cita_id"]) == id_cita] == []
 
 
 def test_un_seguimiento_anulado_no_vuelve_a_la_cola(conexion_pruebas, cita_de_prueba):
@@ -450,7 +456,14 @@ def test_la_cascada_de_nombre_trae_la_ficha_y_el_perfil_cuando_existen(conexion_
     filas = persistencia.seguimientos_por_despachar(
         conexion_pruebas, ahora=objetivo + timedelta(hours=1)
     )
-    fila = next(f for f in filas if str(f["conversacion_id"]) == id_conversacion)
+    coincidencias = [f for f in filas if str(f["conversacion_id"]) == id_conversacion]
+    # El `assert len(...) == 1` es lo que de verdad prueba "sin que el LEFT JOIN multiplique
+    # la fila" (ronda 2 de revisión): el `next(...)` que había antes tomaba la primera
+    # coincidencia y descartaba el resto en silencio, así que un JOIN que devolviera DOS filas
+    # para esta misma conversación -el bug que este comentario existe para descartar- habría
+    # pasado en verde igual.
+    assert len(coincidencias) == 1
+    fila = coincidencias[0]
 
     assert fila["nombre_completo"] is None       # cita_id NULL: el LEFT JOIN a citas no da nada
     assert fila["nombre_ficha"] == "Ana Perez"

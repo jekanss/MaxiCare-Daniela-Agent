@@ -598,6 +598,40 @@ def test_un_nombre_de_perfil_vacio_o_solo_espacios_tampoco_es_usable():
         assert s.parametros_de(fila) is None, repr(perfil)
 
 
+def test_un_emoji_delante_del_nombre_no_se_manda_como_si_fuera_el_nombre():
+    """El defecto de la ronda 2 de revision: la guarda vieja validaba la cadena ENTERA -"tiene
+    alguna letra en algun lado?"- y `"🌸 Ana"` la pasaba porque "Ana" tiene letras, pero el
+    token que de verdad viajaba a Meta era el PRIMERO ("🌸" a secas): "Hola 🌸" es peor que
+    "Hola paciente", parece un bot roto. Ahora se parte primero y se valida el token que se va
+    a mandar, no la cadena completa -- con estos tres "hermanos" del mismo estilo (emoji +
+    nombre, la forma mas comun de nombre de perfil en WhatsApp), la fila se anula en vez de
+    mandar el emoji solo."""
+    for perfil in ("🌸 Ana", "💖 Andrea", "✨ Ana"):
+        fila = fila_de_reactivacion(nombre_ficha=None, nombre_perfil=perfil)
+        assert s.parametros_de(fila) is None, repr(perfil)
+
+
+def test_un_nombre_que_empieza_con_espacio_no_cae_al_respaldo_paciente():
+    """Residuo de la ronda 2: ni `asegurar_paciente` ni `registrar_cita` recortan lo que
+    llega, asi que una ficha como " Ana Perez" es alcanzable. Con `.split(" ")[0]` el primer
+    token era una cadena vacia y el respaldo `or "paciente"` volvia a colar el literal que
+    este hallazgo entero existe para sacar de las reactivaciones. `.split()` sin argumento
+    ignora los espacios de sobra y rescata el nombre real -- "paciente" no puede aparecer
+    aqui NUNCA, y esta prueba lo deja en firme con una fila que antes lo producia."""
+    fila = fila_de_reactivacion(nombre_ficha=" Ana Perez", nombre_perfil=None)
+    assert s.parametros_de(fila) == ["Ana"]
+
+
+def test_un_salto_de_linea_interno_no_sobrevive_al_hueco():
+    """Residuo de la ronda 2: Meta RECHAZA un parametro de plantilla con saltos de linea, y
+    como la fila se marca ANTES de enviar (no negociable 21) se perderia para siempre tras
+    los tres intentos. `.split(" ")[0]` no cortaba por `\\n` ni por `\\t` -solo por el caracter
+    espacio literal-, asi que `"Ana\\nPerez"` sobrevivia entero, salto de linea incluido.
+    `.split()` sin argumento corta por CUALQUIER espacio en blanco."""
+    fila = fila_de_reactivacion(nombre_ficha=None, nombre_perfil="Ana\nPerez")
+    assert s.parametros_de(fila) == ["Ana"]
+
+
 def test_el_recordatorio_de_cita_sigue_mandando_sus_cuatro_huecos():
     """A diferencia de una reactivacion, un recordatorio de verdad SI trae `nombre_completo`:
     sale de `citas`, que lo declara `NOT NULL`, y por eso este es el unico test del archivo
@@ -702,6 +736,43 @@ def test_una_reactivacion_sin_nombre_usable_se_anula_y_no_se_manda_ni_se_marca()
     assert marcadas == []
     assert anuladas == [(1, "sin_nombre")]
     assert recuento == {"enviados": 0, "anulados": 1, "aplazados": 0, "fallidos": 0}
+
+
+def test_en_modo_de_comprobacion_una_reactivacion_sin_nombre_queda_pendiente_como_sus_hermanas():
+    """El arreglo de la ronda 2: el chequeo de `sin_nombre` se movio DESPUES del de la
+    plantilla. Antes, con el canal apagado -las cuatro plantillas vacias, el modo de
+    comprobacion de hoy-, una reactivacion sin nombre usable se ANULABA igual, mientras el
+    resto de la cola se quedaba pendiente sin tocar. Eso rompia el invariante de esta fase:
+    "decide, registra, y NO TOCA nada mientras no haya plantilla" -el ensayo existe para ver
+    a quien se le habria escrito ANTES de escribirle a nadie, y una fila que se consume sola
+    durante el ensayo hace que el ensayo mienta sobre esa fila en particular. Ahora se queda
+    pendiente igual que sus hermanas."""
+    import asyncio
+
+    enviados: list[dict] = []
+    anuladas: list[tuple[int, str]] = []
+    marcadas: list[int] = []
+
+    class _WhatsAppFalso:
+        async def enviar_plantilla(self, telefono, **k):
+            enviados.append(k)
+            return "wamid.X"
+
+    recuento = asyncio.run(
+        _despachar_con(
+            [fila_de_reactivacion(nombre_ficha=None, nombre_perfil="🌸")],
+            whatsapp=_WhatsAppFalso(),
+            plantillas={},  # el modo de comprobacion de hoy: las cuatro plantillas vacias
+            ahora=momento(16, 11),
+            marcadas=marcadas,
+            anuladas=anuladas,
+        )
+    )
+
+    assert enviados == []
+    assert marcadas == []
+    assert anuladas == []
+    assert recuento == {"enviados": 0, "anulados": 0, "aplazados": 0, "fallidos": 0}
 
 
 def test_un_tipo_desconocido_sin_cita_inicio_se_anula_fail_closed():

@@ -531,8 +531,50 @@ SEGUNDOS_ENTRE_INTENTOS = 2.0
 _DIAS = ("lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo")
 
 
+def _primer_nombre_usable(texto: str | None) -> str | None:
+    """El primer token de `texto` que sirve para un saludo, o `None` si no hay ninguno.
+
+    **Parte ANTES de validar, y no al revés** (defecto de la ronda 2 de revisión: la versión
+    anterior validaba la cadena ENTERA -"¿tiene alguna letra en algún lado?"- y solo DESPUÉS
+    tomaba el primer token para mandarlo. Con `"🌸 Ana"` la cadena completa tiene una letra -la
+    de "Ana"- y pasaba la guarda, pero el token que de verdad viajaba a Meta era `"🌸"`, el
+    emoji solo: "Hola 🌸" es peor que "Hola paciente" a ojos del paciente -parece un bot roto-,
+    que es exactamente lo que esta guarda existe para impedir. Medido por el revisor: el emoji
+    delante del nombre (`💖 Andrea`, `✨ Ana`) es una de las formas más comunes de nombre de
+    perfil en WhatsApp, así que no era un caso de esquina. Aquí el token que se valida es el
+    MISMO que se manda.
+
+    `.split()` **sin argumento**, y no `.split(" ")`: corta por CUALQUIER espacio en blanco
+    -incluidos saltos de línea y tabulaciones- y nunca deja un token vacío. Cierra dos residuos
+    más del mismo hallazgo, medidos por el revisor:
+
+    - Un nombre con un salto de línea interno (`"Ana\\nPerez"`) sobrevivía entero, `\\n`
+      incluido, porque `.split(" ")` solo corta por el carácter espacio. Meta RECHAZA un
+      parámetro de plantilla con saltos de línea, y como la fila se marca ANTES de enviar (no
+      negociable 21), se perdería para siempre tras los tres intentos, con aviso de fallo al
+      doctor por algo que nunca tuvo que fallar.
+    - Un nombre que empieza con un espacio (`" Ana Perez"`, alcanzable porque ni
+      `asegurar_paciente` ni `registrar_cita` recortan lo que llega) dejaba `.split(" ")[0]`
+      en una cadena VACÍA, y el respaldo `or "paciente"` volvía a colar el literal que este
+      hallazgo entero existe para sacar de las reactivaciones -ver `parametros_de`, que ya no
+      tiene ese respaldo en su rama de reactivación.
+
+    El criterio de "usable" sigue siendo el mismo, deliberadamente conservador: al menos una
+    letra (`str.isalpha()`, que sí reconoce acentos y eñes). No busca la regla perfecta -no
+    intenta rescatar "Ana" de "🌸 Ana" probando el segundo token-, solo que el token que se
+    manda no sea un emoji, un signo suelto, o vacío.
+    """
+    if not texto:
+        return None
+    tokens = texto.split()
+    if not tokens:
+        return None
+    primero = tokens[0]
+    return primero if any(caracter.isalpha() for caracter in primero) else None
+
+
 def _nombre_de_reactivacion(fila: dict[str, Any]) -> str | None:
-    """El nombre para el ÚNICO hueco de una reactivación, en cascada de tres fuentes.
+    """El nombre de pila para el ÚNICO hueco de una reactivación, en cascada de tres fuentes.
 
     `citas.nombre_completo` -> la ficha de `pacientes` -> el nombre de perfil de WhatsApp
     (`mensajes_entrantes.nombre_perfil`), en ese orden -- el mismo que arma el SELECT de
@@ -549,29 +591,22 @@ def _nombre_de_reactivacion(fila: dict[str, Any]) -> str | None:
     nombre de perfil que la persona misma escribió en WhatsApp -- texto libre, sin garantía
     de forma.
 
-    Devuelve `None` si ninguna fuente da un nombre usable: **ante la duda, no se manda.**
+    Cada candidato pasa por `_primer_nombre_usable` -- ronda 2 de revisión: antes esta función
+    devolvía la cadena CRUDA de la fuente y `parametros_de` la partía después, validando la
+    cadena entera en vez del token que de verdad se manda (ver el docstring de esa función).
+    Devuelve `None` si NINGÚN candidato produce un nombre usable: **ante la duda, no se manda.**
     """
-    citas_nombre = fila.get("nombre_completo")
-    if citas_nombre:
-        return citas_nombre
-
     ficha = fila.get("nombre_ficha")
     # El marcador de la regla dura 12: una ficha con ese nombre no cuenta como nombre, cae al
     # siguiente eslabón. `NOMBRE_PENDIENTE` es el literal ASCII "PENDIENTE" -- si se colara
     # aquí, la reactivación saldría diciendo "Hola PENDIENTE", peor que "Hola paciente".
-    if ficha and ficha != persistencia.NOMBRE_PENDIENTE:
-        return ficha
+    if ficha == persistencia.NOMBRE_PENDIENTE:
+        ficha = None
 
-    # `nombre_perfil` es texto libre que la persona eligió en su WhatsApp: puede ser un
-    # nombre, un apodo, el nombre de un negocio, un emoji suelto o una frase. El criterio es
-    # deliberadamente conservador y no busca la regla perfecta -- basta con que no mande
-    # "Hola 🌸": exige al menos una letra (`str.isalpha()`, que sí reconoce acentos y eñes) en
-    # el texto ya recortado. Un emoji, una cadena de puntuación o un campo vacío no la tienen
-    # y quedan fuera; un apodo o un nombre de negocio sí la tienen y pasan -- son menos
-    # naturales que un nombre de pila, pero siguen siendo un saludo con nombre y no uno vacío.
-    perfil = (fila.get("nombre_perfil") or "").strip()
-    if perfil and any(caracter.isalpha() for caracter in perfil):
-        return perfil
+    for candidato in (fila.get("nombre_completo"), ficha, fila.get("nombre_perfil")):
+        nombre = _primer_nombre_usable(candidato)
+        if nombre is not None:
+            return nombre
 
     return None
 
@@ -606,10 +641,12 @@ def parametros_de(fila: dict[str, Any]) -> list[str] | None:
         nombre = (fila.get("nombre_completo") or "").split(" ")[0] or "paciente"
         return _parametros_del_recordatorio(fila, nombre)
 
+    # `_nombre_de_reactivacion` ya devuelve el PRIMER TOKEN validado -no la cadena cruda-, así
+    # que aquí no se vuelve a partir ni queda un respaldo `"paciente"`: ese literal no puede
+    # aparecer en una reactivación (ronda 2 de revisión). Si no hay nombre usable, la fila es
+    # una fila rota y `despachar` la anula -- ver `_nombre_de_reactivacion`.
     nombre = _nombre_de_reactivacion(fila)
-    if nombre is None:
-        return None
-    return [nombre.split(" ")[0] or "paciente"]
+    return None if nombre is None else [nombre]
 
 
 def _parametros_del_recordatorio(fila: dict[str, Any], nombre: str) -> list[str]:
@@ -759,29 +796,24 @@ async def despachar(
             # M3 (ronda 1 de revisión): antes de acotar esto a `TIPO_RECORDATORIO`, ese caso
             # se quedaba pendiente PARA SIEMPRE si nadie migraba el `tipo` a mano -el
             # despachador lo releería cada 60 s sin dejar rastro del motivo-. Ahora cierra
-            # fail-closed contra la lista de reactivaciones CONOCIDAS (`TIPOS_DE_REACTIVACION`,
-            # la misma polaridad que `es_reactivacion` en `decidir`), no contra un tipo suelto.
+            # fail-closed contra la lista de reactivaciones CONOCIDAS (`TIPOS_DE_REACTIVACION`).
+            #
+            # Esto NO es la misma polaridad que `es_reactivacion` en `decidir` (ronda 2 de
+            # revisión: un comentario anterior lo decía, y era falso). Las dos son
+            # conservadoras, pero en direcciones OPUESTAS a propósito, y "unificarlas" rompería
+            # una de las dos:
+            #   - `decidir` usa `tipo not in TIPOS_NO_COMERCIALES`: un `tipo` DESCONOCIDO SÍ
+            #     cuenta como reactivación, para que las guardas comerciales (baja, freno,
+            #     tope anual, horario) se le apliquen -- el lado seguro ahí es sospechar de
+            #     más, no de menos.
+            #   - Aquí se usa `tipo not in TIPOS_DE_REACTIVACION`: un `tipo` DESCONOCIDO NO
+            #     cuenta como reactivación reconocida, así que si además le falta `cita_inicio`
+            #     se anula fail-closed en vez de tratarlo como una reactivación legítima que
+            #     solo espera nombre o plantilla -- el lado seguro aquí es exigir más para
+            #     dejarlo vivo, no menos.
             if fila.get("tipo") not in TIPOS_DE_REACTIVACION and fila.get("cita_inicio") is None:
                 await asyncio.to_thread(
                     persistencia.anular_seguimiento, conn, fila["id"], motivo="sin_cita"
-                )
-                recuento["anulados"] += 1
-                continue
-
-            # Fila ROTA #2, y el hallazgo CRÍTICO de la ronda 1: una reactivación sin NINGÚN
-            # nombre usable para su único hueco (ver `_nombre_de_reactivacion`). Sin esto,
-            # `parametros_de` caía a su respaldo `"paciente"` y el 100% de las reactivaciones
-            # salían con "Hola paciente" -- la firma de un mensaje masivo, y el desempate de
-            # este proyecto es que nadie reporte el número. Se anula, no se deja pendiente: el
-            # nombre no va a aparecer solo con el paso del tiempo, y dejarla pendiente
-            # acumularía basura que el despachador relee cada 60 s sin ninguna salida posible.
-            # El barrido de la parada siguiente puede volver a encolar a esta misma persona si
-            # alguna vez deja un nombre usable (agenda, o vuelve a escribirle a Daniela con el
-            # perfil puesto).
-            parametros = parametros_de(fila)
-            if parametros is None:
-                await asyncio.to_thread(
-                    persistencia.anular_seguimiento, conn, fila["id"], motivo="sin_nombre"
                 )
                 recuento["anulados"] += 1
                 continue
@@ -808,6 +840,34 @@ async def despachar(
                     "SIGUE pendiente -no se marca- para cuando exista la plantilla.",
                     fila["id"], fila.get("tipo"),
                 )
+                continue
+
+            # Fila ROTA #2, y el hallazgo CRÍTICO de la ronda 1: una reactivación sin NINGÚN
+            # nombre usable para su único hueco (ver `_nombre_de_reactivacion`). Sin esto,
+            # `parametros_de` caía a su respaldo `"paciente"` y el 100% de las reactivaciones
+            # salían con "Hola paciente" -- la firma de un mensaje masivo, y el desempate de
+            # este proyecto es que nadie reporte el número. Se anula, no se deja pendiente: el
+            # nombre no va a aparecer solo con el paso del tiempo, y dejarla pendiente
+            # acumularía basura que el despachador relee cada 60 s sin ninguna salida posible.
+            # El barrido de la parada siguiente puede volver a encolar a esta misma persona si
+            # alguna vez deja un nombre usable (agenda, o vuelve a escribirle a Daniela con el
+            # perfil puesto).
+            #
+            # VA DESPUÉS del chequeo de plantilla de arriba, y no antes (ronda 2 de revisión):
+            # con la plantilla vacía -el modo de comprobación de hoy- esta fila tiene que
+            # quedarse PENDIENTE igual que sus hermanas, no consumirse sola. Comprobarlo antes
+            # rompía el invariante de esta fase ("decide, registra y NO TOCA nada mientras no
+            # haya plantilla"): una reactivación sin nombre usable se anulaba aunque el canal
+            # entero estuviera apagado, y el ensayo -que existe para ver a quién se le habría
+            # escrito ANTES de escribirle a nadie- mentía sobre esa fila en particular. Con la
+            # plantilla configurada el resultado es el mismo por los dos órdenes: se anula
+            # igual, así que el camino real no pierde nada.
+            parametros = parametros_de(fila)
+            if parametros is None:
+                await asyncio.to_thread(
+                    persistencia.anular_seguimiento, conn, fila["id"], motivo="sin_nombre"
+                )
+                recuento["anulados"] += 1
                 continue
 
             # MARCAR PRIMERO. Ver `persistencia.marcar_seguimiento_enviado`: no hay transacción
