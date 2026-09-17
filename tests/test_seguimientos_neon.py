@@ -352,7 +352,11 @@ def test_la_consulta_trae_la_baja_del_contacto(conexion_pruebas):
     persistencia.insertar_seguimiento(
         conexion_pruebas,
         id_conversacion=id_conv,
-        tipo="reactivacion",
+        # `reactivacion_sin_agendar` y no `reactivacion` a secas: el CHECK
+        # `ck_seguimientos_tipo` de la migración 021 cierra el vocabulario de `tipo`, y un
+        # valor fuera de la lista revienta el INSERT. Esta prueba no ejercita el tipo --lo que
+        # comprueba es la columna `no_contactar`--, así que cualquier tipo válido sirve.
+        tipo="reactivacion_sin_agendar",
         fecha_objetivo=ayer,
         clave_idempotencia="baja-1",
     )
@@ -380,7 +384,8 @@ def test_un_telefono_sin_fila_de_contacto_no_cuenta_como_baja(conexion_pruebas):
     persistencia.insertar_seguimiento(
         conexion_pruebas,
         id_conversacion=id_conv,
-        tipo="reactivacion",
+        # Mismo motivo que arriba: el CHECK de la 021 exige un tipo del vocabulario cerrado.
+        tipo="reactivacion_sin_agendar",
         fecha_objetivo=ayer,
         clave_idempotencia="sin-contacto-1",
     )

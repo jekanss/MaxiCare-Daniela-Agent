@@ -216,7 +216,7 @@ def _con_historia(url: str, telefono: str, *, wamids: list[str]) -> dict:
             """
             INSERT INTO seguimientos (conversacion_id, tipo, fecha_objetivo,
                                       clave_idempotencia)
-            VALUES (%s, 'recordatorio', %s, %s)
+            VALUES (%s, 'recordatorio_cita', %s, %s)
             """,
             (id_conversacion, ahora + timedelta(days=2), f"seg-{marca}"),
         )
