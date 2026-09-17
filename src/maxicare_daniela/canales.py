@@ -259,6 +259,40 @@ class WhatsApp:
             )
         return r.json()["messages"][0]["id"]
 
+    async def calidad_del_numero(self) -> dict[str, str]:
+        """Lo que Meta opina HOY de este número. Una LECTURA: no cuesta ni gasta cupo.
+
+        Se pregunta en vez de esperar al webhook `phone_number_quality_update` a propósito
+        (tarea 7.0 de la reactivación de leads, regla 11): ese webhook exige suscribir el
+        campo en la consola de Meta --configuración externa que un despliegue no
+        garantiza-- y sobre todo SE PUEDE PERDER: si el servidor está caído cuando Meta lo
+        manda, Meta reintenta un rato y desiste, y el sistema se queda creyendo que todo va
+        bien justo cuando no va bien. Una consulta antes de cada barrido no se pierde nunca.
+
+        Mismo patrón que `canales.aviso_sigue_puesto` (no negociable 26) y que
+        `telegram.estado_del_tema` (no negociable 19): lo que no emite evento, se sonda.
+
+        Devuelve `{}` si la consulta falla. Quien llama tiene que tratar el diccionario
+        vacío como «no se sabe», que para `barrido.se_puede_encolar` significa NO encolar
+        -- ante la duda, no mandar.
+
+        Usa la constante de módulo `BASE_GRAPH` y la propiedad `_cabeceras`, igual que los
+        otros cuatro sitios de esta clase que hablan con Graph: esta clase no tiene ningún
+        atributo `self._base`, así que no hay nada que extraer.
+        """
+        url = f"{BASE_GRAPH}/{self._phone_number_id}"
+        parametros = {"fields": "quality_rating,messaging_limit_tier,status"}
+        try:
+            async with httpx.AsyncClient(timeout=TIMEOUT_NORMAL) as cliente:
+                respuesta = await cliente.get(
+                    url, headers=self._cabeceras, params=parametros
+                )
+                respuesta.raise_for_status()
+                return respuesta.json()
+        except Exception:  # noqa: BLE001 -- un fallo aquí no puede tumbar el barrido
+            log.exception("no se pudo leer la calidad del número en Meta")
+            return {}
+
     async def subir_media(self, archivo: ArchivoDescargado) -> str:
         """Sube los bytes a Meta y devuelve el `media_id`. La primera mitad del relevo.
 

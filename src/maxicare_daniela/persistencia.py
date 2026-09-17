@@ -36,6 +36,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
+from .calendario import ZONA_BOGOTA
+
 log = logging.getLogger("maxicare.persistencia")
 
 # ==========================================================================================
@@ -1873,6 +1875,308 @@ def anular_reactivaciones_vivas(conn, telefono: str, *, motivo: str) -> int:
     return anulados
 
 
+# ==========================================================================================
+# El barrido de reactivación (tarea 7) -- quién entra en la cola
+#
+# `barrido.encolar` es el único consumidor de este bloque. Va aquí y no en `barrido.py`
+# porque el SQL es lo que se prueba contra Neon (`tests/test_reactivacion_neon.py`), y ese es
+# el criterio que ya separa el resto de este archivo de `seguimientos.py`.
+# ==========================================================================================
+
+#: Cuántos días se espera entre un envío de reactivación y el siguiente intento AL MISMO
+#: tipo, y también cuántos días de silencio hacen falta para dar por fallido un envío ya
+#: hecho (`series_por_contabilizar`, más abajo). Las dos preguntas comparten el mismo número
+#: a propósito, y es lo que produce -- sin una tabla aparte de «primer intento / segundo
+#: intento»-- el «como mucho dos mensajes de seguimiento (24 h y 7 días)» del plan:
+#:
+#:   1. El primer envío sale cuando el lead entra por primera vez a `leads_sin_agendar` o
+#:      `leads_que_cancelaron` (24 h después de la última señal).
+#:   2. Si a los 7 días sigue sin responder, ese envío se cuenta como fallido
+#:      (`seguimientos_fallidos += 1`) en el MISMO instante en que el bloqueo de reenvío de
+#:      abajo expira -- así que el barrido lo vuelve a ofrecer. Ese es el segundo envío.
+#:   3. Si a los 7 días de ESE segundo envío tampoco contesta, `seguimientos_fallidos` llega
+#:      a 2 (el default de `max_seguimientos_fallidos`) y R1 -- tanto aquí, como filtro de
+#:      cartera, como en `seguimientos.decidir`, como guarda de despacho -- deja de
+#:      ofrecerlo.
+#:
+#: Las tareas 1-6 de este plan no dejaron construido un calendario 24 h / 7 días explícito
+#: para la reactivación: esta es la interpretación de este módulo, documentada aquí porque es
+#: una decisión de diseño y no un hecho verificado contra el resto del código. El número es
+#: una constante y se puede ajustar sin tocar la forma de ninguna consulta.
+DIAS_ENTRE_INTENTOS_DE_REACTIVACION = 7
+
+#: Quien preguntó y no agendó. Las condiciones, y ninguna sobra:
+#:
+#: 1. Tiene conversación de **WhatsApp** -- regla 1: solo a quien escribió PRIMERO, y solo
+#:    por ese canal (Ruling C4: `conversaciones.canal` admite también `'web'`, y una
+#:    conversación del chat del panel no es un número de WhatsApp al que mandarle una
+#:    plantilla).
+#: 2. Su último mensaje fue hace >= 24 h y < 30 días -- antes sigue en la conversación, y
+#:    «hace unos días nos escribió» sobre algo de hace tres meses es falso: de las cosas por
+#:    las que la gente reporta un número.
+#: 3. No tiene cita FUTURA no cancelada -- a quien ya tiene hora no se le persigue.
+#: 4. No pidió la baja, y el contador de series fallidas no llegó al tope (R1, por
+#:    duplicado: `seguimientos.decidir` la vuelve a mirar al despachar, pero no hay motivo
+#:    para encolar aquí una fila que esa guarda va a anular de todas formas).
+#: 5. No tiene ya un seguimiento de este tipo EN JUEGO -- pendiente de decidir, o enviado
+#:    hace menos de `DIAS_ENTRE_INTENTOS_DE_REACTIVACION` días. Sin esto, cada pasada del
+#:    barrido (una vez por hora) encolaría una fila nueva encima de la que ya está viva.
+#: 6. **NUNCA se le anuló una serie de este tipo con motivo `el_paciente_dijo_que_no`.** Esta
+#:    es la condición que el encargo original NO traía. `herramientas._cerrar_seguimiento`
+#:    anula con ese motivo EXACTO cuando el paciente dice explícitamente que no quiere que le
+#:    insistan sobre ESTA consulta, y las otras condiciones de arriba -en particular la 5,
+#:    que solo mira `anulado_en IS NULL`- no la distinguen de una anulación por
+#:    `llego_tarde` o por `fuera_de_horario_comercial`: esas SÍ deben poder volver a
+#:    ofrecerse, porque el motivo por el que no salieron ya dejó de ser cierto. Un «no»
+#:    explícito es distinto: no caduca con el reloj, así que este bloqueo NO lleva ventana de
+#:    tiempo -- es permanente para esta consulta. Es la decisión más importante de este
+#:    módulo: sin ella, Daniela le dice al paciente «anotado, no se le vuelve a escribir
+#:    sobre esta consulta» y el barrido se lo vuelve a ofrecer al día siguiente, que es
+#:    literalmente el fallo por el que se reporta un número.
+#:
+#: **Límite conocido y aceptado, dicho y no escondido:** esta consulta NO repite el tope
+#: anual (R2, `max_reactivaciones_12m`) ni las guardas de horario o contacto reciente
+#: (R4, R5) de `seguimientos.decidir`. Solo R1 (el freno por persona) se mira aquí, como
+#: filtro barato de cartera. Encolar una fila que R2, R4 o R5 van a anular al despachar es
+#: trabajo de sobra, nunca un envío de más: `seguimientos.decidir` vuelve a evaluar las
+#: cinco guardas de reactivación sobre CADA fila antes de mandar nada, así que ninguna de
+#: las dos consultas de este módulo es, por sí sola, la última palabra sobre a quién se le
+#: escribe -- lo es `decidir`.
+_LEADS_SIN_AGENDAR = f"""
+WITH ultima_conversacion AS (
+    -- Por TELÉFONO, no por fila de mensaje: `mensajes_entrantes` NO TIENE
+    -- `conversacion_id` (verificado contra la migración 004 -- Ruling C3 --: la tabla es
+    -- wamid/telefono/recibido_en y nada más), así que la única conversación que se puede
+    -- nombrar aquí es la MÁS RECIENTE de ese número. Sin el DISTINCT ON, un número con
+    -- varias conversaciones históricas (`conversacion_viva` cierra a las 24 h, así que
+    -- cualquier lead de más de un día ya tiene más de una) entraría una vez por cada una.
+    SELECT DISTINCT ON (telefono) telefono, id AS conversacion_id
+      FROM conversaciones
+     WHERE canal = 'whatsapp'
+     ORDER BY telefono, creada_en DESC
+),
+ultimo_mensaje AS (
+    SELECT telefono, max(recibido_en) AS cuando
+      FROM mensajes_entrantes
+     GROUP BY telefono
+)
+SELECT uc.telefono, uc.conversacion_id, um.cuando AS ultimo_mensaje
+  FROM ultima_conversacion uc
+  JOIN ultimo_mensaje um ON um.telefono = uc.telefono
+  LEFT JOIN contactos co ON co.telefono = uc.telefono
+ WHERE COALESCE(co.no_contactar, FALSE) = FALSE
+   AND COALESCE(co.seguimientos_fallidos, 0) < %(max_fallidos)s
+   AND um.cuando <= %(ahora)s - interval '24 hours'
+   AND um.cuando >  %(ahora)s - interval '30 days'
+   AND NOT EXISTS (
+        SELECT 1 FROM citas c
+         WHERE c.telefono = uc.telefono
+           AND c.inicio > %(ahora)s
+           AND c.estado <> 'cancelada'
+   )
+   AND NOT EXISTS (
+        SELECT 1 FROM seguimientos s
+          JOIN conversaciones cv2 ON cv2.id = s.conversacion_id
+         WHERE cv2.telefono = uc.telefono
+           AND s.tipo = 'reactivacion_sin_agendar'
+           AND (
+                (s.anulado_en IS NULL AND s.enviado_en IS NULL)
+             OR (s.enviado_en IS NOT NULL
+                 AND s.enviado_en > %(ahora)s
+                                    - interval '{DIAS_ENTRE_INTENTOS_DE_REACTIVACION} days')
+           )
+   )
+   AND NOT EXISTS (
+        SELECT 1 FROM seguimientos s3
+          JOIN conversaciones cv3 ON cv3.id = s3.conversacion_id
+         WHERE cv3.telefono = uc.telefono
+           AND s3.tipo = 'reactivacion_sin_agendar'
+           AND s3.motivo_anulacion = 'el_paciente_dijo_que_no'
+   )
+ ORDER BY um.cuando DESC
+ LIMIT %(limite)s
+"""
+
+
+def leads_sin_agendar(
+    conn, *, ahora: datetime, limite: int = 200, max_seguimientos_fallidos: int = 2
+) -> list[dict[str, Any]]:
+    """Quien preguntó y no agendó, y todavía puede recibir un mensaje. Ver `_LEADS_SIN_AGENDAR`.
+
+    `max_seguimientos_fallidos` lleva DEFAULT (Ruling C9): las pruebas del encargo original
+    la llaman sin ese argumento.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            _LEADS_SIN_AGENDAR,
+            {"ahora": ahora, "limite": limite, "max_fallidos": max_seguimientos_fallidos},
+        )
+        columnas = [d[0] for d in cur.description]
+        return [dict(zip(columnas, fila)) for fila in cur.fetchall()]
+
+
+#: La misma forma que `_LEADS_SIN_AGENDAR`, sobre `citas` con `estado = 'cancelada'` en vez
+#: de sobre `mensajes_entrantes`. El «último mensaje» de aquella es aquí «cuándo se canceló»
+#: (`citas.actualizada_en`, que `marcar_cita_cancelada` toca a propósito): es el evento que
+#: convierte a esta persona en un lead, así que es contra el que se mide la ventana de
+#: 24 h-30 días. `citas.conversacion_id` sale directo de la cita cancelada -- no hace falta
+#: la vuelta por `conversaciones.canal` de la otra consulta, porque una cita solo se crea
+#: desde una conversación real de WhatsApp (`herramientas._crear_cita` no tiene otro camino).
+_LEADS_QUE_CANCELARON = f"""
+WITH ultima_cancelada AS (
+    SELECT DISTINCT ON (telefono) telefono, conversacion_id, actualizada_en
+      FROM citas
+     WHERE estado = 'cancelada'
+     ORDER BY telefono, actualizada_en DESC
+)
+SELECT uc.telefono, uc.conversacion_id, uc.actualizada_en AS ultimo_mensaje
+  FROM ultima_cancelada uc
+  LEFT JOIN contactos co ON co.telefono = uc.telefono
+ WHERE COALESCE(co.no_contactar, FALSE) = FALSE
+   AND COALESCE(co.seguimientos_fallidos, 0) < %(max_fallidos)s
+   AND uc.actualizada_en <= %(ahora)s - interval '24 hours'
+   AND uc.actualizada_en >  %(ahora)s - interval '30 days'
+   AND NOT EXISTS (
+        SELECT 1 FROM citas c2
+         WHERE c2.telefono = uc.telefono
+           AND c2.inicio > %(ahora)s
+           AND c2.estado <> 'cancelada'
+   )
+   AND NOT EXISTS (
+        SELECT 1 FROM seguimientos s
+          JOIN conversaciones cv ON cv.id = s.conversacion_id
+         WHERE cv.telefono = uc.telefono
+           AND s.tipo = 'reactivacion_cancelada'
+           AND (
+                (s.anulado_en IS NULL AND s.enviado_en IS NULL)
+             OR (s.enviado_en IS NOT NULL
+                 AND s.enviado_en > %(ahora)s
+                                    - interval '{DIAS_ENTRE_INTENTOS_DE_REACTIVACION} days')
+           )
+   )
+   AND NOT EXISTS (
+        SELECT 1 FROM seguimientos s2
+          JOIN conversaciones cv2 ON cv2.id = s2.conversacion_id
+         WHERE cv2.telefono = uc.telefono
+           AND s2.tipo = 'reactivacion_cancelada'
+           AND s2.motivo_anulacion = 'el_paciente_dijo_que_no'
+   )
+ ORDER BY uc.actualizada_en DESC
+ LIMIT %(limite)s
+"""
+
+
+def leads_que_cancelaron(
+    conn, *, ahora: datetime, limite: int = 200, max_seguimientos_fallidos: int = 2
+) -> list[dict[str, Any]]:
+    """Quien canceló y no volvió a agendar. Ver `_LEADS_QUE_CANCELARON`.
+
+    `max_seguimientos_fallidos` lleva DEFAULT por la misma razón que en `leads_sin_agendar`
+    (Ruling C9).
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            _LEADS_QUE_CANCELARON,
+            {"ahora": ahora, "limite": limite, "max_fallidos": max_seguimientos_fallidos},
+        )
+        columnas = [d[0] for d in cur.description]
+        return [dict(zip(columnas, fila)) for fila in cur.fetchall()]
+
+
+def contar_enviados_hoy(conn, *, ahora: datetime) -> int:
+    """Cuántos mensajes de REACTIVACIÓN se enviaron en el día de Bogotá que contiene `ahora`.
+
+    Ruling C2: `persistencia.contar_enviados_hoy` no existía -- el encargo original la daba
+    por hecha -- y cuenta SOLO reactivación (`tipo <> 'recordatorio_cita'`). Si contara
+    también los recordatorios de cita, un día con muchas citas agendadas se comería el cupo
+    diario del barrido (regla 9, `tope_diario_reactivacion`) y apagaría la reactivación entera
+    sin que nadie lo viera ni lo decidiera -- el número de recordatorios de un día cualquiera
+    no tiene ninguna relación con cuántos mensajes comerciales tolera Meta.
+
+    El día se calcula en Python con `ZONA_BOGOTA` -- un desfase FIJO, porque Colombia no
+    tiene horario de verano -- y no con `AT TIME ZONE` de Postgres, para no depender de que
+    la base tenga cargada esa zona con ese nombre exacto.
+    """
+    inicio_del_dia = ahora.astimezone(ZONA_BOGOTA).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT count(*) FROM seguimientos
+             WHERE tipo <> 'recordatorio_cita'
+               AND enviado_en >= %(inicio)s
+               AND enviado_en <  %(inicio)s + interval '1 day'
+            """,
+            {"inicio": inicio_del_dia},
+        )
+        (total,) = cur.fetchone()
+    return total
+
+
+def series_por_contabilizar(
+    conn,
+    *,
+    ahora: datetime,
+    dias: int = DIAS_ENTRE_INTENTOS_DE_REACTIVACION,
+    limite: int = 200,
+) -> list[dict[str, Any]]:
+    """Reactivaciones enviadas hace más de `dias` días que nadie contestó y nadie contó.
+
+    Cada fila es UN envío que se da por fallido (aquí «fallido» es «no contestado en `dias`
+    días», sin distinguir si fue el primer o el segundo intento de esa persona -- ver el
+    comentario largo de `DIAS_ENTRE_INTENTOS_DE_REACTIVACION`). `barrido._contabilizar_
+    series_cerradas` sube `contactos.seguimientos_fallidos` por cada una y marca
+    `contabilizado_en` para que la siguiente pasada no la vuelva a contar: sin esa marca, el
+    freno por persona (R1) se dispararía solo con el paso del tiempo, sin que la persona
+    hiciera nada.
+
+    `tipo IN (...)` lleva los literales de `seguimientos.TIPOS_QUE_EL_BARRIDO_ENCOLA` a mano
+    y no importados: la flecha de imports de este proyecto va de `seguimientos.py` hacia
+    `persistencia.py`, nunca al revés, y esta función tiene que quedarse de este lado para no
+    crear un ciclo.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT s.id, cv.telefono
+              FROM seguimientos s
+              JOIN conversaciones cv ON cv.id = s.conversacion_id
+             WHERE s.tipo IN ('reactivacion_sin_agendar', 'reactivacion_cancelada')
+               AND s.enviado_en IS NOT NULL
+               AND s.enviado_en <= %(ahora)s - (%(dias)s * interval '1 day')
+               AND s.contabilizado_en IS NULL
+               AND NOT EXISTS (
+                    SELECT 1 FROM mensajes_entrantes me
+                     WHERE me.telefono = cv.telefono
+                       AND me.recibido_en > s.enviado_en
+               )
+             ORDER BY s.enviado_en
+             LIMIT %(limite)s
+            """,
+            {"ahora": ahora, "dias": dias, "limite": limite},
+        )
+        columnas = [d[0] for d in cur.description]
+        return [dict(zip(columnas, fila)) for fila in cur.fetchall()]
+
+
+def marcar_serie_contabilizada(conn, id_seguimiento: int, *, commit: bool = True) -> None:
+    """Deja constancia de que esta fila ya subió el contador, para que no lo vuelva a subir.
+
+    Ruling D5: quien la llame junto a `sumar_seguimiento_fallido(commit=False)` tiene que
+    llamar a ESTA función DESPUÉS, sobre la misma conexión, y dejar que su `commit()`
+    confirme las dos escrituras juntas -- ver el docstring corregido de
+    `sumar_seguimiento_fallido`.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE seguimientos SET contabilizado_en = now() WHERE id = %s",
+            (id_seguimiento,),
+        )
+    if commit:
+        conn.commit()
+
+
 def seguimientos_por_despachar(
     conn, *, ahora: datetime, limite: int = 50
 ) -> list[dict[str, Any]]:
@@ -2760,13 +3064,26 @@ def sumar_seguimiento_fallido(conn, telefono: str, *, commit: bool = True) -> in
     llamar al modelo, pero el chat web del panel (`runtime.py`) NO pasa por ahí: sin este
     `asegurar_contacto`, la primera vez que alguien prueba «ya no, gracias» desde el panel
     Daniela confirmaría el cierre y el contador se quedaría en cero -- un freno que se da por
-    ejercitado sin haberlo sido. `asegurar_contacto` hace su propio `commit()`: eso no rompe
-    nada, porque asegurar que la fila exista es una precondición idempotente, no una escritura
-    que tenga que deshacerse junto con el resto.
+    ejercitado sin haberlo sido.
 
-    `commit=False` para el barrido de la parada siguiente (tarea 7), que tiene que subir este
-    contador y marcar `seguimientos.contabilizado_en` en la MISMA transacción: sin eso, una
-    caída entre las dos escrituras cuenta dos veces la misma serie contra el freno de la 021.
+    `asegurar_contacto` hace su propio `commit()` INCONDICIONAL. **Corrección (tarea 7, Ruling
+    D5): esto NO es inocuo en todos los casos**, al revés de lo que decía una versión anterior
+    de este párrafo. Es inocuo cuando esta función se llama sola --asegurar que la fila exista
+    es una precondición idempotente-- pero deja de serlo en cuanto hay otra escritura
+    pendiente en la MISMA conexión antes de llamar aquí con `commit=False`: ese `commit()`
+    interno confirma TODO lo que estuviera pendiente en `conn`, no solo la fila de
+    `contactos`.
+
+    Por eso `commit=False` es para `barrido._contabilizar_series_cerradas` (tarea 7), que
+    tiene que subir este contador y marcar `seguimientos.contabilizado_en` como una sola
+    unidad, y el ORDEN importa: quien llame aquí con `commit=False` tiene que llamar a
+    `marcar_serie_contabilizada` DESPUÉS, sobre la MISMA conexión, y dejar que sea el
+    `commit()` de esa segunda llamada el que confirme las dos escrituras juntas. Al revés
+    --marcar primero, sumar después-- el `commit()` interno de `asegurar_contacto` confirmaría
+    la marca SOLA, y una caída justo ahí deja la fila con `contabilizado_en` puesto pero el
+    contador SIN SUBIR: la serie fallida queda marcada como ya contada sin haberlo sido nunca,
+    y no hay ninguna pasada futura que la vuelva a mirar -- el agujero exacto que la columna
+    `contabilizado_en` existe para tapar.
     """
     asegurar_contacto(conn, telefono)
     with conn.cursor() as cur:

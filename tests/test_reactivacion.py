@@ -881,3 +881,176 @@ def test_cerrar_seguimiento_NO_marca_la_baja():
 
     assert "pedir_baja" not in inspect.getsource(h._cerrar_seguimiento)
     assert "pedir_baja" not in inspect.getsource(persistencia.anular_reactivaciones_vivas)
+
+
+# ==========================================================================================
+# Tarea 7.0: el centinela de calidad (regla 11)
+# ==========================================================================================
+
+
+@pytest.mark.parametrize(
+    "calidad,debe_encolar",
+    [("GREEN", True), ("YELLOW", False), ("RED", False), ("FLAGGED", False),
+     ("UNKNOWN", True), ("NA", True), (None, False)],
+)
+def test_regla_11_la_calidad_del_numero_manda(calidad, debe_encolar):
+    """`None` = la consulta fallo, y ahi NO se encola.
+
+    Es la asimetria CONTRARIA a la del no negociable 26: alli, ante la duda se avisa porque
+    molestar al doctor de mas es barato. Aqui lo barato es callarse -- el coste de no encolar
+    durante una hora son leads, y el de encolar con la calidad en rojo es el numero.
+
+    `UNKNOWN` y `NA` SI encolan: son los valores de un numero sin historial suficiente, no una
+    senal de dano. Tratarlos como rojo dejaria el sistema apagado para siempre en una cuenta
+    nueva, que es justo cuando mas falta hace.
+    """
+    from maxicare_daniela import barrido
+
+    assert barrido.se_puede_encolar(calidad) is debe_encolar
+
+
+def test_el_interruptor_apagado_no_toca_la_base(monkeypatch):
+    """Regla 10, Ruling C8: `encendido=False` no llega ni a abrir una conexion."""
+    from maxicare_daniela import barrido, persistencia
+
+    def _explota(*a, **k):
+        raise AssertionError("encolar() abrio una conexion con encendido=False")
+
+    monkeypatch.setattr(persistencia, "conectar", _explota)
+    recuento = barrido.encolar(
+        database_url="postgresql://no-se-usa",
+        ahora=momento(16, 11),
+        tope_diario=20,
+        encendido=False,
+        calidad={"quality_rating": "GREEN"},
+    )
+    assert recuento["encolados"] == 0
+
+
+def test_la_calidad_en_rojo_no_toca_la_base(monkeypatch):
+    """Ruling C8: el porton de calidad va DESPUES de `encendido` y ANTES de `conectar` -- con
+    la calidad en rojo tampoco hay por que abrir una conexion."""
+    from maxicare_daniela import barrido, persistencia
+
+    def _explota(*a, **k):
+        raise AssertionError("encolar() abrio una conexion con la calidad en rojo")
+
+    monkeypatch.setattr(persistencia, "conectar", _explota)
+    recuento = barrido.encolar(
+        database_url="postgresql://no-se-usa",
+        ahora=momento(16, 11),
+        tope_diario=20,
+        encendido=True,
+        calidad={"quality_rating": "RED"},
+    )
+    assert recuento == {"encolados": 0, "contabilizados": 0, "frenado_por_calidad": 1}
+
+
+def test_la_calidad_desconocida_tampoco_toca_la_base(monkeypatch):
+    """`calidad=None` es lo que le llega a `runtime` cuando `WhatsApp.calidad_del_numero`
+    devuelve `{}` -- la consulta a Meta fallo. Ante la duda, no se abre ni conexion."""
+    from maxicare_daniela import barrido, persistencia
+
+    def _explota(*a, **k):
+        raise AssertionError("encolar() abrio una conexion sin poder leer la calidad")
+
+    monkeypatch.setattr(persistencia, "conectar", _explota)
+    recuento = barrido.encolar(
+        database_url="postgresql://no-se-usa",
+        ahora=momento(16, 11),
+        tope_diario=20,
+        encendido=True,
+        calidad=None,
+    )
+    assert recuento["frenado_por_calidad"] == 1
+
+
+# ==========================================================================================
+# Tarea 8: la tarea de fondo del barrido, con su interruptor
+# ==========================================================================================
+
+
+def test_el_barrido_no_arranca_sin_base(monkeypatch):
+    """Mismo patron que `_arrancar_despacho_de_recordatorios`: sin `database_url` no hay
+    ninguna base a la que preguntarle nada, y arrancar la tarea igual solo produciria una
+    excepcion por ciclo, cada hora, para siempre."""
+    import asyncio
+    from dataclasses import replace
+
+    from maxicare_daniela import runtime
+
+    async def escenario():
+        monkeypatch.setattr(runtime, "config", replace(runtime.config, database_url=""))
+        monkeypatch.setattr(runtime, "_tarea_de_barrido_de_reactivacion", None)
+
+        await runtime._arrancar_barrido_de_reactivacion()
+
+        assert runtime._tarea_de_barrido_de_reactivacion is None
+
+    asyncio.run(escenario())
+
+
+def test_el_barrido_no_arranca_si_esta_apagado(monkeypatch):
+    """Regla 10 en el arranque: `config.reactivacion_encendida=False` no crea la tarea, y lo
+    dice en el log -- sin esto habria que mirar los logs cada hora para saber si el barrido
+    esta corriendo de verdad o solo devolviendo ceros."""
+    import asyncio
+    from dataclasses import replace
+
+    from maxicare_daniela import runtime
+
+    async def escenario():
+        monkeypatch.setattr(
+            runtime,
+            "config",
+            replace(
+                runtime.config,
+                database_url="postgresql://no-se-usa",
+                reactivacion_encendida=False,
+            ),
+        )
+        monkeypatch.setattr(runtime, "_tarea_de_barrido_de_reactivacion", None)
+
+        await runtime._arrancar_barrido_de_reactivacion()
+
+        assert runtime._tarea_de_barrido_de_reactivacion is None
+
+    asyncio.run(escenario())
+
+
+def test_el_barrido_arranca_igual_sin_plantillas_de_reactivacion(monkeypatch):
+    """Encolar sin plantilla es el modo de comprobacion (`seguimientos.despachar`): decide y
+    registra, no manda nada. Apagar la TAREA por falta de plantilla apagaria tambien esa
+    comprobacion, que es justo lo que hace falta mientras Meta no aprueba las tres."""
+    import asyncio
+    from dataclasses import replace
+
+    from maxicare_daniela import runtime
+
+    async def escenario():
+        monkeypatch.setattr(
+            runtime,
+            "config",
+            replace(
+                runtime.config,
+                database_url="postgresql://no-se-usa",
+                reactivacion_encendida=True,
+                plantilla_sin_agendar="",
+                plantilla_cancelada="",
+                plantilla_no_asistio="",
+            ),
+        )
+        monkeypatch.setattr(runtime, "_tarea_de_barrido_de_reactivacion", None)
+
+        await runtime._arrancar_barrido_de_reactivacion()
+
+        tarea = runtime._tarea_de_barrido_de_reactivacion
+        assert tarea is not None, "sin plantillas, el barrido NO arranco"
+        assert not tarea.done()
+        tarea.cancel()
+        try:
+            await tarea
+        except asyncio.CancelledError:
+            pass
+
+    asyncio.run(escenario())
