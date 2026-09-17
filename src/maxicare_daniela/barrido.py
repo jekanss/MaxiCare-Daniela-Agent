@@ -48,14 +48,15 @@ def se_puede_encolar(quality_rating: str | None) -> bool:
 
 
 def _contabilizar_series_cerradas(conn, *, ahora: datetime) -> int:
-    """Sube el contador de quien recibió un envío hace más de una semana y no contestó.
+    """Sube el contador de quien recibió un envío hace más de una semana y no agendó.
 
-    Cada fila de `persistencia.series_por_contabilizar` es un envío de reactivación que lleva
-    `persistencia.DIAS_ENTRE_INTENTOS_DE_REACTIVACION` días sin respuesta: se cuenta como una
-    serie fallida (`contactos.seguimientos_fallidos += 1`) y se marca (`contabilizado_en`)
-    para que la pasada siguiente no la vuelva a contar. Sin la marca, el freno por persona
-    (R1, `max_seguimientos_fallidos`) se dispararía solo con el paso del tiempo, sin que la
-    persona hiciera nada más que quedarse callada una vez.
+    Cada fila de `persistencia.series_por_contabilizar` es una serie de reactivación que
+    lleva `persistencia.DIAS_ENTRE_INTENTOS_DE_REACTIVACION` días sin acabar en una cita
+    (Ronda 1, I-2: la vara es agendar, no contestar): se cuenta como una serie fallida
+    (`contactos.seguimientos_fallidos += 1`) y se marca (`contabilizado_en`) para que la
+    pasada siguiente no la vuelva a contar. Sin la marca, el freno por persona (R1,
+    `max_seguimientos_fallidos`) se dispararía solo con el paso del tiempo, sin que la
+    persona hiciera nada más.
 
     Ruling D5: el orden es SUMAR primero (con `commit=False`) y MARCAR después, nunca al
     revés -- ver el docstring corregido de `persistencia.sumar_seguimiento_fallido`.
@@ -115,12 +116,15 @@ def encolar(
 
     conn = persistencia.conectar(database_url)
     try:
-        # El tope diario (regla 9) cuenta lo YA ENVIADO hoy (Ruling C2: solo reactivación,
-        # nunca recordatorios de cita), no lo encolado: lo que Meta ve son envíos. Encolar de
-        # más y que el despachador aplace la diferencia sería un pico igual de grande al día
-        # siguiente.
-        enviados_hoy = persistencia.contar_enviados_hoy(conn, ahora=ahora)
-        cupo = max(0, tope_diario - enviados_hoy)
+        # El tope diario (regla 9). CRÍTICO, ronda 1 de revisión: aquí usaba `contar_
+        # enviados_hoy`, que solo ve `enviado_en` y deja INVISIBLE toda fila que R4 aplazó
+        # (no anuló) fuera de 9-19h. Con eso, el cupo se veía libre TODA LA NOCHE y cada
+        # pasada horaria volvía a encolar el tope entero sobre gente nueva -- 280 mensajes de
+        # golpe a las 9:00, medido por el revisor con 400 leads y tope 20. `contar_
+        # comprometidos_hoy` cuenta también lo pendiente sin resolver, sea cual sea su edad,
+        # y es lo que de verdad acota el compromiso total. Ver su docstring.
+        comprometidos = persistencia.contar_comprometidos_hoy(conn, ahora=ahora)
+        cupo = max(0, tope_diario - comprometidos)
         if cupo == 0:
             return recuento
 
@@ -132,10 +136,19 @@ def encolar(
         ):
             if recuento["encolados"] >= cupo:
                 break
+            # I-4, ronda 1 de revisión (inanición): se pide `limite` -- el parámetro de la
+            # función, pensado para esto y hasta ahora muerto-- y NO `cupo`. Una fila que ya
+            # se encoló HOY y luego se anuló (`tope_anual`, `sin_nombre`...) no bloquea la
+            # reconsulta -el "en juego" de arriba no cuenta lo anulado- pero SIGUE en la
+            # cabeza del `ORDER BY`, y con `limite=cupo` la consulta solo traía esas mismas
+            # filas ya condenadas: chocaban contra el `ON CONFLICT`, `encolados` se quedaba
+            # en 0, y la persona nº 21 no recibía su turno en TODA la jornada. Pidiendo más
+            # candidatos de los que hacen falta y siguiendo hasta cubrir el cupo de verdad,
+            # una fila fallida ya no tapa a las que vienen detrás.
             for lead in consulta(
                 conn,
                 ahora=ahora,
-                limite=cupo,
+                limite=limite,
                 max_seguimientos_fallidos=max_seguimientos_fallidos,
             ):
                 if recuento["encolados"] >= cupo:
@@ -155,6 +168,10 @@ def encolar(
                         ahora.date().isoformat(),
                     ]
                 )
+                # No cuenta como error si `insertar_seguimiento` devuelve `False`: significa
+                # que esta persona ya tenía HOY una fila con esta clave (posiblemente
+                # anulada, ver I-4) y simplemente se sigue con el siguiente candidato de la
+                # lista, sin romper el bucle.
                 if persistencia.insertar_seguimiento(
                     conn,
                     id_conversacion=lead["conversacion_id"],

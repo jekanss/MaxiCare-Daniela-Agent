@@ -2151,6 +2151,14 @@ async def _avisar_de_calidad_del_numero(calidad: dict[str, str] | None) -> None:
 
     Nunca propaga: un fallo avisando de que algo se frenó no puede tumbar el ciclo siguiente
     -- mismo criterio que `_avisar_de_recordatorios_fallidos`.
+
+    **Ronda 1 de revisión: el cooldown se sella ANTES de intentar nada, no solo tras un envío
+    que salió bien.** La versión anterior solo sellaba `_ultimo_aviso_de_calidad_en` dentro
+    del `try` de Telegram, así que si no había Telegram configurado (`log.error` y `return`
+    tempranos) el sello nunca se ponía: un `ERROR` en el log CADA HORA, para siempre, sin que
+    nada lo silenciara. El cooldown es sobre CUÁNTO SE INTENTA avisar, no sobre cuántas veces
+    salió bien -- repetir el intento con la misma frecuencia que el barrido (cada hora) sería
+    exactamente el ruido que esta guarda existe para evitar.
     """
     global _ultimo_aviso_de_calidad_en
     ahora_reloj = time.time()
@@ -2159,6 +2167,7 @@ async def _avisar_de_calidad_del_numero(calidad: dict[str, str] | None) -> None:
         and ahora_reloj - _ultimo_aviso_de_calidad_en < SEGUNDOS_ENTRE_AVISOS_DE_CALIDAD
     ):
         return
+    _ultimo_aviso_de_calidad_en = ahora_reloj
 
     calificacion = (calidad or {}).get("quality_rating", "desconocida")
     nivel = (calidad or {}).get("messaging_limit_tier", "desconocido")
@@ -2178,7 +2187,6 @@ async def _avisar_de_calidad_del_numero(calidad: dict[str, str] | None) -> None:
             "cita, los escalamientos y la atención normal NO se ven afectados.",
             tema_id=_tema_general or 0,
         )
-        _ultimo_aviso_de_calidad_en = ahora_reloj
     except Exception:  # noqa: BLE001 -- ver docstring
         log.exception("no se pudo avisar a los doctores de la calidad del número")
 

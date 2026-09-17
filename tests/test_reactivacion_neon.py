@@ -500,36 +500,102 @@ def test_contar_enviados_hoy_no_cuenta_los_de_ayer(conexion_pruebas):
     assert persistencia.contar_enviados_hoy(conexion_pruebas, ahora=AHORA) == 0
 
 
-def test_series_por_contabilizar_encuentra_un_envio_viejo_sin_respuesta(conexion_pruebas):
+def test_series_por_contabilizar_encuentra_un_envio_viejo_sin_cita(conexion_pruebas):
     conv = persistencia.asegurar_conversacion(conexion_pruebas, telefono=TELEFONO)
     persistencia.insertar_seguimiento(
         conexion_pruebas, id_conversacion=conv, tipo="reactivacion_sin_agendar",
-        fecha_objetivo=AHORA - timedelta(days=10), clave_idempotencia="k-viejo-sin-respuesta",
+        fecha_objetivo=AHORA - timedelta(days=10), clave_idempotencia="k-viejo-sin-cita",
     )
     with conexion_pruebas.cursor() as cur:
         cur.execute(
             "UPDATE seguimientos SET enviado_en = %s WHERE clave_idempotencia = %s",
-            (AHORA - timedelta(days=10), "k-viejo-sin-respuesta"),
+            (AHORA - timedelta(days=10), "k-viejo-sin-cita"),
         )
     conexion_pruebas.commit()
     filas = persistencia.series_por_contabilizar(conexion_pruebas, ahora=AHORA)
     assert [f["telefono"] for f in filas] == [TELEFONO]
 
 
-def test_series_por_contabilizar_no_cuenta_a_quien_SI_contesto(conexion_pruebas):
+def test_series_por_contabilizar_SI_cuenta_a_quien_contesta_pero_no_agenda(conexion_pruebas):
+    """I-2, ronda 1 de revisión -- el hallazgo más grave de la parada.
+
+    La versión anterior descartaba la serie si había CUALQUIER mensaje del paciente después
+    del envío, así que quien contestaba algo -un «ahora no, gracias» que Daniela no
+    interpreta como cierre- nunca acumulaba el contador y el barrido lo seguía invitando
+    cada semana para siempre: 6 mensajes en 40 días contra 2 de quien se queda callado,
+    medido por el revisor. El criterio correcto es si la serie ACABÓ EN CITA, no si hubo
+    RESPUESTA -- la misma vara que ya usa `crear_cita` para resetear el contador.
+    """
     conv = persistencia.asegurar_conversacion(conexion_pruebas, telefono=TELEFONO)
     persistencia.insertar_seguimiento(
         conexion_pruebas, id_conversacion=conv, tipo="reactivacion_sin_agendar",
-        fecha_objetivo=AHORA - timedelta(days=10), clave_idempotencia="k-viejo-con-respuesta",
+        fecha_objetivo=AHORA - timedelta(days=10), clave_idempotencia="k-contesta-no-agenda",
     )
     with conexion_pruebas.cursor() as cur:
         cur.execute(
             "UPDATE seguimientos SET enviado_en = %s WHERE clave_idempotencia = %s",
-            (AHORA - timedelta(days=10), "k-viejo-con-respuesta"),
+            (AHORA - timedelta(days=10), "k-contesta-no-agenda"),
         )
     conexion_pruebas.commit()
-    _mensaje(conexion_pruebas, TELEFONO, cuando=AHORA - timedelta(days=5))
+    _mensaje(conexion_pruebas, TELEFONO, cuando=AHORA - timedelta(days=5))  # contestó, no agendó
+    filas = persistencia.series_por_contabilizar(conexion_pruebas, ahora=AHORA)
+    assert [f["telefono"] for f in filas] == [TELEFONO], "una respuesta sin cita sigue exonerando"
+
+
+def test_series_por_contabilizar_no_cuenta_a_quien_SI_agendo(conexion_pruebas):
+    """El control de la prueba anterior: agendar SÍ exonera -- es la misma vara que
+    `crear_cita` usa para resetear `seguimientos_fallidos` a cero."""
+    conv = persistencia.asegurar_conversacion(conexion_pruebas, telefono=TELEFONO)
+    persistencia.insertar_seguimiento(
+        conexion_pruebas, id_conversacion=conv, tipo="reactivacion_sin_agendar",
+        fecha_objetivo=AHORA - timedelta(days=10), clave_idempotencia="k-si-agendo",
+    )
+    with conexion_pruebas.cursor() as cur:
+        cur.execute(
+            "UPDATE seguimientos SET enviado_en = %s WHERE clave_idempotencia = %s",
+            (AHORA - timedelta(days=10), "k-si-agendo"),
+        )
+    conexion_pruebas.commit()
+    # La cita se crea DESPUÉS del envío (su `creada_en` por defecto es "ahora" de verdad,
+    # que en la corrida de la prueba cae después de `AHORA - 10 dias`).
+    persistencia.registrar_cita(
+        conexion_pruebas, reserva_id=None, conversacion_id=conv, paciente_id=None,
+        nombre_completo="Marcela Rios", telefono=TELEFONO, tratamiento="limpieza",
+        inicio=AHORA + timedelta(days=3), duracion_minutos=60, evento_calendar_id=None,
+    )
     assert persistencia.series_por_contabilizar(conexion_pruebas, ahora=AHORA) == []
+
+
+def test_series_por_contabilizar_cuenta_UNA_sola_vez_por_serie_de_dos_envios(conexion_pruebas):
+    """I-5, ronda 1 de revisión: una unidad por SERIE, no por envío.
+
+    Con dos envíos del mismo tipo (el primer y el segundo intento), contar cada fila de
+    forma independiente daría DOS unidades por lo que es una sola serie fallida. Solo el
+    envío MÁS RECIENTE (`DISTINCT ON`) se mira; el más viejo se queda sin marcar para
+    siempre, y eso es correcto: no se vuelve a mirar y no hay double-count posible.
+    """
+    conv = persistencia.asegurar_conversacion(conexion_pruebas, telefono=TELEFONO)
+    for clave, dias in (("k-serie-primero", 20), ("k-serie-segundo", 8)):
+        persistencia.insertar_seguimiento(
+            conexion_pruebas, id_conversacion=conv, tipo="reactivacion_sin_agendar",
+            fecha_objetivo=AHORA - timedelta(days=dias), clave_idempotencia=clave,
+        )
+        with conexion_pruebas.cursor() as cur:
+            cur.execute(
+                "UPDATE seguimientos SET enviado_en = %s WHERE clave_idempotencia = %s",
+                (AHORA - timedelta(days=dias), clave),
+            )
+    conexion_pruebas.commit()
+
+    filas = persistencia.series_por_contabilizar(conexion_pruebas, ahora=AHORA)
+    assert len(filas) == 1, f"contó la serie de dos envíos como {len(filas)} unidades"
+
+    with conexion_pruebas.cursor() as cur:
+        cur.execute(
+            "SELECT clave_idempotencia FROM seguimientos WHERE id = %s", (filas[0]["id"],)
+        )
+        (clave_marcada,) = cur.fetchone()
+    assert clave_marcada == "k-serie-segundo", "tenía que quedarse con el envío MÁS RECIENTE"
 
 
 def test_no_contabiliza_dos_veces_la_misma_serie(conexion_pruebas):
@@ -640,3 +706,375 @@ def test_el_tope_diario_corta(conexion_pruebas, esquema):
         calidad={"quality_rating": "GREEN"},
     )
     assert recuento["encolados"] == 2
+
+
+# ==========================================================================================
+# Ronda 1 de revisión sobre la parada E
+# ==========================================================================================
+
+
+def test_CRITICO_el_tope_diario_acota_lo_comprometido_no_solo_lo_enviado(
+    conexion_pruebas, esquema
+):
+    """CRÍTICO, ronda 1 de revisión.
+
+    R4 (`seguimientos.decidir`) APLAZA -no anula- fuera de 9-19h, así que una fila encolada
+    de noche se queda PENDIENTE (`enviado_en IS NULL`) con `fecha_objetivo` reescrita a
+    mañana. Contar solo `enviado_en` para el cupo diario (`contar_enviados_hoy`, la función
+    vieja) deja el cupo "libre" toda la noche: diez pasadas horarias con `tope_diario=20`
+    encolaban 200 filas pendientes, que salían TODAS de golpe a las 9:00 del día siguiente.
+    Medido por el revisor: 400 leads, tope 20, 280 mensajes reales.
+
+    Aquí se simulan varias pasadas seguidas SIN que nada se despache entre medias -como
+    ocurriría de noche, con el despachador vivo pero R4/R5 aplazando todo- y se comprueba
+    que el total COMPROMETIDO (enviado + pendiente sin anular) nunca pasa del tope.
+    """
+    from maxicare_daniela import barrido
+
+    for i in range(50):
+        telefono = f"5730055500{i:02d}"
+        persistencia.asegurar_conversacion(conexion_pruebas, telefono=telefono)
+        _mensaje(conexion_pruebas, telefono, cuando=AHORA - timedelta(hours=30))
+
+    calidad = {"quality_rating": "GREEN"}
+    for _ in range(10):  # diez pasadas "horarias" sin que nada se despache entre medias
+        barrido.encolar(
+            database_url=esquema, ahora=AHORA, tope_diario=20, encendido=True, calidad=calidad,
+        )
+
+    with conexion_pruebas.cursor() as cur:
+        cur.execute(
+            "SELECT count(*) FROM seguimientos WHERE tipo <> 'recordatorio_cita' "
+            "AND anulado_en IS NULL"
+        )
+        (comprometidos,) = cur.fetchone()
+    assert comprometidos <= 20, f"el tope diario no acotó: {comprometidos} filas vivas"
+
+
+def test_no_recibe_dos_tipos_de_reactivacion_en_la_misma_ventana(conexion_pruebas, esquema):
+    """I-1, ronda 1 de revisión.
+
+    Quien preguntó y no agendó Y ADEMÁS canceló una cita antigua calificaba por las DOS
+    consultas a la vez, y como cada `NOT EXISTS` de "seguimiento en juego" miraba SOLO su
+    propio tipo, `barrido.encolar` lo encolaba dos veces en la misma pasada -dos discursos
+    distintos ("¿sigues interesada?" y "¿pudiste reagendar tu cita?") en la misma ventana de
+    24h-30d. Ahora el "en juego" mira TODOS los tipos de reactivación.
+    """
+    from maxicare_daniela import barrido
+
+    conv = persistencia.asegurar_conversacion(conexion_pruebas, telefono=TELEFONO)
+    _mensaje(conexion_pruebas, TELEFONO, cuando=AHORA - timedelta(hours=30))
+    id_cita = persistencia.registrar_cita(
+        conexion_pruebas, reserva_id=None, conversacion_id=conv, paciente_id=None,
+        nombre_completo="Marcela Rios", telefono=TELEFONO, tratamiento="limpieza",
+        inicio=AHORA - timedelta(days=2), duracion_minutos=60, evento_calendar_id=None,
+    )
+    persistencia.marcar_cita_cancelada(conexion_pruebas, id_cita, motivo="paciente")
+    with conexion_pruebas.cursor() as cur:
+        cur.execute(
+            "UPDATE citas SET actualizada_en = %s WHERE id = %s",
+            (AHORA - timedelta(hours=30), id_cita),
+        )
+    conexion_pruebas.commit()
+
+    recuento = barrido.encolar(
+        database_url=esquema, ahora=AHORA, tope_diario=20, encendido=True,
+        calidad={"quality_rating": "GREEN"},
+    )
+    assert recuento["encolados"] == 1, f"encoló los dos tipos en la misma pasada: {recuento}"
+
+    with conexion_pruebas.cursor() as cur:
+        cur.execute(
+            "SELECT s.tipo FROM seguimientos s "
+            "JOIN conversaciones cv ON cv.id = s.conversacion_id "
+            "WHERE cv.telefono = %s",
+            (TELEFONO,),
+        )
+        tipos = [fila[0] for fila in cur.fetchall()]
+    assert len(tipos) == 1, f"se encolaron los dos tipos a la vez: {tipos}"
+
+
+def test_el_barrido_escribe_el_tipo_la_fecha_y_la_clave_correctos(conexion_pruebas, esquema):
+    """I-3, ronda 1 de revisión: ninguna prueba miraba lo que el barrido ESCRIBE, solo cuántas
+    filas. El revisor intercambió `TIPO_SIN_AGENDAR`<->`TIPO_CANCELADA` en el código y la
+    suite entera siguió en verde -30 passed en Neon, 987 offline-. Con esta prueba, ese
+    intercambio la rompe."""
+    from maxicare_daniela import barrido
+
+    conv = persistencia.asegurar_conversacion(conexion_pruebas, telefono=TELEFONO)
+    _mensaje(conexion_pruebas, TELEFONO, cuando=AHORA - timedelta(hours=30))
+
+    recuento = barrido.encolar(
+        database_url=esquema, ahora=AHORA, tope_diario=20, encendido=True,
+        calidad={"quality_rating": "GREEN"},
+    )
+    assert recuento["encolados"] == 1
+
+    with conexion_pruebas.cursor() as cur:
+        cur.execute(
+            "SELECT s.tipo, s.fecha_objetivo, s.clave_idempotencia FROM seguimientos s "
+            "JOIN conversaciones cv ON cv.id = s.conversacion_id WHERE cv.telefono = %s",
+            (TELEFONO,),
+        )
+        (tipo, fecha_objetivo, clave) = cur.fetchone()
+
+    assert tipo == "reactivacion_sin_agendar"
+    assert fecha_objetivo == AHORA
+    assert clave == f"{conv}:reactivacion:reactivacion_sin_agendar:{AHORA.date().isoformat()}"
+
+
+def test_leads_que_cancelaron_escribe_el_tipo_correcto(conexion_pruebas, esquema):
+    """La misma prueba que la anterior, del otro lado: `leads_que_cancelaron` tiene que
+    escribir `reactivacion_cancelada`, no `reactivacion_sin_agendar`."""
+    from maxicare_daniela import barrido
+
+    conv = persistencia.asegurar_conversacion(conexion_pruebas, telefono=TELEFONO)
+    id_cita = persistencia.registrar_cita(
+        conexion_pruebas, reserva_id=None, conversacion_id=conv, paciente_id=None,
+        nombre_completo="Marcela Rios", telefono=TELEFONO, tratamiento="limpieza",
+        inicio=AHORA - timedelta(days=2), duracion_minutos=60, evento_calendar_id=None,
+    )
+    persistencia.marcar_cita_cancelada(conexion_pruebas, id_cita, motivo="paciente")
+    with conexion_pruebas.cursor() as cur:
+        cur.execute(
+            "UPDATE citas SET actualizada_en = %s WHERE id = %s",
+            (AHORA - timedelta(hours=30), id_cita),
+        )
+    conexion_pruebas.commit()
+
+    recuento = barrido.encolar(
+        database_url=esquema, ahora=AHORA, tope_diario=20, encendido=True,
+        calidad={"quality_rating": "GREEN"},
+    )
+    assert recuento["encolados"] == 1
+
+    with conexion_pruebas.cursor() as cur:
+        cur.execute(
+            "SELECT s.tipo FROM seguimientos s "
+            "JOIN conversaciones cv ON cv.id = s.conversacion_id WHERE cv.telefono = %s",
+            (TELEFONO,),
+        )
+        (tipo,) = cur.fetchone()
+    assert tipo == "reactivacion_cancelada"
+
+
+def test_leads_que_cancelaron_no_mira_conversaciones_web(conexion_pruebas):
+    """C4, cerrado del todo en la ronda 1 de revisión: el filtro `canal = 'whatsapp'` faltaba
+    en esta consulta -se apoyaba en que una cita solo nace de una conversación real de
+    WhatsApp, cierto hoy pero no protegido por ninguna prueba. Mutar el filtro de la otra
+    consulta a `WHERE TRUE` dejaba las pruebas de Neon en verde; esta lo impide."""
+    conv = persistencia.asegurar_conversacion(conexion_pruebas, telefono=TELEFONO, canal="web")
+    id_cita = persistencia.registrar_cita(
+        conexion_pruebas, reserva_id=None, conversacion_id=conv, paciente_id=None,
+        nombre_completo="Marcela Rios", telefono=TELEFONO, tratamiento="limpieza",
+        inicio=AHORA - timedelta(days=2), duracion_minutos=60, evento_calendar_id=None,
+    )
+    persistencia.marcar_cita_cancelada(conexion_pruebas, id_cita, motivo="paciente")
+    with conexion_pruebas.cursor() as cur:
+        cur.execute(
+            "UPDATE citas SET actualizada_en = %s WHERE id = %s",
+            (AHORA - timedelta(hours=30), id_cita),
+        )
+    conexion_pruebas.commit()
+    assert persistencia.leads_que_cancelaron(conexion_pruebas, ahora=AHORA, limite=50) == []
+
+
+def test_una_fila_anulada_no_tapa_la_cabeza_de_la_cola(conexion_pruebas, esquema):
+    """I-4, ronda 1 de revisión: inanición.
+
+    Con `limite=cupo` en la llamada a la consulta, una fila que ya se encoló HOY y se anuló
+    (p. ej. `tope_anual` o `sin_nombre`) no bloquea la reconsulta -el `NOT EXISTS` de "en
+    juego" no cuenta lo anulado- pero SIGUE apareciendo en la cabeza del `ORDER BY` y choca
+    contra el `ON CONFLICT`: `encolados` se queda en 0 y la persona nº 21 nunca recibe su
+    turno en toda la jornada. El arreglo pide MÁS candidatos de los que hacen falta
+    (`limite`, no `cupo`) y sigue intentando hasta cubrir el cupo de verdad.
+    """
+    from maxicare_daniela import barrido
+
+    # Las tres primeras (por `ORDER BY um.cuando DESC`, mensaje más reciente primero) ya
+    # tienen HOY una fila anulada -simulando que `seguimientos.decidir` las rechazó nada más
+    # despacharlas- y seguirán apareciendo en la cabeza de la consulta.
+    for i in range(3):
+        telefono = f"573006660{i:03d}"
+        conv = persistencia.asegurar_conversacion(conexion_pruebas, telefono=telefono)
+        _mensaje(conexion_pruebas, telefono, cuando=AHORA - timedelta(hours=25, minutes=i))
+        # La MISMA clave que `barrido.encolar` construiría hoy para esta conversación y este
+        # tipo -- si no coincide exactamente, el `ON CONFLICT` no choca y la prueba no
+        # reproduce nada.
+        clave_de_hoy = (
+            f"{conv}:reactivacion:reactivacion_sin_agendar:{AHORA.date().isoformat()}"
+        )
+        persistencia.insertar_seguimiento(
+            conexion_pruebas,
+            id_conversacion=conv,
+            tipo="reactivacion_sin_agendar",
+            fecha_objetivo=AHORA,
+            clave_idempotencia=clave_de_hoy,
+        )
+        persistencia.anular_reactivaciones_vivas(conexion_pruebas, telefono, motivo="tope_anual")
+
+    # Dos candidatos genuinamente nuevos, con mensajes más VIEJOS -así que salen DESPUÉS de
+    # los tres anteriores en el `ORDER BY um.cuando DESC`, tal como estarían en producción
+    # tras varias horas de barrido consumiendo la cabeza de la lista.
+    buenos = []
+    for i in range(2):
+        telefono = f"573007770{i:03d}"
+        persistencia.asegurar_conversacion(conexion_pruebas, telefono=telefono)
+        _mensaje(conexion_pruebas, telefono, cuando=AHORA - timedelta(hours=26, minutes=i))
+        buenos.append(telefono)
+
+    recuento = barrido.encolar(
+        database_url=esquema, ahora=AHORA, tope_diario=2, encendido=True,
+        calidad={"quality_rating": "GREEN"},
+    )
+    assert recuento["encolados"] == 2, (
+        f"la cabeza de la cola (ya anulada) tapó a los candidatos buenos: {recuento}"
+    )
+
+    with conexion_pruebas.cursor() as cur:
+        cur.execute(
+            "SELECT cv.telefono FROM seguimientos s "
+            "JOIN conversaciones cv ON cv.id = s.conversacion_id "
+            "WHERE s.anulado_en IS NULL AND s.tipo = 'reactivacion_sin_agendar'"
+        )
+        telefonos_encolados = {fila[0] for fila in cur.fetchall()}
+    assert telefonos_encolados == set(buenos)
+
+
+def test_no_ofrece_un_tercer_intento_dentro_de_la_misma_serie_sin_cerrarla(conexion_pruebas):
+    """I-5, ronda 1 de revisión: el tope de intentos DENTRO de una serie es fijo (2) y no
+    depende de la perilla `max_seguimientos_fallidos`. Sin este tope, dos envíos ya viejos
+    (fuera de la ventana de reintento de 7 días) no bloqueaban un tercero, y quien nunca
+    cierra la serie -porque `series_por_contabilizar` todavía no corrió- recibiría un tercer
+    mensaje del MISMO tipo antes de que la serie se dé por cerrada."""
+    conv = persistencia.asegurar_conversacion(conexion_pruebas, telefono=TELEFONO)
+    _mensaje(conexion_pruebas, TELEFONO, cuando=AHORA - timedelta(hours=30))
+    for i, dias in enumerate([20, 8]):
+        clave = f"k-serie-tope-{i}"
+        persistencia.insertar_seguimiento(
+            conexion_pruebas, id_conversacion=conv, tipo="reactivacion_sin_agendar",
+            fecha_objetivo=AHORA - timedelta(days=dias), clave_idempotencia=clave,
+        )
+        with conexion_pruebas.cursor() as cur:
+            cur.execute(
+                "UPDATE seguimientos SET enviado_en = %s WHERE clave_idempotencia = %s",
+                (AHORA - timedelta(days=dias), clave),
+            )
+    conexion_pruebas.commit()
+    assert persistencia.leads_sin_agendar(conexion_pruebas, ahora=AHORA, limite=50) == []
+
+
+def test_cerrar_la_serie_abre_paso_al_siguiente_intento(conexion_pruebas):
+    """El control de la prueba anterior: cerrar la serie (`_contabilizar_series_cerradas`,
+    que sube `seguimientos_fallidos` a 1, todavía por debajo del tope de 2) es lo único que
+    abre paso a un envío más de este mismo tipo."""
+    from maxicare_daniela import barrido
+
+    conv = persistencia.asegurar_conversacion(conexion_pruebas, telefono=TELEFONO)
+    _mensaje(conexion_pruebas, TELEFONO, cuando=AHORA - timedelta(hours=30))
+    for i, dias in enumerate([20, 8]):
+        clave = f"k-serie-cierra-{i}"
+        persistencia.insertar_seguimiento(
+            conexion_pruebas, id_conversacion=conv, tipo="reactivacion_sin_agendar",
+            fecha_objetivo=AHORA - timedelta(days=dias), clave_idempotencia=clave,
+        )
+        with conexion_pruebas.cursor() as cur:
+            cur.execute(
+                "UPDATE seguimientos SET enviado_en = %s WHERE clave_idempotencia = %s",
+                (AHORA - timedelta(days=dias), clave),
+            )
+    conexion_pruebas.commit()
+
+    cerradas = barrido._contabilizar_series_cerradas(conexion_pruebas, ahora=AHORA)
+    assert cerradas == 1
+
+    leads = persistencia.leads_sin_agendar(conexion_pruebas, ahora=AHORA, limite=50)
+    assert [l["telefono"] for l in leads] == [TELEFONO]
+
+
+def test_el_calendario_medido_de_las_tres_personas_da_2(conexion_pruebas, esquema):
+    """El pedido explícito de la ronda 1 de revisión: simular el ciclo completo (encolar +
+    contabilizar, pasada a pasada, marcando el envío como si el despachador lo hubiera hecho
+    en el acto) para tres personas representativas, y comprobar que las tres terminan con
+    `seguimientos_fallidos == 2` -ni más (I-2: quien contesta sin agendar ya no escapa al
+    contador) ni menos (I-1: quien califica por las dos listas no dobla el envío)-, con
+    exactamente 2 mensajes enviados cada una.
+
+    - «la que calla»: nunca vuelve a escribir, nunca agenda.
+    - «la de las dos listas»: pregunta y no agenda, Y ADEMÁS canceló una cita vieja.
+    - «la que contesta»: responde cada vez que le llega un mensaje, pero nunca agenda.
+    """
+    from maxicare_daniela import barrido
+
+    CALLA = "573005550001"
+    DOSLISTAS = "573005550002"
+    CONTESTA = "573005550003"
+
+    persistencia.asegurar_conversacion(conexion_pruebas, telefono=CALLA)
+    _mensaje(conexion_pruebas, CALLA, cuando=AHORA - timedelta(hours=30))
+
+    conv_dos = persistencia.asegurar_conversacion(conexion_pruebas, telefono=DOSLISTAS)
+    _mensaje(conexion_pruebas, DOSLISTAS, cuando=AHORA - timedelta(hours=30))
+    id_cita = persistencia.registrar_cita(
+        conexion_pruebas, reserva_id=None, conversacion_id=conv_dos, paciente_id=None,
+        nombre_completo="Paciente Dos Listas", telefono=DOSLISTAS, tratamiento="limpieza",
+        inicio=AHORA - timedelta(days=2), duracion_minutos=60, evento_calendar_id=None,
+    )
+    persistencia.marcar_cita_cancelada(conexion_pruebas, id_cita, motivo="paciente")
+    with conexion_pruebas.cursor() as cur:
+        cur.execute(
+            "UPDATE citas SET actualizada_en = %s WHERE id = %s",
+            (AHORA - timedelta(hours=30), id_cita),
+        )
+    conexion_pruebas.commit()
+
+    persistencia.asegurar_conversacion(conexion_pruebas, telefono=CONTESTA)
+    _mensaje(conexion_pruebas, CONTESTA, cuando=AHORA - timedelta(hours=30))
+
+    calidad = {"quality_rating": "GREEN"}
+
+    def _pasada(dia):
+        """Encola, y simula que el despachador manda TODO lo que quedó pendiente, en el acto."""
+        barrido.encolar(
+            database_url=esquema, ahora=dia, tope_diario=100, encendido=True, calidad=calidad,
+        )
+        with conexion_pruebas.cursor() as cur:
+            cur.execute(
+                "UPDATE seguimientos SET enviado_en = %s "
+                " WHERE tipo <> 'recordatorio_cita' AND enviado_en IS NULL "
+                "   AND anulado_en IS NULL",
+                (dia,),
+            )
+        conexion_pruebas.commit()
+
+    _pasada(AHORA)                                    # día 0: sale el primer intento de cada una
+    _mensaje(conexion_pruebas, CONTESTA, cuando=AHORA + timedelta(days=3))  # contesta, no agenda
+    _pasada(AHORA + timedelta(days=7))                # día 7: cierra el 1º, sale el 2º intento
+    _pasada(AHORA + timedelta(days=14))               # día 14: cierra el 2º intento
+
+    for telefono in (CALLA, DOSLISTAS, CONTESTA):
+        contacto = persistencia.leer_contacto(conexion_pruebas, telefono)
+        assert contacto["seguimientos_fallidos"] == 2, (
+            f"{telefono}: contador terminó en {contacto['seguimientos_fallidos']}, no en 2"
+        )
+
+    with conexion_pruebas.cursor() as cur:
+        cur.execute(
+            "SELECT cv.telefono, count(*) FROM seguimientos s "
+            "JOIN conversaciones cv ON cv.id = s.conversacion_id "
+            "WHERE s.tipo <> 'recordatorio_cita' AND s.enviado_en IS NOT NULL "
+            "GROUP BY cv.telefono"
+        )
+        enviados = dict(cur.fetchall())
+    assert enviados == {CALLA: 2, DOSLISTAS: 2, CONTESTA: 2}, enviados
+
+    # Ninguna de las tres sigue calificando: R1 las apagó a las tres.
+    _pasada(AHORA + timedelta(days=21))
+    with conexion_pruebas.cursor() as cur:
+        cur.execute(
+            "SELECT count(*) FROM seguimientos WHERE tipo <> 'recordatorio_cita' "
+            "AND enviado_en > %s",
+            (AHORA + timedelta(days=14),),
+        )
+        (nuevos,) = cur.fetchone()
+    assert nuevos == 0, "R1 no las apagó: siguió saliendo algo después del día 14"

@@ -1054,3 +1054,192 @@ def test_el_barrido_arranca_igual_sin_plantillas_de_reactivacion(monkeypatch):
             pass
 
     asyncio.run(escenario())
+
+
+# ==========================================================================================
+# Ronda 1 de revisión sobre la parada E: 7.0.3 y 7.0.6 no tenían NI UNA prueba
+# ==========================================================================================
+
+
+class _RespuestaDeMetaFalsa:
+    def __init__(self, cuerpo: dict) -> None:
+        self._cuerpo = cuerpo
+
+    def raise_for_status(self) -> None:
+        return None
+
+    def json(self) -> dict:
+        return self._cuerpo
+
+
+class _ClienteDeMetaFalso:
+    """Un `httpx.AsyncClient` de mentira, mismo patrón que `test_relevo.py::_ClienteFalso`."""
+
+    def __init__(self, cuerpo: dict) -> None:
+        self._cuerpo = cuerpo
+        self.llamadas: list[tuple[str, dict]] = []
+
+    def __call__(self, *a, **k):
+        return self
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *a):
+        return False
+
+    async def get(self, url, headers=None, params=None):
+        self.llamadas.append((url, params or {}))
+        return _RespuestaDeMetaFalsa(self._cuerpo)
+
+
+class _ClienteDeMetaQueExplota:
+    def __call__(self, *a, **k):
+        return self
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *a):
+        return False
+
+    async def get(self, *a, **k):
+        raise RuntimeError("timeout de verdad, o lo que sea")
+
+
+def test_calidad_del_numero_devuelve_lo_que_dice_meta(monkeypatch):
+    """7.0.3: nadie probaba `calidad_del_numero`. Verificado contra el número de producción
+    el 17/09/2026 -- este es el cuerpo real que devolvió Meta."""
+    import asyncio
+
+    from maxicare_daniela import canales
+
+    cliente = _ClienteDeMetaFalso(
+        {"quality_rating": "GREEN", "messaging_limit_tier": "TIER_250", "status": "CONNECTED"}
+    )
+    monkeypatch.setattr(canales.httpx, "AsyncClient", cliente)
+
+    resultado = asyncio.run(canales.WhatsApp("token-x", "123456").calidad_del_numero())
+
+    assert resultado == {
+        "quality_rating": "GREEN", "messaging_limit_tier": "TIER_250", "status": "CONNECTED",
+    }
+    url, parametros = cliente.llamadas[0]
+    assert url == f"{canales.BASE_GRAPH}/123456"
+    assert parametros == {"fields": "quality_rating,messaging_limit_tier,status"}
+
+
+def test_calidad_del_numero_devuelve_vacio_si_la_llamada_falla(monkeypatch):
+    """El contrato que `barrido.se_puede_encolar` necesita: un fallo de red no propaga, y
+    `{}` es lo que ese código lee como "no se sabe" -- ante la duda, no se encola."""
+    import asyncio
+
+    from maxicare_daniela import canales
+
+    monkeypatch.setattr(canales.httpx, "AsyncClient", _ClienteDeMetaQueExplota())
+
+    resultado = asyncio.run(canales.WhatsApp("token-x", "123456").calidad_del_numero())
+
+    assert resultado == {}
+
+
+def test_el_aviso_de_calidad_no_se_repite_dentro_del_cooldown(monkeypatch):
+    """7.0.6: el aviso al General cuando la calidad frena el barrido, como mucho una vez
+    cada `SEGUNDOS_ENTRE_AVISOS_DE_CALIDAD`. Sin esta prueba, nadie comprobaba el cooldown."""
+    import asyncio
+    from dataclasses import replace
+
+    from maxicare_daniela import runtime
+
+    async def escenario():
+        enviados = []
+
+        async def _enviar_falso(texto, *, tema_id):
+            enviados.append(texto)
+
+        monkeypatch.setattr(runtime, "_telegram", type("T", (), {"enviar_mensaje": staticmethod(_enviar_falso)})())
+        monkeypatch.setattr(
+            runtime, "config",
+            replace(runtime.config, telegram_bot_token="x", telegram_chat_doctores="-1"),
+        )
+        monkeypatch.setattr(runtime, "_ultimo_aviso_de_calidad_en", None)
+
+        await runtime._avisar_de_calidad_del_numero({"quality_rating": "RED"})
+        await runtime._avisar_de_calidad_del_numero({"quality_rating": "RED"})
+
+        assert len(enviados) == 1, "el segundo aviso, dentro del cooldown, no debia salir"
+
+    asyncio.run(escenario())
+
+
+def test_el_aviso_sella_el_cooldown_aunque_no_haya_telegram(monkeypatch):
+    """El bug real que el revisor encontró: sin Telegram configurado, la rama `log.error`
+    salía por `return` ANTES de sellar `_ultimo_aviso_de_calidad_en` -- un ERROR en el log
+    por cada ciclo del barrido (cada hora), para siempre, sin que nada lo silenciara. Ahora
+    el sello va antes de la rama de Telegram."""
+    import asyncio
+    from dataclasses import replace
+
+    from maxicare_daniela import runtime
+
+    async def escenario():
+        errores = []
+        monkeypatch.setattr(runtime.log, "error", lambda *a, **k: errores.append(a))
+        monkeypatch.setattr(
+            runtime, "config", replace(runtime.config, telegram_bot_token="", telegram_chat_doctores=""),
+        )
+        monkeypatch.setattr(runtime, "_ultimo_aviso_de_calidad_en", None)
+
+        await runtime._avisar_de_calidad_del_numero({"quality_rating": "RED"})
+        await runtime._avisar_de_calidad_del_numero({"quality_rating": "RED"})
+
+        assert len(errores) == 1, "sin sellar el cooldown, cada llamada vuelve a loguear ERROR"
+
+    asyncio.run(escenario())
+
+
+def test_el_bucle_de_reactivacion_avisa_cuando_la_calidad_frena(monkeypatch):
+    """Wiring, 7.0.6: nadie probaba que `_avisar_de_calidad_del_numero` estuviera CABLEADO
+    dentro de `_barrer_reactivacion_sin_parar` -- la parte que se rompe callada. Se deja
+    correr el bucle UNA vuelta (el `sleep` se dobla para lanzar `CancelledError` en la
+    segunda) y se comprueba que, con la calidad en rojo, sale el aviso."""
+    import asyncio
+    from dataclasses import replace
+
+    from maxicare_daniela import barrido, runtime
+
+    async def escenario():
+        llamadas_aviso = []
+
+        async def _calidad_falsa():
+            return {"quality_rating": "RED"}
+
+        async def _aviso_falso(calidad):
+            llamadas_aviso.append(calidad)
+
+        vueltas = {"n": 0}
+
+        async def _sleep_una_vez(_segundos):
+            vueltas["n"] += 1
+            if vueltas["n"] > 1:
+                raise asyncio.CancelledError()
+
+        monkeypatch.setattr(
+            runtime, "config", replace(runtime.config, database_url="postgresql://no-se-usa"),
+        )
+        monkeypatch.setattr(runtime, "_whatsapp", type("W", (), {"calidad_del_numero": staticmethod(_calidad_falsa)})())
+        monkeypatch.setattr(runtime, "_avisar_de_calidad_del_numero", _aviso_falso)
+        monkeypatch.setattr(runtime, "_leer_configuracion_operativa", lambda: {})
+        monkeypatch.setattr(barrido, "se_puede_encolar", lambda *_: False)
+        monkeypatch.setattr(runtime.asyncio, "sleep", _sleep_una_vez)
+
+        try:
+            await runtime._barrer_reactivacion_sin_parar()
+        except asyncio.CancelledError:
+            pass
+
+        assert llamadas_aviso == [{"quality_rating": "RED"}], (
+            "el aviso de calidad no se cableó dentro del bucle"
+        )
+
+    asyncio.run(escenario())

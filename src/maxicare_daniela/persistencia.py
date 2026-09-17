@@ -1884,26 +1884,41 @@ def anular_reactivaciones_vivas(conn, telefono: str, *, motivo: str) -> int:
 # ==========================================================================================
 
 #: Cuántos días se espera entre un envío de reactivación y el siguiente intento AL MISMO
-#: tipo, y también cuántos días de silencio hacen falta para dar por fallido un envío ya
-#: hecho (`series_por_contabilizar`, más abajo). Las dos preguntas comparten el mismo número
-#: a propósito, y es lo que produce -- sin una tabla aparte de «primer intento / segundo
-#: intento»-- el «como mucho dos mensajes de seguimiento (24 h y 7 días)» del plan:
+#: tipo, y también cuántos días de silencio (sin agendar, ver Ronda 1 - I-2) hacen falta para
+#: dar por fallido un envío ya hecho (`series_por_contabilizar`, más abajo).
 #:
-#:   1. El primer envío sale cuando el lead entra por primera vez a `leads_sin_agendar` o
-#:      `leads_que_cancelaron` (24 h después de la última señal).
-#:   2. Si a los 7 días sigue sin responder, ese envío se cuenta como fallido
-#:      (`seguimientos_fallidos += 1`) en el MISMO instante en que el bloqueo de reenvío de
-#:      abajo expira -- así que el barrido lo vuelve a ofrecer. Ese es el segundo envío.
-#:   3. Si a los 7 días de ESE segundo envío tampoco contesta, `seguimientos_fallidos` llega
-#:      a 2 (el default de `max_seguimientos_fallidos`) y R1 -- tanto aquí, como filtro de
-#:      cartera, como en `seguimientos.decidir`, como guarda de despacho -- deja de
-#:      ofrecerlo.
+#: **Ronda 1 de revisión sobre la parada E, I-5: esta constante ya NO es el único número.**
+#: Antes de la ronda 1, un solo contador (`contactos.seguimientos_fallidos`, comparado contra
+#: la perilla `max_seguimientos_fallidos`) hacía DOS trabajos a la vez -- acotar cuántos
+#: envíos caben DENTRO de una serie y acotar cuántas SERIES tolera una persona-- y la 021
+#: describe la perilla como «cuántas SERIES», no como «cuántos envíos». Si la clínica subía
+#: esa perilla de 2 a 3 esperando "tres oportunidades", lo que cambiaba EN SILENCIO era
+#: "tres mensajes por consulta", porque el código no distinguía las dos cosas. Ahora:
+#:
+#:   - `INTENTOS_POR_SERIE_DE_REACTIVACION` (fijo, 2, no configurable) acota los envíos
+#:     DENTRO de una serie -- el primero y el segundo, con este número de días entre medias.
+#:   - `max_seguimientos_fallidos` (la perilla de la 021, configurable) acota cuántas SERIES
+#:     completas puede quemar una persona antes de que R1 la apague hasta que agende.
+#:
+#: El calendario que produce, con los dos defaults en 2: el primer envío sale a las 24 h de
+#: la última señal; si a los 7 días no hay CITA (Ronda 1, I-2: no "si no contesta" -- ver el
+#: docstring de `series_por_contabilizar`), ese envío cierra la serie (`seguimientos_
+#: fallidos` pasa a 1) en el MISMO instante en que expira su propio bloqueo de reenvío, así
+#: que el segundo envío sale enseguida; si a los 7 días de ESE tampoco hay cita, la serie
+#: cierra otra vez (`seguimientos_fallidos` pasa a 2) y R1 -- aquí, como filtro de cartera, y
+#: en `seguimientos.decidir`, como guarda de despacho-- deja de ofrecer ese tipo a esa
+#: persona. Total: 2 mensajes, y el contador termina en 2 -- verificado con la simulación de
+#: `test_el_calendario_medido_de_las_tres_personas_da_2`.
 #:
 #: Las tareas 1-6 de este plan no dejaron construido un calendario 24 h / 7 días explícito
-#: para la reactivación: esta es la interpretación de este módulo, documentada aquí porque es
-#: una decisión de diseño y no un hecho verificado contra el resto del código. El número es
-#: una constante y se puede ajustar sin tocar la forma de ninguna consulta.
+#: para la reactivación: esta sigue siendo la interpretación de este módulo, documentada
+#: porque es una decisión de diseño y no un hecho verificado contra el resto del código. Los
+#: dos números son constantes y se pueden ajustar sin tocar la forma de ninguna consulta.
 DIAS_ENTRE_INTENTOS_DE_REACTIVACION = 7
+
+#: Ronda 1 de revisión, I-5. Fijo y NO ligado a la perilla configurable
+#: `max_seguimientos_fallidos`: ver el docstring de `DIAS_ENTRE_INTENTOS_DE_REACTIVACION`.
+INTENTOS_POR_SERIE_DE_REACTIVACION = 2
 
 #: Quien preguntó y no agendó. Las condiciones, y ninguna sobra:
 #:
@@ -1918,10 +1933,21 @@ DIAS_ENTRE_INTENTOS_DE_REACTIVACION = 7
 #: 4. No pidió la baja, y el contador de series fallidas no llegó al tope (R1, por
 #:    duplicado: `seguimientos.decidir` la vuelve a mirar al despachar, pero no hay motivo
 #:    para encolar aquí una fila que esa guarda va a anular de todas formas).
-#: 5. No tiene ya un seguimiento de este tipo EN JUEGO -- pendiente de decidir, o enviado
-#:    hace menos de `DIAS_ENTRE_INTENTOS_DE_REACTIVACION` días. Sin esto, cada pasada del
-#:    barrido (una vez por hora) encolaría una fila nueva encima de la que ya está viva.
-#: 6. **NUNCA se le anuló una serie de este tipo con motivo `el_paciente_dijo_que_no`.** Esta
+#: 5. No tiene ya un seguimiento de **NINGÚN tipo de reactivación** EN JUEGO -- pendiente de
+#:    decidir, o enviado hace menos de `DIAS_ENTRE_INTENTOS_DE_REACTIVACION` días. **Ronda 1
+#:    de revisión, I-1: antes miraba solo su PROPIO tipo**, así que quien preguntó y no
+#:    agendó Y ADEMÁS canceló una cita vieja calificaba por las DOS consultas a la vez y
+#:    recibía dos discursos distintos («¿sigues interesada?» y «¿pudiste reagendar tu
+#:    cita?») en la misma ventana de 24 h. Ahora "en juego" es de la PERSONA, no del tipo:
+#:    quien tiene algo pendiente o reciente de cualquier tipo no recibe otro mientras tanto.
+#: 6. Dentro de la serie ACTUAL de este tipo (los envíos desde el último cierre, o desde
+#:    siempre si nunca cerró ninguna) no lleva ya `INTENTOS_POR_SERIE_DE_REACTIVACION`
+#:    envíos SIN CERRAR. **Ronda 1, I-5**: sin este tope, dos envíos ya viejos (fuera de la
+#:    ventana de reintento de la condición 5, pero con `contabilizado_en` todavía en NULL
+#:    porque `series_por_contabilizar` aún no corrió) no bloqueaban un tercero del MISMO
+#:    tipo. Cerrar la serie (que sube `seguimientos_fallidos`, condición 4) es lo ÚNICO que
+#:    abre paso a otro envío de este tipo.
+#: 7. **NUNCA se le anuló una serie de este tipo con motivo `el_paciente_dijo_que_no`.** Esta
 #:    es la condición que el encargo original NO traía. `herramientas._cerrar_seguimiento`
 #:    anula con ese motivo EXACTO cuando el paciente dice explícitamente que no quiere que le
 #:    insistan sobre ESTA consulta, y las otras condiciones de arriba -en particular la 5,
@@ -1933,6 +1959,16 @@ DIAS_ENTRE_INTENTOS_DE_REACTIVACION = 7
 #:    módulo: sin ella, Daniela le dice al paciente «anotado, no se le vuelve a escribir
 #:    sobre esta consulta» y el barrido se lo vuelve a ofrecer al día siguiente, que es
 #:    literalmente el fallo por el que se reporta un número.
+#:
+#:    **Y es deliberadamente por TIPO, no por persona (Ronda 1, observación del revisor,
+#:    dicha y no escondida): quien dijo que no a "¿sigues interesada en agendar?" SÍ puede
+#:    recibir después "¿pudiste reagendar tu cita?" sobre una consulta distinta.** Son dos
+#:    asuntos diferentes -- eso es lo que defiende que el bloqueo sea por tipo-- pero el
+#:    paciente no necesariamente percibe la diferencia: si Daniela dijo «no se le vuelve a
+#:    escribir sobre esta consulta» y lo siguiente que le llega es el otro tipo, puede sentir
+#:    que la promesa no se cumplió. Se acepta el riesgo porque cerrar el bloqueo a nivel de
+#:    PERSONA (en vez de tipo) apagaría la reactivación entera -incluida una consulta legítima
+#:    y distinta- por un "no" que solo hablaba de la primera.
 #:
 #: **Límite conocido y aceptado, dicho y no escondido:** esta consulta NO repite el tope
 #: anual (R2, `max_reactivaciones_12m`) ni las guardas de horario o contacto reciente
@@ -1975,10 +2011,12 @@ SELECT uc.telefono, uc.conversacion_id, um.cuando AS ultimo_mensaje
            AND c.estado <> 'cancelada'
    )
    AND NOT EXISTS (
+        -- I-1: TODOS los tipos de reactivacion, no solo el de esta consulta -- ver la
+        -- condicion 5 de arriba.
         SELECT 1 FROM seguimientos s
           JOIN conversaciones cv2 ON cv2.id = s.conversacion_id
          WHERE cv2.telefono = uc.telefono
-           AND s.tipo = 'reactivacion_sin_agendar'
+           AND s.tipo IN ('reactivacion_sin_agendar', 'reactivacion_cancelada')
            AND (
                 (s.anulado_en IS NULL AND s.enviado_en IS NULL)
              OR (s.enviado_en IS NOT NULL
@@ -1986,7 +2024,18 @@ SELECT uc.telefono, uc.conversacion_id, um.cuando AS ultimo_mensaje
                                     - interval '{DIAS_ENTRE_INTENTOS_DE_REACTIVACION} days')
            )
    )
+   AND (
+        -- I-5: el tope de intentos DENTRO de la serie actual de ESTE tipo -- ver la
+        -- condicion 6 de arriba. Tipo-especifico, al reves que el bloqueo de arriba.
+        SELECT count(*) FROM seguimientos s4
+          JOIN conversaciones cv4 ON cv4.id = s4.conversacion_id
+         WHERE cv4.telefono = uc.telefono
+           AND s4.tipo = 'reactivacion_sin_agendar'
+           AND s4.enviado_en IS NOT NULL
+           AND s4.contabilizado_en IS NULL
+   ) < {INTENTOS_POR_SERIE_DE_REACTIVACION}
    AND NOT EXISTS (
+        -- El "no" explicito, condicion 7: por TIPO, a proposito -- ver el comentario largo.
         SELECT 1 FROM seguimientos s3
           JOIN conversaciones cv3 ON cv3.id = s3.conversacion_id
          WHERE cv3.telefono = uc.telefono
@@ -2019,15 +2068,21 @@ def leads_sin_agendar(
 #: de sobre `mensajes_entrantes`. El «último mensaje» de aquella es aquí «cuándo se canceló»
 #: (`citas.actualizada_en`, que `marcar_cita_cancelada` toca a propósito): es el evento que
 #: convierte a esta persona en un lead, así que es contra el que se mide la ventana de
-#: 24 h-30 días. `citas.conversacion_id` sale directo de la cita cancelada -- no hace falta
-#: la vuelta por `conversaciones.canal` de la otra consulta, porque una cita solo se crea
-#: desde una conversación real de WhatsApp (`herramientas._crear_cita` no tiene otro camino).
+#: 24 h-30 días.
+#:
+#: **Ronda 1 de revisión, C4 (quedó a medias): SÍ hace falta el `JOIN` a `conversaciones` y
+#: el filtro `canal = 'whatsapp'`.** El argumento de que "una cita solo nace de una
+#: conversación real de WhatsApp" es cierto hoy, pero no estaba protegido por ninguna
+#: prueba: mutar el filtro de la OTRA consulta a `WHERE TRUE` dejaba la suite de Neon entera
+#: en verde. Ahora las dos consultas repiten el mismo filtro, con el mismo criterio.
 _LEADS_QUE_CANCELARON = f"""
 WITH ultima_cancelada AS (
-    SELECT DISTINCT ON (telefono) telefono, conversacion_id, actualizada_en
-      FROM citas
-     WHERE estado = 'cancelada'
-     ORDER BY telefono, actualizada_en DESC
+    SELECT DISTINCT ON (c.telefono) c.telefono, c.conversacion_id, c.actualizada_en
+      FROM citas c
+      JOIN conversaciones cv ON cv.id = c.conversacion_id
+     WHERE c.estado = 'cancelada'
+       AND cv.canal = 'whatsapp'
+     ORDER BY c.telefono, c.actualizada_en DESC
 )
 SELECT uc.telefono, uc.conversacion_id, uc.actualizada_en AS ultimo_mensaje
   FROM ultima_cancelada uc
@@ -2043,10 +2098,11 @@ SELECT uc.telefono, uc.conversacion_id, uc.actualizada_en AS ultimo_mensaje
            AND c2.estado <> 'cancelada'
    )
    AND NOT EXISTS (
+        -- I-1: TODOS los tipos de reactivacion -- ver la condicion 5 de `_LEADS_SIN_AGENDAR`.
         SELECT 1 FROM seguimientos s
           JOIN conversaciones cv ON cv.id = s.conversacion_id
          WHERE cv.telefono = uc.telefono
-           AND s.tipo = 'reactivacion_cancelada'
+           AND s.tipo IN ('reactivacion_sin_agendar', 'reactivacion_cancelada')
            AND (
                 (s.anulado_en IS NULL AND s.enviado_en IS NULL)
              OR (s.enviado_en IS NOT NULL
@@ -2054,7 +2110,18 @@ SELECT uc.telefono, uc.conversacion_id, uc.actualizada_en AS ultimo_mensaje
                                     - interval '{DIAS_ENTRE_INTENTOS_DE_REACTIVACION} days')
            )
    )
+   AND (
+        -- I-5: el tope de intentos DENTRO de la serie actual de ESTE tipo.
+        SELECT count(*) FROM seguimientos s4
+          JOIN conversaciones cv4 ON cv4.id = s4.conversacion_id
+         WHERE cv4.telefono = uc.telefono
+           AND s4.tipo = 'reactivacion_cancelada'
+           AND s4.enviado_en IS NOT NULL
+           AND s4.contabilizado_en IS NULL
+   ) < {INTENTOS_POR_SERIE_DE_REACTIVACION}
    AND NOT EXISTS (
+        -- El "no" explicito: por TIPO, a proposito -- ver el comentario largo en
+        -- `_LEADS_SIN_AGENDAR`.
         SELECT 1 FROM seguimientos s2
           JOIN conversaciones cv2 ON cv2.id = s2.conversacion_id
          WHERE cv2.telefono = uc.telefono
@@ -2114,6 +2181,53 @@ def contar_enviados_hoy(conn, *, ahora: datetime) -> int:
     return total
 
 
+def contar_comprometidos_hoy(conn, *, ahora: datetime) -> int:
+    """Cuánto cuenta HOY contra el tope diario: lo ya ENVIADO hoy, más lo que sigue
+    COMPROMETIDO -- pendiente de decidir, sin importar hace cuánto se encoló.
+
+    **CRÍTICO, ronda 1 de revisión sobre la parada E.** `barrido.encolar` usaba
+    `contar_enviados_hoy` para el cupo, y esa función solo ve `enviado_en`: una fila
+    encolada y luego APLAZADA (R4 fuera de 9-19h, `seguimientos.decidir`) se queda pendiente
+    -`enviado_en` sigue en NULL- y es INVISIBLE para ese conteo. R4 aplaza, no anula, así que
+    fuera del horario comercial el cupo se veía libre TODA LA NOCHE, y cada pasada horaria del
+    barrido volvía a encolar el tope entero sobre gente NUEVA. Medido por el revisor con 400
+    leads y tope 20: 280 mensajes reales de golpe a las 9:00 del día siguiente -- exactamente
+    el pico que la regla 9 existe para evitar, y que el propio comentario de `barrido.encolar`
+    decía estar impidiendo sin impedirlo.
+
+    La corrección: una fila PENDIENTE (`enviado_en IS NULL AND anulado_en IS NULL`) cuenta
+    igual que una enviada, sin importar cuándo se creó -- es una promesa de envío que Meta va
+    a ver salir tarde o temprano, y dejar de contarla es reabrir el agujero. Solo se libera
+    cuando se ENVÍA (pasa a contar como "enviado hoy", ese día en concreto) o se ANULA
+    (`seguimientos.decidir` decidió que no sale, y deja de ser un compromiso). Esto también
+    dice, a propósito, que un backlog de aplazadas de un fin de semana entero sigue ocupando
+    el cupo el lunes hasta que se resuelva: es la misma cautela que la regla 9 pide.
+
+    **Decisión, para quien se pregunte por qué el barrido no se apaga fuera de horario en vez
+    de esto:** no hace falta. Encolar de madrugada es inofensivo por sí solo -- el envío de
+    verdad lo decide `seguimientos.decidir` con R4/R5, que sí conocen el horario-- y este
+    conteo ya acota cuánto puede acumularse mientras tanto. Añadir un `if` de horario aquí
+    sería una segunda guarda para el mismo problema que esta ya resuelve.
+    """
+    inicio_del_dia = ahora.astimezone(ZONA_BOGOTA).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT count(*) FROM seguimientos
+             WHERE tipo <> 'recordatorio_cita'
+               AND (
+                    (enviado_en >= %(inicio)s AND enviado_en < %(inicio)s + interval '1 day')
+                 OR (enviado_en IS NULL AND anulado_en IS NULL)
+               )
+            """,
+            {"inicio": inicio_del_dia},
+        )
+        (total,) = cur.fetchone()
+    return total
+
+
 def series_por_contabilizar(
     conn,
     *,
@@ -2121,15 +2235,33 @@ def series_por_contabilizar(
     dias: int = DIAS_ENTRE_INTENTOS_DE_REACTIVACION,
     limite: int = 200,
 ) -> list[dict[str, Any]]:
-    """Reactivaciones enviadas hace más de `dias` días que nadie contestó y nadie contó.
+    """Series de reactivación que llevan más de `dias` días sin acabar en una cita.
 
-    Cada fila es UN envío que se da por fallido (aquí «fallido» es «no contestado en `dias`
-    días», sin distinguir si fue el primer o el segundo intento de esa persona -- ver el
-    comentario largo de `DIAS_ENTRE_INTENTOS_DE_REACTIVACION`). `barrido._contabilizar_
-    series_cerradas` sube `contactos.seguimientos_fallidos` por cada una y marca
-    `contabilizado_en` para que la siguiente pasada no la vuelva a contar: sin esa marca, el
-    freno por persona (R1) se dispararía solo con el paso del tiempo, sin que la persona
-    hiciera nada.
+    **Ronda 1 de revisión, I-2 -- el hallazgo más grave de toda la parada.** La versión
+    anterior descartaba la serie si había CUALQUIER mensaje del paciente después del envío
+    (`NOT EXISTS mensajes_entrantes ... recibido_en > enviado_en`). Eso exoneraba para
+    SIEMPRE a quien contestaba algo -- un «ahora no, gracias» que Daniela no interpreta como
+    un cierre, o cualquier cosa- del contador: nunca llegaba a `seguimientos_fallidos`, y
+    encima cada respuesta reiniciaba la ventana de 24 h-30 días de `leads_sin_agendar`.
+    Medido por el revisor: un número que siempre contesta pero nunca agenda recibía 6
+    mensajes en 40 días, contra 2 de quien se queda callado -- exactamente al revés de lo que
+    el freno por persona (R1) existe para lograr.
+
+    El criterio correcto es si la serie terminó en una CITA, no si hubo una RESPUESTA: es la
+    misma vara que ya usa `crear_cita` para resetear el contador
+    (`persistencia.reiniciar_seguimientos_fallidos`), así que agendar es lo único que
+    exonera, en los dos sitios.
+
+    **Ronda 1, I-5 -- una unidad por SERIE, no por envío.** Con `INTENTOS_POR_SERIE_DE_
+    REACTIVACION` limitando cada serie a 2 envíos, contar CADA fila enviada de forma
+    independiente daría dos unidades por serie (una por el primer intento, otra por el
+    segundo) en vez de una por la serie completa. Por eso esta consulta usa `DISTINCT ON
+    (telefono, tipo)` y se queda con el envío MÁS RECIENTE de cada persona y tipo: si hay un
+    segundo intento, es al que hay que atender -el primero ya cumplió su papel de abrir paso
+    al segundo, y no representa un cierre por su cuenta-. Marcar solo ese envío con
+    `contabilizado_en` basta: el envío más viejo, si lo hay, queda sin marcar para siempre,
+    y eso es correcto -- no vuelve a mirarse nunca, y no hay double-count posible porque el
+    `DISTINCT ON` nunca lo elige de nuevo.
 
     `tipo IN (...)` lleva los literales de `seguimientos.TIPOS_QUE_EL_BARRIDO_ENCOLA` a mano
     y no importados: la flecha de imports de este proyecto va de `seguimientos.py` hacia
@@ -2139,19 +2271,29 @@ def series_por_contabilizar(
     with conn.cursor() as cur:
         cur.execute(
             """
-            SELECT s.id, cv.telefono
-              FROM seguimientos s
-              JOIN conversaciones cv ON cv.id = s.conversacion_id
-             WHERE s.tipo IN ('reactivacion_sin_agendar', 'reactivacion_cancelada')
-               AND s.enviado_en IS NOT NULL
-               AND s.enviado_en <= %(ahora)s - (%(dias)s * interval '1 day')
-               AND s.contabilizado_en IS NULL
+            WITH ultimo_envio AS (
+                SELECT DISTINCT ON (cv.telefono, s.tipo)
+                       s.id, s.tipo, cv.telefono, s.enviado_en, s.contabilizado_en
+                  FROM seguimientos s
+                  JOIN conversaciones cv ON cv.id = s.conversacion_id
+                 WHERE s.tipo IN ('reactivacion_sin_agendar', 'reactivacion_cancelada')
+                   AND s.enviado_en IS NOT NULL
+                 ORDER BY cv.telefono, s.tipo, s.enviado_en DESC
+            )
+            SELECT ue.id, ue.telefono
+              FROM ultimo_envio ue
+             WHERE ue.contabilizado_en IS NULL
+               AND ue.enviado_en <= %(ahora)s - (%(dias)s * interval '1 day')
                AND NOT EXISTS (
-                    SELECT 1 FROM mensajes_entrantes me
-                     WHERE me.telefono = cv.telefono
-                       AND me.recibido_en > s.enviado_en
+                    -- Se cuenta como fallida salvo que la persona haya terminado con una
+                    -- cita VIVA agendada DESPUÉS de este envío (I-2: la vara es agendar, no
+                    -- contestar).
+                    SELECT 1 FROM citas c
+                     WHERE c.telefono = ue.telefono
+                       AND c.estado <> 'cancelada'
+                       AND c.creada_en > ue.enviado_en
                )
-             ORDER BY s.enviado_en
+             ORDER BY ue.enviado_en
              LIMIT %(limite)s
             """,
             {"ahora": ahora, "dias": dias, "limite": limite},
