@@ -18,10 +18,15 @@
 -- que este proyecto ya ha tropezado -- ver el no negociable sobre las columnas de la 010, o
 -- la migracion 019 sobre `no_contactar` frente al aviso.
 --
--- `INTENTOS_POR_SERIE_DE_REACTIVACION` (en `persistencia.py`) sigue existiendo como la MISMA
--- cota, expresada una segunda vez como defensa en profundidad dentro del filtro de cartera;
--- no tiene fila propia en `configuracion` porque no es una perilla independiente, y las dos
--- constantes tienen que moverse juntas si esta perilla cambia de valor por defecto.
+-- `INTENTOS_POR_SERIE_DE_REACTIVACION` (en `persistencia.py`) sigue existiendo como defensa
+-- en profundidad dentro del filtro de cartera, pero NO es la misma cota que esta perilla --
+-- ronda 3 de revision, corrigiendo una afirmacion de la ronda 2 que el revisor senalo como
+-- falsa. Son dos cotas DISTINTAS que se solapan: esta perilla es POR PERSONA y cuenta lo YA
+-- CONTABILIZADO; aquella es POR TIPO y cuenta lo SIN CONTABILIZAR TODAVIA (la guarda contra
+-- un envio de mas mientras el barrido no se ha enterado). No tiene fila propia en
+-- `configuracion` porque no es una perilla independiente, pero las dos constantes NO tienen
+-- que moverse juntas si esta cambia de valor por defecto -- ver el docstring de
+-- `INTENTOS_POR_SERIE_DE_REACTIVACION` para las dos diferencias completas.
 --
 -- Un UPDATE simple es idempotente por construccion: aplicarlo dos veces dejo el mismo texto.
 -- =========================================================================================

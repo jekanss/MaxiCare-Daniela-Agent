@@ -602,6 +602,13 @@ def test_contar_comprometidos_hoy_no_vuelve_a_meter_una_ventana_por_horas(conexi
     60 horas es, a propósito, más que cualquier ventana fija "razonable" que alguien
     pudiera volver a inventar. Si el conteo volviera a mirar horas en vez de
     `aplazado_desde`, esta fila dejaría de contar y la prueba caería.
+
+    **M3 (revisión de la tarea 9): lo de arriba solo mata la mitad.** Esa fila tiene
+    `aplazado_desde` puesto, así que cuenta por ESA rama pase lo que pase con la otra -- un
+    mutante que afloje `fecha_objetivo < fin_del_dia` a `fecha_objetivo <= fin_del_dia + 48h`
+    seguía en verde, porque el `OR aplazado_desde IS NOT NULL` ya la cubría sola. Hace falta
+    además una fila que NUNCA se aplazó, con `fecha_objetivo` dentro de esa ventana floja
+    pero fuera del día de hoy de verdad: esa tiene que dar 0, y es la que delata al mutante.
     """
     conv = persistencia.asegurar_conversacion(conexion_pruebas, telefono=TELEFONO)
     persistencia.insertar_seguimiento(
@@ -618,6 +625,22 @@ def test_contar_comprometidos_hoy_no_vuelve_a_meter_una_ventana_por_horas(conexi
         conexion_pruebas, id_seguimiento, hasta=AHORA + timedelta(hours=60)
     )
     assert persistencia.contar_comprometidos_hoy(conexion_pruebas, ahora=AHORA) == 1
+
+    # M3: la fila que faltaba. Nunca se aplazó (`aplazado_desde` sigue NULL) y su
+    # `fecha_objetivo` cae después del día de hoy de verdad pero dentro de la ventana floja
+    # de 48 h que un mutante podría reintroducir sobre el otro lado del `OR`.
+    fin_del_dia = AHORA.astimezone(ZONA_BOGOTA).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    ) + timedelta(days=1)
+    persistencia.insertar_seguimiento(
+        conexion_pruebas, id_conversacion=conv, tipo="reactivacion_sin_agendar",
+        fecha_objetivo=fin_del_dia + timedelta(hours=24),
+        clave_idempotencia="k-nunca-aplazada-fuera-de-hoy",
+    )
+    assert persistencia.contar_comprometidos_hoy(conexion_pruebas, ahora=AHORA) == 1, (
+        "una fila que NUNCA se aplazó y cae fuera del día de hoy de verdad no debería "
+        "contar -- si sube a 2, alguien reintrodujo una ventana de horas floja"
+    )
 
 
 def test_contar_comprometidos_hoy_no_cuenta_lo_programado_muy_a_futuro(conexion_pruebas):
@@ -1175,13 +1198,16 @@ def test_una_fila_anulada_no_tapa_la_cabeza_de_la_cola(conexion_pruebas, esquema
 
 
 def test_no_ofrece_un_tercer_intento_sin_cerrar_los_dos_anteriores(conexion_pruebas):
-    """`INTENTOS_POR_SERIE_DE_REACTIVACION` es fijo (2) y es defensa en profundidad de la
-    MISMA cota que R1 (Ronda 2: ya no es un tope independiente -- ver el docstring de
-    `DIAS_ENTRE_INTENTOS_DE_REACTIVACION`). Dos envíos ya viejos (fuera de la ventana de
-    reintento de 7 días) que TODAVÍA no se contabilizaron -un estado transitorio: en la
-    operación normal `_contabilizar_envios_vencidos` los cierra antes de que esta consulta
-    corra, ver `barrido.encolar`- siguen bloqueando un tercer envío del MISMO tipo aunque
-    `contactos.seguimientos_fallidos` (la vía normal de R1) todavía no se haya actualizado.
+    """`INTENTOS_POR_SERIE_DE_REACTIVACION` es fijo (2) y es defensa en profundidad, pero NO
+    es la MISMA cota que R1 (Ronda 3: corrige una afirmación de la ronda 2 que el revisor
+    marcó como falsa -- ver el docstring de `INTENTOS_POR_SERIE_DE_REACTIVACION` para las dos
+    diferencias reales: R1/`max_seguimientos_fallidos` es POR PERSONA y cuenta lo YA
+    CONTABILIZADO; esta es POR TIPO y cuenta lo SIN CONTABILIZAR TODAVÍA). Dos envíos ya
+    viejos (fuera de la ventana de reintento de 7 días) que TODAVÍA no se contabilizaron -un
+    estado transitorio: en la operación normal `_contabilizar_envios_vencidos` los cierra
+    antes de que esta consulta corra, ver `barrido.encolar`- siguen bloqueando un tercer
+    envío del MISMO tipo aunque `contactos.seguimientos_fallidos` (la vía normal de R1)
+    todavía no se haya actualizado.
     """
     conv = persistencia.asegurar_conversacion(conexion_pruebas, telefono=TELEFONO)
     _mensaje(conexion_pruebas, TELEFONO, cuando=AHORA - timedelta(hours=30))

@@ -1937,10 +1937,12 @@ DIAS_ENTRE_INTENTOS_DE_REACTIVACION = 7
 #:     que no llegaron a cita, para siempre hasta que agende.
 #:   - `INTENTOS_POR_SERIE_DE_REACTIVACION` (condición 6) es POR TIPO, no cruza tipos, y
 #:     cuenta lo SIN CONTABILIZAR TODAVÍA -- cuántos envíos de ESTE tipo están "en el aire",
-#:     esperando su turno en `envios_por_contabilizar`. Es la guarda contra la inanición
-#:     transitoria (ver su condición 6): mientras `_contabilizar_envios_vencidos` no haya
-#:     corrido sobre un envío viejo, esta cuenta lo sigue viendo como pendiente aunque R1 (que
-#:     mira `contactos`, ya actualizado o no) no se haya enterado todavía.
+#:     esperando su turno en `envios_por_contabilizar`. Es el freno que impide un envío DE
+#:     MÁS mientras esos dos siguen sin contabilizar (ver su condición 6) -- no protege de la
+#:     inanición, al revés de lo que un nombre anterior de este comentario sugería: mientras
+#:     `_contabilizar_envios_vencidos` no haya corrido sobre un envío viejo, esta cuenta lo
+#:     sigue viendo como pendiente aunque R1 (que mira `contactos`, ya actualizado o no) no se
+#:     haya enterado todavía.
 #:
 #: **Por eso NO se mueven juntas.** Subir `max_seguimientos_fallidos` no tiene por qué subir
 #: esta constante, y viceversa: la primera decide cuánta paciencia tiene la clínica con una
@@ -1986,11 +1988,13 @@ INTENTOS_POR_SERIE_DE_REACTIVACION = 2
 #:    AND contabilizado_en IS NULL`). **Ronda 3, corrección: esto NO es la misma cota que la
 #:    condición 4** (`max_seguimientos_fallidos`) -- ver el docstring de
 #:    `INTENTOS_POR_SERIE_DE_REACTIVACION` para las dos diferencias reales (por persona sobre
-#:    lo contabilizado, contra por tipo sobre lo sin contabilizar). Esta condición es la
-#:    guarda contra la inanición TRANSITORIA: mientras `barrido._contabilizar_envios_vencidos`
-#:    no haya corrido sobre un envío que ya venció, esta cuenta lo sigue viendo como "en el
-#:    aire" aunque el contador de `contactos` (condición 4) todavía no se haya enterado. En la
-#:    operación normal casi nunca es la que dispara primero -- `envios_por_contabilizar` corre
+#:    lo contabilizado, contra por tipo sobre lo sin contabilizar). Esta condición es el freno
+#:    TRANSITORIO contra un envío de MÁS -- no una guarda de inanición, que sería lo
+#:    contrario: una guarda de inanición impide que alguien se quede SIN turno, y esta impide
+#:    mandar UNO DE MÁS-- mientras `barrido._contabilizar_envios_vencidos` no haya corrido
+#:    sobre un envío que ya venció, esta cuenta lo sigue viendo como "en el aire" aunque el
+#:    contador de `contactos` (condición 4) todavía no se haya enterado. En la operación
+#:    normal casi nunca es la que dispara primero -- `envios_por_contabilizar` corre
 #:    antes que esta consulta en cada pasada que llega a abrir conexión (ver `barrido.
 #:    encolar`) -- pero "casi nunca" no es "nunca": por eso hace falta como capa aparte, y por
 #:    eso NO se puede alojar donde pasa la tool ni donde pasa `seguimientos.decidir`, solo
@@ -2073,10 +2077,11 @@ SELECT uc.telefono, uc.conversacion_id, um.cuando AS ultimo_mensaje
            )
    )
    AND (
-        -- Ronda 3: NO es la misma cota que el contador de R1 (condicion 4) -- es la
-        -- guarda contra la inanicion TRANSITORIA, por tipo y sobre lo SIN contabilizar.
-        -- Ver el docstring de INTENTOS_POR_SERIE_DE_REACTIVACION y la condicion 6 de
-        -- `_LEADS_SIN_AGENDAR`.
+        -- Ronda 3: NO es la misma cota que el contador de R1 (condicion 4) -- es el
+        -- freno TRANSITORIO contra un envio DE MAS, no una guarda de inanicion (esa seria
+        -- lo contrario: proteger de que alguien se quede SIN turno). Por tipo y sobre lo
+        -- SIN contabilizar. Ver el docstring de INTENTOS_POR_SERIE_DE_REACTIVACION y la
+        -- condicion 6 de `_LEADS_SIN_AGENDAR`.
         -- Tipo-especifico, al reves que el bloqueo de arriba.
         SELECT count(*) FROM seguimientos s4
           JOIN conversaciones cv4 ON cv4.id = s4.conversacion_id
@@ -2162,10 +2167,11 @@ SELECT uc.telefono, uc.conversacion_id, uc.actualizada_en AS ultimo_mensaje
            )
    )
    AND (
-        -- Ronda 3: NO es la misma cota que el contador de R1 (condicion 4) -- es la
-        -- guarda contra la inanicion TRANSITORIA, por tipo y sobre lo SIN contabilizar.
-        -- Ver el docstring de INTENTOS_POR_SERIE_DE_REACTIVACION y la condicion 6 de
-        -- `_LEADS_SIN_AGENDAR`.
+        -- Ronda 3: NO es la misma cota que el contador de R1 (condicion 4) -- es el
+        -- freno TRANSITORIO contra un envio DE MAS, no una guarda de inanicion (esa seria
+        -- lo contrario: proteger de que alguien se quede SIN turno). Por tipo y sobre lo
+        -- SIN contabilizar. Ver el docstring de INTENTOS_POR_SERIE_DE_REACTIVACION y la
+        -- condicion 6 de `_LEADS_SIN_AGENDAR`.
         SELECT count(*) FROM seguimientos s4
           JOIN conversaciones cv4 ON cv4.id = s4.conversacion_id
          WHERE cv4.telefono = uc.telefono
@@ -2264,8 +2270,13 @@ def contar_comprometidos_hoy(conn, *, ahora: datetime) -> int:
     `seguimientos.decidir` (ver `seguimientos.py`) acaban ANULANDO una reactivación que lleva
     demasiado aplazada (`llego_tarde` si se retrasa más de 2 h sobre su `fecha_objetivo`,
     `reactivacion_estancada` a las 96 h desde el primer aplazamiento, `HORAS_DE_ESPERA_QUE_
-    INVALIDAN_UN_APLAZAMIENTO_SOSTENIDO`), y una fila anulada dejar de cumplir `anulado_en IS
-    NULL`, así que sale del conteo. El peor caso queda acotado en 96 h, no en "para siempre".
+    INVALIDAN_UN_APLAZAMIENTO_SOSTENIDO`), y una fila anulada deja de cumplir `anulado_en IS
+    NULL`, así que sale del conteo. **Las 96 h son el techo SOLO para el caso que nombra ese
+    umbral -- el relevo sostenido (ver su propio docstring)**: no en "para siempre", pero
+    tampoco en general. R3bis solo se evalúa cuando `despachar` vuelve a mirar esa fila --
+    es decir, cuando `ahora` alcanza su `fecha_objetivo` de nuevo--, así que el techo real es
+    esas 96 h MÁS el horizonte hasta esa próxima recogida: con la jornada por defecto (cierra
+    el domingo, y el sábado a las 15h) eso puede sumar hasta ~144 h, no 96.
 
     Solo se libera del conteo cuando se ENVÍA (pasa a contar como "enviado hoy", ese día en
     concreto) o se ANULA. Esto también dice, a propósito, que un backlog de aplazadas de un
