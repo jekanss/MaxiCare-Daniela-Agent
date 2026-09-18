@@ -32,7 +32,7 @@ import json
 import logging
 import uuid
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
@@ -1885,7 +1885,7 @@ def anular_reactivaciones_vivas(conn, telefono: str, *, motivo: str) -> int:
 
 #: Cuántos días se espera entre un envío de reactivación y el siguiente intento AL MISMO
 #: tipo, y también cuántos días sin acabar en cita (Ronda 1, I-2) hacen falta para dar por
-#: fallido un envío ya hecho (`series_por_contabilizar`, más abajo).
+#: fallido un envío ya hecho (`envios_por_contabilizar`, más abajo).
 #:
 #: **Ronda 2 de revisión: I-5 se REVIRTIÓ. Esta nota corrige la de la ronda 1, que decía lo
 #: contrario y estaba mal.** La ronda 1 intentó separar «intentos dentro de una serie» de
@@ -1899,22 +1899,18 @@ def anular_reactivaciones_vivas(conn, telefono: str, *, motivo: str) -> int:
 #: como lo mires, y separarlas era simular una distinción que el resto del sistema no tiene.
 #:
 #: **Se simplifica**, y el comportamiento resultante es el correcto -- «como mucho 2 mensajes
-#: de reactivación por persona hasta que agende», que es lo que pide el cliente y es más
-#: estricto que "2 series de 2" en el eje barato (por persona, no por consulta):
+#: de reactivación por persona hasta que agende», que es lo que pide el cliente:
 #:
 #:   - El contador (`contactos.seguimientos_fallidos`, tope `max_seguimientos_fallidos`)
 #:     cuenta ENVÍOS de reactivación que no acabaron en cita. Uno por envío. Determinista:
-#:     `series_por_contabilizar` ya no usa `DISTINCT ON` y cuenta cada fila que cumple la
+#:     `envios_por_contabilizar` ya no usa `DISTINCT ON` y cuenta cada fila que cumple la
 #:     condición, sin agrupar.
-#:   - `INTENTOS_POR_SERIE_DE_REACTIVACION` se queda, pero como lo que siempre debió ser:
-#:     la MISMA cota expresada una segunda vez, en el filtro de cartera (defensa en
-#:     profundidad, igual que el `Literal` de una tool y la comprobación del núcleo detrás:
-#:     dos capas independientes del mismo límite). **Las dos tienen que moverse juntas** --
-#:     si `max_seguimientos_fallidos` cambia de valor por defecto, `INTENTOS_POR_SERIE_DE_
-#:     REACTIVACION` tiene que cambiar con ella, o una de las dos capas deja de coincidir con
-#:     la otra y una empieza a mandar sobre la otra en silencio.
 #:   - La migración 023 corrige la `descripcion` de `max_seguimientos_fallidos` en
 #:     `configuracion`, que hasta ahora decía «series» sin que el código hiciera eso.
+#:
+#: **`INTENTOS_POR_SERIE_DE_REACTIVACION` (más abajo) NO es la misma cota** -- ronda 3,
+#: corrección de una afirmación mía de la ronda 2 ("las dos tienen que moverse juntas"), que
+#: el revisor marcó como falsa. Ver su propio docstring para las dos diferencias reales.
 #:
 #: El calendario que produce, con el default en 2: el primer envío sale a las 24 h de la
 #: última señal; si a los 7 días no hay CITA, ese envío cuenta como fallido
@@ -1931,10 +1927,29 @@ def anular_reactivaciones_vivas(conn, telefono: str, *, motivo: str) -> int:
 #: dos números son constantes y se pueden ajustar sin tocar la forma de ninguna consulta.
 DIAS_ENTRE_INTENTOS_DE_REACTIVACION = 7
 
-#: Ronda 2 de revisión: se queda, pero ya NO como un tope independiente de "intentos dentro
-#: de una serie" -- ver el docstring largo de `DIAS_ENTRE_INTENTOS_DE_REACTIVACION`. Es la
-#: MISMA cota que `max_seguimientos_fallidos`, expresada una segunda vez como defensa en
-#: profundidad dentro del filtro de cartera. Las dos constantes tienen que moverse juntas.
+#: Ronda 3 de revisión: corregido. La ronda 2 documentaba esto como «la MISMA cota que
+#: `max_seguimientos_fallidos`, expresada una segunda vez» y ordenaba moverlas juntas -- las
+#: dos afirmaciones eran mías y las dos eran falsas, y el revisor lo señaló. Son dos cotas
+#: DISTINTAS que se solapan pero miden cosas diferentes:
+#:
+#:   - `max_seguimientos_fallidos` (R1, condición 4 de abajo) es POR PERSONA, cruza los dos
+#:     tipos de reactivación, y cuenta lo YA CONTABILIZADO -- el historial cerrado de envíos
+#:     que no llegaron a cita, para siempre hasta que agende.
+#:   - `INTENTOS_POR_SERIE_DE_REACTIVACION` (condición 6) es POR TIPO, no cruza tipos, y
+#:     cuenta lo SIN CONTABILIZAR TODAVÍA -- cuántos envíos de ESTE tipo están "en el aire",
+#:     esperando su turno en `envios_por_contabilizar`. Es la guarda contra la inanición
+#:     transitoria (ver su condición 6): mientras `_contabilizar_envios_vencidos` no haya
+#:     corrido sobre un envío viejo, esta cuenta lo sigue viendo como pendiente aunque R1 (que
+#:     mira `contactos`, ya actualizado o no) no se haya enterado todavía.
+#:
+#: **Por eso NO se mueven juntas.** Subir `max_seguimientos_fallidos` no tiene por qué subir
+#: esta constante, y viceversa: la primera decide cuánta paciencia tiene la clínica con una
+#: persona a lo largo de su historial; la segunda decide cuántos envíos del MISMO tipo pueden
+#: quedar sin resolver a la vez antes de frenar en seco, que es una pregunta sobre el ritmo
+#: del barrido, no sobre la persona. Bajarla sin tocar la otra sigue siendo seguro (el freno
+#: de cartera se dispara antes); subirla sin tocar la otra también (R1 sigue siendo el límite
+#: real). Documentarlas como "la misma cota" es lo que aflojaría el fail-safe el día que
+#: alguien cambie una sin la otra creyendo que ya no hace falta.
 INTENTOS_POR_SERIE_DE_REACTIVACION = 2
 
 #: Quien preguntó y no agendó. Las condiciones, y ninguna sobra:
@@ -1968,14 +1983,18 @@ INTENTOS_POR_SERIE_DE_REACTIVACION = 2
 #:    Es una decisión de producto, no un descuido: MaxiCare tiene que poder verla aquí.
 #: 6. El tope de intentos DE ESTE TIPO (`INTENTOS_POR_SERIE_DE_REACTIVACION`) tampoco se
 #:    alcanzó -- cuántos envíos de este tipo siguen SIN CONTABILIZAR (`enviado_en NOT NULL
-#:    AND contabilizado_en IS NULL`). **Ronda 2: esto ya NO es un tope independiente de
-#:    "intentos dentro de una serie"** -- es la MISMA cota de la condición 4
-#:    (`max_seguimientos_fallidos`), expresada una segunda vez como defensa en profundidad:
-#:    si por lo que sea el contador de `contactos` y el recuento real de envíos sin
-#:    contabilizar de este tipo divergieran, esta condición sigue protegiendo. En la
-#:    operación normal nunca es la que dispara primero -- `series_por_contabilizar` corre
-#:    SIEMPRE antes de esta consulta (ver `barrido.encolar`), así que para cuando se llega
-#:    aquí ya no debería haber más de un envío sin contabilizar esperando.
+#:    AND contabilizado_en IS NULL`). **Ronda 3, corrección: esto NO es la misma cota que la
+#:    condición 4** (`max_seguimientos_fallidos`) -- ver el docstring de
+#:    `INTENTOS_POR_SERIE_DE_REACTIVACION` para las dos diferencias reales (por persona sobre
+#:    lo contabilizado, contra por tipo sobre lo sin contabilizar). Esta condición es la
+#:    guarda contra la inanición TRANSITORIA: mientras `barrido._contabilizar_envios_vencidos`
+#:    no haya corrido sobre un envío que ya venció, esta cuenta lo sigue viendo como "en el
+#:    aire" aunque el contador de `contactos` (condición 4) todavía no se haya enterado. En la
+#:    operación normal casi nunca es la que dispara primero -- `envios_por_contabilizar` corre
+#:    antes que esta consulta en cada pasada que llega a abrir conexión (ver `barrido.
+#:    encolar`) -- pero "casi nunca" no es "nunca": por eso hace falta como capa aparte, y por
+#:    eso NO se puede alojar donde pasa la tool ni donde pasa `seguimientos.decidir`, solo
+#:    aquí, en el filtro de cartera.
 #: 7. **NUNCA se le anuló una serie de este tipo con motivo `el_paciente_dijo_que_no`.** Esta
 #:    es la condición que el encargo original NO traía. `herramientas._cerrar_seguimiento`
 #:    anula con ese motivo EXACTO cuando el paciente dice explícitamente que no quiere que le
@@ -2054,8 +2073,10 @@ SELECT uc.telefono, uc.conversacion_id, um.cuando AS ultimo_mensaje
            )
    )
    AND (
-        -- Ronda 2: la MISMA cota que el contador de R1, expresada una segunda vez como
-        -- defensa en profundidad -- ver la condicion 6 de `_LEADS_SIN_AGENDAR`.
+        -- Ronda 3: NO es la misma cota que el contador de R1 (condicion 4) -- es la
+        -- guarda contra la inanicion TRANSITORIA, por tipo y sobre lo SIN contabilizar.
+        -- Ver el docstring de INTENTOS_POR_SERIE_DE_REACTIVACION y la condicion 6 de
+        -- `_LEADS_SIN_AGENDAR`.
         -- Tipo-especifico, al reves que el bloqueo de arriba.
         SELECT count(*) FROM seguimientos s4
           JOIN conversaciones cv4 ON cv4.id = s4.conversacion_id
@@ -2141,8 +2162,10 @@ SELECT uc.telefono, uc.conversacion_id, uc.actualizada_en AS ultimo_mensaje
            )
    )
    AND (
-        -- Ronda 2: la MISMA cota que el contador de R1, expresada una segunda vez como
-        -- defensa en profundidad -- ver la condicion 6 de `_LEADS_SIN_AGENDAR`.
+        -- Ronda 3: NO es la misma cota que el contador de R1 (condicion 4) -- es la
+        -- guarda contra la inanicion TRANSITORIA, por tipo y sobre lo SIN contabilizar.
+        -- Ver el docstring de INTENTOS_POR_SERIE_DE_REACTIVACION y la condicion 6 de
+        -- `_LEADS_SIN_AGENDAR`.
         SELECT count(*) FROM seguimientos s4
           JOIN conversaciones cv4 ON cv4.id = s4.conversacion_id
          WHERE cv4.telefono = uc.telefono
@@ -2181,28 +2204,10 @@ def leads_que_cancelaron(
         return [dict(zip(columnas, fila)) for fila in cur.fetchall()]
 
 
-#: Ronda 2 de revisión, bug 2.1. `contar_comprometidos_hoy` cuenta una fila PENDIENTE como
-#: compromiso -eso es correcto y es lo que cierra el CRÍTICO de la ronda 1-, pero
-#: `herramientas._programar_seguimiento` deja que el MODELO ponga una `fecha_objetivo`
-#: arbitraria y SIN cota superior (`_a_fecha` solo exige que sea futura). Sin ventana, dos
-#: filas a +14 días contaban contra el cupo de HOY, y de TODOS los días hasta que se
-#: resolvieran: medido por el revisor, con `tope_diario=2` esas dos filas dejaban
-#: `{'encolados': 0}` con cinco leads frescos esperando turno. Con la perilla real (20),
-#: veinte seguimientos a futuro apagarían el barrido entero durante días, sin un error en
-#: ningún log.
-#:
-#: La ventana cubre los aplazamientos reales de `seguimientos.decidir` (R4 al horario
-#: comercial, G4 al relevo, G7 uno-por-número) sin dejar pasar lo que el modelo programa a
-#: propósito para dentro de varios días. El peor encadenamiento realista de esos tres es un
-#: viernes por la noche que aplaza al lunes de apertura -bajo 48 h, porque la `Jornada` por
-#: defecto abre el sábado-, así que 48 h es margen de sobra para "esto va a salir pronto" y
-#: estrecho para "esto es un seguimiento a futuro programado a propósito".
-HORAS_PARA_CONTAR_COMO_COMPROMETIDO_HOY = 48
-
-
 def contar_comprometidos_hoy(conn, *, ahora: datetime) -> int:
-    """Cuánto cuenta HOY contra el tope diario: lo ya ENVIADO hoy, más lo PENDIENTE que va a
-    salir pronto (dentro de `HORAS_PARA_CONTAR_COMO_COMPROMETIDO_HOY`).
+    """Cuánto cuenta HOY contra el tope diario: lo ya ENVIADO hoy, más lo PENDIENTE que es
+    "de hoy" -- lo que vence antes de que acabe el día de Bogotá, o lo que YA se aplazó
+    alguna vez, sea cual sea la hora a la que quedó.
 
     **CRÍTICO, ronda 1 de revisión sobre la parada E.** Antes de esta función, el cupo
     contaba solo `enviado_en`: una fila encolada y luego APLAZADA (R4 fuera de 9-19h,
@@ -2212,21 +2217,60 @@ def contar_comprometidos_hoy(conn, *, ahora: datetime) -> int:
     sobre gente NUEVA. Medido por el revisor con 400 leads y tope 20: 280 mensajes reales de
     golpe a las 9:00 del día siguiente.
 
-    **Ronda 2, bug 2.1: la ventana no puede ser "para siempre".** La primera versión de esta
-    función contaba CUALQUIER fila pendiente, sin mirar su `fecha_objetivo` -- y
-    `programar_seguimiento` (la tool que llama el MODELO) puede encolar una reactivación a
-    semanas vista, sin cota superior. Eso hacía que un puñado de seguimientos legítimamente
-    programados a futuro apagara el barrido entero durante días: el cupo nunca los ve como
-    "resueltos" porque no se resuelven hasta su fecha, muy lejana. Ahora solo cuenta lo
-    pendiente cuyo `fecha_objetivo` cae dentro de la ventana corta -- ver
-    `HORAS_PARA_CONTAR_COMO_COMPROMETIDO_HOY`. Lo que el modelo programe más allá de esa
-    ventana no compite por el cupo de hoy; empezará a contar cuando falten menos de 48 h
-    para su propia fecha, que es cuando de verdad se acerca a consumir un envío.
+    **Ronda 2, bug 2.1: contar CUALQUIER pendiente tampoco vale.** `programar_seguimiento`
+    (la tool que llama el MODELO) encola una reactivación con `fecha_objetivo` arbitraria y
+    SIN cota superior (`_a_fecha` solo exige que sea futura), así que contar cualquier
+    pendiente sin mirar su fecha hacía que un puñado de seguimientos programados a semanas
+    vista apagara el barrido entero durante días: no se resuelven hasta su fecha, muy lejana,
+    así que nunca dejan de "contar".
+
+    **Ronda 2, intento fallido: una ventana de horas fijas.** La primera corrección puso una
+    ventana de 48 h (`fecha_objetivo <= ahora + 48h`), calculada a mano estimando "el peor
+    aplazamiento realista". Estaba mal en las dos direcciones, y el revisor lo midió:
+
+    - **Insuficiente**: `_proxima_apertura(sábado 08:00, Jornada())` cae el LUNES a las
+      08:00 -- 48,0 horas exactas, cero margen-- y la ventana usaba `<=`, así que ese caso
+      límite SÍ debía contar y con redondeos de reloj real podía no hacerlo. El propio texto
+      que justificaba el 48 estaba equivocado: decía que el peor caso era "un viernes de
+      noche" mirando R4, y **R4 no consulta `Jornada` en absoluto** -- usa las constantes fijas
+      `HORA_APERTURA_COMERCIAL`/`HORA_CIERRE_COMERCIAL` (9-19), nunca `jornada.cierre_de()`.
+      El peor caso real sale de G5/G7, que SÍ usan la `Jornada` de la clínica (cierra sábado a
+      las 15h, domingo cerrado), y es el sábado, no el viernes.
+    - **Frágil por diseño**: cualquier cambio futuro al horario comercial, a la `Jornada` o a
+      las guardas de `seguimientos.decidir` puede alargar el aplazamiento máximo real sin que
+      nada avise -- el número quedaba grabado en una constante, desconectado de las reglas que
+      lo producen. Verificado: el mutante "48 -> 24" sobrevivía con toda la suite en verde.
+
+    **Ruling E9: se quita el número y se pone la semántica.** En vez de calcular cuántas horas
+    puede durar un aplazamiento, se pregunta lo que de verdad hace falta saber: ¿esta fila,
+    aunque esté pendiente, es del tipo que puede cruzar la medianoche? Dos maneras, ninguna
+    basada en una duración:
+
+    1. Su `fecha_objetivo` cae DENTRO del día de Bogotá de `ahora` -- es, literalmente, "de
+       hoy", sin importar si ya se aplazó o no.
+    2. `aplazado_desde` NO es NULL -- la migración 022 ya la escribe (con `COALESCE`, la
+       primera vez que `aplazar_seguimiento` toca la fila) exactamente en el conjunto de
+       filas que alguna guarda de `decidir` empujó hacia delante, sea cual sea la nueva
+       `fecha_objetivo`. Es la señal semántica de "esto ya se movió una vez y puede seguir
+       moviéndose", y no depende de contar horas: una fila aplazada de un sábado 19:00 a un
+       lunes 09:00 (38 h) cuenta igual que una aplazada de un viernes 20:00 a un lunes 08:00.
+
+    Lo que NUNCA entra por la vía 2 es justo lo que había que excluir: una fila que
+    `programar_seguimiento` creó a futuro y que nadie ha aplazado todavía tiene
+    `aplazado_desde IS NULL` por construcción, así que solo cuenta si además cae dentro del
+    día de hoy -- y si `fecha_objetivo` está a dos semanas vista, no cae.
+
+    **Cómo se libera una fila aplazada, para que el cupo no quede clavado en 0**: R3/R3bis de
+    `seguimientos.decidir` (ver `seguimientos.py`) acaban ANULANDO una reactivación que lleva
+    demasiado aplazada (`llego_tarde` si se retrasa más de 2 h sobre su `fecha_objetivo`,
+    `reactivacion_estancada` a las 96 h desde el primer aplazamiento, `HORAS_DE_ESPERA_QUE_
+    INVALIDAN_UN_APLAZAMIENTO_SOSTENIDO`), y una fila anulada dejar de cumplir `anulado_en IS
+    NULL`, así que sale del conteo. El peor caso queda acotado en 96 h, no en "para siempre".
 
     Solo se libera del conteo cuando se ENVÍA (pasa a contar como "enviado hoy", ese día en
-    concreto) o se ANULA (`seguimientos.decidir` decidió que no sale). Esto también dice, a
-    propósito, que un backlog de aplazadas de un fin de semana entero sigue ocupando el cupo
-    hasta que se resuelve: es la misma cautela que la regla 9 pide.
+    concreto) o se ANULA. Esto también dice, a propósito, que un backlog de aplazadas de un
+    fin de semana entero sigue ocupando el cupo hasta que se resuelve: es la misma cautela
+    que la regla 9 pide.
 
     **Decisión, para quien se pregunte por qué el barrido no se apaga fuera de horario en vez
     de esto:** no hace falta. Encolar de madrugada es inofensivo por sí solo -- el envío de
@@ -2236,34 +2280,31 @@ def contar_comprometidos_hoy(conn, *, ahora: datetime) -> int:
     Excluye `recordatorio_cita` (Ruling C2): un día con muchas citas agendadas no puede
     comerse el cupo de reactivación. **M13, ronda 2**: sin este filtro, con recordatorios de
     cita pendientes contando -y siempre los hay- el cupo de reactivación sería 0 de forma
-    permanente. `test_contar_comprometidos_hoy_no_cuenta_recordatorios_de_cita` lo fija.
+    permanente. `test_contar_comprometidos_hoy_no_cuenta_recordatorios_de_cita_pendientes` lo
+    fija.
     """
     inicio_del_dia = ahora.astimezone(ZONA_BOGOTA).replace(
         hour=0, minute=0, second=0, microsecond=0
     )
+    fin_del_dia = inicio_del_dia + timedelta(days=1)
     with conn.cursor() as cur:
         cur.execute(
             """
             SELECT count(*) FROM seguimientos
              WHERE tipo <> 'recordatorio_cita'
                AND (
-                    (enviado_en >= %(inicio)s AND enviado_en < %(inicio)s + interval '1 day')
+                    (enviado_en >= %(inicio)s AND enviado_en < %(fin)s)
                  OR (enviado_en IS NULL AND anulado_en IS NULL
-                     AND fecha_objetivo <= %(ahora)s
-                                           + (%(horas)s * interval '1 hour'))
+                     AND (fecha_objetivo < %(fin)s OR aplazado_desde IS NOT NULL))
                )
             """,
-            {
-                "inicio": inicio_del_dia,
-                "ahora": ahora,
-                "horas": HORAS_PARA_CONTAR_COMO_COMPROMETIDO_HOY,
-            },
+            {"inicio": inicio_del_dia, "fin": fin_del_dia},
         )
         (total,) = cur.fetchone()
     return total
 
 
-def series_por_contabilizar(
+def envios_por_contabilizar(
     conn,
     *,
     ahora: datetime,
@@ -2334,7 +2375,7 @@ def series_por_contabilizar(
         return [dict(zip(columnas, fila)) for fila in cur.fetchall()]
 
 
-def marcar_serie_contabilizada(conn, id_seguimiento: int, *, commit: bool = True) -> None:
+def marcar_envio_contabilizado(conn, id_seguimiento: int, *, commit: bool = True) -> None:
     """Deja constancia de que esta fila ya subió el contador, para que no lo vuelva a subir.
 
     Ruling D5: quien la llame junto a `sumar_seguimiento_fallido(commit=False)` tiene que
@@ -3223,7 +3264,14 @@ def pedir_baja(
 
 
 def sumar_seguimiento_fallido(conn, telefono: str, *, commit: bool = True) -> int:
-    """Suma uno al contador de series de seguimiento que no sirvieron. Devuelve el nuevo valor.
+    """Suma uno al contador de ENVÍOS de reactivación que no sirvieron. Devuelve el nuevo
+    valor.
+
+    **Ronda 3 de revisión: este docstring decía «contador de series» hasta ahora** -- el
+    tipo exacto de mentira que llevó a la ronda 2 a diseñar (y a la ronda 1 antes, con otro
+    intento) un mecanismo para contar "series" que este sistema nunca tuvo dónde anclar. Ver
+    el docstring de `persistencia.DIAS_ENTRE_INTENTOS_DE_REACTIVACION` para la historia
+    completa: el contador cuenta ENVÍOS, uno por uno, determinista.
 
     NO es la baja y no se le parece: esto lo decide el sistema --«a este número no le sirve que
     lo persigamos»-- y `no_contactar` lo decide la persona. Por eso esto vive solo en
@@ -3248,14 +3296,14 @@ def sumar_seguimiento_fallido(conn, telefono: str, *, commit: bool = True) -> in
     interno confirma TODO lo que estuviera pendiente en `conn`, no solo la fila de
     `contactos`.
 
-    Por eso `commit=False` es para `barrido._contabilizar_series_cerradas` (tarea 7), que
+    Por eso `commit=False` es para `barrido._contabilizar_envios_vencidos` (tarea 7), que
     tiene que subir este contador y marcar `seguimientos.contabilizado_en` como una sola
     unidad, y el ORDEN importa: quien llame aquí con `commit=False` tiene que llamar a
-    `marcar_serie_contabilizada` DESPUÉS, sobre la MISMA conexión, y dejar que sea el
+    `marcar_envio_contabilizado` DESPUÉS, sobre la MISMA conexión, y dejar que sea el
     `commit()` de esa segunda llamada el que confirme las dos escrituras juntas. Al revés
     --marcar primero, sumar después-- el `commit()` interno de `asegurar_contacto` confirmaría
     la marca SOLA, y una caída justo ahí deja la fila con `contabilizado_en` puesto pero el
-    contador SIN SUBIR: la serie fallida queda marcada como ya contada sin haberlo sido nunca,
+    contador SIN SUBIR: el envío fallido queda marcado como ya contado sin haberlo sido nunca,
     y no hay ninguna pasada futura que la vuelva a mirar -- el agujero exacto que la columna
     `contabilizado_en` existe para tapar.
     """

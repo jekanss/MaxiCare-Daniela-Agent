@@ -518,13 +518,104 @@ def test_contar_comprometidos_hoy_no_cuenta_lo_ya_enviado_ayer(conexion_pruebas)
 
 
 def test_contar_comprometidos_hoy_cuenta_lo_pendiente_que_vence_pronto(conexion_pruebas):
-    """El lado que cierra el CRÍTICO de la ronda 1: una fila aplazada a unas horas vista
-    (como haría R4 al horario comercial) sigue comprometiendo el cupo aunque `enviado_en`
-    siga en NULL."""
+    """Ruling E9, lado 1 de la disyunción (`fecha_objetivo < fin del día de Bogotá`): una
+    fila que vence más tarde HOY -sin haberse aplazado nunca, `aplazado_desde` sigue en
+    NULL- sigue comprometiendo el cupo aunque `enviado_en` siga en NULL. Es el lado que
+    cierra el CRÍTICO de la ronda 1."""
     conv = persistencia.asegurar_conversacion(conexion_pruebas, telefono=TELEFONO)
     persistencia.insertar_seguimiento(
         conexion_pruebas, id_conversacion=conv, tipo="reactivacion_sin_agendar",
         fecha_objetivo=AHORA + timedelta(hours=10), clave_idempotencia="k-aplazada-esta-noche",
+    )
+    assert persistencia.contar_comprometidos_hoy(conexion_pruebas, ahora=AHORA) == 1
+
+
+def test_contar_comprometidos_hoy_cuenta_lo_aplazado_por_mucho_que_dure(conexion_pruebas):
+    """Ruling E9, lado 2 de la disyunción (`aplazado_desde IS NOT NULL`), y la prueba de
+    borde que faltaba: una fila aplazada cuenta SIN IMPORTAR CUÁNTO DURE la espera -- a
+    diferencia de la ventana de horas fijas que probó (y falló) la ronda 2. Aquí
+    `fecha_objetivo` queda fuera del día de HOY a propósito (38 h vista, el caso medido por
+    el revisor: sábado 19:00 aplazada a lunes 09:00 por `_proxima_apertura`), así que si esta
+    prueba pasa, es el lado `aplazado_desde` -y no el de la fecha- el que la sostiene.
+    """
+    conv = persistencia.asegurar_conversacion(conexion_pruebas, telefono=TELEFONO)
+    persistencia.insertar_seguimiento(
+        conexion_pruebas, id_conversacion=conv, tipo="reactivacion_sin_agendar",
+        fecha_objetivo=AHORA, clave_idempotencia="k-aplazada-sabado-a-lunes",
+    )
+    with conexion_pruebas.cursor() as cur:
+        cur.execute(
+            "SELECT id FROM seguimientos WHERE clave_idempotencia = %s",
+            ("k-aplazada-sabado-a-lunes",),
+        )
+        (id_seguimiento,) = cur.fetchone()
+    # Lo mismo que hace `seguimientos.aplazar_seguimiento` de verdad al despachar: reescribe
+    # `fecha_objetivo` y fija `aplazado_desde` -- la señal semántica de "esto ya se movió".
+    persistencia.aplazar_seguimiento(
+        conexion_pruebas, id_seguimiento, hasta=AHORA + timedelta(hours=38)
+    )
+    assert persistencia.contar_comprometidos_hoy(conexion_pruebas, ahora=AHORA) == 1
+
+
+def test_contar_comprometidos_hoy_libera_una_aplazada_en_cuanto_se_anula(conexion_pruebas):
+    """La comprobación que pidió explícitamente la ronda 3 antes de aceptar E9: una fila
+    aplazada NO se queda contada para siempre. R3/R3bis de `seguimientos.decidir` acaban
+    anulando una reactivación que lleva demasiado aplazada (`llego_tarde` o
+    `reactivacion_estancada`, con un techo de 96 h desde el primer aplazamiento), y en
+    cuanto `anulado_en` deja de ser NULL, `contar_comprometidos_hoy` la suelta -- el `AND
+    anulado_en IS NULL` del lado pendiente de la disyunción no distingue por qué se anuló,
+    así que cualquiera de las dos vías cierra el ciclo. Simulado aquí con
+    `anular_seguimiento` directo, que es lo que ambas guardas llaman al final.
+    """
+    conv = persistencia.asegurar_conversacion(conexion_pruebas, telefono=TELEFONO)
+    persistencia.insertar_seguimiento(
+        conexion_pruebas, id_conversacion=conv, tipo="reactivacion_sin_agendar",
+        fecha_objetivo=AHORA, clave_idempotencia="k-aplazada-luego-anulada",
+    )
+    with conexion_pruebas.cursor() as cur:
+        cur.execute(
+            "SELECT id FROM seguimientos WHERE clave_idempotencia = %s",
+            ("k-aplazada-luego-anulada",),
+        )
+        (id_seguimiento,) = cur.fetchone()
+    persistencia.aplazar_seguimiento(
+        conexion_pruebas, id_seguimiento, hasta=AHORA + timedelta(hours=38)
+    )
+    assert persistencia.contar_comprometidos_hoy(conexion_pruebas, ahora=AHORA) == 1, (
+        "la fila aplazada tenía que contar ANTES de anularse"
+    )
+
+    persistencia.anular_seguimiento(conexion_pruebas, id_seguimiento, motivo="reactivacion_estancada")
+
+    assert persistencia.contar_comprometidos_hoy(conexion_pruebas, ahora=AHORA) == 0, (
+        "una fila aplazada y luego anulada se quedó contada para siempre"
+    )
+
+
+def test_contar_comprometidos_hoy_no_vuelve_a_meter_una_ventana_por_horas(conexion_pruebas):
+    """La prueba que falla si alguien reintroduce una ventana de horas fijas (el intento
+    fallido de la ronda 2, 48 h -- insuficiente, medido por el revisor: el peor
+    aplazamiento real es EXACTAMENTE 48,0 h, así que cualquier `<=` con margen cero deja
+    pasar el caso límite según cómo caiga el redondeo, y encima frágil, porque un cambio en
+    la `Jornada` o en las guardas de `decidir` puede alargarlo sin avisar).
+
+    60 horas es, a propósito, más que cualquier ventana fija "razonable" que alguien
+    pudiera volver a inventar. Si el conteo volviera a mirar horas en vez de
+    `aplazado_desde`, esta fila dejaría de contar y la prueba caería.
+    """
+    conv = persistencia.asegurar_conversacion(conexion_pruebas, telefono=TELEFONO)
+    persistencia.insertar_seguimiento(
+        conexion_pruebas, id_conversacion=conv, tipo="reactivacion_sin_agendar",
+        fecha_objetivo=AHORA, clave_idempotencia="k-aplazada-60-horas",
+    )
+    with conexion_pruebas.cursor() as cur:
+        cur.execute(
+            "SELECT id FROM seguimientos WHERE clave_idempotencia = %s",
+            ("k-aplazada-60-horas",),
+        )
+        (id_seguimiento,) = cur.fetchone()
+    persistencia.aplazar_seguimiento(
+        conexion_pruebas, id_seguimiento, hasta=AHORA + timedelta(hours=60)
     )
     assert persistencia.contar_comprometidos_hoy(conexion_pruebas, ahora=AHORA) == 1
 
@@ -573,7 +664,7 @@ def test_bug_2_1_lo_programado_a_futuro_no_apaga_el_barrido_para_los_leads_fresc
 
 
 def test_bug_2_2_contabilizar_corre_aunque_el_cupo_este_a_cero(conexion_pruebas, esquema):
-    """Ronda 2 de revisión: `_contabilizar_series_cerradas` va ANTES del `if cupo == 0:
+    """Ronda 2 de revisión: `_contabilizar_envios_vencidos` va ANTES del `if cupo == 0:
     return`. Con el cupo lleno de pendientes -el estado normal de cada noche, tras el
     arreglo del CRÍTICO-, el `return` temprano dejaba de contabilizar precisamente esas
     horas. Medido por el revisor: con una fila pendiente y `tope_diario=1`, una serie
@@ -629,7 +720,7 @@ def test_M6_leads_sin_agendar_bloqueado_por_una_reactivacion_cancelada_pendiente
     assert persistencia.leads_sin_agendar(conexion_pruebas, ahora=AHORA, limite=50) == []
 
 
-def test_series_por_contabilizar_encuentra_un_envio_viejo_sin_cita(conexion_pruebas):
+def test_envios_por_contabilizar_encuentra_un_envio_viejo_sin_cita(conexion_pruebas):
     conv = persistencia.asegurar_conversacion(conexion_pruebas, telefono=TELEFONO)
     persistencia.insertar_seguimiento(
         conexion_pruebas, id_conversacion=conv, tipo="reactivacion_sin_agendar",
@@ -641,11 +732,11 @@ def test_series_por_contabilizar_encuentra_un_envio_viejo_sin_cita(conexion_prue
             (AHORA - timedelta(days=10), "k-viejo-sin-cita"),
         )
     conexion_pruebas.commit()
-    filas = persistencia.series_por_contabilizar(conexion_pruebas, ahora=AHORA)
+    filas = persistencia.envios_por_contabilizar(conexion_pruebas, ahora=AHORA)
     assert [f["telefono"] for f in filas] == [TELEFONO]
 
 
-def test_series_por_contabilizar_SI_cuenta_a_quien_contesta_pero_no_agenda(conexion_pruebas):
+def test_envios_por_contabilizar_SI_cuenta_a_quien_contesta_pero_no_agenda(conexion_pruebas):
     """I-2, ronda 1 de revisión -- el hallazgo más grave de la parada.
 
     La versión anterior descartaba la serie si había CUALQUIER mensaje del paciente después
@@ -667,11 +758,11 @@ def test_series_por_contabilizar_SI_cuenta_a_quien_contesta_pero_no_agenda(conex
         )
     conexion_pruebas.commit()
     _mensaje(conexion_pruebas, TELEFONO, cuando=AHORA - timedelta(days=5))  # contestó, no agendó
-    filas = persistencia.series_por_contabilizar(conexion_pruebas, ahora=AHORA)
+    filas = persistencia.envios_por_contabilizar(conexion_pruebas, ahora=AHORA)
     assert [f["telefono"] for f in filas] == [TELEFONO], "una respuesta sin cita sigue exonerando"
 
 
-def test_series_por_contabilizar_no_cuenta_a_quien_SI_agendo(conexion_pruebas):
+def test_envios_por_contabilizar_no_cuenta_a_quien_SI_agendo(conexion_pruebas):
     """El control de la prueba anterior: agendar SÍ exonera -- es la misma vara que
     `crear_cita` usa para resetear `seguimientos_fallidos` a cero.
 
@@ -705,10 +796,10 @@ def test_series_por_contabilizar_no_cuenta_a_quien_SI_agendo(conexion_pruebas):
             (AHORA - timedelta(days=5), id_cita),
         )
     conexion_pruebas.commit()
-    assert persistencia.series_por_contabilizar(conexion_pruebas, ahora=AHORA) == []
+    assert persistencia.envios_por_contabilizar(conexion_pruebas, ahora=AHORA) == []
 
 
-def test_series_por_contabilizar_cuenta_CADA_envio_por_separado(conexion_pruebas):
+def test_envios_por_contabilizar_cuenta_CADA_envio_por_separado(conexion_pruebas):
     """Ronda 2 de revisión: I-5 se REVIRTIÓ, y esta prueba fija el comportamiento CONTRARIO
     al que fijaba la ronda 1 (que congelaba el defecto medido por el revisor: una serie de
     dos envíos solo contaba una vez, así que subir la perilla de 2 a 3 no daba "3 series"
@@ -728,7 +819,7 @@ def test_series_por_contabilizar_cuenta_CADA_envio_por_separado(conexion_pruebas
             )
     conexion_pruebas.commit()
 
-    filas = persistencia.series_por_contabilizar(conexion_pruebas, ahora=AHORA)
+    filas = persistencia.envios_por_contabilizar(conexion_pruebas, ahora=AHORA)
     assert len(filas) == 2, f"dos envíos vencidos deberían contar como dos, no {len(filas)}"
     claves = {"k-envio-uno", "k-envio-dos"}
     with conexion_pruebas.cursor() as cur:
@@ -759,8 +850,8 @@ def test_no_contabiliza_dos_veces_la_misma_serie(conexion_pruebas):
         )
     conexion_pruebas.commit()
 
-    primero = barrido._contabilizar_series_cerradas(conexion_pruebas, ahora=AHORA)
-    segundo = barrido._contabilizar_series_cerradas(conexion_pruebas, ahora=AHORA)
+    primero = barrido._contabilizar_envios_vencidos(conexion_pruebas, ahora=AHORA)
+    segundo = barrido._contabilizar_envios_vencidos(conexion_pruebas, ahora=AHORA)
 
     assert primero == 1
     assert segundo == 0
@@ -1088,7 +1179,7 @@ def test_no_ofrece_un_tercer_intento_sin_cerrar_los_dos_anteriores(conexion_prue
     MISMA cota que R1 (Ronda 2: ya no es un tope independiente -- ver el docstring de
     `DIAS_ENTRE_INTENTOS_DE_REACTIVACION`). Dos envíos ya viejos (fuera de la ventana de
     reintento de 7 días) que TODAVÍA no se contabilizaron -un estado transitorio: en la
-    operación normal `_contabilizar_series_cerradas` los cierra antes de que esta consulta
+    operación normal `_contabilizar_envios_vencidos` los cierra antes de que esta consulta
     corra, ver `barrido.encolar`- siguen bloqueando un tercer envío del MISMO tipo aunque
     `contactos.seguimientos_fallidos` (la vía normal de R1) todavía no se haya actualizado.
     """
@@ -1135,7 +1226,7 @@ def test_cerrar_dos_envios_viejos_a_la_vez_agota_el_tope_de_R1(conexion_pruebas)
             )
     conexion_pruebas.commit()
 
-    cerradas = barrido._contabilizar_series_cerradas(conexion_pruebas, ahora=AHORA)
+    cerradas = barrido._contabilizar_envios_vencidos(conexion_pruebas, ahora=AHORA)
     assert cerradas == 2, "los dos envíos vencidos tenían que cerrarse juntos, no uno"
     assert persistencia.leer_contacto(conexion_pruebas, TELEFONO)["seguimientos_fallidos"] == 2
 
@@ -1167,7 +1258,7 @@ def test_el_calendario_medido_de_las_tres_personas_da_2(conexion_pruebas, esquem
 
     **Y esta prueba, sola, es insensible a `INTENTOS_POR_SERIE_DE_REACTIVACION`** (ronda 2,
     hallazgo de higiene): en la cadencia normal de arriba nunca coexisten dos envíos sin
-    contabilizar del mismo tipo -`_contabilizar_series_cerradas` cierra cada uno antes de que
+    contabilizar del mismo tipo -`_contabilizar_envios_vencidos` cierra cada uno antes de que
     llegue el siguiente (bug 2.2 corregido)-, así que ese tope nunca es el que decide. El
     bloque final, con un cuarto teléfono, añade a propósito el estado que sí lo ejercita.
     """

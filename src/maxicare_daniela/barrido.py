@@ -47,10 +47,10 @@ def se_puede_encolar(quality_rating: str | None) -> bool:
     return quality_rating.upper() in CALIDADES_QUE_DEJAN_ENCOLAR
 
 
-def _contabilizar_series_cerradas(conn, *, ahora: datetime) -> int:
+def _contabilizar_envios_vencidos(conn, *, ahora: datetime) -> int:
     """Sube el contador de quien recibió un envío hace más de una semana y no agendó.
 
-    Cada fila de `persistencia.series_por_contabilizar` es un ENVÍO de reactivación (Ronda 2:
+    Cada fila de `persistencia.envios_por_contabilizar` es un ENVÍO de reactivación (Ronda 2:
     ya no "una serie" -- ver el docstring de `persistencia.DIAS_ENTRE_INTENTOS_DE_
     REACTIVACION`) que lleva `persistencia.DIAS_ENTRE_INTENTOS_DE_REACTIVACION` días sin
     acabar en una cita (Ronda 1, I-2: la vara es agendar, no contestar): se cuenta
@@ -63,15 +63,15 @@ def _contabilizar_series_cerradas(conn, *, ahora: datetime) -> int:
     revés -- ver el docstring corregido de `persistencia.sumar_seguimiento_fallido`.
     `sumar_seguimiento_fallido` llama a `asegurar_contacto`, que hace su propio `commit()`
     incondicional; con el contador todavía sin confirmar, es el `commit()` de
-    `marcar_serie_contabilizada` el que confirma las DOS escrituras juntas. Al revés, una
-    caída entre las dos deja la fila MARCADA pero el contador SIN SUBIR: la serie fallida
+    `marcar_envio_contabilizado` el que confirma las DOS escrituras juntas. Al revés, una
+    caída entre las dos deja la fila MARCADA pero el contador SIN SUBIR: el envío fallido
     desaparece sin contarse y sin que nadie pueda volver a intentarlo -- el agujero exacto
     que `contabilizado_en` existe para tapar.
     """
     contadas = 0
-    for fila in persistencia.series_por_contabilizar(conn, ahora=ahora):
+    for fila in persistencia.envios_por_contabilizar(conn, ahora=ahora):
         persistencia.sumar_seguimiento_fallido(conn, fila["telefono"], commit=False)
-        persistencia.marcar_serie_contabilizada(conn, fila["id"])
+        persistencia.marcar_envio_contabilizado(conn, fila["id"])
         contadas += 1
     return contadas
 
@@ -117,26 +117,31 @@ def encolar(
 
     conn = persistencia.conectar(database_url)
     try:
-        # Ronda 2 de revisión, bug 2.2: `_contabilizar_series_cerradas` va ANTES del cupo, no
+        # Ronda 2 de revisión, bug 2.2: `_contabilizar_envios_vencidos` va ANTES del cupo, no
         # después. Antes del arreglo del CRÍTICO, el cupo solo llegaba a 0 tras envíos REALES
         # -un caso que en la práctica es raro un rato antes de las 9pm-, así que contabilizar
         # corría casi siempre. Con `contar_comprometidos_hoy` (que cuenta lo pendiente), el
         # cupo llega a 0 TODAS las noches y TODOS los domingos -es el estado normal-, y con el
-        # `return` de arriba `_contabilizar_series_cerradas` dejaba de correr precisamente
-        # esas horas. Medido por el revisor: con una fila pendiente y `tope_diario=1`, una
-        # serie vencida hace 10 días devolvía `contabilizados: 0`. Retrasar el cierre de
+        # `return` de arriba `_contabilizar_envios_vencidos` dejaba de correr precisamente
+        # esas horas. Medido por el revisor: con una fila pendiente y `tope_diario=1`, un
+        # envío vencido hace 10 días devolvía `contabilizados: 0`. Retrasar el cierre de
         # envíos vencidos no pierde el cierre, pero alimenta el bug 2.1 (más pendientes
         # acumulados, más tiempo) -- contabilizar es trabajo de mantenimiento independiente
-        # del cupo, y tiene que correr en CADA pasada sin excepción.
-        recuento["contabilizados"] = _contabilizar_series_cerradas(conn, ahora=ahora)
+        # del cupo. Ronda 3, corrección: NO corre "en cada pasada sin excepción" -- las dos
+        # guardas de arriba (`encendido`, `calidad`) siguen yendo ANTES y siguen sin abrir
+        # conexión si frenan (Ruling C8: con el número en riesgo, ni una lectura vale la
+        # pena). Lo que corrige este orden es que, de las pasadas que SÍ llegan a abrir
+        # conexión, ninguna se salte el cierre por falta de cupo.
+        recuento["contabilizados"] = _contabilizar_envios_vencidos(conn, ahora=ahora)
 
         # El tope diario (regla 9). CRÍTICO, ronda 1 de revisión: aquí usaba `contar_
         # enviados_hoy`, que solo ve `enviado_en` y deja INVISIBLE toda fila que R4 aplazó
         # (no anuló) fuera de 9-19h. Con eso, el cupo se veía libre TODA LA NOCHE y cada
         # pasada horaria volvía a encolar el tope entero sobre gente nueva -- 280 mensajes de
         # golpe a las 9:00, medido por el revisor con 400 leads y tope 20. `contar_
-        # comprometidos_hoy` cuenta también lo pendiente sin resolver dentro de una ventana
-        # corta (ver su docstring, bug 2.1), y es lo que de verdad acota el compromiso total.
+        # comprometidos_hoy` cuenta también lo pendiente que es "de hoy" -por fecha o por
+        # haberse aplazado ya (Ruling E9, ver su docstring)-, y es lo que de verdad acota el
+        # compromiso total sin depender de un número de horas calculado a mano.
         comprometidos = persistencia.contar_comprometidos_hoy(conn, ahora=ahora)
         cupo = max(0, tope_diario - comprometidos)
         if cupo == 0:
