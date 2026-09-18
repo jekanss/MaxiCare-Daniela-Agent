@@ -1231,6 +1231,12 @@ def test_el_bucle_de_reactivacion_avisa_cuando_la_calidad_frena(monkeypatch):
         monkeypatch.setattr(runtime, "_avisar_de_calidad_del_numero", _aviso_falso)
         monkeypatch.setattr(runtime, "_leer_configuracion_operativa", lambda: {})
         monkeypatch.setattr(barrido, "se_puede_encolar", lambda *_: False)
+        # OJO al doblar esto (higiene, ronda 2 de revisión): `runtime.asyncio` ES el módulo
+        # `asyncio` del intérprete, no una copia -- el mismo patrón, con el mismo aviso, en
+        # `tests/test_seguimientos.py::test_los_intentos_agotados_marcan_fallido_y_no_se_
+        # pierden`. Hoy no muerde porque `monkeypatch` lo deshace al terminar esta prueba y
+        # nada más corre en este bucle de eventos mientras tanto, pero es la clase de parche
+        # que sí mordería si algo más usara `asyncio.sleep` de forma concurrente aquí.
         monkeypatch.setattr(runtime.asyncio, "sleep", _sleep_una_vez)
 
         try:

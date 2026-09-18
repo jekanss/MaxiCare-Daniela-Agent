@@ -465,8 +465,13 @@ def test_leads_que_cancelaron_no_persigue_a_quien_ya_reagendo(conexion_pruebas):
     assert persistencia.leads_que_cancelaron(conexion_pruebas, ahora=AHORA, limite=50) == []
 
 
-def test_contar_enviados_hoy_solo_cuenta_reactivacion(conexion_pruebas):
-    """Ruling C2: un recordatorio de cita enviado hoy NO se come el cupo diario del barrido."""
+def test_contar_comprometidos_hoy_solo_cuenta_reactivacion(conexion_pruebas):
+    """Ruling C2 + M13 (ronda 2 de revisión): un recordatorio de cita enviado hoy NO se come
+    el cupo diario del barrido. M13 es grave: `contar_enviados_hoy` (la función vieja) SÍ
+    tenía este filtro y el mutante que la reemplazó, `contar_comprometidos_hoy`, quedó
+    protegido solo por la memoria de quien la escribió -- sin esta prueba, 41 passed en
+    Neon con el filtro quitado, y con recordatorios de cita pendientes contando (siempre
+    los hay) el cupo de reactivación sería 0 de forma permanente."""
     conv = persistencia.asegurar_conversacion(conexion_pruebas, telefono=TELEFONO)
     persistencia.insertar_seguimiento(
         conexion_pruebas, id_conversacion=conv, tipo="recordatorio_cita",
@@ -482,10 +487,22 @@ def test_contar_enviados_hoy_solo_cuenta_reactivacion(conexion_pruebas):
             (AHORA, "k-recordatorio-hoy", "k-reactivacion-hoy"),
         )
     conexion_pruebas.commit()
-    assert persistencia.contar_enviados_hoy(conexion_pruebas, ahora=AHORA) == 1
+    assert persistencia.contar_comprometidos_hoy(conexion_pruebas, ahora=AHORA) == 1
 
 
-def test_contar_enviados_hoy_no_cuenta_los_de_ayer(conexion_pruebas):
+def test_contar_comprometidos_hoy_no_cuenta_recordatorios_de_cita_pendientes(conexion_pruebas):
+    """M13, la mitad que de verdad importa: el filtro tiene que alcanzar también a los
+    PENDIENTES, no solo a los enviados -- un recordatorio de cita casi siempre está pendiente
+    (se manda la víspera), así que es la rama que se ejercita todo el tiempo en producción."""
+    conv = persistencia.asegurar_conversacion(conexion_pruebas, telefono=TELEFONO)
+    persistencia.insertar_seguimiento(
+        conexion_pruebas, id_conversacion=conv, tipo="recordatorio_cita",
+        fecha_objetivo=AHORA, clave_idempotencia="k-recordatorio-pendiente",
+    )
+    assert persistencia.contar_comprometidos_hoy(conexion_pruebas, ahora=AHORA) == 0
+
+
+def test_contar_comprometidos_hoy_no_cuenta_lo_ya_enviado_ayer(conexion_pruebas):
     conv = persistencia.asegurar_conversacion(conexion_pruebas, telefono=TELEFONO)
     persistencia.insertar_seguimiento(
         conexion_pruebas, id_conversacion=conv, tipo="reactivacion_sin_agendar",
@@ -497,7 +514,119 @@ def test_contar_enviados_hoy_no_cuenta_los_de_ayer(conexion_pruebas):
             (AHORA - timedelta(days=1), "k-de-ayer"),
         )
     conexion_pruebas.commit()
-    assert persistencia.contar_enviados_hoy(conexion_pruebas, ahora=AHORA) == 0
+    assert persistencia.contar_comprometidos_hoy(conexion_pruebas, ahora=AHORA) == 0
+
+
+def test_contar_comprometidos_hoy_cuenta_lo_pendiente_que_vence_pronto(conexion_pruebas):
+    """El lado que cierra el CRÍTICO de la ronda 1: una fila aplazada a unas horas vista
+    (como haría R4 al horario comercial) sigue comprometiendo el cupo aunque `enviado_en`
+    siga en NULL."""
+    conv = persistencia.asegurar_conversacion(conexion_pruebas, telefono=TELEFONO)
+    persistencia.insertar_seguimiento(
+        conexion_pruebas, id_conversacion=conv, tipo="reactivacion_sin_agendar",
+        fecha_objetivo=AHORA + timedelta(hours=10), clave_idempotencia="k-aplazada-esta-noche",
+    )
+    assert persistencia.contar_comprometidos_hoy(conexion_pruebas, ahora=AHORA) == 1
+
+
+def test_contar_comprometidos_hoy_no_cuenta_lo_programado_muy_a_futuro(conexion_pruebas):
+    """Bug 2.1, ronda 2 de revisión: `programar_seguimiento` (la tool que llama el MODELO)
+    encola reactivaciones con `fecha_objetivo` arbitraria y SIN cota superior. Sin ventana,
+    esas filas -pendientes durante todo su horizonte, porque el despachador solo recoge
+    `fecha_objetivo <= ahora`- se cargaban al cupo de CADA día hasta que se resolvían. Medido
+    por el revisor: dos filas a +14 días con `tope_diario=2` dejaban `{'encolados': 0}` con
+    cinco leads frescos esperando turno."""
+    conv = persistencia.asegurar_conversacion(conexion_pruebas, telefono=TELEFONO)
+    persistencia.insertar_seguimiento(
+        conexion_pruebas, id_conversacion=conv, tipo="reactivacion_sin_agendar",
+        fecha_objetivo=AHORA + timedelta(days=14), clave_idempotencia="k-programada-lejos",
+    )
+    assert persistencia.contar_comprometidos_hoy(conexion_pruebas, ahora=AHORA) == 0
+
+
+def test_bug_2_1_lo_programado_a_futuro_no_apaga_el_barrido_para_los_leads_frescos(
+    conexion_pruebas, esquema
+):
+    """El repro exacto del revisor, contra `barrido.encolar` completo."""
+    from maxicare_daniela import barrido
+
+    for i in range(2):
+        telefono = f"573008880{i:03d}"
+        conv = persistencia.asegurar_conversacion(conexion_pruebas, telefono=telefono)
+        persistencia.insertar_seguimiento(
+            conexion_pruebas, id_conversacion=conv, tipo="reactivacion_sin_agendar",
+            fecha_objetivo=AHORA + timedelta(days=14), clave_idempotencia=f"k-lejos-{i}",
+        )
+
+    for i in range(5):
+        telefono = f"573009990{i:03d}"
+        persistencia.asegurar_conversacion(conexion_pruebas, telefono=telefono)
+        _mensaje(conexion_pruebas, telefono, cuando=AHORA - timedelta(hours=30))
+
+    recuento = barrido.encolar(
+        database_url=esquema, ahora=AHORA, tope_diario=2, encendido=True,
+        calidad={"quality_rating": "GREEN"},
+    )
+    assert recuento["encolados"] == 2, (
+        f"lo programado a futuro apagó el cupo para los leads frescos: {recuento}"
+    )
+
+
+def test_bug_2_2_contabilizar_corre_aunque_el_cupo_este_a_cero(conexion_pruebas, esquema):
+    """Ronda 2 de revisión: `_contabilizar_series_cerradas` va ANTES del `if cupo == 0:
+    return`. Con el cupo lleno de pendientes -el estado normal de cada noche, tras el
+    arreglo del CRÍTICO-, el `return` temprano dejaba de contabilizar precisamente esas
+    horas. Medido por el revisor: con una fila pendiente y `tope_diario=1`, una serie
+    vencida hace 10 días devolvía `contabilizados: 0`."""
+    from maxicare_daniela import barrido
+
+    # Ocupa el cupo entero con una fila pendiente (no resuelta), simulando la noche.
+    conv_ocupa = persistencia.asegurar_conversacion(conexion_pruebas, telefono=TELEFONO)
+    persistencia.insertar_seguimiento(
+        conexion_pruebas, id_conversacion=conv_ocupa, tipo="reactivacion_sin_agendar",
+        fecha_objetivo=AHORA, clave_idempotencia="k-ocupa-el-cupo",
+    )
+
+    # Una serie vencida hace 10 días, lista para contabilizarse, de OTRO teléfono.
+    otro = "573001110099"
+    conv_vieja = persistencia.asegurar_conversacion(conexion_pruebas, telefono=otro)
+    persistencia.insertar_seguimiento(
+        conexion_pruebas, id_conversacion=conv_vieja, tipo="reactivacion_sin_agendar",
+        fecha_objetivo=AHORA - timedelta(days=10), clave_idempotencia="k-vencida-hace-10-dias",
+    )
+    with conexion_pruebas.cursor() as cur:
+        cur.execute(
+            "UPDATE seguimientos SET enviado_en = %s WHERE clave_idempotencia = %s",
+            (AHORA - timedelta(days=10), "k-vencida-hace-10-dias"),
+        )
+    conexion_pruebas.commit()
+
+    recuento = barrido.encolar(
+        database_url=esquema, ahora=AHORA, tope_diario=1, encendido=True,
+        calidad={"quality_rating": "GREEN"},
+    )
+    assert recuento["contabilizados"] == 1, (
+        f"el cupo a cero se llevó por delante el cierre de series vencidas: {recuento}"
+    )
+
+
+def test_M6_leads_sin_agendar_bloqueado_por_una_reactivacion_cancelada_pendiente(
+    conexion_pruebas,
+):
+    """M6, ronda 2 de revisión: mutante superviviente. Revertir la guarda I-1 SOLO en
+    `_LEADS_SIN_AGENDAR` dejaba 41 passed en Neon y 992 offline, porque la única prueba de
+    I-1 (`test_no_recibe_dos_tipos_de_reactivacion_en_la_misma_ventana`) ejercita el barrido
+    completo, y `sin_agendar` corre PRIMERO en `barrido.encolar` -- así que esa prueba solo
+    cazaba la guarda del lado de `_LEADS_QUE_CANCELARON`. Aquí se llama a `leads_sin_agendar`
+    DIRECTAMENTE sobre un teléfono que YA tiene una `reactivacion_cancelada` pendiente, para
+    cazar la guarda del otro lado."""
+    conv = persistencia.asegurar_conversacion(conexion_pruebas, telefono=TELEFONO)
+    _mensaje(conexion_pruebas, TELEFONO, cuando=AHORA - timedelta(hours=30))
+    persistencia.insertar_seguimiento(
+        conexion_pruebas, id_conversacion=conv, tipo="reactivacion_cancelada",
+        fecha_objetivo=AHORA, clave_idempotencia="k-cancelada-en-juego",
+    )
+    assert persistencia.leads_sin_agendar(conexion_pruebas, ahora=AHORA, limite=50) == []
 
 
 def test_series_por_contabilizar_encuentra_un_envio_viejo_sin_cita(conexion_pruebas):
@@ -544,7 +673,15 @@ def test_series_por_contabilizar_SI_cuenta_a_quien_contesta_pero_no_agenda(conex
 
 def test_series_por_contabilizar_no_cuenta_a_quien_SI_agendo(conexion_pruebas):
     """El control de la prueba anterior: agendar SÍ exonera -- es la misma vara que
-    `crear_cita` usa para resetear `seguimientos_fallidos` a cero."""
+    `crear_cita` usa para resetear `seguimientos_fallidos` a cero.
+
+    Ronda 2 de revisión, higiene: la versión anterior dejaba que `citas.creada_en` cayera en
+    el reloj REAL de la corrida (su default es `now()`) y se apoyaba en que ese instante
+    fuera posterior a `AHORA - 10 días` -- cierto solo porque `AHORA` está clavada cerca de
+    la fecha real del repositorio. Es la misma familia de fallo que ya se ha pagado tres
+    veces en este proyecto (ver `.claude/rules/pruebas.md`). Ahora `creada_en` se fija a
+    mano, dentro de la ventana de `AHORA`, sin ninguna relación con el reloj de verdad.
+    """
     conv = persistencia.asegurar_conversacion(conexion_pruebas, telefono=TELEFONO)
     persistencia.insertar_seguimiento(
         conexion_pruebas, id_conversacion=conv, tipo="reactivacion_sin_agendar",
@@ -556,26 +693,30 @@ def test_series_por_contabilizar_no_cuenta_a_quien_SI_agendo(conexion_pruebas):
             (AHORA - timedelta(days=10), "k-si-agendo"),
         )
     conexion_pruebas.commit()
-    # La cita se crea DESPUÉS del envío (su `creada_en` por defecto es "ahora" de verdad,
-    # que en la corrida de la prueba cae después de `AHORA - 10 dias`).
-    persistencia.registrar_cita(
+    id_cita = persistencia.registrar_cita(
         conexion_pruebas, reserva_id=None, conversacion_id=conv, paciente_id=None,
         nombre_completo="Marcela Rios", telefono=TELEFONO, tratamiento="limpieza",
         inicio=AHORA + timedelta(days=3), duracion_minutos=60, evento_calendar_id=None,
     )
+    # La cita se crea DESPUÉS del envío -- fijado a mano, sin depender del reloj real.
+    with conexion_pruebas.cursor() as cur:
+        cur.execute(
+            "UPDATE citas SET creada_en = %s WHERE id = %s",
+            (AHORA - timedelta(days=5), id_cita),
+        )
+    conexion_pruebas.commit()
     assert persistencia.series_por_contabilizar(conexion_pruebas, ahora=AHORA) == []
 
 
-def test_series_por_contabilizar_cuenta_UNA_sola_vez_por_serie_de_dos_envios(conexion_pruebas):
-    """I-5, ronda 1 de revisión: una unidad por SERIE, no por envío.
-
-    Con dos envíos del mismo tipo (el primer y el segundo intento), contar cada fila de
-    forma independiente daría DOS unidades por lo que es una sola serie fallida. Solo el
-    envío MÁS RECIENTE (`DISTINCT ON`) se mira; el más viejo se queda sin marcar para
-    siempre, y eso es correcto: no se vuelve a mirar y no hay double-count posible.
-    """
+def test_series_por_contabilizar_cuenta_CADA_envio_por_separado(conexion_pruebas):
+    """Ronda 2 de revisión: I-5 se REVIRTIÓ, y esta prueba fija el comportamiento CONTRARIO
+    al que fijaba la ronda 1 (que congelaba el defecto medido por el revisor: una serie de
+    dos envíos solo contaba una vez, así que subir la perilla de 2 a 3 no daba "3 series"
+    sino 3 mensajes con contador en 3 -- ver el docstring de `DIAS_ENTRE_INTENTOS_DE_
+    REACTIVACION`). Ahora dos envíos, cada uno vencido y sin cita, cuentan como DOS unidades
+    -- determinista, sin `DISTINCT ON`, sin noción de "serie"."""
     conv = persistencia.asegurar_conversacion(conexion_pruebas, telefono=TELEFONO)
-    for clave, dias in (("k-serie-primero", 20), ("k-serie-segundo", 8)):
+    for clave, dias in (("k-envio-uno", 20), ("k-envio-dos", 8)):
         persistencia.insertar_seguimiento(
             conexion_pruebas, id_conversacion=conv, tipo="reactivacion_sin_agendar",
             fecha_objetivo=AHORA - timedelta(days=dias), clave_idempotencia=clave,
@@ -588,14 +729,15 @@ def test_series_por_contabilizar_cuenta_UNA_sola_vez_por_serie_de_dos_envios(con
     conexion_pruebas.commit()
 
     filas = persistencia.series_por_contabilizar(conexion_pruebas, ahora=AHORA)
-    assert len(filas) == 1, f"contó la serie de dos envíos como {len(filas)} unidades"
-
+    assert len(filas) == 2, f"dos envíos vencidos deberían contar como dos, no {len(filas)}"
+    claves = {"k-envio-uno", "k-envio-dos"}
     with conexion_pruebas.cursor() as cur:
         cur.execute(
-            "SELECT clave_idempotencia FROM seguimientos WHERE id = %s", (filas[0]["id"],)
+            "SELECT clave_idempotencia FROM seguimientos WHERE id = ANY(%s)",
+            ([f["id"] for f in filas],),
         )
-        (clave_marcada,) = cur.fetchone()
-    assert clave_marcada == "k-serie-segundo", "tenía que quedarse con el envío MÁS RECIENTE"
+        marcadas = {fila[0] for fila in cur.fetchall()}
+    assert marcadas == claves, "los dos envíos tienen que poder marcarse, no solo el reciente"
 
 
 def test_no_contabiliza_dos_veces_la_misma_serie(conexion_pruebas):
@@ -941,16 +1083,19 @@ def test_una_fila_anulada_no_tapa_la_cabeza_de_la_cola(conexion_pruebas, esquema
     assert telefonos_encolados == set(buenos)
 
 
-def test_no_ofrece_un_tercer_intento_dentro_de_la_misma_serie_sin_cerrarla(conexion_pruebas):
-    """I-5, ronda 1 de revisión: el tope de intentos DENTRO de una serie es fijo (2) y no
-    depende de la perilla `max_seguimientos_fallidos`. Sin este tope, dos envíos ya viejos
-    (fuera de la ventana de reintento de 7 días) no bloqueaban un tercero, y quien nunca
-    cierra la serie -porque `series_por_contabilizar` todavía no corrió- recibiría un tercer
-    mensaje del MISMO tipo antes de que la serie se dé por cerrada."""
+def test_no_ofrece_un_tercer_intento_sin_cerrar_los_dos_anteriores(conexion_pruebas):
+    """`INTENTOS_POR_SERIE_DE_REACTIVACION` es fijo (2) y es defensa en profundidad de la
+    MISMA cota que R1 (Ronda 2: ya no es un tope independiente -- ver el docstring de
+    `DIAS_ENTRE_INTENTOS_DE_REACTIVACION`). Dos envíos ya viejos (fuera de la ventana de
+    reintento de 7 días) que TODAVÍA no se contabilizaron -un estado transitorio: en la
+    operación normal `_contabilizar_series_cerradas` los cierra antes de que esta consulta
+    corra, ver `barrido.encolar`- siguen bloqueando un tercer envío del MISMO tipo aunque
+    `contactos.seguimientos_fallidos` (la vía normal de R1) todavía no se haya actualizado.
+    """
     conv = persistencia.asegurar_conversacion(conexion_pruebas, telefono=TELEFONO)
     _mensaje(conexion_pruebas, TELEFONO, cuando=AHORA - timedelta(hours=30))
     for i, dias in enumerate([20, 8]):
-        clave = f"k-serie-tope-{i}"
+        clave = f"k-intentos-tope-{i}"
         persistencia.insertar_seguimiento(
             conexion_pruebas, id_conversacion=conv, tipo="reactivacion_sin_agendar",
             fecha_objetivo=AHORA - timedelta(days=dias), clave_idempotencia=clave,
@@ -964,16 +1109,21 @@ def test_no_ofrece_un_tercer_intento_dentro_de_la_misma_serie_sin_cerrarla(conex
     assert persistencia.leads_sin_agendar(conexion_pruebas, ahora=AHORA, limite=50) == []
 
 
-def test_cerrar_la_serie_abre_paso_al_siguiente_intento(conexion_pruebas):
-    """El control de la prueba anterior: cerrar la serie (`_contabilizar_series_cerradas`,
-    que sube `seguimientos_fallidos` a 1, todavía por debajo del tope de 2) es lo único que
-    abre paso a un envío más de este mismo tipo."""
+def test_cerrar_dos_envios_viejos_a_la_vez_agota_el_tope_de_R1(conexion_pruebas):
+    """Ronda 2 de revisión: el control de la prueba anterior YA NO es "cerrar abre paso"
+    -esa era la promesa rota de la ronda 1, que contaba una unidad por SERIE en vez de por
+    ENVÍO-. Con el conteo revertido a "un envío, una unidad", cerrar DOS envíos viejos a la
+    vez -el estado transitorio de la prueba anterior- sube el contador en DOS de un tirón, y
+    con el default de `max_seguimientos_fallidos` (2) eso agota el tope en la MISMA pasada:
+    no queda paso para un tercer intento. Es la operación normal (uno cada vez) la que dosifica
+    el contador en pasos de uno -- ver `test_el_calendario_medido_de_las_tres_personas_da_2`.
+    """
     from maxicare_daniela import barrido
 
     conv = persistencia.asegurar_conversacion(conexion_pruebas, telefono=TELEFONO)
     _mensaje(conexion_pruebas, TELEFONO, cuando=AHORA - timedelta(hours=30))
     for i, dias in enumerate([20, 8]):
-        clave = f"k-serie-cierra-{i}"
+        clave = f"k-cierra-los-dos-{i}"
         persistencia.insertar_seguimiento(
             conexion_pruebas, id_conversacion=conv, tipo="reactivacion_sin_agendar",
             fecha_objetivo=AHORA - timedelta(days=dias), clave_idempotencia=clave,
@@ -986,10 +1136,11 @@ def test_cerrar_la_serie_abre_paso_al_siguiente_intento(conexion_pruebas):
     conexion_pruebas.commit()
 
     cerradas = barrido._contabilizar_series_cerradas(conexion_pruebas, ahora=AHORA)
-    assert cerradas == 1
+    assert cerradas == 2, "los dos envíos vencidos tenían que cerrarse juntos, no uno"
+    assert persistencia.leer_contacto(conexion_pruebas, TELEFONO)["seguimientos_fallidos"] == 2
 
     leads = persistencia.leads_sin_agendar(conexion_pruebas, ahora=AHORA, limite=50)
-    assert [l["telefono"] for l in leads] == [TELEFONO]
+    assert leads == [], "R1 tenía que quedar agotado tras cerrar los dos de un tirón"
 
 
 def test_el_calendario_medido_de_las_tres_personas_da_2(conexion_pruebas, esquema):
@@ -1003,6 +1154,22 @@ def test_el_calendario_medido_de_las_tres_personas_da_2(conexion_pruebas, esquem
     - «la que calla»: nunca vuelve a escribir, nunca agenda.
     - «la de las dos listas»: pregunta y no agenda, Y ADEMÁS canceló una cita vieja.
     - «la que contesta»: responde cada vez que le llega un mensaje, pero nunca agenda.
+
+    **Lo que esto NO es, dicho en la ronda 2 de revisión porque el informe de la ronda 1 lo
+    daba a entender sin decirlo: no es un extremo a extremo.** `_pasada` marca `enviado_en`
+    con un `UPDATE` directo -- `seguimientos.despachar`, `decidir` con sus once guardas y
+    `marcar_seguimiento_enviado` NUNCA se ejecutan aquí. El atajo yerra hacia el lado
+    GENEROSO: marca como enviado incluso lo que `decidir` habría anulado (por ejemplo, fuera
+    de horario comercial). Para el número que este test mide -- "como mucho 2" -- ese sesgo
+    es el correcto (si acaso, sobreestima cuántos mensajes saldrían de verdad), así que no
+    hace falta corregirlo, pero quien lo lea tiene que saber qué mide y qué no: la cuenta del
+    BARRIDO (quién entra y cuántas veces), no el envío real de WhatsApp.
+
+    **Y esta prueba, sola, es insensible a `INTENTOS_POR_SERIE_DE_REACTIVACION`** (ronda 2,
+    hallazgo de higiene): en la cadencia normal de arriba nunca coexisten dos envíos sin
+    contabilizar del mismo tipo -`_contabilizar_series_cerradas` cierra cada uno antes de que
+    llegue el siguiente (bug 2.2 corregido)-, así que ese tope nunca es el que decide. El
+    bloque final, con un cuarto teléfono, añade a propósito el estado que sí lo ejercita.
     """
     from maxicare_daniela import barrido
 
@@ -1078,3 +1245,27 @@ def test_el_calendario_medido_de_las_tres_personas_da_2(conexion_pruebas, esquem
         )
         (nuevos,) = cur.fetchone()
     assert nuevos == 0, "R1 no las apagó: siguió saliendo algo después del día 14"
+
+    # Cuarto caso, añadido a propósito (ver el docstring): un teléfono que llega con DOS
+    # envíos viejos ya sin cerrar -el estado que sí ejercita `INTENTOS_POR_SERIE_DE_
+    # REACTIVACION`, y que la cadencia normal de arriba no produce nunca-. Con ese tope
+    # puesto a 99 (o quitado), esta parte de la prueba deja de fallar y el barrido volvería
+    # a ofrecer un tercer intento sin que la serie se hubiera cerrado.
+    ATASCADA = "573005550004"
+    conv_atascada = persistencia.asegurar_conversacion(conexion_pruebas, telefono=ATASCADA)
+    _mensaje(conexion_pruebas, ATASCADA, cuando=AHORA - timedelta(hours=30))
+    for i, dias in enumerate([20, 8]):
+        clave = f"k-atascada-{i}"
+        persistencia.insertar_seguimiento(
+            conexion_pruebas, id_conversacion=conv_atascada, tipo="reactivacion_sin_agendar",
+            fecha_objetivo=AHORA - timedelta(days=dias), clave_idempotencia=clave,
+        )
+        with conexion_pruebas.cursor() as cur:
+            cur.execute(
+                "UPDATE seguimientos SET enviado_en = %s WHERE clave_idempotencia = %s",
+                (AHORA - timedelta(days=dias), clave),
+            )
+    conexion_pruebas.commit()
+    assert persistencia.leads_sin_agendar(conexion_pruebas, ahora=AHORA, limite=50) == [], (
+        "INTENTOS_POR_SERIE_DE_REACTIVACION no frenó los dos envíos sin cerrar"
+    )
