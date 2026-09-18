@@ -1062,6 +1062,28 @@ async def despachar(
                     fila.get("id"),
                     fila.get("tipo"),
                 )
+                # Y el `rollback`, que es lo que hace que «la tanda sigue» sea verdad.
+                # Sin él, un error de BASE en una fila deja la transacción COMPARTIDA
+                # envenenada y la siguiente lectura válida muere con
+                # `InFailedSqlTransaction: current transaction is aborted` -- o sea que
+                # todas las filas restantes fallan, **recordatorios de cita incluidos**,
+                # que es justo lo que este `except` existía para impedir. Medido contra
+                # Neon en la re-revisión del arreglo final: el `except` sin `rollback`
+                # solo salvaba el caso de Python puro (un `TypeError` en `decidir`), que
+                # es el improbable, y no el realista.
+                #
+                # El `rollback` va envuelto porque un fallo aquí -conexión ya muerta- no
+                # puede llevarse la tanda por la puerta de atrás: si no se puede limpiar,
+                # las siguientes fallarán una a una y se contarán, que es el estado que
+                # este bloque ya sabe manejar.
+                try:
+                    await asyncio.to_thread(conn.rollback)
+                except Exception:  # noqa: BLE001 -- la conexión ya estaba perdida
+                    log.exception(
+                        "no se pudo limpiar la transacción tras el fallo del seguimiento "
+                        "%s; las filas restantes fallarán una a una y se contarán",
+                        fila.get("id"),
+                    )
     finally:
         await asyncio.to_thread(_cerrar, conn)
 

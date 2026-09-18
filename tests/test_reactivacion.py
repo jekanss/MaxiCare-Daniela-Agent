@@ -1773,3 +1773,111 @@ class _WhatsAppQueCuenta:
             {"telefono": telefono, "plantilla": plantilla, "parametros": parametros}
         )
         return "wamid.doblado"
+
+
+# ---------------------------------------------------------------------------
+# El CABLE del freno de emergencia, no la guarda.
+#
+# La guarda FRENO de `decidir` estaba sujeta por pruebas; lo que NO lo estaba era la
+# unica linea que la alimenta (`freno_de_reactivacion=_freno_de_reactivacion()` en el
+# despachador de `runtime`). El revisor del arreglo final borro esa linea y volvio a
+# correrlo todo: `pytest -q` entero en verde Y `probar_reactivacion.py` certificando
+# "el freno llega hasta donde se MANDA". Con el cable cortado, H2 y H3 vuelven enteros
+# -- el interruptor de panico y el freno por calidad dejan de parar los ENVIOS-- y nada
+# lo dice. Es la sexta vez en esta rama que un fallo tiene esta forma: el codigo dice una
+# cosa y hace otra, en silencio.
+#
+# Por eso esta prueba NO mira la guarda: mira que el VALOR VIAJA desde `runtime` hasta
+# `seguimientos.despachar`.
+# ---------------------------------------------------------------------------
+
+
+def test_el_freno_de_emergencia_VIAJA_de_runtime_al_despachador():
+    """Corre un ciclo real de `_despachar_recordatorios_sin_parar` y exige el kwarg."""
+    import asyncio
+
+    from maxicare_daniela import runtime as rt
+
+    recibido: dict = {}
+
+    class _Alto(Exception):
+        """Corta el `while True` en el segundo sueño, no en el primero."""
+
+    async def _sleep_que_corta(_segundos):
+        if recibido.get("despachado"):
+            raise _Alto
+        return None
+
+    async def _despachar_doblado(**kwargs):
+        recibido["despachado"] = True
+        recibido["kwargs"] = kwargs
+        return {"enviados": 0, "anulados": 0, "aplazados": 0, "fallidos": 0}
+
+    with pytest.MonkeyPatch().context() as mp:
+        mp.setattr(asyncio, "sleep", _sleep_que_corta)
+        mp.setattr(rt.seguimientos, "despachar", _despachar_doblado)
+        mp.setattr(rt, "_leer_configuracion_operativa", lambda: {})
+        # El freno DICE que hay que frenar; si el cable esta cortado, llega `None`.
+        mp.setattr(rt, "_freno_de_reactivacion", lambda: "interruptor_de_panico")
+        with pytest.raises(_Alto):
+            asyncio.run(rt._despachar_recordatorios_sin_parar())
+
+    assert recibido.get("despachado"), "el ciclo no llego a llamar a `despachar`"
+    assert "freno_de_reactivacion" in recibido["kwargs"], (
+        "el despachador de `runtime` no le pasa `freno_de_reactivacion` a "
+        "`seguimientos.despachar`: el freno de emergencia no llega a donde se MANDA"
+    )
+    assert recibido["kwargs"]["freno_de_reactivacion"] == "interruptor_de_panico", (
+        "el valor no viaja: `despachar` recibe algo distinto de lo que dijo "
+        "`_freno_de_reactivacion`"
+    )
+
+
+def test_la_polaridad_del_FRENO_falla_cerrado_con_un_tipo_desconocido():
+    """Un `tipo` que nadie reconoce tiene que FRENARSE, no salir.
+
+    El primer fallo grave de esta rama fue una guarda con la polaridad al reves que
+    fallaba ABIERTO. El FRENO es la unica de las trece guardas cuya polaridad no sujetaba
+    ninguna prueba: mutar `es_reactivacion` (`not in TIPOS_NO_COMERCIALES`) por el literal
+    `tipo in TIPOS_DE_REACTIVACION` dejaba la suite entera en verde -- y con esa mutacion
+    un `tipo` desconocido sale CON EL FRENO DE EMERGENCIA PUESTO. Es alcanzable: el CHECK
+    de la 021 es NOT VALID.
+
+    La frontera, en la misma prueba: `recordatorio_cita` SI sale con el freno puesto. Eso
+    es el no negociable 25 -- la baja es comercial y no apaga el aviso de una cita.
+    """
+    ahora = momento(15, 11)  # martes, 11 de la manana: hora habil, nada mas frena
+
+    def _decidir(tipo):
+        return s.decidir(
+            {
+                "id": 1,
+                "tipo": tipo,
+                "fecha_objetivo": ahora - timedelta(minutes=5),
+                "cita_id": None,
+                "seguimientos_fallidos": 0,
+                "reactivaciones_ultimo_ano": 0,
+                "aplazado_desde": None,
+                "no_contactar": False,
+            },
+            ahora=ahora,
+            jornada=JORNADA,
+            ultimo_mensaje=None,
+            ya_salio_a_ese_numero=False,
+            freno_de_reactivacion="interruptor_de_panico",
+        )
+
+    for tipo in ("un_tipo_que_nadie_ha_escrito_todavia", "", None):
+        decision = _decidir(tipo)
+        assert decision.accion == "aplazar", (
+            f"un tipo desconocido ({tipo!r}) sale con el freno de emergencia puesto: "
+            "la polaridad del FRENO falla ABIERTO"
+        )
+        assert decision.motivo.startswith("frenada:"), decision.motivo
+
+    # Y la frontera: el recordatorio de una cita real sigue saliendo.
+    assert _decidir(s.TIPO_RECORDATORIO).accion != "aplazar" or not _decidir(
+        s.TIPO_RECORDATORIO
+    ).motivo.startswith("frenada:"), (
+        "el freno comercial esta apagando el aviso de una cita real (no negociable 25)"
+    )
