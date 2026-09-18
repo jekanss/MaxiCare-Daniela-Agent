@@ -125,6 +125,15 @@ def momento_del_recordatorio(
 #: Cuánto se aplaza un recordatorio que pilló al doctor hablando con el paciente.
 MINUTOS_DE_ESPERA_POR_RELEVO = 30
 
+#: Cuánto se aplaza una reactivación mientras algo la tiene FRENADA -- el interruptor de
+#: pánico, la calidad del número, o Daniela apagada. Ver la guarda `freno` en `decidir`.
+#:
+#: Una hora y no un minuto: las tres señales que pueden levantar el freno se refrescan con el
+#: reloj del BARRIDO (`runtime.SEGUNDOS_ENTRE_BARRIDOS_DE_REACTIVACION`, horario), así que
+#: volver a preguntar a los sesenta segundos no puede dar una respuesta distinta y lo único
+#: que consigue es reescribir `fecha_objetivo` mil veces al día.
+MINUTOS_DE_ESPERA_POR_FRENO_DE_REACTIVACION = 60
+
 #: A partir de cuánto retraso un recordatorio deja de servir y pasa a estorbar.
 HORAS_DE_RETRASO_QUE_LO_INVALIDAN = 2
 
@@ -241,6 +250,27 @@ TIPOS_QUE_EL_BARRIDO_ENCOLA = frozenset({TIPO_SIN_AGENDAR, TIPO_CANCELADA})
 #: dos, esa apertura pasaría en silencio y ninguna prueba lo notaría.
 TIPOS_QUE_EL_MODELO_PUEDE_PEDIR = frozenset({TIPO_SIN_AGENDAR, TIPO_CANCELADA})
 
+#: Las columnas que R1, R2 y R3bis leen de la fila, y sin las cuales esas tres guardas se
+#: apagan SOLAS (revisión final, H6 bis).
+#:
+#: Las tres se leían con `.get()` y respaldo permisivo -- `0`, `0` y `None`--, así que perder
+#: una columna del SELECT de `persistencia.seguimientos_por_despachar` no era un error: era
+#: una guarda menos, en silencio y con `pytest -q` entero en verde. Ejecutado contra el código
+#: de la rama: la MISMA fila, con el contador reventado (5 sobre un tope de 2), el tope anual
+#: reventado (99) y 500 horas atascada, pasaba de `anular/seguimiento_apagado` a `enviar/ok`
+#: por no traer estas tres claves. Es, casi palabra por palabra, el primero de los cuatro
+#: fallos graves de esta rama -- una guarda que falla ABIERTO-- alcanzable otra vez por una
+#: puerta más corta.
+#:
+#: **`in` y no `is not None`**: `aplazado_desde` en NULL es el estado normal de una fila que
+#: nunca se aplazó, así que lo que hay que distinguir es «la columna no vino» de «la columna
+#: vino vacía». Un `dict` sabe esa diferencia; un `.get()` no.
+COLUMNAS_DE_LAS_GUARDAS_DE_REACTIVACION = (
+    "seguimientos_fallidos",
+    "reactivaciones_ultimo_ano",
+    "aplazado_desde",
+)
+
 
 @dataclass(frozen=True)
 class Decision:
@@ -261,6 +291,7 @@ def decidir(
     hora_vispera: int = HORA_VISPERA_POR_DEFECTO,
     max_reactivaciones_12m: int = MAX_REACTIVACIONES_12M,
     max_seguimientos_fallidos: int = MAX_SEGUIMIENTOS_FALLIDOS,
+    freno_de_reactivacion: str | None = None,
 ) -> Decision:
     """Las guardas del despachador, en orden. Es lo que separa un recordatorio de un buzón
     de spam.
@@ -269,11 +300,21 @@ def decidir(
     `TIPOS_NO_COMERCIALES` se anula si el contacto pidió no ser contactado. Es el orden que
     pidió MaxiCare por escrito: privacidad -> canal -> criterio -> contacto.
 
-    Las guardas de reactivación (R1-R5, con R3bis colgando de R3) van justo después de G0 y
-    antes del bloque de la cita: todas son exclusivas de un seguimiento SIN cita
-    (`es_reactivacion`), y un recordatorio de cita las atraviesa sin evaluarlas -- por diseño,
-    no por descuido: el apagado y el tope son frenos COMERCIALES y una cita real no es
-    publicidad.
+    Las guardas de reactivación (R1-R5, con R3bis colgando de R3 y el FRENO entre R3bis y R4)
+    van justo después de G0 y antes del bloque de la cita: todas son exclusivas de un
+    seguimiento SIN cita (`es_reactivacion`), y un recordatorio de cita las atraviesa sin
+    evaluarlas -- por diseño, no por descuido: el apagado y el tope son frenos COMERCIALES y
+    una cita real no es publicidad.
+
+    `freno_de_reactivacion` entra como parámetro y NO se lee de `config`: este módulo no
+    importa configuración ni habla con la red, igual que no habla con la base. Quien lo calcula
+    es `runtime`, que es quien conoce las tres señales (el interruptor de pánico, la calidad
+    del número ante Meta y el interruptor de Daniela). Ver la guarda FRENO.
+
+    Cuentas, para quien lea una paráfrasis de esto en otro sitio: un `recordatorio_cita` pasa
+    por NUEVE guardas (G0, G1, G2, G3, G3bis, G4, G5, G6, G7) y una reactivación por TRECE
+    (G0, R0, R1, R2, R3, R3bis, FRENO, R4, R5, G4, G5, G6, G7 -- las cuatro del bloque de la
+    cita se saltan porque no tiene `cita_id`).
 
     El orden del resto importa: las tres primeras del bloque de cita son sobre la cita y se
     saltan si el seguimiento no cuelga de ninguna; las dos siguientes aplazan en vez de
@@ -298,6 +339,22 @@ def decidir(
     # la 021 es NOT VALID y no revisa lo que ya estaba en `public`) atravesaba las cinco
     # guardas de reactivación sin que ninguna se evaluara.
     es_reactivacion = fila.get("tipo") not in TIPOS_NO_COMERCIALES
+
+    # R0. La fila trae con qué evaluar R1, R2 y R3bis, o no se manda (revisión final, H6 bis).
+    #
+    # Va ANTES de las tres guardas que dependen de esas columnas, porque si no la primera que
+    # se evalúa ya lo hace a ciegas. Anula en vez de aplazar: una columna que falta no aparece
+    # sola con el paso del tiempo -- es un SELECT que cambió-- y aplazar dejaría la fila dando
+    # vueltas cada sesenta segundos sin dejar rastro de por qué. Anulada queda el motivo
+    # escrito en la tabla, que es la primera pregunta que hace la clínica, y el barrido puede
+    # volver a encolar a esa persona cuando el SELECT esté arreglado.
+    #
+    # Solo para reactivaciones: un `recordatorio_cita` no evalúa R1-R5 y no necesita ninguna
+    # de estas columnas. Es la misma frontera de siempre.
+    if es_reactivacion:
+        faltan = [c for c in COLUMNAS_DE_LAS_GUARDAS_DE_REACTIVACION if c not in fila]
+        if faltan:
+            return Decision("anular", f"fila_incompleta:{','.join(faltan)}")
 
     # R1. El freno por persona. Antes que nada de lo demas: si esta apagado, no importa la hora
     # ni el retraso. El apagado es del SISTEMA --«a este numero no le sirve que lo
@@ -351,6 +408,43 @@ def decidir(
         > timedelta(hours=HORAS_DE_ESPERA_QUE_INVALIDAN_UN_APLAZAMIENTO_SOSTENIDO)
     ):
         return Decision("anular", "reactivacion_estancada")
+
+    # FRENO. El interruptor de pánico (regla 10), el freno por calidad (regla 11) y el
+    # interruptor de Daniela, aplicados donde de verdad se manda y no solo donde se encola.
+    #
+    # **El agujero que cierra** (revisión final, H2 y H3): los tres frenos vivían SOLO en
+    # `barrido.encolar`, que corre una vez por hora. `despachar` corre cada sesenta segundos y
+    # no miraba ninguno, así que quien accionaba el freno de emergencia veía salir en el minuto
+    # siguiente todo lo que ya estaba en la cola -- hasta el tope diario, más lo aplazado de
+    # días anteriores. Y con `MAXICARE_DANIELA_RESPONDE=0` era peor que un mensaje de más:
+    # salía un «¿sigue interesada?» que pedía respuesta y quien pulsaba «Sí, me interesa» no
+    # recibía NADA, porque `atencion.procesar_mensaje` corta en esa misma bandera. Pedir
+    # respuesta y callarse es el disparador de reporte más limpio que existe, y si quien vuelve
+    # escribe «me duele», cruza la frontera clínica.
+    #
+    # **APLAZA, nunca anula y nunca marca.** El freno es transitorio por definición -- la
+    # calidad sube, el operador vuelve a encender-- y anular perdería filas que sí calificaban
+    # por un motivo que dejará de ser cierto. Marcar sería peor todavía: `marcar_seguimiento_
+    # enviado` va ANTES del envío (no negociable 21), así que marcar sin mandar pierde la fila
+    # para siempre.
+    #
+    # **Va DESPUÉS de R1-R3bis y no antes**, y es deliberado: esas cuatro anulan por razones
+    # que siguen siendo ciertas con el freno puesto (el contador, el tope anual, el retraso, el
+    # atasco), y dejarlas correr es lo que impide que un freno largo acumule un backlog que
+    # salga de golpe el día que se levante -- que es justo el pico que R3 existe para evitar.
+    # Con R3bis viva, un freno de más de 96 h va matando las filas en vez de apilarlas.
+    #
+    # **`es_reactivacion` y no `tipo in TIPOS_DE_REACTIVACION`**: misma polaridad que G0 y
+    # R1-R5, y por la misma razón -- un `tipo` desconocido cuenta como comercial y se frena.
+    # `recordatorio_cita` es lo único que sigue saliendo con el freno puesto, por los tres
+    # caminos: ahí está exactamente la frontera del no negociable 25 (la baja es comercial y
+    # no apaga el recordatorio de una cita).
+    if es_reactivacion and freno_de_reactivacion:
+        return Decision(
+            "aplazar",
+            f"frenada:{freno_de_reactivacion}",
+            ahora + timedelta(minutes=MINUTOS_DE_ESPERA_POR_FRENO_DE_REACTIVACION),
+        )
 
     # R4. Horario propio (regla 6). NO cuelga de `jornada`: ver el comentario de
     # HORA_APERTURA_COMERCIAL. Aplaza a la proxima apertura comercial, no a la de la clinica.
@@ -638,8 +732,19 @@ def parametros_de(fila: dict[str, Any]) -> list[str] | None:
     # las filas de prueba que no fijan esa clave, p. ej. `scripts/probar_plantilla.py`
     # `_fila_de_ejemplo()` -- usan los cuatro huecos.
     if tipo in TIPOS_NO_COMERCIALES or tipo is None:
-        nombre = (fila.get("nombre_completo") or "").split(" ")[0] or "paciente"
-        return _parametros_del_recordatorio(fila, nombre)
+        # `.split()` sin argumento y no `.split(" ")` (revisión final, H7). El razonamiento
+        # está entero en `_primer_nombre_usable`, y aplica palabra por palabra a esta rama:
+        # Meta RECHAZA un parámetro de plantilla con saltos de línea (132007), y como la fila
+        # se marca ANTES de enviar (no negociable 21) el rechazo la pierde para siempre tras
+        # los tres intentos. `citas.nombre_completo` lo escribe `registrar_cita` con lo que el
+        # modelo capturó y SIN recortar, así que `"Ana\nPérez"` es alcanzable -- y lo que se
+        # pierde aquí no es un mensaje comercial, es el aviso de una cita real.
+        #
+        # Aquí SÍ se conserva el respaldo `"paciente"`, al revés que en la rama de
+        # reactivación: un recordatorio de cita tiene que salir aunque el nombre sea raro,
+        # porque el paciente tiene hora de verdad. Lo que no puede es salir MAL formado.
+        primero = ((fila.get("nombre_completo") or "").split() or [""])[0]
+        return _parametros_del_recordatorio(fila, primero or "paciente")
 
     # `_nombre_de_reactivacion` ya devuelve el PRIMER TOKEN validado -no la cadena cruda-, así
     # que aquí no se vuelve a partir ni queda un respaldo `"paciente"`: ese literal no puede
@@ -690,8 +795,13 @@ async def despachar(
     idioma: str = "es",
     ahora: datetime | None = None,
     limite: int = 50,
+    freno_de_reactivacion: str | None = None,
 ) -> dict[str, int]:
     """Un ciclo del despachador. Devuelve el recuento por acción.
+
+    `freno_de_reactivacion` viaja tal cual a `decidir` y no se consulta aquí: ver la guarda
+    FRENO de esa función. Con el freno puesto, toda reactivación se APLAZA y los
+    `recordatorio_cita` siguen saliendo -- esa es la frontera.
 
     `ahora` entra como parámetro para que una prueba pueda fijarlo: es la misma regla que
     `ctx.ahora` en las tools, y la razón por la que esto se puede probar sin esperar a las seis
@@ -746,7 +856,18 @@ async def despachar(
             persistencia.seguimientos_por_despachar, conn, ahora=momento_actual, limite=limite
         )
 
-        for fila in filas:
+        async def _una_fila(fila: dict[str, Any]) -> None:
+            """Todo el trabajo de UNA fila. Sale del bucle para poder tener su propio
+            `try/except` (revisión final, H8).
+
+            Antes esto era el cuerpo del `for` y una excepción a mitad de tanda se llevaba por
+            delante el lote ENTERO -- incluidos los `recordatorio_cita` de las otras 49 filas,
+            que es el lado malo clínico: el paciente no recibe el aviso de una cita real. Y con
+            `ORDER BY s.fecha_objetivo`, una fila que reventara de forma determinista estaría
+            siempre a la cabeza del lote y bloquearía la cola indefinidamente.
+
+            `return` y no `continue` -- es la misma salida, ahora desde una función.
+            """
             telefono = fila.get("telefono") or ""
 
             ultimo = await asyncio.to_thread(
@@ -762,6 +883,7 @@ async def despachar(
                 hora_vispera=hora_vispera,
                 max_reactivaciones_12m=max_12m,
                 max_seguimientos_fallidos=max_fallidos,
+                freno_de_reactivacion=freno_de_reactivacion,
             )
 
             if decision.accion == "anular":
@@ -769,7 +891,7 @@ async def despachar(
                     persistencia.anular_seguimiento, conn, fila["id"], motivo=decision.motivo
                 )
                 recuento["anulados"] += 1
-                continue
+                return
 
             if decision.accion == "aplazar":
                 await asyncio.to_thread(
@@ -779,7 +901,7 @@ async def despachar(
                     hasta=decision.hasta or momento_actual,
                 )
                 recuento["aplazados"] += 1
-                continue
+                return
 
             # A partir de aquí `decision.accion == "enviar"`. La plantilla de ESTE tipo. Antes
             # había una sola y todo lo que no tuviera `cita_inicio` se anulaba con
@@ -816,7 +938,7 @@ async def despachar(
                     persistencia.anular_seguimiento, conn, fila["id"], motivo="sin_cita"
                 )
                 recuento["anulados"] += 1
-                continue
+                return
 
             if telefono:
                 # G7 se apoya en que este número YA tiene (o está a punto de tener) un
@@ -840,7 +962,7 @@ async def despachar(
                     "SIGUE pendiente -no se marca- para cuando exista la plantilla.",
                     fila["id"], fila.get("tipo"),
                 )
-                continue
+                return
 
             # Fila ROTA #2, y el hallazgo CRÍTICO de la ronda 1: una reactivación sin NINGÚN
             # nombre usable para su único hueco (ver `_nombre_de_reactivacion`). Sin esto,
@@ -868,7 +990,7 @@ async def despachar(
                     persistencia.anular_seguimiento, conn, fila["id"], motivo="sin_nombre"
                 )
                 recuento["anulados"] += 1
-                continue
+                return
 
             # MARCAR PRIMERO. Ver `persistencia.marcar_seguimiento_enviado`: no hay transacción
             # que cubra una llamada a Meta, y mandar dos veces es peor que perder uno. El
@@ -883,7 +1005,7 @@ async def despachar(
                     "este punto; no se manda ni se cuenta aquí.",
                     fila["id"],
                 )
-                continue
+                return
 
             fallo: str | None = None
             for intento in range(INTENTOS_DE_ENVIO):
@@ -912,7 +1034,7 @@ async def despachar(
                     INTENTOS_DE_ENVIO,
                     fallo,
                 )
-                continue
+                return
 
             await asyncio.to_thread(
                 persistencia.anotar_recordatorio_en_conversacion,
@@ -922,6 +1044,24 @@ async def despachar(
                 cuando=momento_actual,
             )
             recuento["enviados"] += 1
+
+        for fila in filas:
+            try:
+                await _una_fila(fila)
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 -- H8: una fila no se lleva la tanda entera
+                # Se cuenta como `fallidos` y no en una clave nueva, a propósito: `fallidos`
+                # ya significa «este seguimiento no salió» y es lo que `runtime` usa para
+                # avisar a los doctores. Una fila que revienta es exactamente eso, y si era un
+                # `recordatorio_cita` el doctor tiene que enterarse. Avisar de más es el lado
+                # barato; callar un recordatorio que no salió, no.
+                recuento["fallidos"] += 1
+                log.exception(
+                    "seguimiento %s (%s) reventó y se salta; la tanda sigue con las demás",
+                    fila.get("id"),
+                    fila.get("tipo"),
+                )
     finally:
         await asyncio.to_thread(_cerrar, conn)
 

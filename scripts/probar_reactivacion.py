@@ -344,9 +344,20 @@ def regla_02(conn) -> None:
 def regla_03(conn) -> None:
     """El botón de salida en cada mensaje cierra ese seguimiento para siempre.
 
-    Simula lo que hace `herramientas._cerrar_seguimiento` cuando el paciente pulsa «Ya no,
-    gracias»: `persistencia.anular_reactivaciones_vivas` anula la fila TODAVÍA PENDIENTE con
-    el motivo `el_paciente_dijo_que_no`, y la condición 7 de `_LEADS_SIN_AGENDAR` la excluye
+    Recorre la SECUENCIA REAL, y eso es lo que corrige la revisión final: encolar -> marcar
+    ENVIADO -> `cerrar_seguimiento` -> el barrido al día siguiente ya no lo encuentra.
+
+    La versión anterior de esta comprobación sembraba a mano una fila PENDIENTE justo antes de
+    llamar a la anulación, y en producción esa fila no existe en ese instante: el paciente
+    solo puede pulsar «Ya no, gracias» DESPUÉS de que el mensaje salió, y una fila enviada
+    tiene `enviado_en NOT NULL`, que es justo lo que `anular_reactivaciones_vivas` excluye.
+    Con el estado fabricado, `anulados` valía 1 y todo parecía funcionar; con el estado real
+    vale 0 y, antes del arreglo, NADA quedaba escrito -- el barrido lo volvía a encolar 25 h
+    después de que Daniela le prometiera lo contrario.
+
+    Lo que hoy sostiene el bloqueo es la LÁPIDA que escribe
+    `persistencia.registrar_negativa_de_reactivacion`: una fila que nace anulada con el motivo
+    permanente, del tipo que se le mandó, y que la condición 7 de `_LEADS_SIN_AGENDAR` excluye
     PARA SIEMPRE -- sin ventana de tiempo, al revés que las demás anulaciones.
     """
     conv = persistencia.asegurar_conversacion(conn, telefono=TEL_R3)
@@ -358,10 +369,18 @@ def regla_03(conn) -> None:
 
     persistencia.insertar_seguimiento(
         conn, id_conversacion=conv, tipo=seguimientos.TIPO_SIN_AGENDAR,
-        fecha_objetivo=AHORA, clave_idempotencia="regla3-pendiente",
+        fecha_objetivo=AHORA - timedelta(hours=1), clave_idempotencia="regla3-enviado",
     )
-    anulados = persistencia.anular_reactivaciones_vivas(
-        conn, TEL_R3, motivo="el_paciente_dijo_que_no"
+    with conn.cursor() as cur:
+        cur.execute("SELECT id FROM seguimientos WHERE clave_idempotencia = 'regla3-enviado'")
+        (id_fila,) = cur.fetchone()
+    # El mensaje SALIÓ. A partir de aquí -y solo a partir de aquí- el paciente puede decir que
+    # no: es la única ventana en la que ese botón existe.
+    persistencia.marcar_seguimiento_enviado(conn, id_fila)
+
+    resultado = persistencia.registrar_negativa_de_reactivacion(
+        conn, TEL_R3, id_conversacion=conv,
+        tipos=sorted(seguimientos.TIPOS_QUE_EL_BARRIDO_ENCOLA),
     )
 
     # Mucho más allá de los 7 días de la regla 2 -- y dentro todavía de los 30 del mensaje
@@ -372,11 +391,16 @@ def regla_03(conn) -> None:
         for l in persistencia.leads_sin_agendar(conn, ahora=AHORA + timedelta(days=10), limite=200)
     }
 
-    ok = calificaba_antes and anulados == 1 and not tras_mucho_tiempo
+    ok = (
+        calificaba_antes
+        and resultado["lapidas"] == [seguimientos.TIPO_SIN_AGENDAR]
+        and not tras_mucho_tiempo
+    )
     print(
         f"{marca(ok)} 3. el botón de salida cierra el seguimiento para siempre: calificaba "
-        f"antes ({calificaba_antes}), {anulados} fila(s) anulada(s) con el motivo permanente, "
-        f"sigue fuera 10 días después ({not tras_mucho_tiempo})"
+        f"antes ({calificaba_antes}); tras el envío REAL el «no» deja "
+        f"{resultado['anulados']} anulada(s) y lápida sobre {resultado['lapidas']}; sigue "
+        f"fuera 10 días después ({not tras_mucho_tiempo})"
     )
 
 
@@ -674,8 +698,43 @@ def regla_10() -> None:
         ok = False
         recuento = f"reventó: {type(e).__name__}: {e}"
     print(
-        f"{marca(ok)} 10. interruptor de pánico (encendido=False, DSN inválido): {recuento} "
+        f"{marca(ok)} 10a. interruptor de pánico (encendido=False, DSN inválido): {recuento} "
         "-- no llegó a abrir ninguna conexión"
+    )
+
+    # La SEGUNDA MITAD del interruptor, que hasta la revisión final no existía: el freno vivía
+    # solo en `barrido.encolar` -una vez por hora- y el despachador -cada sesenta segundos-
+    # no lo miraba, así que quien accionaba el freno de emergencia veía salir todo lo que ya
+    # estaba encolado. Aplaza, nunca anula y nunca marca; y el recordatorio de una cita sigue
+    # saliendo, que es la frontera del no negociable 25.
+    base = {
+        "no_contactar": False, "seguimientos_fallidos": 0, "reactivaciones_ultimo_ano": 0,
+        "fecha_objetivo": AHORA, "aplazado_desde": None, "cita_estado": None,
+        "cita_inicio": None, "cita_id": None, "tomada_por": None,
+    }
+    motivos = {}
+    for senal in ("interruptor_de_panico", "calidad_del_numero", "daniela_apagada"):
+        decision = seguimientos.decidir(
+            dict(base, tipo=seguimientos.TIPO_SIN_AGENDAR), ahora=AHORA, jornada=Jornada(),
+            ultimo_mensaje=None, freno_de_reactivacion=senal,
+        )
+        motivos[senal] = f"{decision.accion}/{decision.motivo}"
+    recordatorio = seguimientos.decidir(
+        dict(
+            base, tipo=seguimientos.TIPO_RECORDATORIO, cita_id="cita-de-prueba",
+            cita_estado="confirmada", cita_inicio=AHORA + timedelta(hours=5),
+        ),
+        ahora=AHORA, jornada=Jornada(), ultimo_mensaje=None,
+        freno_de_reactivacion="interruptor_de_panico",
+    )
+    ok_freno = (
+        all(v.startswith("aplazar/frenada:") for v in motivos.values())
+        and recordatorio.accion == "enviar"
+    )
+    print(
+        f"{marca(ok_freno)} 10b. el freno llega hasta donde se MANDA: las tres señales dejan "
+        f"la reactivación en {sorted(set(motivos.values()))} (aplazada, ni anulada ni marcada) "
+        f"y un recordatorio de cita del mismo número sigue en '{recordatorio.accion}'"
     )
 
 

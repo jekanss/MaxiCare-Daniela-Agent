@@ -20,6 +20,7 @@ def momento(dia: int, hora: int, minuto: int = 0) -> datetime:
 
 async def _despachar_con(
     filas, *, whatsapp, plantillas, ahora, monkeypatch=None, marcadas=None, anuladas=None,
+    freno_de_reactivacion=None, aplazadas=None,
 ):
     """Corre un ciclo de `despachar` con la base entera doblada.
 
@@ -64,7 +65,11 @@ async def _despachar_con(
     mp.setattr(persistencia, "ultimo_mensaje_del_paciente", lambda conn, telefono: None)
     mp.setattr(persistencia, "marcar_seguimiento_enviado", _marcar)
     mp.setattr(persistencia, "anular_seguimiento", _anular)
-    mp.setattr(persistencia, "aplazar_seguimiento", lambda conn, i, **k: None)
+    def _aplazar(conn, id_seguimiento, **k):
+        if aplazadas is not None:
+            aplazadas.append((id_seguimiento, k.get("hasta")))
+
+    mp.setattr(persistencia, "aplazar_seguimiento", _aplazar)
     mp.setattr(persistencia, "anotar_recordatorio_en_conversacion", lambda conn, i, **k: None)
     try:
         return await s.despachar(
@@ -73,6 +78,7 @@ async def _despachar_con(
             jornada=JORNADA,
             plantillas=plantillas,
             ahora=ahora,
+            freno_de_reactivacion=freno_de_reactivacion,
         )
     finally:
         mp.undo()
@@ -515,18 +521,36 @@ def test_r3bis_no_dispara_sobre_el_segundo_intento_de_la_tarea_6_a_siete_dias():
     """El caso concreto que el revisor senalo: la tarea 6 de este plan siembra el segundo
     intento de la serie con `fecha_objetivo` a 7 dias vista (168 h). 168 > 96 -el umbral de
     R3bis-, asi que con la version vieja (`creado_en`) esa parada nacia muerta contra esta
-    guarda. Con `aplazado_desde` en `None` -nunca se aplazo- la fila llega puntual y sale."""
+    guarda. Con `aplazado_desde` en `None` -nunca se aplazo- la fila llega puntual y sale.
+
+    **Revisión final: esta prueba y la anterior eran la MISMA llamada byte por byte**, y su
+    única aserción propia (`== 168`) era aritmética de `datetime`, no del código bajo prueba.
+    R3bis es justo la guarda cuyo ancla se fijó mal DOS veces en esta rama, así que estaba
+    cubierta por dos pruebas idénticas y por un `assert` que no podía fallar nunca por un
+    cambio en `seguimientos.py`.
+
+    Lo que la diferencia ahora es `creado_en`: la fila se creó 168 h antes de su
+    `fecha_objetivo`, que es lo que de verdad pasa en la tarea 6. Esa clave **no está en el
+    SELECT de `persistencia.seguimientos_por_despachar`** y por eso `decidir` no la mira hoy
+    -- está aquí precisamente para que un re-anclaje futuro a `creado_en` (el error de la ronda
+    1, cometido dos veces) haga fallar ESTA prueba, en vez de pasar en verde como pasó
+    entonces. El valor no es inventado: es el que la columna `creado_en` de la 001 tendría.
+    """
     creada = momento(9, 11)
     siete_dias_despues = momento(16, 11)
     assert (siete_dias_despues - creada).total_seconds() / 3600 == 168  # el numero del hallazgo
 
     decision = s.decidir(
-        fila_de_reactivacion(fecha_objetivo=siete_dias_despues),
+        fila_de_reactivacion(fecha_objetivo=siete_dias_despues, creado_en=creada),
         ahora=siete_dias_despues,  # llega EXACTO: nunca se aplazo
         jornada=JORNADA,
         ultimo_mensaje=None,
     )
-    assert decision.accion == "enviar"
+    assert decision.accion == "enviar", (
+        "una fila creada 168 h antes de su fecha_objetivo, que llega puntual y nunca se "
+        "aplazó, tiene que salir: si esto falla, R3bis volvió a medir la EDAD de la fila en "
+        "vez de cuánto lleva atascada"
+    )
 
 
 def test_el_freno_no_alcanza_al_recordatorio_de_una_cita_ni_tampoco_r3bis():
@@ -821,13 +845,19 @@ def test_parametros_de_un_tipo_desconocido_cae_al_lado_ESTRECHO_no_al_de_cuatro_
 # ==========================================================================================
 
 
-def test_cerrar_seguimiento_anula_lo_pendiente_y_sube_el_contador():
+def test_cerrar_seguimiento_deja_constancia_permanente_y_sube_el_contador():
     """1 pequeña (ronda de revisión sobre la parada D): el motivo tiene que ser el LITERAL
-    exacto del código, no cualquier cadena. Verificado por mutación: cambiar
-    `"el_paciente_dijo_que_no"` por otra cosa en `_cerrar_seguimiento` dejaba esta prueba en
-    verde antes de que se afirmara `llamadas["anular"][1]`. Es el no negociable 2 aplicado
-    aquí: el motivo que acaba en `seguimientos.motivo_anulacion` lo escribe el CÓDIGO, nunca
-    el modelo -- el modelo solo aporta `nota`, que ni siquiera viaja hasta la base.
+    exacto del código, no cualquier cadena. Es el no negociable 2 aplicado aquí: lo que acaba
+    en `seguimientos.motivo_anulacion` lo escribe el CÓDIGO, nunca el modelo -- el modelo solo
+    aporta `nota`, que ni siquiera viaja hasta la base.
+
+    **Revisión final (H1): la puerta ya no es `anular_reactivaciones_vivas`.** Esa función sola
+    no puede guardar un «no» -- su WHERE exige `enviado_en IS NULL`, y el paciente solo puede
+    decir que no DESPUÉS de que el mensaje salió--, así que devolvía 0 siempre y el motivo
+    permanente no llegaba nunca a la tabla. La puerta es
+    `registrar_negativa_de_reactivacion`, que anula lo vivo Y escribe la lápida. Esta prueba
+    afirma sobre ELLA, y que los tipos que recibe son los del vocabulario del barrido y no una
+    lista escrita a mano aquí.
     """
     import asyncio
     from unittest.mock import MagicMock
@@ -837,9 +867,9 @@ def test_cerrar_seguimiento_anula_lo_pendiente_y_sube_el_contador():
 
     llamadas = {}
 
-    def _anular(conn, telefono, *, motivo):
-        llamadas["anular"] = (telefono, motivo)
-        return 1
+    def _registrar(conn, telefono, *, id_conversacion, tipos):
+        llamadas["registrar"] = (telefono, id_conversacion, tuple(tipos))
+        return {"anulados": 0, "lapidas": list(tipos)}
 
     def _sumar(conn, telefono):
         llamadas["sumar"] = telefono
@@ -853,14 +883,43 @@ def test_cerrar_seguimiento_anula_lo_pendiente_y_sube_el_contador():
 
     ctx = contexto()
     with pytest.MonkeyPatch().context() as mp:
-        mp.setattr(h.persistencia, "anular_reactivaciones_vivas", _anular)
+        mp.setattr(h.persistencia, "registrar_negativa_de_reactivacion", _registrar)
         mp.setattr(h.persistencia, "sumar_seguimiento_fallido", _sumar)
         mp.setattr(h, "_con_base", _con_base_falsa)
         asyncio.run(h._cerrar_seguimiento(ctx, "ya no me interesa"))
 
-    assert llamadas["anular"][0] == ctx.telefono_completo
-    assert llamadas["anular"][1] == "el_paciente_dijo_que_no"
+    telefono, conversacion, tipos = llamadas["registrar"]
+    assert telefono == ctx.telefono_completo
+    assert conversacion == ctx.id_conversacion
+    assert set(tipos) == set(s.TIPOS_QUE_EL_BARRIDO_ENCOLA), (
+        "los tipos sobre los que se escribe la lápida tienen que salir del vocabulario del "
+        "barrido: si se escriben a mano, el día que se encienda `reactivacion_no_asistio` el "
+        "«no» del paciente no lo cubrirá y nadie se enterará"
+    )
     assert llamadas["sumar"] == ctx.telefono_completo
+
+
+def test_el_no_del_paciente_no_vive_en_el_contador():
+    """El corolario del hallazgo H1, y la razón por la que la lápida existe.
+
+    Lo único duradero que `cerrar_seguimiento` escribía era `+1` en
+    `contactos.seguimientos_fallidos`, y ese contador NO es un sitio donde pueda vivir un «no»:
+    su tope es `max_seguimientos_fallidos`, una perilla EDITABLE de `configuracion`, y
+    `crear_cita` lo devuelve a 0. Subir la perilla de 2 a 3 -- una decisión de marketing
+    perfectamente razonable-- o que la persona agende una vez borraba el «no» entero.
+
+    Esta prueba fija que la constancia permanente NO depende del contador: `_cerrar_seguimiento`
+    llama a la función que escribe en `seguimientos`, y lo hace ANTES de tocar el contador.
+    """
+    import inspect
+
+    from maxicare_daniela import herramientas as h
+
+    fuente = inspect.getsource(h._cerrar_seguimiento)
+    assert "registrar_negativa_de_reactivacion" in fuente
+    assert fuente.index("registrar_negativa_de_reactivacion") < fuente.index(
+        "sumar_seguimiento_fallido"
+    ), "la constancia permanente va antes que el contador, no al revés"
 
 
 def test_cerrar_seguimiento_NO_marca_la_baja():
@@ -881,6 +940,13 @@ def test_cerrar_seguimiento_NO_marca_la_baja():
 
     assert "pedir_baja" not in inspect.getsource(h._cerrar_seguimiento)
     assert "pedir_baja" not in inspect.getsource(persistencia.anular_reactivaciones_vivas)
+    # La tercera puerta, desde la revisión final: la que de verdad escribe la constancia.
+    assert "pedir_baja" not in inspect.getsource(
+        persistencia.registrar_negativa_de_reactivacion
+    )
+    assert "no_contactar" not in inspect.getsource(
+        persistencia.registrar_negativa_de_reactivacion
+    ), "la lápida es por consulta; tocar `no_contactar` la convertiría en la baja"
 
 
 # ==========================================================================================
@@ -1249,3 +1315,461 @@ def test_el_bucle_de_reactivacion_avisa_cuando_la_calidad_frena(monkeypatch):
         )
 
     asyncio.run(escenario())
+
+
+# ==========================================================================================
+# Revisión final. Las seis que cierran lo que la rama dejó abierto.
+# ==========================================================================================
+
+
+# -- H6 bis: una guarda que se apaga sola al perder una columna del SELECT -------------------
+
+
+def test_r0_una_reactivacion_sin_las_columnas_de_sus_guardas_NO_se_manda():
+    """La forma exacta del primero de los cuatro fallos graves de esta rama, por otra puerta.
+
+    R1, R2 y R3bis leen `seguimientos_fallidos`, `reactivaciones_ultimo_ano` y
+    `aplazado_desde` de la fila. Se leían con `.get()` y respaldo permisivo, así que si el
+    SELECT de `persistencia.seguimientos_por_despachar` perdía una de esas columnas, la guarda
+    correspondiente se apagaba EN SILENCIO y `pytest -q` seguía entero en verde.
+
+    Medido por el revisor contra el código de la rama: la MISMA fila -- contador 5 sobre un
+    tope de 2, tope anual 99 sobre 6, 500 h atascada-- daba `anular/seguimiento_apagado` con
+    las tres claves y `enviar/ok` sin ellas. Una fila que tenía TRES razones para no salir
+    salía, por perder tres columnas de un SELECT.
+
+    Lo único que lo sostenía era una prueba de `-m neon`. Esto se comprueba offline.
+    """
+    completa = fila_de_reactivacion(
+        seguimientos_fallidos=5,
+        reactivaciones_ultimo_ano=99,
+        aplazado_desde=momento(1, 11),  # atascada desde hace más de dos semanas
+    )
+    con_todo = s.decidir(completa, ahora=momento(16, 11), jornada=JORNADA, ultimo_mensaje=None)
+    assert con_todo.accion == "anular"
+
+    for columna in s.COLUMNAS_DE_LAS_GUARDAS_DE_REACTIVACION:
+        mutilada = {k: v for k, v in completa.items() if k != columna}
+        decision = s.decidir(
+            mutilada, ahora=momento(16, 11), jornada=JORNADA, ultimo_mensaje=None
+        )
+        assert decision.accion != "enviar", (
+            f"perder la columna '{columna}' del SELECT apaga una guarda y deja SALIR una "
+            f"reactivación que no debía salir: {decision}"
+        )
+        assert decision.motivo.startswith("fila_incompleta"), decision
+
+
+def test_r0_no_confunde_una_columna_ausente_con_una_columna_en_NULL():
+    """`aplazado_desde` en NULL es el estado normal de una fila que nunca se aplazó: si R0 lo
+    tratara como "falta la columna", anularía TODA reactivación sana y la función quedaría
+    apagada entera sin que ningún log lo dijera."""
+    decision = s.decidir(
+        fila_de_reactivacion(aplazado_desde=None),
+        ahora=momento(16, 11),
+        jornada=JORNADA,
+        ultimo_mensaje=None,
+    )
+    assert decision.accion == "enviar"
+
+
+def test_r0_no_alcanza_a_un_recordatorio_de_cita():
+    """La frontera de siempre: un `recordatorio_cita` no evalúa R1-R5 y no necesita ninguna de
+    esas columnas, así que una fila de cita sin ellas tiene que salir igual. Si R0 la tocara,
+    un cambio en el SELECT dejaría sin aviso a pacientes con cita real."""
+    fila = {
+        "id": 7,
+        "conversacion_id": "conv-1",
+        "cita_id": "cita-1",
+        "tipo": s.TIPO_RECORDATORIO,
+        "fecha_objetivo": momento(16, 11),
+        "telefono": "573001112233",
+        "nombre_completo": "Ana Gómez",
+        "cita_inicio": momento(17, 9),
+        "cita_estado": "confirmada",
+        "tomada_por": None,
+        "no_contactar": False,
+    }
+    decision = s.decidir(fila, ahora=momento(16, 11), jornada=JORNADA, ultimo_mensaje=None)
+    assert decision.accion == "enviar"
+
+
+# -- Los literales de tipo del SQL, atados al vocabulario ------------------------------------
+
+
+def test_los_literales_de_tipo_del_sql_no_se_separan_del_vocabulario_del_barrido():
+    """El día que la fase 8 encienda `reactivacion_no_asistio` -- «cambiar una constante», dice
+    el diseño -- cinco cadenas SQL no se enterarían, y ninguna prueba lo notaría.
+
+    Consecuencia medida sobre el código: la condición 5 de las dos consultas de cartera
+    (`s.tipo IN (...)`, el "en juego" que impide dos discursos distintos en la misma ventana)
+    no vería el tipo nuevo, y `envios_por_contabilizar` tampoco. Una persona podría recibir un
+    `no_asistio` **y** un `sin_agendar` a la vez, con el contador sin subir por ninguno de los
+    `no_asistio`. Eso es mandar de MÁS, y el mecanismo de disparo es «alguien hace exactamente
+    lo que el diseño le dijo que hiciera».
+
+    **Es una prueba y NO un refactor**, a propósito: la flecha de imports va de
+    `seguimientos.py` hacia `persistencia.py` y nunca al revés, así que esos literales no se
+    pueden importar sin crear un ciclo. Lo que se puede hacer es que separarlos falle aquí.
+
+    Dos formas distintas de nombrar el tipo, y las dos tienen que seguir el vocabulario:
+
+    - `tipo IN (...)` -- la lista completa. Tiene que ser IGUAL al conjunto, en las dos
+      direcciones: ni de menos (el tipo nuevo no se ve) ni de más (un literal que el código no
+      reconoce).
+    - `tipo = '<uno>'` -- las condiciones 6 y 7, que son POR TIPO a propósito. Cada tipo del
+      vocabulario necesita las suyas, y por eso encender un tipo nuevo no es solo tocar la
+      constante: hace falta su consulta de cartera.
+    """
+    import inspect
+    import re
+
+    from maxicare_daniela import persistencia as p
+
+    cartera = p._LEADS_SIN_AGENDAR + p._LEADS_QUE_CANCELARON
+    con_lista = {
+        "_LEADS_SIN_AGENDAR": p._LEADS_SIN_AGENDAR,
+        "_LEADS_QUE_CANCELARON": p._LEADS_QUE_CANCELARON,
+        "envios_por_contabilizar": inspect.getsource(p.envios_por_contabilizar),
+    }
+
+    encontradas = 0
+    for nombre, sql in con_lista.items():
+        # El `if "'" in lista` descarta la CITA del patrón que hay en el docstring de
+        # `envios_por_contabilizar` (`tipo IN (...)`, explicando por qué los literales van a
+        # mano). No debilita nada: `tipo IN ()` sin un solo literal no es SQL válido, así que
+        # lo que se descarta no puede ser una lista de verdad.
+        listas = [l for l in re.findall(r"tipo IN \(([^)]*)\)", sql) if "'" in l]
+        assert listas, f"{nombre} ya no tiene ninguna lista `tipo IN (...)`"
+        for lista in listas:
+            encontradas += 1
+            del_sql = set(re.findall(r"'(\w+)'", lista))
+            assert del_sql == set(s.TIPOS_QUE_EL_BARRIDO_ENCOLA), (
+                f"la lista `tipo IN (...)` de {nombre} se separó del vocabulario del barrido "
+                f"-- sql={sorted(del_sql)} codigo={sorted(s.TIPOS_QUE_EL_BARRIDO_ENCOLA)}"
+            )
+    assert encontradas == 3, f"se esperaban tres listas `tipo IN (...)`, se vieron {encontradas}"
+
+    for tipo in s.TIPOS_QUE_EL_BARRIDO_ENCOLA:
+        # La condición 6 (intentos por serie) y la 7 (el «no» del paciente), una cada una.
+        assert cartera.count(f"= '{tipo}'") >= 2, (
+            f"'{tipo}' está en TIPOS_QUE_EL_BARRIDO_ENCOLA pero las consultas de cartera no "
+            "traen sus dos condiciones por tipo (la 6 y la 7): encolarlo lo dejaría sin el "
+            "freno de intentos y sin el bloqueo permanente del «no» del paciente"
+        )
+
+
+def test_el_motivo_del_no_del_paciente_es_una_sola_constante():
+    """`el_paciente_dijo_que_no` vivía como literal suelto en cuatro sitios. La condición 7
+    busca por ese motivo EXACTO: si uno se separa de los otros, el bloqueo permanente deja de
+    encontrarse y nada falla."""
+    from maxicare_daniela import persistencia as p
+
+    assert p.MOTIVO_NEGATIVA_DEL_PACIENTE == "el_paciente_dijo_que_no"
+    for nombre, sql in (
+        ("_LEADS_SIN_AGENDAR", p._LEADS_SIN_AGENDAR),
+        ("_LEADS_QUE_CANCELARON", p._LEADS_QUE_CANCELARON),
+    ):
+        assert f"motivo_anulacion = '{p.MOTIVO_NEGATIVA_DEL_PACIENTE}'" in sql, nombre
+
+
+# -- H2 y H3: el freno llega hasta donde se MANDA, no solo hasta donde se encola --------------
+
+
+def test_el_freno_aplaza_la_reactivacion_y_nunca_la_anula_ni_la_marca():
+    """H2/H3. El interruptor de pánico y el freno por calidad vivían SOLO en `barrido.encolar`,
+    que corre una vez por hora. `despachar` corre cada sesenta segundos, es quien de verdad
+    manda, y no miraba ninguno: quien accionaba el freno de emergencia veía salir en el minuto
+    siguiente todo lo que ya estaba en la cola -- hasta el tope diario, más lo aplazado de días
+    anteriores.
+
+    **Aplaza, nunca anula y nunca marca.** Anular perdería filas que sí calificaban por un
+    motivo transitorio; marcar sería peor, porque `marcar_seguimiento_enviado` va ANTES del
+    envío (no negociable 21) y marcar sin mandar pierde la fila para siempre.
+    """
+    import asyncio
+
+    marcadas, anuladas, aplazadas = [], [], []
+    whatsapp = _WhatsAppQueCuenta()
+    recuento = asyncio.run(
+        _despachar_con(
+            [fila_de_reactivacion(id=1)],
+            whatsapp=whatsapp,
+            plantillas={s.TIPO_SIN_AGENDAR: "plantilla_real"},
+            ahora=momento(16, 11),
+            marcadas=marcadas,
+            anuladas=anuladas,
+            aplazadas=aplazadas,
+            freno_de_reactivacion="interruptor_de_panico",
+        )
+    )
+    assert recuento["aplazados"] == 1
+    assert recuento["enviados"] == 0
+    assert not whatsapp.llamadas, "salió una reactivación con el freno de emergencia puesto"
+    assert not marcadas, "una fila frenada se marcó como enviada: se pierde para siempre"
+    assert not anuladas, "una fila frenada se anuló: el freno es transitorio, no permanente"
+    assert aplazadas and aplazadas[0][0] == 1
+
+
+def test_el_freno_NO_alcanza_al_recordatorio_de_una_cita():
+    """La frontera, y es el no negociable 25: la baja -- y todo freno comercial -- es comercial
+    y no apaga el aviso de una cita real. Si el freno alcanzara a `recordatorio_cita`, apagar
+    la publicidad dejaría a pacientes con hora sin su recordatorio."""
+    import asyncio
+
+    whatsapp = _WhatsAppQueCuenta()
+    fila = fila_de_reactivacion(
+        id=2,
+        tipo=s.TIPO_RECORDATORIO,
+        cita_id="cita-1",
+        cita_inicio=momento(17, 9),
+        cita_estado="confirmada",
+        nombre_completo="Ana Gómez",
+    )
+    recuento = asyncio.run(
+        _despachar_con(
+            [fila],
+            whatsapp=whatsapp,
+            plantillas={s.TIPO_RECORDATORIO: "recordatorio"},
+            ahora=momento(16, 11),
+            freno_de_reactivacion="daniela_apagada",
+        )
+    )
+    assert recuento["enviados"] == 1
+    assert len(whatsapp.llamadas) == 1
+
+
+@pytest.mark.parametrize(
+    "apagado,esperado",
+    [
+        ({"reactivacion_encendida": False}, "interruptor_de_panico"),
+        ({"daniela_responde": False}, "daniela_apagada"),
+        ({}, "calidad_del_numero"),
+    ],
+)
+def test_runtime_calcula_el_freno_por_las_tres_senales(monkeypatch, apagado, esperado):
+    """Las tres señales que tienen que llegar al despachador, y una de ellas es la frontera
+    clínica: con `MAXICARE_DANIELA_RESPONDE=0` salía un «¿sigue interesada?» y quien pulsaba
+    «Sí, me interesa» no recibía NADA -- `atencion.procesar_mensaje` corta en esa bandera.
+    Pedir respuesta y callarse es el disparador de reporte más limpio que existe, y si quien
+    vuelve escribe «me duele», cruza la frontera clínica."""
+    import dataclasses
+
+    from maxicare_daniela import runtime
+
+    base = dataclasses.replace(
+        runtime.config, reactivacion_encendida=True, daniela_responde=True
+    )
+    monkeypatch.setattr(runtime, "config", dataclasses.replace(base, **apagado))
+    # `None` es "todavía nadie preguntó por la calidad", y eso frena -- misma asimetría que
+    # `barrido.se_puede_encolar`: ante la duda, no se manda.
+    monkeypatch.setattr(runtime, "_ultima_calidad_del_numero", None)
+    assert runtime._freno_de_reactivacion() == esperado
+
+
+def test_runtime_deja_pasar_la_reactivacion_solo_con_la_calidad_confirmada(monkeypatch):
+    """El invariante que deja el arreglo: una reactivación solo sale si alguien comprobó la
+    calidad del número en la última hora. Un `RED` frena igual que un `None`."""
+    import dataclasses
+
+    from maxicare_daniela import runtime
+
+    monkeypatch.setattr(
+        runtime,
+        "config",
+        dataclasses.replace(runtime.config, reactivacion_encendida=True, daniela_responde=True),
+    )
+    monkeypatch.setattr(runtime, "_ultima_calidad_del_numero", {"quality_rating": "GREEN"})
+    assert runtime._freno_de_reactivacion() is None
+
+    monkeypatch.setattr(runtime, "_ultima_calidad_del_numero", {"quality_rating": "RED"})
+    assert runtime._freno_de_reactivacion() == "calidad_del_numero"
+
+
+def test_el_freno_va_despues_de_las_guardas_que_anulan_por_razones_permanentes():
+    """El orden importa, y no es cosmético.
+
+    R1, R2, R3 y R3bis anulan por razones que siguen siendo ciertas con el freno puesto (el
+    contador, el tope anual, el retraso, el atasco). Dejarlas correr es lo que impide que un
+    freno largo apile un backlog que salga de golpe el día que se levante -- el pico exacto que
+    R3 existe para evitar. Con R3bis viva, un freno de más de 96 h va matando las filas en vez
+    de acumularlas.
+    """
+    frenada_y_apagada = s.decidir(
+        fila_de_reactivacion(seguimientos_fallidos=9),
+        ahora=momento(16, 11),
+        jornada=JORNADA,
+        ultimo_mensaje=None,
+        freno_de_reactivacion="interruptor_de_panico",
+    )
+    assert frenada_y_apagada.accion == "anular"
+    assert frenada_y_apagada.motivo == "seguimiento_apagado"
+
+    frenada_y_estancada = s.decidir(
+        fila_de_reactivacion(aplazado_desde=momento(1, 11)),
+        ahora=momento(16, 11),
+        jornada=JORNADA,
+        ultimo_mensaje=None,
+        freno_de_reactivacion="calidad_del_numero",
+    )
+    assert frenada_y_estancada.motivo == "reactivacion_estancada"
+
+
+# -- H7: el nombre del recordatorio también se parte por cualquier espacio -------------------
+
+
+def test_el_recordatorio_de_cita_no_manda_un_nombre_con_salto_de_linea():
+    """H7, frontera clínica. El razonamiento que la ronda 2 escribió para la reactivación
+    aplica palabra por palabra aquí: Meta RECHAZA un parámetro de plantilla con saltos de línea
+    (132007), y como la fila se marca ANTES de enviar (no negociable 21) el rechazo la pierde
+    para siempre tras los tres intentos. Lo que se pierde no es publicidad: es el aviso de una
+    cita real.
+
+    `citas.nombre_completo` lo escribe `registrar_cita` con lo que el modelo capturó y SIN
+    recortar, así que `"Ana\\nPérez"` es alcanzable. `.split(" ")` no corta por `\\n`.
+    """
+    parametros = s.parametros_de(
+        {
+            "tipo": s.TIPO_RECORDATORIO,
+            "nombre_completo": "Ana\nPérez",
+            "cita_inicio": momento(17, 9),
+            "tratamiento": "limpieza",
+        }
+    )
+    assert parametros[0] == "Ana"
+    for hueco in parametros:
+        assert "\n" not in hueco and "\r" not in hueco and "\t" not in hueco
+
+
+def test_el_recordatorio_de_cita_con_un_nombre_que_empieza_por_espacio_no_manda_vacio():
+    """El segundo residuo del mismo hallazgo: `" Ana Pérez"` dejaba `.split(" ")[0]` en una
+    cadena VACÍA. Ni `asegurar_paciente` ni `registrar_cita` recortan lo que llega."""
+    parametros = s.parametros_de(
+        {
+            "tipo": s.TIPO_RECORDATORIO,
+            "nombre_completo": "  Ana Pérez",
+            "cita_inicio": momento(17, 9),
+            "tratamiento": "limpieza",
+        }
+    )
+    assert parametros[0] == "Ana"
+
+
+def test_el_recordatorio_de_cita_sin_nombre_conserva_su_respaldo():
+    """Aquí SÍ se conserva `"paciente"`, al revés que en la rama de reactivación: el paciente
+    tiene hora de verdad y el aviso tiene que salir aunque no haya nombre."""
+    parametros = s.parametros_de(
+        {
+            "tipo": s.TIPO_RECORDATORIO,
+            "nombre_completo": None,
+            "cita_inicio": momento(17, 9),
+            "tratamiento": "limpieza",
+        }
+    )
+    assert parametros[0] == "paciente"
+
+
+# -- H8: una fila que revienta no se lleva la tanda ------------------------------------------
+
+
+def test_una_fila_que_revienta_no_se_lleva_los_recordatorios_de_las_demas():
+    """H8, y el lado malo es clínico. Una excepción dentro del `for fila in filas:` salía de
+    `despachar` y se comía el lote ENTERO -- incluidos los `recordatorio_cita` de las otras 49
+    filas. Con `ORDER BY s.fecha_objetivo`, una fila que reventara de forma determinista
+    estaría siempre a la cabeza y bloquearía la cola indefinidamente."""
+    import asyncio
+
+    rota = fila_de_reactivacion(id=1)
+    rota["fecha_objetivo"] = "esto no es un datetime"  # revienta en R3, dentro de `decidir`
+    buena = fila_de_reactivacion(
+        id=2,
+        tipo=s.TIPO_RECORDATORIO,
+        cita_id="cita-1",
+        cita_inicio=momento(17, 9),
+        cita_estado="confirmada",
+        nombre_completo="Ana Gómez",
+        telefono="573009998877",
+    )
+
+    whatsapp = _WhatsAppQueCuenta()
+    recuento = asyncio.run(
+        _despachar_con(
+            [rota, buena],
+            whatsapp=whatsapp,
+            plantillas={s.TIPO_RECORDATORIO: "recordatorio"},
+            ahora=momento(16, 11),
+        )
+    )
+    assert recuento["enviados"] == 1, "la fila rota se llevó por delante el recordatorio de cita"
+    assert recuento["fallidos"] == 1, "la fila rota tiene que contarse, no desaparecer callada"
+    assert len(whatsapp.llamadas) == 1
+
+
+# -- La cota superior de `programar_seguimiento` ---------------------------------------------
+
+
+def test_el_modelo_no_puede_programar_un_seguimiento_a_seis_meses():
+    """No había ninguna cota superior: `_a_fecha` solo exigía que la fecha fuera futura.
+
+    Dos cosas van mal y ninguna deja rastro: lo que sale a los seis meses dice «hace unos días
+    nos escribió» sobre algo que la cartera ya no considera reciente, y `contar_comprometidos_
+    hoy` no cuenta una fila a semanas vista, así que no consume cupo hoy y luego aparece fuera
+    de todo ritmo. La cota se toma de `persistencia.DIAS_DE_VENTANA_DE_CARTERA` y no se elige
+    aquí: es la misma ventana de las dos consultas de cartera.
+    """
+    import asyncio
+
+    from maxicare_daniela import persistencia as p
+    from maxicare_daniela.herramientas import _programar_seguimiento
+    from tests.test_herramientas import contexto
+
+    ctx = contexto()
+    lejos = ctx.ahora + timedelta(days=p.DIAS_DE_VENTANA_DE_CARTERA + 1)
+    respuesta = asyncio.run(
+        _programar_seguimiento(ctx, s.TIPO_SIN_AGENDAR, lejos.isoformat())
+    )
+    assert "programado" not in respuesta.lower()
+    assert str(p.DIAS_DE_VENTANA_DE_CARTERA) in respuesta
+
+
+def test_el_borde_de_la_cota_de_treinta_dias_sigue_dentro():
+    """La cota es `<=`, no `<`: justo a 30 días sí se puede programar. Sin este caso, apretar
+    la cota por error a `<` pasaría en silencio y se perdería el día 30 entero."""
+    import asyncio
+
+    from maxicare_daniela import persistencia as p
+    from maxicare_daniela.herramientas import _programar_seguimiento
+    from tests.test_herramientas import contexto
+
+    programados = {}
+
+    ctx = contexto()
+
+    async def _con_base_falsa(_ctx, trabajo):
+        programados["llamado"] = True
+        return (None, True)
+
+    justo = ctx.ahora + timedelta(days=p.DIAS_DE_VENTANA_DE_CARTERA)
+    with pytest.MonkeyPatch().context() as mp:
+        from maxicare_daniela import herramientas as h
+
+        mp.setattr(h, "_con_base", _con_base_falsa)
+        respuesta = asyncio.run(
+            _programar_seguimiento(ctx, s.TIPO_SIN_AGENDAR, justo.isoformat())
+        )
+    assert programados.get("llamado"), "la cota se comió el día 30, que sí debe entrar"
+    assert "programado" in respuesta.lower()
+
+
+class _WhatsAppQueCuenta:
+    """Un WhatsApp doblado que solo cuenta. No revienta: varias de las pruebas de arriba
+    esperan que SÍ salga algo (el recordatorio de cita con el freno puesto)."""
+
+    def __init__(self) -> None:
+        self.llamadas: list[dict] = []
+
+    async def enviar_plantilla(self, telefono, *, plantilla, parametros, idioma="es"):
+        self.llamadas.append(
+            {"telefono": telefono, "plantilla": plantilla, "parametros": parametros}
+        )
+        return "wamid.doblado"

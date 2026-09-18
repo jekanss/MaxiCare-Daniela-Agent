@@ -120,8 +120,8 @@ def fila(**cambios) -> dict:
         tipo="recordatorio_cita",
         fecha_objetivo=momento(16, 18),
         # `aplazado_desde` en `None`: así nace una fila real que nunca se ha aplazado. R3bis
-        # lee esta clave con `.get(...)`, así que ni siquiera haría falta declararla -- se
-        # deja explícita para que quede claro qué significa el default.
+        # lee esta clave, y desde la revisión final (H6 bis) R0 exige que ESTÉ -- distinta cosa
+        # que estar en `None`, que es su estado normal.
         aplazado_desde=None,
         intentos=0,
         telefono="573001112233",
@@ -130,6 +130,13 @@ def fila(**cambios) -> dict:
         cita_estado="confirmada",
         tomada_por=None,
         no_contactar=False,
+        # Las otras dos columnas que R0 exige en una fila de reactivación. El SELECT real
+        # (`persistencia.seguimientos_por_despachar`) las devuelve SIEMPRE, con `COALESCE` a 0
+        # para un teléfono sin fila en `contactos`, así que una fila de prueba que no las traiga
+        # es una fila que la base no puede producir -- y eso es justo lo que R0 caza. Un
+        # `recordatorio_cita` no las mira, pero esta fábrica también fabrica reactivaciones.
+        seguimientos_fallidos=0,
+        reactivaciones_ultimo_ano=0,
     )
     base.update(cambios)
     return base

@@ -1483,6 +1483,27 @@ async def _programar_seguimiento(
     if objetivo <= ctx.ahora:
         return "Esa fecha ya pasó. Programa el seguimiento para un momento futuro."
 
+    # La cota SUPERIOR (revisión final). Antes no había ninguna: `_a_fecha` solo exigía que la
+    # fecha fuera futura, así que el modelo podía programar un seguimiento a seis meses. Dos
+    # cosas van mal con eso, y ninguna deja rastro en un log:
+    #
+    # - Lo que sale a los seis meses dice «hace unos días nos escribió» sobre algo que la
+    #   cartera ya no considera reciente -- la misma razón por la que las dos consultas de
+    #   `persistencia` cierran su ventana a `DIAS_DE_VENTANA_DE_CARTERA`. Por eso el número no
+    #   se elige aquí: se toma de ahí, y el día que la ventana cambie esta cota la sigue.
+    # - `contar_comprometidos_hoy` no cuenta una fila a semanas vista (no es "de hoy" y nunca
+    #   se aplazó), así que no consume cupo hoy y luego aparece fuera de todo ritmo.
+    #
+    # Va en el CÓDIGO y no en el prompt por la doctrina de los no negociables 2 y 12: lo que
+    # el modelo escribe se acota donde no depende de que obedezca.
+    limite = ctx.ahora + timedelta(days=persistencia.DIAS_DE_VENTANA_DE_CARTERA)
+    if objetivo > limite:
+        return (
+            f"Esa fecha está demasiado lejos: un seguimiento se programa como mucho a "
+            f"{persistencia.DIAS_DE_VENTANA_DE_CARTERA} días. Elige una fecha más cercana o "
+            "dile al paciente que vuelva a escribir cuando lo necesite."
+        )
+
     clave = ctx.clave("seguimiento", tipo, objetivo.isoformat())
 
     def trabajo(conn) -> tuple[str | None, bool]:
@@ -2088,20 +2109,41 @@ async def _revocar_no_contactar(ctx: ContextoDaniela, nota: str | None) -> str:
 
 
 async def _cerrar_seguimiento(ctx: ContextoDaniela, nota: str | None) -> str:
-    """El núcleo. Anula lo pendiente y sube el contador. **Nunca marca la baja**: ver D2 --
-    «ya no me interesa esta consulta» no es «no me escriban nunca más», y de las dos es la
-    única que no se deshace sin que la persona vuelva a pedirlo. Marcar la baja aquí quemaría
-    a un paciente por una frase que no dijo.
+    """El núcleo. Deja constancia del «no», anula lo pendiente y sube el contador.
+
+    **Nunca marca la baja**: ver D2 -- «ya no me interesa esta consulta» no es «no me escriban
+    nunca más», y de las dos es la única que no se deshace sin que la persona vuelva a
+    pedirlo. Marcar la baja aquí quemaría a un paciente por una frase que no dijo.
+
+    **Lo duradero lo escribe `registrar_negativa_de_reactivacion`, no el contador** (hallazgo
+    crítico de la revisión final). La versión anterior llamaba a `anular_reactivaciones_vivas`
+    sola, cuyo WHERE exige `enviado_en IS NULL`: cuando el paciente PUEDE decir que no, la
+    fila que originó ese mensaje ya está enviada, así que `anulados` valía 0 siempre y el
+    motivo permanente no llegaba nunca a la tabla. Lo único que quedaba era el `+1` del
+    contador, y el contador NO es un sitio donde pueda vivir un «no»: su tope es una perilla
+    editable y `crear_cita` lo devuelve a 0. Medido: el paciente volvía a recibir mensaje 25 h
+    después de que Daniela le dijera «no se le vuelve a escribir sobre esta consulta».
+
+    El contador se sigue subiendo, y no es redundante: mide otra cosa (a este número no le
+    sirve que lo persigamos) y es lo que R1 lee al despachar.
     """
 
     def trabajo(conn):
-        anulados = persistencia.anular_reactivaciones_vivas(
-            conn, ctx.telefono_completo, motivo="el_paciente_dijo_que_no"
+        resultado = persistencia.registrar_negativa_de_reactivacion(
+            conn,
+            ctx.telefono_completo,
+            id_conversacion=ctx.id_conversacion,
+            tipos=sorted(seguimientos.TIPOS_QUE_EL_BARRIDO_ENCOLA),
         )
         persistencia.sumar_seguimiento_fallido(conn, ctx.telefono_completo)
-        return anulados
+        return resultado
 
-    await _con_base(ctx, trabajo)
+    resultado = await _con_base(ctx, trabajo)
+    log.info(
+        "cerrar_seguimiento: %d fila(s) anulada(s), lápida permanente sobre %s",
+        resultado["anulados"],
+        ", ".join(resultado["lapidas"]) or "ningún tipo nuevo (ya estaba escrita)",
+    )
     return (
         "Anotado: no se le vuelve a escribir sobre esta consulta. Si tiene una cita agendada, "
         "su recordatorio le sigue llegando. Si lo que quiere es no recibir NINGÚN mensaje "

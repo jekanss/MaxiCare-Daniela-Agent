@@ -211,6 +211,217 @@ def test_cerrar_anula_el_segundo_intento_que_vive_en_otra_conversacion(conexion_
     assert anulados == 1, "el segundo intento de la serie sobrevivió al «no»"
 
 
+def test_el_no_del_paciente_sobrevive_a_la_SECUENCIA_REAL(conexion_pruebas):
+    """**El hallazgo crítico de la revisión final, y la única prueba que recorre la secuencia
+    de producción de punta a punta.**
+
+    Las tres comprobaciones que existían sobre el «no» sembraban a mano una fila PENDIENTE
+    justo antes de llamar a la anulación, y en producción esa fila NO existe en ese instante:
+    el paciente solo puede pulsar «Ya no, gracias» DESPUÉS de que el mensaje salió, y una fila
+    enviada tiene `enviado_en NOT NULL`, que es exactamente lo que
+    `anular_reactivaciones_vivas` excluye. Por eso nadie vio que `anulados` valía 0 SIEMPRE y
+    que el motivo permanente no se escribía jamás.
+
+    La secuencia, tal cual ocurre:
+
+        encolar -> marcar enviado -> cerrar_seguimiento -> barrido al día siguiente
+
+    Y lo que se exige es que el último paso NO lo encuentre. Sin la lápida, el barrido lo
+    encolaba 25 h después de que Daniela le dijera «anotado, no se le vuelve a escribir sobre
+    esta consulta»: literalmente el fallo por el que se reporta un número.
+    """
+    conv = persistencia.asegurar_conversacion(conexion_pruebas, telefono=TELEFONO)
+    _mensaje(conexion_pruebas, TELEFONO, cuando=AHORA - timedelta(hours=30))
+
+    # 1. El barrido lo encola y el despachador lo manda. `enviado_en` puesto, como en la vida.
+    persistencia.insertar_seguimiento(
+        conexion_pruebas, id_conversacion=conv, tipo="reactivacion_sin_agendar",
+        fecha_objetivo=AHORA - timedelta(hours=1), clave_idempotencia="secuencia-real-1",
+    )
+    with conexion_pruebas.cursor() as cur:
+        cur.execute(
+            "SELECT id FROM seguimientos WHERE clave_idempotencia = 'secuencia-real-1'"
+        )
+        (id_enviado,) = cur.fetchone()
+    assert persistencia.marcar_seguimiento_enviado(conexion_pruebas, id_enviado)
+
+    # 2. El paciente contesta «Ya no, gracias». Esto es lo que hace `_cerrar_seguimiento`.
+    resultado = persistencia.registrar_negativa_de_reactivacion(
+        conexion_pruebas, TELEFONO, id_conversacion=conv,
+        tipos=["reactivacion_sin_agendar", "reactivacion_cancelada"],
+    )
+    # Lo vivo son CERO filas, y ese es justo el punto: la única fila que había ya está
+    # enviada. Si la prueba exigiera `anulados == 1` estaría volviendo a inventarse el estado.
+    assert resultado["anulados"] == 0
+    assert resultado["lapidas"] == ["reactivacion_sin_agendar"], (
+        "la lápida tiene que caer sobre el tipo que SE LE MANDÓ, y solo sobre ese: el otro "
+        "asunto («¿pudiste reagendar tu cita?») sigue siendo distinto"
+    )
+
+    # 3. El motivo permanente EXISTE en la tabla. Antes del arreglo: cero filas.
+    with conexion_pruebas.cursor() as cur:
+        cur.execute(
+            "SELECT count(*) FROM seguimientos WHERE motivo_anulacion = %s",
+            (persistencia.MOTIVO_NEGATIVA_DEL_PACIENTE,),
+        )
+        (con_el_motivo,) = cur.fetchone()
+    assert con_el_motivo == 1
+
+    # 4. Al día siguiente -- y a los diez, y a los treinta-- el barrido ya no lo encuentra.
+    for dias in (1, 10, 29):
+        cuando = AHORA + timedelta(days=dias)
+        leads = persistencia.leads_sin_agendar(
+            conexion_pruebas, ahora=cuando, limite=50, max_seguimientos_fallidos=99
+        )
+        assert TELEFONO not in {l["telefono"] for l in leads}, (
+            f"a los {dias} días el barrido volvió a encolar a quien dijo que no"
+        )
+
+
+def test_el_no_del_paciente_sobrevive_a_que_agende_y_a_la_perilla(conexion_pruebas):
+    """Las otras dos cosas que borraban el «no», y las dos son reales.
+
+    Lo único que sostenía la promesa antes del arreglo era `contactos.seguimientos_fallidos`
+    llegando a 2, y ese contador:
+
+    - lo resetea `crear_cita` a 0 (D4, correcto para lo que D4 quiere), así que UNA sola cita
+      borraba el «no» entero;
+    - tiene por tope `max_seguimientos_fallidos`, una perilla EDITABLE desde el panel cuya
+      descripción no menciona en ningún sitio que sostenga el «no» de nadie. Subirla de 2 a 3
+      -- una decisión de marketing perfectamente razonable-- devolvía a la cola a quien había
+      dicho «Ya no, gracias».
+
+    La lápida no vive en el contador, así que ninguna de las dos la toca.
+    """
+    conv = persistencia.asegurar_conversacion(conexion_pruebas, telefono=TELEFONO)
+    _mensaje(conexion_pruebas, TELEFONO, cuando=AHORA - timedelta(hours=30))
+    persistencia.registrar_negativa_de_reactivacion(
+        conexion_pruebas, TELEFONO, id_conversacion=conv,
+        tipos=["reactivacion_sin_agendar", "reactivacion_cancelada"],
+    )
+
+    # La perilla al máximo: R1 ya no frena a nadie.
+    persistencia.asegurar_contacto(conexion_pruebas, TELEFONO)
+    persistencia.reiniciar_seguimientos_fallidos(conexion_pruebas, TELEFONO)  # como `crear_cita`
+    assert persistencia.leer_contacto(conexion_pruebas, TELEFONO)["seguimientos_fallidos"] == 0
+
+    leads = persistencia.leads_sin_agendar(
+        conexion_pruebas, ahora=AHORA + timedelta(days=8), limite=50,
+        max_seguimientos_fallidos=99,
+    )
+    assert TELEFONO not in {l["telefono"] for l in leads}, (
+        "con el contador en 0 y la perilla en 99, el «no» del paciente desapareció"
+    )
+
+
+def test_el_no_sin_ninguna_reactivacion_previa_tambien_queda_escrito(conexion_pruebas):
+    """El escenario que NO depende de ninguna perilla y que fallaba SIEMPRE.
+
+    El paciente pregunta un precio dentro de una conversación normal, dice «no gracias, por
+    ahora no», y Daniela le contesta «anotado, no se le vuelve a escribir sobre esta consulta».
+    Nunca hubo una reactivación, así que no hay ninguna fila que anular: `anulados = 0` y, antes
+    del arreglo, nada quedaba escrito. Medido contra Neon: 25 h después el barrido lo encolaba.
+
+    Sin un asunto abierto al que atribuir el «no», la lápida cae sobre los dos tipos. Es el
+    lado barato de equivocarse: de más se pierde un lead; de menos se le escribe a quien
+    acaba de recibir la promesa contraria por escrito.
+    """
+    conv = persistencia.asegurar_conversacion(conexion_pruebas, telefono=TELEFONO)
+    _mensaje(conexion_pruebas, TELEFONO, cuando=AHORA - timedelta(hours=30))
+
+    resultado = persistencia.registrar_negativa_de_reactivacion(
+        conexion_pruebas, TELEFONO, id_conversacion=conv,
+        tipos=["reactivacion_sin_agendar", "reactivacion_cancelada"],
+    )
+    assert resultado["anulados"] == 0
+    assert set(resultado["lapidas"]) == {"reactivacion_sin_agendar", "reactivacion_cancelada"}
+
+    leads = persistencia.leads_sin_agendar(
+        conexion_pruebas, ahora=AHORA + timedelta(hours=25), limite=50
+    )
+    assert TELEFONO not in {l["telefono"] for l in leads}
+
+
+def test_la_lapida_es_idempotente_y_no_come_cupo_ni_sube_contadores(conexion_pruebas):
+    """La lápida tiene que ser INERTE para todo lo que no sea la condición 7. Si contara como
+    comprometida, cada «no» se comería un hueco del tope diario de reactivación; si contara
+    como envío, subiría el contador de alguien que nunca recibió nada.
+
+    Y decir que no dos veces no escribe dos lápidas: la clave de idempotencia la arma el
+    código (no negociable 2) y no lleva el día dentro, al revés que la del barrido -- aquella
+    tiene que poder repetirse mañana, y esta tiene que no poder repetirse nunca.
+    """
+    conv = persistencia.asegurar_conversacion(conexion_pruebas, telefono=TELEFONO)
+    antes = persistencia.contar_comprometidos_hoy(conexion_pruebas, ahora=AHORA)
+
+    primera = persistencia.registrar_negativa_de_reactivacion(
+        conexion_pruebas, TELEFONO, id_conversacion=conv,
+        tipos=["reactivacion_sin_agendar", "reactivacion_cancelada"],
+    )
+    segunda = persistencia.registrar_negativa_de_reactivacion(
+        conexion_pruebas, TELEFONO, id_conversacion=conv,
+        tipos=["reactivacion_sin_agendar", "reactivacion_cancelada"],
+    )
+    assert len(primera["lapidas"]) == 2
+    assert segunda["lapidas"] == [], "un segundo «no» escribió una lápida de más"
+
+    assert persistencia.contar_comprometidos_hoy(conexion_pruebas, ahora=AHORA) == antes
+    assert persistencia.envios_por_contabilizar(
+        conexion_pruebas, ahora=AHORA + timedelta(days=30)
+    ) == []
+    assert persistencia.seguimientos_por_despachar(
+        conexion_pruebas, ahora=AHORA + timedelta(days=30)
+    ) == []
+
+
+def test_la_lapida_de_un_tipo_no_bloquea_el_OTRO_asunto(conexion_pruebas):
+    """La decisión que hace que el bloqueo sea por TIPO y no por persona: quien dijo que no a
+    «¿sigues interesada en agendar?» SÍ puede recibir después «¿pudiste reagendar tu cita?».
+    Son dos asuntos distintos, y cerrar el bloqueo a nivel de persona apagaría la reactivación
+    entera -- incluida una consulta legítima y distinta-- por un «no» que solo hablaba de la
+    primera."""
+    conv = persistencia.asegurar_conversacion(conexion_pruebas, telefono=TELEFONO)
+    _mensaje(conexion_pruebas, TELEFONO, cuando=AHORA - timedelta(hours=30))
+
+    # Le mandamos SOLO `sin_agendar` y dice que no: solo ese asunto estaba abierto.
+    persistencia.insertar_seguimiento(
+        conexion_pruebas, id_conversacion=conv, tipo="reactivacion_sin_agendar",
+        fecha_objetivo=AHORA - timedelta(hours=1), clave_idempotencia="solo-sin-agendar",
+    )
+    with conexion_pruebas.cursor() as cur:
+        cur.execute("SELECT id FROM seguimientos WHERE clave_idempotencia = 'solo-sin-agendar'")
+        (id_enviado,) = cur.fetchone()
+    persistencia.marcar_seguimiento_enviado(conexion_pruebas, id_enviado)
+
+    resultado = persistencia.registrar_negativa_de_reactivacion(
+        conexion_pruebas, TELEFONO, id_conversacion=conv,
+        tipos=["reactivacion_sin_agendar", "reactivacion_cancelada"],
+    )
+    assert resultado["lapidas"] == ["reactivacion_sin_agendar"]
+
+    # Meses después cancela una cita: ese es otro asunto, y sí puede recibirlo.
+    id_cita = persistencia.registrar_cita(
+        conexion_pruebas, reserva_id=None, conversacion_id=conv, paciente_id=None,
+        nombre_completo="Marcela Rios", telefono=TELEFONO, tratamiento="limpieza",
+        inicio=AHORA + timedelta(days=100), duracion_minutos=60, evento_calendar_id=None,
+    )
+    persistencia.marcar_cita_cancelada(conexion_pruebas, id_cita, motivo="paciente")
+    with conexion_pruebas.cursor() as cur:
+        cur.execute(
+            "UPDATE citas SET actualizada_en = %s WHERE id = %s",
+            (AHORA + timedelta(days=100), id_cita),
+        )
+    conexion_pruebas.commit()
+
+    cancelaron = persistencia.leads_que_cancelaron(
+        conexion_pruebas, ahora=AHORA + timedelta(days=102), limite=50,
+        max_seguimientos_fallidos=99,
+    )
+    assert TELEFONO in {l["telefono"] for l in cancelaron}, (
+        "la lápida de un tipo bloqueó el otro: el bloqueo dejó de ser por asunto"
+    )
+
+
 def test_cerrar_no_se_lleva_por_delante_el_recordatorio_de_una_cita(conexion_pruebas):
     """I2 (ronda de revisión sobre la parada D): la única línea de esta parada con
     consecuencia clínica.
@@ -232,11 +443,14 @@ def test_cerrar_no_se_lleva_por_delante_el_recordatorio_de_una_cita(conexion_pru
         fecha_objetivo=AHORA + timedelta(days=7), clave_idempotencia="k-reactivacion",
     )
 
-    anulados = persistencia.anular_reactivaciones_vivas(
-        conexion_pruebas, TELEFONO, motivo="el_paciente_dijo_que_no"
+    # Revisión final: por la puerta de VERDAD (`registrar_negativa_de_reactivacion`) y no por
+    # `anular_reactivaciones_vivas` a pelo, que es solo una de sus dos mitades.
+    resultado = persistencia.registrar_negativa_de_reactivacion(
+        conexion_pruebas, TELEFONO, id_conversacion=conv,
+        tipos=["reactivacion_sin_agendar", "reactivacion_cancelada"],
     )
 
-    assert anulados == 1, "tenía que anular SOLO la reactivación, no las dos filas"
+    assert resultado["anulados"] == 1, "tenía que anular SOLO la reactivación, no las dos filas"
     with conexion_pruebas.cursor() as cur:
         cur.execute(
             "SELECT anulado_en FROM seguimientos WHERE tipo = 'recordatorio_cita' "
@@ -244,6 +458,23 @@ def test_cerrar_no_se_lleva_por_delante_el_recordatorio_de_una_cita(conexion_pru
         )
         (anulado_en,) = cur.fetchone()
     assert anulado_en is None, "el recordatorio de la cita quedó anulado por un «no» ajeno"
+
+    # La mitad que faltaba: que tampoco se escriba una LÁPIDA de tipo `recordatorio_cita`. No
+    # apagaría el recordatorio de hoy -- la condición 7 solo la miran las consultas de
+    # reactivación-- pero sería la primera fila del proyecto que dice por escrito que este
+    # paciente rechazó que le avisen de su propia cita, y el día que alguien lea ese motivo sin
+    # filtrar por tipo, el no negociable 25 se cae solo.
+    with conexion_pruebas.cursor() as cur:
+        cur.execute(
+            "SELECT count(*) FROM seguimientos WHERE tipo = 'recordatorio_cita' "
+            "AND motivo_anulacion = %s",
+            (persistencia.MOTIVO_NEGATIVA_DEL_PACIENTE,),
+        )
+        (lapidas_de_cita,) = cur.fetchone()
+    assert lapidas_de_cita == 0, (
+        "se escribió una lápida sobre `recordatorio_cita`: la baja es comercial y no apaga el "
+        "aviso de una cita (no negociable 25)"
+    )
 
 
 # ==========================================================================================
@@ -338,6 +569,15 @@ def test_quien_dijo_que_no_no_vuelve_a_entrar_por_esta_misma_consulta(conexion_p
     Bloqueo PERMANENTE y no por ventana: un "no" explícito no caduca con el reloj como
     caducan `llego_tarde` o `fuera_de_horario_comercial`, que son sobre CUÁNDO salió el
     mensaje y no sobre si debía salir. Ante la duda, no se vuelve a escribir.
+
+    **Revisión final: esta prueba sembraba a mano una fila PENDIENTE justo antes de anular**, y
+    en producción esa fila no existe en ese instante -- el paciente solo puede decir que no
+    DESPUÉS de que el mensaje salió, y una fila enviada es justo la que
+    `anular_reactivaciones_vivas` excluye. Fabricar ese estado es lo que tapó H1 durante toda
+    la rama. Ahora la fila se marca ENVIADA, como en la vida, y lo que se afirma es que la
+    condición 7 encuentra algo igual: la lápida que escribe
+    `registrar_negativa_de_reactivacion`. La secuencia completa, de punta a punta, está en
+    `test_el_no_del_paciente_sobrevive_a_la_SECUENCIA_REAL`.
     """
     conv = persistencia.asegurar_conversacion(conexion_pruebas, telefono=TELEFONO)
     _mensaje(conexion_pruebas, TELEFONO, cuando=AHORA - timedelta(hours=30))
@@ -345,10 +585,16 @@ def test_quien_dijo_que_no_no_vuelve_a_entrar_por_esta_misma_consulta(conexion_p
         conexion_pruebas, id_conversacion=conv, tipo="reactivacion_sin_agendar",
         fecha_objetivo=AHORA - timedelta(days=1), clave_idempotencia="k-dijo-que-no",
     )
-    anulados = persistencia.anular_reactivaciones_vivas(
-        conexion_pruebas, TELEFONO, motivo="el_paciente_dijo_que_no",
+    with conexion_pruebas.cursor() as cur:
+        cur.execute("SELECT id FROM seguimientos WHERE clave_idempotencia = 'k-dijo-que-no'")
+        (id_fila,) = cur.fetchone()
+    assert persistencia.marcar_seguimiento_enviado(conexion_pruebas, id_fila)
+
+    resultado = persistencia.registrar_negativa_de_reactivacion(
+        conexion_pruebas, TELEFONO, id_conversacion=conv,
+        tipos=["reactivacion_sin_agendar", "reactivacion_cancelada"],
     )
-    assert anulados == 1, "el montaje no anuló la fila que la prueba necesita"
+    assert resultado["lapidas"] == ["reactivacion_sin_agendar"]
 
     assert persistencia.leads_sin_agendar(conexion_pruebas, ahora=AHORA, limite=50) == []
 

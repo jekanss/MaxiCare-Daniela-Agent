@@ -1844,7 +1844,17 @@ def anular_seguimientos_de_cita(
     return anulados
 
 
-def anular_reactivaciones_vivas(conn, telefono: str, *, motivo: str) -> int:
+#: El motivo de anulación que la condición 7 de las dos consultas de cartera busca, y el
+#: único que NO caduca con el reloj. Vivía como literal suelto en cuatro sitios -- las dos
+#: consultas, la tool y las pruebas--: si uno se separaba de los otros, el bloqueo permanente
+#: dejaba de encontrarse sin que nada fallara. Se escribe una vez y las dos consultas lo
+#: interpolan (son f-strings) para que separarlos deje de ser posible.
+MOTIVO_NEGATIVA_DEL_PACIENTE = "el_paciente_dijo_que_no"
+
+
+def anular_reactivaciones_vivas(
+    conn, telefono: str, *, motivo: str, commit: bool = True
+) -> int:
     """Anula los seguimientos de reactivación pendientes de ESE teléfono. Devuelve cuántos.
 
     Va por teléfono y no por conversación a propósito: la conversación caduca a las 24 h y el
@@ -1853,6 +1863,16 @@ def anular_reactivaciones_vivas(conn, telefono: str, *, motivo: str) -> int:
 
     NO toca `recordatorio_cita`: quien dice «ya no me interesa» a una reactivación no está
     renunciando a que le avisen de su propia cita.
+
+    **`enviado_en IS NULL` es lo que hace que esta función, POR SÍ SOLA, no pueda guardar el
+    «no» del paciente** (hallazgo crítico de la revisión final): cuando el paciente PUEDE
+    decir que no, la fila que originó ese mensaje ya está enviada, así que devolvía 0 y el
+    motivo permanente no se escribía jamás. Es correcto que sea así -- una fila ya enviada no
+    se "desenvía"--; lo que faltaba era dejar constancia aparte. Eso lo hace
+    `registrar_negativa_de_reactivacion`, que es la puerta que debe usar el código de
+    producto: esta función sola solo cierra lo que todavía no ha salido.
+
+    `commit=False` para que la anulación y la lápida viajen en la MISMA transacción.
     """
     with conn.cursor() as cur:
         cur.execute(
@@ -1871,8 +1891,118 @@ def anular_reactivaciones_vivas(conn, telefono: str, *, motivo: str) -> int:
             {"tel": telefono, "motivo": motivo[:200]},
         )
         anulados = cur.rowcount
-    conn.commit()
+    if commit:
+        conn.commit()
     return anulados
+
+
+def registrar_negativa_de_reactivacion(
+    conn, telefono: str, *, id_conversacion: str, tipos: Iterable[str]
+) -> dict[str, Any]:
+    """El «no» del paciente, escrito donde la condición 7 sabe encontrarlo. Una transacción.
+
+    Devuelve `{"anulados": n, "lapidas": [tipo, ...]}`.
+
+    **El problema que resuelve.** `anular_reactivaciones_vivas` sola no puede guardar un «no»:
+    su WHERE exige `enviado_en IS NULL`, y el paciente solo puede decir que no DESPUÉS de que
+    el mensaje salió. Medido contra Neon con el código real: `anulados` valía 0 siempre y
+    `motivo_anulacion = 'el_paciente_dijo_que_no'` no llegaba nunca a la tabla, así que la
+    condición 7 de `_LEADS_SIN_AGENDAR` y `_LEADS_QUE_CANCELARON` -- la que este módulo
+    documenta como «la decisión más importante» -- estaba muerta en producción. Lo único que
+    quedaba en pie era `contactos.seguimientos_fallidos += 1`, y eso NO sirve como «no»:
+    su tope es una perilla editable de `configuracion` y `crear_cita` lo devuelve a 0, así que
+    una sola cita -- o subir la perilla de 2 a 3-- borraba el «no» entero.
+
+    **La lápida.** Una fila de `seguimientos` que nace ANULADA, con el motivo permanente y sin
+    `enviado_en`. No hace falta migración ni columna nueva: la condición 7 pregunta por
+    `(tipo, motivo_anulacion)` y no mira ninguna otra columna, así que encuentra exactamente
+    lo que fue escrita para encontrar. Y es INERTE para todo lo demás, que es lo que la hace
+    barata -- comprobado condición por condición contra las cinco consultas que leen esta
+    tabla:
+
+    - `seguimientos_por_despachar` exige `anulado_en IS NULL`: no la recoge.
+    - `contar_comprometidos_hoy` exige `enviado_en` de hoy, o `enviado_en IS NULL AND
+      anulado_en IS NULL`: no la cuenta, así que no come cupo del tope diario.
+    - `envios_por_contabilizar` exige `enviado_en IS NOT NULL`: no sube ningún contador.
+    - La condición 5 («en juego») exige lo mismo que las dos de arriba: no bloquea al OTRO
+      tipo, que es justo lo que el bloqueo por tipo quiere permitir.
+    - La condición 6 exige `enviado_en IS NOT NULL`: no gasta intentos de serie.
+
+    **Sobrevive a las cuatro cosas que borraban el «no»**, que es el requisito: que la fila ya
+    estuviera enviada (la lápida es una fila nueva), que no existiera ninguna fila (idem),
+    que la persona agende después (`crear_cita` resetea el contador, no toca `seguimientos`) y
+    que alguien mueva una perilla de `configuracion` (la condición 7 no lee ninguna).
+
+    **Va por TIPO y no por persona, y la elección del tipo es lo único con criterio aquí.**
+    Quien dijo que no a «¿sigues interesada en agendar?» sí puede recibir después «¿pudiste
+    reagendar tu cita?»: son dos asuntos distintos. Así que la lápida se escribe sobre los
+    tipos que NOSOTROS le habíamos abierto a esa persona -- los que alguna vez se le enviaron,
+    más los que estaban vivos en la cola en este instante--, que es a lo que su «no» puede
+    estar contestando.
+
+    Y si no le habíamos abierto NINGUNO -- el paciente preguntó un precio y dijo «no gracias»
+    dentro de la conversación normal, que es el caso más común y el que medido contra Neon
+    volvía a recibir mensaje 25 h después-- entonces no hay asunto al que atribuir el «no», y
+    se escribe sobre `tipos` entero. Es el lado barato de equivocarse: de más, se pierde un
+    lead que quizá habría contestado a otro discurso; de menos, se le escribe a alguien a
+    quien Daniela acaba de prometerle por escrito que no se le volvería a escribir, que es
+    literalmente el fallo por el que se reporta un número.
+
+    `tipos` entra como parámetro y no se importa de `seguimientos.py`: la flecha de imports de
+    este proyecto va de `seguimientos` hacia `persistencia`, nunca al revés.
+    """
+    tipos = tuple(dict.fromkeys(tipos))
+    if not tipos:
+        return {"anulados": 0, "lapidas": []}
+
+    with conn.cursor() as cur:
+        # ANTES de anular: una fila viva todavía tiene `anulado_en IS NULL`, y es
+        # precisamente una de las que dicen a qué asunto puede estar contestando el «no».
+        cur.execute(
+            """
+            SELECT DISTINCT s.tipo
+              FROM seguimientos s
+              JOIN conversaciones cv ON cv.id = s.conversacion_id
+             WHERE cv.telefono = %(tel)s
+               AND s.tipo = ANY(%(tipos)s)
+               AND (s.enviado_en IS NOT NULL OR s.anulado_en IS NULL)
+            """,
+            {"tel": telefono, "tipos": list(tipos)},
+        )
+        abiertos = {fila[0] for fila in cur.fetchall()}
+
+    anulados = anular_reactivaciones_vivas(
+        conn, telefono, motivo=MOTIVO_NEGATIVA_DEL_PACIENTE, commit=False
+    )
+
+    lapidas: list[str] = []
+    con_lapida = [tipo for tipo in tipos if not abiertos or tipo in abiertos]
+    with conn.cursor() as cur:
+        for tipo in con_lapida:
+            # La clave la arma el CÓDIGO, nunca el modelo (no negociable 2), y NO lleva el día
+            # dentro -- al revés que la del barrido, y por la misma razón que aquella sí lo
+            # lleva: la del barrido tiene que poder repetirse mañana, y esta tiene que no
+            # poder repetirse nunca. Una por teléfono y tipo, para siempre.
+            cur.execute(
+                """
+                INSERT INTO seguimientos
+                    (conversacion_id, tipo, fecha_objetivo, clave_idempotencia,
+                     anulado_en, motivo_anulacion)
+                VALUES (%(conv)s, %(tipo)s, now(), %(clave)s, now(), %(motivo)s)
+                ON CONFLICT (clave_idempotencia) DO NOTHING
+                RETURNING id
+                """,
+                {
+                    "conv": id_conversacion,
+                    "tipo": tipo,
+                    "clave": f"{telefono}:negativa:{tipo}",
+                    "motivo": MOTIVO_NEGATIVA_DEL_PACIENTE,
+                },
+            )
+            if cur.fetchone() is not None:
+                lapidas.append(tipo)
+    conn.commit()
+    return {"anulados": anulados, "lapidas": lapidas}
 
 
 # ==========================================================================================
@@ -1926,6 +2056,20 @@ def anular_reactivaciones_vivas(conn, telefono: str, *, motivo: str) -> int:
 #: porque es una decisión de diseño y no un hecho verificado contra el resto del código. Los
 #: dos números son constantes y se pueden ajustar sin tocar la forma de ninguna consulta.
 DIAS_ENTRE_INTENTOS_DE_REACTIVACION = 7
+
+#: La ventana de cartera: pasado esto, «hace unos días nos escribió» es falso y decirlo es de
+#: las cosas por las que la gente reporta un número. Es el borde superior de la condición 2 de
+#: las dos consultas de abajo, y las dos lo interpolan.
+#:
+#: Y es además la cota superior de `fecha_objetivo` en `herramientas._programar_seguimiento`
+#: (revisión final). Ahí no había ninguna: `_a_fecha` solo exigía que la fecha fuera futura,
+#: así que el MODELO podía programar un seguimiento a seis meses. La doctrina del proyecto es
+#: que lo que el modelo escribe se acota en el código (no negociables 2 y 12), y el valor no
+#: hay que elegirlo: un seguimiento programado más allá de esta ventana saldría diciendo
+#: «hace unos días nos escribió» sobre algo que la cartera ya no considera reciente. Encima
+#: interactúa con `contar_comprometidos_hoy`: una fila a semanas vista no cuenta contra el
+#: cupo del día y luego cae fuera de todo ritmo.
+DIAS_DE_VENTANA_DE_CARTERA = 30
 
 #: Ronda 3 de revisión: corregido. La ronda 2 documentaba esto como «la MISMA cota que
 #: `max_seguimientos_fallidos`, expresada una segunda vez» y ordenaba moverlas juntas -- las
@@ -2055,7 +2199,7 @@ SELECT uc.telefono, uc.conversacion_id, um.cuando AS ultimo_mensaje
  WHERE COALESCE(co.no_contactar, FALSE) = FALSE
    AND COALESCE(co.seguimientos_fallidos, 0) < %(max_fallidos)s
    AND um.cuando <= %(ahora)s - interval '24 hours'
-   AND um.cuando >  %(ahora)s - interval '30 days'
+   AND um.cuando >  %(ahora)s - interval '{DIAS_DE_VENTANA_DE_CARTERA} days'
    AND NOT EXISTS (
         SELECT 1 FROM citas c
          WHERE c.telefono = uc.telefono
@@ -2096,7 +2240,7 @@ SELECT uc.telefono, uc.conversacion_id, um.cuando AS ultimo_mensaje
           JOIN conversaciones cv3 ON cv3.id = s3.conversacion_id
          WHERE cv3.telefono = uc.telefono
            AND s3.tipo = 'reactivacion_sin_agendar'
-           AND s3.motivo_anulacion = 'el_paciente_dijo_que_no'
+           AND s3.motivo_anulacion = '{MOTIVO_NEGATIVA_DEL_PACIENTE}'
    )
  ORDER BY um.cuando DESC
  LIMIT %(limite)s
@@ -2146,7 +2290,7 @@ SELECT uc.telefono, uc.conversacion_id, uc.actualizada_en AS ultimo_mensaje
  WHERE COALESCE(co.no_contactar, FALSE) = FALSE
    AND COALESCE(co.seguimientos_fallidos, 0) < %(max_fallidos)s
    AND uc.actualizada_en <= %(ahora)s - interval '24 hours'
-   AND uc.actualizada_en >  %(ahora)s - interval '30 days'
+   AND uc.actualizada_en >  %(ahora)s - interval '{DIAS_DE_VENTANA_DE_CARTERA} days'
    AND NOT EXISTS (
         SELECT 1 FROM citas c2
          WHERE c2.telefono = uc.telefono
@@ -2186,7 +2330,7 @@ SELECT uc.telefono, uc.conversacion_id, uc.actualizada_en AS ultimo_mensaje
           JOIN conversaciones cv2 ON cv2.id = s2.conversacion_id
          WHERE cv2.telefono = uc.telefono
            AND s2.tipo = 'reactivacion_cancelada'
-           AND s2.motivo_anulacion = 'el_paciente_dijo_que_no'
+           AND s2.motivo_anulacion = '{MOTIVO_NEGATIVA_DEL_PACIENTE}'
    )
  ORDER BY uc.actualizada_en DESC
  LIMIT %(limite)s

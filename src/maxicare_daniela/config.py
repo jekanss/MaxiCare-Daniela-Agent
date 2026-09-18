@@ -450,13 +450,22 @@ class Config:
     plantilla_cancelada: str = ""
     plantilla_no_asistio: str = ""
 
-    #: El interruptor de pánico (regla 10), para cuando exista el BARRIDO que encola
-    #: (parada siguiente de este plan). `0` apagará el barrido entero sin redesplegar: dejará
-    #: de encolar gente nueva y todo lo demás --recordatorios de cita, atención, relevo--
-    #: seguirá igual. **AVISO (M2, ronda 1 de revisión): HOY no hay ningún barrido corriendo,
-    #: así que ponerlo a `0` ahora no apaga nada.** Sin error en ningún log que lo diga -- el
-    #: mismo patrón que el webhook de Telegram sin activar (CLAUDE.md). `!= "0"` y no `== "1"`
-    #: porque el default es encendido, como `daniela_responde`.
+    #: El interruptor de pánico de la reactivación (regla 10). **Apaga de verdad, y apaga las
+    #: DOS mitades** (el AVISO que decía lo contrario era cierto en la tarea 4 y dejó de serlo
+    #: en `5eb1352`, cuando se construyó el barrido; corregido en la revisión final, H4):
+    #:
+    #: - `barrido.encolar` no encola a nadie nuevo, y con `0` ni siquiera abre una conexión.
+    #:   La tarea de fondo tampoco arranca.
+    #: - `seguimientos.despachar` APLAZA todo lo comercial que ya estuviera encolado, vía
+    #:   `runtime._freno_de_reactivacion` y la guarda FRENO de `seguimientos.decidir`. No lo
+    #:   anula ni lo marca: esas filas salen cuando se vuelva a encender.
+    #:
+    #: Lo que sigue igual con esto en `0`: los recordatorios de cita, la atención y el relevo.
+    #: Esa es la frontera del no negociable 25.
+    #:
+    #: Cambiarlo exige redesplegar (es una variable de entorno, no una perilla de
+    #: `configuracion`). `!= "0"` y no `== "1"` porque el default es encendido, como
+    #: `daniela_responde`.
     reactivacion_encendida: bool = True
 
     #: La dirección donde vive la política de tratamiento de datos que el paciente ve en su

@@ -2033,6 +2033,54 @@ async def _avisar_de_recordatorios_fallidos(fallidos: int) -> None:
         log.exception("no se pudo avisar a los doctores de los recordatorios fallidos")
 
 
+#: Lo último que Meta dijo de la calidad del número, guardado por el barrido de reactivación.
+#: `None` significa «todavía no se ha preguntado», y eso FRENA -- ver `_freno_de_reactivacion`.
+_ultima_calidad_del_numero: dict[str, str] | None = None
+
+
+def _freno_de_reactivacion() -> str | None:
+    """Por qué NO debe salir ninguna reactivación ahora mismo, o `None` si puede salir.
+
+    **El agujero que cierra** (revisión final, H2 y H3): las tres señales se consultaban solo
+    en `barrido.encolar`, que corre una vez por hora y decide quién ENTRA en la cola. El
+    despachador corre cada sesenta segundos, es quien de verdad MANDA, y no miraba ninguna.
+
+    - Interruptor de pánico (`MAXICARE_REACTIVACION=0`, regla 10) y freno por calidad (regla
+      11): quien accionaba el freno de emergencia veía salir en el minuto siguiente todo lo
+      que ya estaba encolado -- hasta el tope diario del día, más lo aplazado de días
+      anteriores. El aviso al General decía «el barrido no encola a nadie nuevo», que era
+      literalmente cierto y por eso mismo engañoso.
+    - `MAXICARE_DANIELA_RESPONDE=0`: peor que un mensaje de más. Salía un «¿sigue interesada?»
+      y quien pulsaba «Sí, me interesa» no recibía NADA, porque `atencion.procesar_mensaje`
+      corta en esa misma bandera. Pedir respuesta y callarse es el disparador de reporte más
+      limpio que existe, y si quien vuelve escribe «me duele», cruza la frontera clínica.
+
+    **La calidad se lee de una caché y no de la red**, y es deliberado: este bucle corre cada
+    sesenta segundos y atiende además los recordatorios de citas reales. Meterle una llamada a
+    `graph.facebook.com` por ciclo sería 1.440 al día y, sobre todo, ataría el aviso de una
+    cita a que la API de Meta responda. La caché la refresca `_barrer_reactivacion_sin_parar`
+    con su propio reloj horario.
+
+    **`None` frena**, igual que en `barrido.se_puede_encolar` y por la misma razón: ante la
+    duda, no se manda. La consecuencia práctica es que tras un reinicio no sale ninguna
+    reactivación hasta que el barrido confirme la calidad del número -- como mucho una hora, y
+    durante esa hora tampoco se ha encolado a nadie nuevo. El invariante que deja es bueno:
+    una reactivación solo sale si alguien comprobó la calidad del número en la última hora.
+
+    Los `recordatorio_cita` NO pasan por aquí: `seguimientos.decidir` solo aplica el freno a lo
+    comercial (guarda FRENO). Ahí está la frontera del no negociable 25.
+    """
+    if not config.reactivacion_encendida:
+        return "interruptor_de_panico"
+    if not config.daniela_responde:
+        return "daniela_apagada"
+    if not barrido.se_puede_encolar(
+        (_ultima_calidad_del_numero or {}).get("quality_rating")
+    ):
+        return "calidad_del_numero"
+    return None
+
+
 async def _despachar_recordatorios_sin_parar() -> None:
     """El reloj de la cola de recordatorios.
 
@@ -2065,6 +2113,7 @@ async def _despachar_recordatorios_sin_parar() -> None:
                     seguimientos.TIPO_NO_ASISTIO: config.plantilla_no_asistio,
                 },
                 idioma=config.plantillas_idioma,
+                freno_de_reactivacion=_freno_de_reactivacion(),
             )
             if any(recuento.values()):
                 log.info("recordatorios: %s", recuento)
@@ -2183,7 +2232,9 @@ async def _avisar_de_calidad_del_numero(calidad: dict[str, str] | None) -> None:
             "⚠️ <b>La reactivación de leads está en pausa</b>\n\n"
             f"Calidad del número ante Meta: <code>{html.escape(calificacion)}</code>. "
             f"Nivel de mensajería: <code>{html.escape(nivel)}</code>.\n\n"
-            "Mientras siga así, el barrido no encola a nadie nuevo. Los recordatorios de "
+            "Mientras siga así, el barrido no encola a nadie nuevo <b>y el despachador "
+            "tampoco manda lo que ya estaba encolado</b>: esas filas se aplazan, no se "
+            "pierden, y saldrán cuando la calidad vuelva a subir. Los recordatorios de "
             "cita, los escalamientos y la atención normal NO se ven afectados.",
             tema_id=_tema_general or 0,
         )
@@ -2203,10 +2254,15 @@ async def _barrer_reactivacion_sin_parar() -> None:
     **Asume un solo worker**, igual que el despacho de recordatorios y el barrido de
     relevos.
     """
+    global _ultima_calidad_del_numero
     while True:
         await asyncio.sleep(SEGUNDOS_ENTRE_BARRIDOS_DE_REACTIVACION)
         try:
             calidad = await _whatsapp.calidad_del_numero()
+            # La caché que lee `_freno_de_reactivacion` desde el otro bucle, el que de verdad
+            # manda. Se escribe SIEMPRE, incluido el `None` de una consulta que falló: dejar el
+            # valor viejo puesto sería seguir mandando con una calidad que ya nadie confirmó.
+            _ultima_calidad_del_numero = calidad
             operativa = await asyncio.to_thread(_leer_configuracion_operativa)
             recuento = await asyncio.to_thread(
                 barrido.encolar,

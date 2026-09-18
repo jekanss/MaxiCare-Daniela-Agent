@@ -147,9 +147,15 @@ de los botones esta probado de punta a punta en produccion; estas tres no vuelve
 
 1. Avisar con los tres nombres exactos tal como quedaron.
 2. Van al `.env` **y al del VPS**, no solo al local.
-3. El despachador hoy solo sabe mandar la de recordatorio de cita: todo lo que le llegue sin
-   `cita_id` lo anula con motivo `sin_plantilla` (`seguimientos.py:481`). Ampliarlo es parte
-   del trabajo de codigo y no bloquea pedir las plantillas.
+3. **No hace falta ampliar nada de codigo: el despachador ya sabe mandar las cuatro.**
+   `seguimientos.despachar` elige la plantilla por TIPO (`plantillas[fila["tipo"]]`) y
+   `parametros_de` arma un hueco para las de reactivacion y cuatro para la de recordatorio.
+   Un tipo sin plantilla configurada no se pierde ni se anula: la fila se queda PENDIENTE
+   hasta que exista, que es el modo de comprobacion de hoy. El motivo `sin_plantilla` ya no
+   existe; lo que queda es `sin_cita`, y es otra cosa -- una fila que no es reactivacion y
+   llega sin `cita_inicio`, o sea sin nada con que rellenar sus huecos de fecha y hora.
+   (Este punto decia lo contrario hasta la revision final: era cierto antes de `823fd0f` y
+   el riesgo de dejarlo era que alguien "lo ampliara" otra vez sobre algo ya hecho.)
 4. `scripts/probar_plantilla.py` manda UNA de verdad y traduce los errores de Meta. Un rechazo
    de Meta no se cobra.
 

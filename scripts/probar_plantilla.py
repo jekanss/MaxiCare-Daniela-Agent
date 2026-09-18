@@ -154,6 +154,20 @@ async def _mostrar_estado(config: Config) -> int:
 
 async def _enviar(config: Config, telefono: str) -> int:
     parametros = seguimientos.parametros_de(_fila_de_ejemplo())
+    # `parametros_de` devuelve `list[str] | None` desde la tarea 4: `None` es la reactivacion
+    # sin ningun nombre usable, que el despachador anula con motivo `sin_nombre` en vez de
+    # mandar "Hola paciente". Hoy `_fila_de_ejemplo()` no fija `tipo`, asi que cae en la rama
+    # del recordatorio y siempre devuelve cuatro -- pero `pytest -q` no corre este fichero, y
+    # el dia que alguien le anada `tipo` al ejemplo esto reventaria con un `TypeError` en vez
+    # de con un mensaje. Es exactamente la trampa que describe `.claude/rules/scripts-
+    # entregables.md`.
+    if parametros is None:
+        print(
+            "  FALLA: `parametros_de` devolvio None para la fila de ejemplo -- es una fila de\n"
+            "         reactivacion sin ningun nombre usable, y el despachador la anularia con\n"
+            "         motivo 'sin_nombre'. No hay nada que mandar; revisa `_fila_de_ejemplo`."
+        )
+        return 1
     print("  Los cuatro huecos, como los arma el despachador:")
     for i, valor in enumerate(parametros, start=1):
         print(f"    {{{{{i}}}}} = {valor!r}")

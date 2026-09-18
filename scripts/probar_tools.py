@@ -363,7 +363,16 @@ def corridas(url: str) -> int:
     )
     print(f"   estado guardado       -> {marca('guardado' in estado)} {estado}")
 
-    objetivo = hora(72)
+    # A SIETE DIAS, y NO con `hora(...)` (revision final). `hora()` cuenta bloques habiles
+    # desde dentro de 45 dias -- ese colchon existe para no chocar con el calendario REAL al
+    # reservar cupos--, y desde esta ronda `programar_seguimiento` acota `fecha_objetivo` a
+    # `persistencia.DIAS_DE_VENTANA_DE_CARTERA` (30), que es la ventana de las dos consultas
+    # de cartera. Con `hora(72)` las dos llamadas de abajo devolvian "esa fecha esta demasiado
+    # lejos" antes de tocar la base, y es correcto que lo hicieran: el problema era el valor
+    # del script, no la cota. Un seguimiento no reserva ningun cupo ni mira la jornada, asi
+    # que no necesita ni el colchon de 45 dias ni un bloque habil -- solo una fecha futura
+    # dentro de la ventana.
+    objetivo = ctx.ahora + timedelta(days=7)
     # `reactivacion_sin_agendar`, no `recordatorio_cita`: desde la tarea 2 de la reactivación
     # de leads, ese tipo salió de lo que se puede pedir por esta tool -- lo emite el código al
     # crear o mover la cita-- y con el viejo las dos llamadas de abajo devolvían "Ese tipo de
@@ -544,6 +553,22 @@ def corridas(url: str) -> int:
     despues = contacto_de_neon(ctx7.telefono_completo)
     print(f"   anula el seguimiento -> {marca(seguimiento_anulado_en_neon(clave_reactivacion))} "
           f"queda con anulado_en puesto")
+    # La LAPIDA (revision final, H1): lo unico duradero que el «no» dejaba antes era el +1 del
+    # contador, y ese contador lo resetea `crear_cita` y lo gobierna una perilla editable. Lo
+    # que de verdad sostiene la promesa «no se le vuelve a escribir sobre esta consulta» es una
+    # fila que nace anulada con el motivo permanente, del tipo correspondiente, y que la
+    # condicion 7 de las dos consultas de cartera busca para siempre. Contra Neon de verdad.
+    with persistencia.conectar(url) as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT s.tipo FROM seguimientos s JOIN conversaciones cv ON cv.id = "
+            "s.conversacion_id WHERE cv.telefono = %s AND s.motivo_anulacion = %s "
+            "AND s.enviado_en IS NULL AND s.clave_idempotencia LIKE %s",
+            (ctx7.telefono_completo, persistencia.MOTIVO_NEGATIVA_DEL_PACIENTE, "%:negativa:%"),
+        )
+        lapidas = sorted(f[0] for f in cur.fetchall())
+    print(f"   deja la lapida       -> "
+          f"{marca(lapidas == ['reactivacion_sin_agendar'])} constancia permanente sobre "
+          f"{lapidas or 'NINGUN tipo'} -- el «no» ya no vive solo en el contador")
     # I3: parte de `sin_fila_previa`, no de un contador leido de antemano -- si
     # `sumar_seguimiento_fallido` no asegurara la fila, esta llamada la habria perdido en
     # silencio (el UPDATE no encuentra a quien tocar) y `despues` seguiria en 0, no en 1.

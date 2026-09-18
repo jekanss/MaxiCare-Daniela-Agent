@@ -151,7 +151,13 @@ argument 'group_id'`). **Quien cambie una de esas firmas corre los seis que no g
   de una comprobación manual, nunca de un script que no gasta ni toca la red. Dobla a mano
   las firmas de `barrido.encolar`, `seguimientos.despachar`, `seguimientos.decidir` y
   `persistencia.contar_comprometidos_hoy`; quien les cambie la firma rompe este script en
-  silencio, igual que a los demás de esta lista. **Es la única red que hoy existe para
+  silencio, igual que a los demás de esta lista. **Desde la revisión final dobla también
+  `persistencia.registrar_negativa_de_reactivacion` y `marcar_seguimiento_enviado`**: la regla
+  3 recorre ahora la SECUENCIA REAL -encolar, marcar ENVIADO, y solo entonces el «no» del
+  paciente-, porque la versión anterior sembraba a mano una fila PENDIENTE justo antes de
+  anular y ese estado en producción no existe (el botón «Ya no, gracias» solo aparece DESPUÉS
+  de que el mensaje salió). Con el estado fabricado la comprobación pasaba en verde sobre un
+  bloqueo que no se escribía nunca. **Es la única red que hoy existe para
   `contar_comprometidos_hoy`**: no hay ni una prueba offline de esa función (toda su
   protección vivía solo en `-m neon`), así que la regla 9 (arranque lento) siembra a mano los
   tres casos de la Ruling E9 -enviado hoy, pendiente de hoy, aplazado lejos- y los dos que NO
