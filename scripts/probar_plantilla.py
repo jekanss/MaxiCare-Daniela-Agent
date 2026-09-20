@@ -115,7 +115,7 @@ _PLANTILLAS: dict[str, _Plantilla] = {
         atributo="plantilla_sin_agendar",
         variable="MAXICARE_PLANTILLA_SIN_AGENDAR",
         huecos=1,
-        header="Su consulta en MaxiCare",
+        header="Tu consulta en MaxiCare",
         botones=("Sí, me interesa", "Ya no, gracias"),
     ),
     "cancelada": _Plantilla(
@@ -123,7 +123,7 @@ _PLANTILLAS: dict[str, _Plantilla] = {
         atributo="plantilla_cancelada",
         variable="MAXICARE_PLANTILLA_CANCELADA",
         huecos=1,
-        header="Su cita en MaxiCare",
+        header="Tu cita en MaxiCare",
         botones=("Sí, reagendar", "Ya no, gracias"),
     ),
     "no_asistio": _Plantilla(
@@ -131,7 +131,7 @@ _PLANTILLAS: dict[str, _Plantilla] = {
         atributo="plantilla_no_asistio",
         variable="MAXICARE_PLANTILLA_NO_ASISTIO",
         huecos=1,
-        header="Su cita en MaxiCare",
+        header="Tu cita en MaxiCare",
         botones=("Sí, reprogramar", "Ya no, gracias"),
     ),
 }

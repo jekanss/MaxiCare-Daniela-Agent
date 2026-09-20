@@ -664,6 +664,13 @@ class ContextoDaniela:
     ultimo_recordatorio_tipo: str | None = None
     ultimo_recordatorio_en: datetime | None = None
 
+    #: Sobre QUÉ preguntó este número la última vez, cuando está contestando una reactivación.
+    #: Sale de `estado_oportunidad` --vocabulario cerrado, no la frase cruda del paciente-- y
+    #: solo se consulta si hubo reactivación: ver `persistencia.tratamiento_de_la_consulta_
+    #: previa`. Sin esto, Daniela le preguntaba el tratamiento a alguien a quien le escribimos
+    #: precisamente porque ya lo había dicho.
+    tratamiento_pendiente: str | None = None
+
     #: `True` solo si TODOS los mensajes del turno son quick replies de una plantilla
     #: (`type: "button"` en el webhook de Meta). Lo lee `guardrails.uso_indebido` para no
     #: preguntarle a un evaluador por algo que es una lista cerrada: el rótulo de un botón no

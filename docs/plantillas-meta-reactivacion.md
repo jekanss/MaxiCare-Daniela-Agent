@@ -61,6 +61,25 @@ Consecuencia practica: **un mensaje de categoria Marketing cuesta mas que uno Ut
 | Botones | dos, tipo *Custom* (quick reply) |
 | Message validity period | lo mas alto que permita la consola |
 
+**Por que TUTEAN, y no es un detalle de estilo.** Decidido el 20/09/2026, viendo el primer
+envio real llegar a un telefono. Las tres nacieron en usted --«le interesa», «su cita»-- y el
+prompt de Daniela dice, literal, «tuteas siempre, nunca usted». El paciente leia un saludo
+formal y un segundo despues, al pulsar el boton, le contestaba una Daniela que lo tuteaba.
+En una reactivacion eso pesa mas que en un recordatorio: es lo PRIMERO que lee alguien que
+no recuerda habernos escrito, y un cambio de trato entre dos mensajes seguidos es la clase
+de costura que delata a un sistema automatico.
+
+Se cambio el 20/09/2026, con volumen cero y las tres recien aprobadas: editar una plantilla
+la devuelve a revision, y no habra un momento mas barato que ese. **`recordatorio_cita` sigue
+en usted** y se dejo asi a proposito: lleva en produccion desde el 14/09, la lee alguien que
+ya conoce a la clinica y tiene una cita de verdad, y tocar la unica plantilla que hoy funciona
+para ganar consistencia no vale el riesgo. Si algun dia se unifica, se unifica esa.
+
+Los rotulos de los botones NO cambian --«Si, me interesa», «Si, reagendar», «Si, reprogramar»,
+«Ya no, gracias» son neutros--, y eso importa: `agentes.INSTRUCCIONES_DANIELA` cita «Ya no,
+gracias» literal, y `scripts/probar_plantilla.py` los lleva todos. Un cambio de rotulo si
+obliga a mover codigo.
+
 **Por que una sola variable, y por que NO lleva el tratamiento:** lo decidio marketing el
 15/09/2026, y con razon. El nombre del tratamiento es un dato de salud, y una notificacion de
 WhatsApp se lee en la pantalla de bloqueo, a la vista de cualquiera que tenga el telefono
@@ -79,8 +98,8 @@ se le fue.
 | **Nombre** | `reactivacion_sin_agendar` |
 | **Categoria** | Marketing |
 | **Idioma** | Spanish (`es`) |
-| **Header** | Texto fijo: `Su consulta en MaxiCare` |
-| **Body** | `Hola {{1}}, hace unos dias nos escribio a MaxiCare y quedo pendiente agendar su cita. Si aun le interesa, con gusto le ayudamos a encontrar un horario.` |
+| **Header** | Texto fijo: `Tu consulta en MaxiCare` |
+| **Body** | `Hola {{1}}, hace unos dias nos escribiste a MaxiCare y quedo pendiente agendar tu cita. Si aun te interesa, con gusto te ayudamos a encontrar un horario.` |
 | **Ejemplo de `{{1}}`** | `Maria` |
 | **Footer** | vacio |
 | **Boton 1** (Custom) | `Si, me interesa` |
@@ -95,8 +114,8 @@ Agendo, cancelo, y no volvio a pedir fecha.
 | **Nombre** | `reactivacion_cancelada` |
 | **Categoria** | Marketing |
 | **Idioma** | Spanish (`es`) |
-| **Header** | Texto fijo: `Su cita en MaxiCare` |
-| **Body** | `Hola {{1}}, vimos que cancelo su cita en MaxiCare y no ha vuelto a agendar. Si lo desea, le ayudamos a buscar una nueva fecha.` |
+| **Header** | Texto fijo: `Tu cita en MaxiCare` |
+| **Body** | `Hola {{1}}, vimos que cancelaste tu cita en MaxiCare y no has vuelto a agendar. Si quieres, te ayudamos a buscar una nueva fecha.` |
 | **Ejemplo de `{{1}}`** | `Maria` |
 | **Footer** | vacio |
 | **Boton 1** (Custom) | `Si, reagendar` |
@@ -111,8 +130,8 @@ Tenia cita y no llego.
 | **Nombre** | `reactivacion_no_asistio` |
 | **Categoria** | Marketing |
 | **Idioma** | Spanish (`es`) |
-| **Header** | Texto fijo: `Su cita en MaxiCare` |
-| **Body** | `Hola {{1}}, notamos que no pudo asistir a su cita en MaxiCare. Si desea reprogramarla, con gusto le buscamos otro horario.` |
+| **Header** | Texto fijo: `Tu cita en MaxiCare` |
+| **Body** | `Hola {{1}}, notamos que no pudiste asistir a tu cita en MaxiCare. Si quieres reprogramarla, con gusto te buscamos otro horario.` |
 | **Ejemplo de `{{1}}`** | `Maria` |
 | **Footer** | vacio |
 | **Boton 1** (Custom) | `Si, reprogramar` |
@@ -124,8 +143,18 @@ Tenia cita y no llego.
 
 Los textos de arriba van **sin tildes a proposito en este archivo**, para que la consola de
 Windows pueda imprimirlo. **Al pegarlos en Meta hay que escribirlos con sus tildes**:
-«dias» → «dias» con tilde en la i, «cancelo» → «canceló», «Si,» → «Sí,», «Maria» → «María».
-Meta acepta tildes sin ningun problema -- `recordatorio_cita` las lleva.
+«dias» → «días», «quedo» → «quedó», «aun» → «aún», «Si,» → «Sí,», «Maria» → «María».
+Meta acepta tildes sin ningun problema -- `recordatorio_cita` las lleva, y el primer envio
+real del 20/09/2026 llego con las cuatro del cuerpo intactas en el telefono.
+
+Los tres cuerpos, ya con tildes y listos para pegar:
+
+- **`reactivacion_sin_agendar`** · header `Tu consulta en MaxiCare`
+  > Hola {{1}}, hace unos días nos escribiste a MaxiCare y quedó pendiente agendar tu cita. Si aún te interesa, con gusto te ayudamos a encontrar un horario.
+- **`reactivacion_cancelada`** · header `Tu cita en MaxiCare`
+  > Hola {{1}}, vimos que cancelaste tu cita en MaxiCare y no has vuelto a agendar. Si quieres, te ayudamos a buscar una nueva fecha.
+- **`reactivacion_no_asistio`** · header `Tu cita en MaxiCare`
+  > Hola {{1}}, notamos que no pudiste asistir a tu cita en MaxiCare. Si quieres reprogramarla, con gusto te buscamos otro horario.
 
 ## Que significa cada boton
 

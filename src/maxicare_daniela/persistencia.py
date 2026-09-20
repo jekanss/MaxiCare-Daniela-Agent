@@ -2815,6 +2815,71 @@ def ultimo_recordatorio(conn, telefono: str) -> tuple[str, datetime] | None:
     return (fila[0], fila[1])
 
 
+def tratamiento_de_la_consulta_previa(conn, telefono: str) -> str | None:
+    """Sobre QUÉ preguntó este número la última vez, o `None` si nunca se supo.
+
+    Solo tiene sentido para quien contesta una REACTIVACIÓN, y por eso `atencion` la llama
+    únicamente en ese caso: es una consulta más dentro del candado por teléfono, y el turno
+    normal no tiene por qué pagarla.
+
+    **El problema que resuelve.** Una reactivación sale, por la definición de su banda, más
+    de 24 h después del último mensaje -- o sea siempre fuera de la ventana de
+    `conversacion_viva`. Cuando la persona contesta «Sí, me interesa» se abre una
+    conversación NUEVA, con una sesión nueva del SDK y sin una línea de historial. Daniela
+    sabía que le habíamos escrito (`ultimo_recordatorio`, que va por teléfono) pero no sobre
+    qué, así que lo primero que hacía era preguntarle el tratamiento **a alguien a quien le
+    escribimos precisamente porque ya lo había dicho**. Pedirle a la persona que repita lo
+    que contó hace una semana es la firma de un mensaje masivo, que es justo la lectura que
+    hay que evitar.
+
+    **Sale de `estado_oportunidad` y no del historial**, y esa es la decisión que importa.
+    Esa tabla es la memoria larga del diseño --«retomar a una paciente meses después con
+    seis campos en vez de ocho meses de chat»--. Rescatar la frase cruda de
+    `mensajes_entrantes.texto` habría metido texto libre de hace días en el prompt de hoy,
+    sin pasar por los guardrails de entrada de este turno: más valor aparente y una
+    superficie que no hace falta abrir.
+
+    **Lo que hace seguro devolver esto: la columna no la escribe el modelo a pelo.** El
+    parámetro de la tool es un `str` --no un `Literal`, al contrario que
+    `LecturaArchivo.tratamiento`--, pero `herramientas._registrar_estado_oportunidad` lo
+    contrasta contra `contratos.vocabulario()` y lanza `ValueError` ANTES de tocar la base,
+    así que lo guardado siempre es una clave de la lista, en minúsculas y sin espacios. La
+    otra escritura de la tabla (`conversacion._guardar_estado`) ni siquiera manda el campo, y
+    el `COALESCE` del upsert conserva el que hubiera. Quien relaje esa validación abre esto:
+    el valor viaja al prompt de un turno posterior tal cual.
+
+    Lo que NO garantiza: que el tratamiento siga en el catálogo. La lista está viva, y uno
+    que la clínica retiró hace un mes sigue aquí. No hace falta filtrarlo --«la última vez
+    preguntó por X» es cierto igual, y el prompt ya le prohíbe a Daniela ofrecer lo que no
+    esté en la lista de hoy--, pero conviene no confundir «está validado» con «está vigente».
+
+    `no_identificado` NO cuenta como respuesta (regla dura 12, y el mismo criterio que usa
+    `instrucciones_daniela` al listar el vocabulario): es lo que el sistema escribe cuando no
+    sabe, y tratarlo como un tratamiento haría que Daniela diera por conocido justo lo que
+    nadie llegó a saber. Devolver `None` la deja preguntar, que es lo correcto ahí.
+
+    Va por TELÉFONO, como `ultimo_recordatorio`, `_es_ajena` y `ultimo_mensaje_del_paciente`:
+    la identidad de este proyecto va por teléfono, y la conversación donde se anotó el
+    tratamiento no es la conversación donde la persona está contestando.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT eo.tratamiento
+              FROM estado_oportunidad eo
+              JOIN conversaciones c ON c.id = eo.conversacion_id
+             WHERE c.telefono = %s
+               AND eo.tratamiento IS NOT NULL
+               AND eo.tratamiento <> 'no_identificado'
+             ORDER BY eo.actualizado_en DESC
+             LIMIT 1
+            """,
+            (telefono,),
+        )
+        fila = cur.fetchone()
+    return fila[0] if fila else None
+
+
 def insertar_escalamiento(
     conn,
     *,

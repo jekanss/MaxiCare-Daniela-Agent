@@ -77,7 +77,7 @@ from typing import Any, Awaitable, Callable
 
 from . import conversacion, guardrails, ingesta
 from . import lectura as lectura_mod
-from . import persistencia, sin_resolver
+from . import persistencia, seguimientos, sin_resolver
 from .calendario import CalendarioCaido, CalendarioDoble, Jornada, calendario_desde_config
 from .canales import Telegram, WhatsApp
 from .config import (
@@ -296,6 +296,9 @@ class _Estado:
     #: un «sí, confirmo» llega sin que Daniela sepa a qué contesta.
     ultimo_recordatorio_tipo: str | None = field(default=None)
     ultimo_recordatorio_en: datetime | None = field(default=None)
+    #: Sobre qué preguntó la última vez, SOLO cuando lo de arriba es una reactivación. Ver
+    #: `persistencia.tratamiento_de_la_consulta_previa`.
+    tratamiento_pendiente: str | None = field(default=None)
     #: `None` si la tabla `configuracion` no respondió. No es lo mismo que un diccionario
     #: vacío: quien lo recibe tiene que poder distinguir «no se pudo leer» de «está vacía».
     operativa: dict[str, int] | None = field(default=None)
@@ -413,6 +416,21 @@ def _leer_estado(database_url: str, telefono: str, wamids: list[str]) -> _Estado
         # de este número-- y unirlas exigiría un `LEFT JOIN` que devolviera `tomada_por`
         # incluso cuando no hay ningún recordatorio, que es el caso normal.
         recordatorio = persistencia.ultimo_recordatorio(conn, telefono)
+        # La TERCERA consulta, y la única de las tres condicionada: solo cuando lo que salió
+        # fue una REACTIVACIÓN. Un recordatorio de cita no la necesita --la cita dice sola de
+        # qué habla-- y el turno normal, que es la inmensa mayoría, no llega a ejecutarla.
+        # Importa porque esto corre DENTRO del candado por teléfono (no negociable 3): lo que
+        # se añada aquí se lo come cada mensaje que entra, así que se paga solo donde sirve.
+        #
+        # Con el default de `TIPOS_DE_REACTIVACION` --la lista blanca de los tipos
+        # CONOCIDOS-- un `tipo` inesperado no dispara la consulta y Daniela se comporta como
+        # hoy. Es el lado barato: de más, una pregunta de sobra al paciente; de menos,
+        # nada roto.
+        tratamiento_pendiente = None
+        if recordatorio and recordatorio[0] in seguimientos.TIPOS_DE_REACTIVACION:
+            tratamiento_pendiente = persistencia.tratamiento_de_la_consulta_previa(
+                conn, telefono
+            )
         # Todos los del grupo, no solo el que abrió el turno: si se ligara solo ese, los
         # demás quedarían en `mensajes_entrantes` sin conversación, y «¿de qué charla
         # salió este mensaje?» dejaría de tener respuesta justo para los mensajes que
@@ -451,6 +469,7 @@ def _leer_estado(database_url: str, telefono: str, wamids: list[str]) -> _Estado
         tomada_por=tomada_por,
         ultimo_recordatorio_tipo=recordatorio[0] if recordatorio else None,
         ultimo_recordatorio_en=recordatorio[1] if recordatorio else None,
+        tratamiento_pendiente=tratamiento_pendiente,
         operativa=operativa,
         pidio_no_contacto=pidio_no_contacto,
         aviso_visto=aviso_visto,
@@ -1183,6 +1202,7 @@ async def atender(
             horas_minimas_para_recordar=operativa.get("horas_minimas_para_recordar", 4),
             ultimo_recordatorio_tipo=estado.ultimo_recordatorio_tipo,
             ultimo_recordatorio_en=estado.ultimo_recordatorio_en,
+            tratamiento_pendiente=estado.tratamiento_pendiente,
             # Sale del `type` que mandó Meta, nunca del modelo. `all` y no `any`: un solo
             # botón en un grupo que además trae texto libre dejaría ese texto sin evaluar.
             # Ver el campo en `contratos.ContextoDaniela`, que explica qué costó.

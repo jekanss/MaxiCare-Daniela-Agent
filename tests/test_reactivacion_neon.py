@@ -1632,3 +1632,99 @@ def test_el_calendario_medido_de_las_tres_personas_da_2(conexion_pruebas, esquem
     assert persistencia.leads_sin_agendar(conexion_pruebas, ahora=AHORA, limite=50) == [], (
         "INTENTOS_POR_SERIE_DE_REACTIVACION no frenó los dos envíos sin cerrar"
     )
+
+
+# ==========================================================================================
+# Lo que preguntó la última vez (20/09/2026)
+# ==========================================================================================
+
+
+def test_el_tratamiento_previo_cruza_de_una_conversacion_a_la_siguiente(conexion_pruebas):
+    """El SQL es lo único que se prueba aquí, y es donde está el valor.
+
+    Una reactivación sale siempre a más de 24 h del último mensaje, o sea SIEMPRE fuera de la
+    ventana de `conversacion_viva`: quien contesta abre una conversación NUEVA. Si esta
+    consulta fuera por `conversacion_id` --que es el error natural, y el que ya se cometió
+    una vez con `ultimo_recordatorio`-- devolvería `None` el 100% de las veces y Daniela
+    volvería a preguntar el tratamiento a quien ya se lo dijo. Va por TELÉFONO, y eso solo se
+    puede comprobar con dos conversaciones de verdad en la base.
+    """
+    vieja = persistencia.asegurar_conversacion(conexion_pruebas, telefono=TELEFONO)
+    persistencia.upsert_estado_oportunidad(
+        conexion_pruebas, vieja, estado="explorando", barrera="precio",
+        tratamiento="ortodoncia",
+    )
+    # La conversación NUEVA, la que abre su respuesta a la reactivación: existe y no tiene
+    # estado ninguno. Es el estado real en el instante en que Daniela arma su prompt.
+    nueva = persistencia.asegurar_conversacion(conexion_pruebas, telefono=TELEFONO)
+    assert nueva != vieja
+
+    assert (
+        persistencia.tratamiento_de_la_consulta_previa(conexion_pruebas, TELEFONO)
+        == "ortodoncia"
+    )
+
+
+def test_el_tratamiento_previo_no_se_lo_lleva_de_OTRO_telefono(conexion_pruebas):
+    """La otra mitad del `WHERE`, y la que de verdad hace daño si falta.
+
+    Sin el filtro por teléfono la consulta devuelve el tratamiento de cualquiera: Daniela le
+    diría a una persona «la última vez preguntaste por implantes» sobre lo que preguntó
+    otra. Eso no es una respuesta torpe, es contarle a alguien un dato de salud ajeno.
+    """
+    otro = persistencia.asegurar_conversacion(conexion_pruebas, telefono="573009998877")
+    persistencia.upsert_estado_oportunidad(
+        conexion_pruebas, otro, estado="explorando", barrera="ninguna",
+        tratamiento="implantes",
+    )
+
+    assert persistencia.tratamiento_de_la_consulta_previa(conexion_pruebas, TELEFONO) is None
+
+
+def test_no_identificado_no_cuenta_como_tratamiento(conexion_pruebas):
+    """`no_identificado` es el literal con el que el SISTEMA dice que no sabe (regla dura 12).
+
+    Colarlo haría que Daniela diera por conocido justo lo que nadie llegó a saber, y el
+    prompt diría «la última vez preguntó por: no_identificado» -- peor que no decir nada,
+    igual que «Hola PENDIENTE». Devolver `None` la deja preguntar, que es lo correcto ahí.
+    """
+    conv = persistencia.asegurar_conversacion(conexion_pruebas, telefono=TELEFONO)
+    persistencia.upsert_estado_oportunidad(
+        conexion_pruebas, conv, estado="explorando", barrera="ninguna",
+        tratamiento="no_identificado",
+    )
+
+    assert persistencia.tratamiento_de_la_consulta_previa(conexion_pruebas, TELEFONO) is None
+
+
+def test_gana_el_tratamiento_mas_reciente(conexion_pruebas):
+    """Quien preguntó por dos cosas en meses distintos: vale la última, no la primera.
+
+    Sin el `ORDER BY ... DESC` el motor devuelve lo que quiera, y «lo que quiera» aquí es
+    retomar una consulta que la persona ya cerró hace meses.
+    """
+    primera = persistencia.asegurar_conversacion(conexion_pruebas, telefono=TELEFONO)
+    persistencia.upsert_estado_oportunidad(
+        conexion_pruebas, primera, estado="explorando", barrera="ninguna",
+        tratamiento="blanqueamiento",
+    )
+    segunda = persistencia.asegurar_conversacion(conexion_pruebas, telefono=TELEFONO)
+    persistencia.upsert_estado_oportunidad(
+        conexion_pruebas, segunda, estado="explorando", barrera="precio",
+        tratamiento="ortodoncia",
+    )
+    # `actualizado_en` lo pone `now()`, que en Postgres es la hora de la TRANSACCIÓN: las dos
+    # filas podrían empatar. Se separan a mano para que la prueba mida el ORDER BY y no la
+    # suerte del planificador -- la misma trampa que documenta `conversacion_viva`.
+    with conexion_pruebas.cursor() as cur:
+        cur.execute(
+            "UPDATE estado_oportunidad SET actualizado_en = now() - interval '90 days' "
+            "WHERE conversacion_id = %s",
+            (primera,),
+        )
+    conexion_pruebas.commit()
+
+    assert (
+        persistencia.tratamiento_de_la_consulta_previa(conexion_pruebas, TELEFONO)
+        == "ortodoncia"
+    )
