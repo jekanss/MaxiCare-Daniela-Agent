@@ -105,17 +105,29 @@ argument 'group_id'`). **Quien cambie una de esas firmas corre los seis que no g
   veces, y hasta este script ninguna prueba lo había ejercitado contra la base de verdad.
 - `probar_plantilla.py` **no toca la base en ningún momento** y es el paso que va entre «Meta
   aprobó la plantilla» y `desplegar.sh`. `--estado` no gasta; con un teléfono manda UN mensaje
-  de plantilla de verdad. **Los cuatro huecos salen de `seguimientos.parametros_de`
+  de plantilla de verdad. **Los huecos salen de `seguimientos.parametros_de`
   (renombrada de `_parametros_del_recordatorio` en la tarea 4; ya no es privada), no de
   literales escritos a mano**, y esa es la única razón por la que la prueba vale: con
   literales comprobaría que Meta acepta *una* plantilla, no la que manda el despachador —un
   orden de huecos cambiado o la conversión de zona rota se verían en el WhatsApp que llega al
   teléfono—. Dobla la FILA que el despachador lee de la base (`cita_inicio`, `nombre_completo`,
-  `tratamiento`): si esa consulta cambia de nombres de columna, aquí no se entera nadie. Su
+  `tratamiento` para el recordatorio; `tipo`, `nombre_ficha`, `nombre_perfil` para las
+  reactivaciones): si esa consulta cambia de nombres de columna, aquí no se entera nadie. Su
   trampa: **el WABA no se puede derivar del token**, así que `--estado` no llega a leer la
   plantilla en Meta y lo dice en vez de callarse —el token es de usuario de sistema con
   acceso total, y por eso sus `granular_scopes` vienen SIN `target_ids`—. El envío real es la
   comprobación definitiva, y un rechazo de Meta no se cobra.
+  **Cubre LAS CUATRO desde el 20/09/2026, no solo la de recordatorio** (`--tipo
+  recordatorio|sin_agendar|cancelada|no_asistio`, default `recordatorio`; `--estado` las
+  recorre todas y una vacía no es un fallo sino el modo de comprobación). Antes estaba
+  cableado a `config.plantilla_recordatorio` y las tres de reactivación no tenían forma de
+  probarse: habrían llegado al día del encendido sin que nadie hubiera visto una en un
+  teléfono. **La fila de ejemplo de una reactivación NO lleva `nombre_completo`** —toda fila
+  de reactivación tiene `cita_id` NULL, así que el `LEFT JOIN` a `citas` no produce ese
+  campo; ponerlo aquí haría pasar la prueba por un eslabón que en producción está vacío el
+  100% de las veces, que es exactamente lo que escondió el «Hola paciente»—. Y **`--plantilla
+  NOMBRE` manda sobre el `.env` solo en esa corrida**: existe porque escribir el nombre en el
+  `.env` de un servidor con este código ES el encendido, y probar no puede exigir encender.
 - `probar_sin_resolver.py` escribe en `pruebas_sin_resolver`, propio y no compartido con
   `probar_tools.py` ni con `probar_recordatorios.py` — a propósito: los tres montan con
   `DROP SCHEMA ... CASCADE`, y correr dos de ellos a la vez sobre el mismo nombre hace que
