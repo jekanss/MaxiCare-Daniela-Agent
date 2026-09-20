@@ -65,7 +65,9 @@ export default function App() {
     <div className="flex h-screen overflow-hidden" style={{ backgroundColor: '#F9FAFB' }}>
       <Sidebar activa={activa} ir={ir} sesion={sesion} alSalir={cerrarSesion} />
       {activa === 'agenda' ? (
-        <Agenda />
+        // Escribe --marca asistencias--, así que puede toparse con un 401 a mitad de la tarde
+        // igual que Tratamientos y SinResolver, y vuelve al ingreso por el mismo camino.
+        <Agenda alCaducarSesion={() => setSesion(null)} />
       ) : activa === 'pruebas' ? (
         <Pruebas />
       ) : activa === 'tratamientos' ? (
