@@ -55,7 +55,7 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from functools import partial
-from typing import Any, Callable, Literal
+from typing import Any, Callable, Literal, Protocol
 
 from agents import RunContextWrapper, function_tool
 
@@ -131,11 +131,34 @@ def _a_fecha(valor: str, campo: str) -> datetime:
     return momento if momento.tzinfo else momento.replace(tzinfo=ZONA_BOGOTA)
 
 
-async def _con_base(ctx: ContextoDaniela, trabajo: Callable[[Any], Any]) -> Any:
+class ConLaBase(Protocol):
+    """Lo único que `_con_base` le pide a quien lo llama: dónde está la base.
+
+    **El parámetro es MÁS ANCHO que `ContextoDaniela` a propósito. No lo estreches.** Desde la
+    fase 8, quien reconcilia contra Calendar puede ser la agenda del panel, que no tiene
+    conversación, ni teléfono, ni turno: entra con un `_SoloLaBase` y no con un contexto de
+    Daniela, y ése es justo el punto del refactor que partió `reconciliar_con_calendar`.
+
+    Por qué un `Protocol` y no la anotación cómoda: con la firma prometiendo un
+    `ContextoDaniela` entero, añadir aquí un `log.debug("...", ctx.id_conversacion)` es lo más
+    razonable del mundo -- y deja la suite ENTERA en verde mientras el panel revienta en
+    producción con un `AttributeError`. Todas las pruebas de esa zona doblan `_con_base` con
+    `monkeypatch`, así que el camino real `reconciliar_con_calendar -> _con_base ->
+    persistencia.conectar` no lo ejecuta ninguna. Que el tipo diga la verdad es lo que pone el
+    error en el sitio donde se comete.
+    """
+
+    database_url: str
+
+
+async def _con_base(ctx: ConLaBase, trabajo: Callable[[Any], Any]) -> Any:
     """Corre una función que necesita conexión, fuera del hilo del bucle de eventos.
 
     `psycopg` es síncrono: llamarlo directamente desde una corrida `async` bloquearía a
     todos los demás pacientes mientras dura la consulta.
+
+    `ctx` es cualquier cosa con `database_url`: un `ContextoDaniela` en los veinte usos de
+    Daniela, un `_SoloLaBase` cuando quien reconcilia es el panel. Ver `ConLaBase`.
     """
 
     def _ejecutar() -> Any:
@@ -1688,7 +1711,7 @@ DIAS_HACIA_ATRAS_AL_SINCRONIZAR = 2
 
 @dataclass(frozen=True)
 class _SoloLaBase:
-    """Lo único que `_con_base` le pide a un contexto.
+    """Un `ConLaBase` de usar y tirar: el contexto mínimo que `_con_base` sabe abrir.
 
     El núcleo recibe una `database_url` suelta y no un `ContextoDaniela` --el panel no tiene
     conversación, ni teléfono, ni turno--, pero sigue entrando por `_con_base` a nivel de
@@ -1696,6 +1719,9 @@ class _SoloLaBase:
     punto que las pruebas doblan con `monkeypatch`, y una copia local con otro nombre dejaría
     a media suite intentando conectarse a Neon de verdad. Pasar por aquí es lo que mantiene
     esa red en pie.
+
+    Que esto valga lo dice el `Protocol` `ConLaBase`, y no la casualidad de que hoy
+    `_con_base` no lea nada más.
     """
 
     database_url: str
