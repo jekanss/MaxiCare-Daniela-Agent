@@ -15,8 +15,11 @@ bitácora es lo único que permite reconstruir qué decía antes y quién lo cam
 from __future__ import annotations
 
 import re
+import uuid
+from datetime import datetime
 from typing import Any, get_args
 
+from .calendario import ZONA_BOGOTA
 from .contratos import Tratamiento
 
 #: La misma regla que el CHECK de `migraciones/008_tratamientos.sql`. Está duplicada a
@@ -319,3 +322,159 @@ def historial(conn, limite: int = 100) -> list[dict[str, Any]]:
              "usuario": u, "cambiado_en": f.isoformat()}
             for t, c, a, n, u, f in cur.fetchall()
         ]
+
+
+# ------------------------------------------------------------------------------------------
+# La agenda del día y la marca de asistencia
+# ------------------------------------------------------------------------------------------
+#
+# `citas.asistio` existe desde la migración 001 y hasta la fase 8 no la escribía NADIE. Es la
+# única señal que distingue una cita cumplida de una que el paciente no atendió, y sin ella
+# la clínica no puede saber si Daniela agenda citas a las que la gente va -- que es el
+# criterio de éxito del proyecto, y no el número de citas creadas.
+
+
+#: Las columnas de una cita tal como las lee la agenda. La lista importa: `evento_calendar_id`
+#: y `reserva_id` no se pintan en ninguna pantalla, pero `herramientas.reconciliar_con_calendar`
+#: los necesita -- el primero para preguntarle a Google por esa cita, el segundo para soltar
+#: el cupo viejo cuando la movieron--. Es la misma forma que devuelve
+#: `persistencia.citas_activas_de_telefono`, más `asistio`, que es lo que añade esta fase.
+_COLUMNAS_CITA = (
+    "id", "conversacion_id", "telefono", "nombre_completo", "tratamiento", "inicio",
+    "duracion_minutos", "estado", "asistio", "evento_calendar_id", "reserva_id",
+)
+
+_SELECT_CITA = (
+    "SELECT id, conversacion_id, telefono, nombre_completo, tratamiento, inicio, "
+    "       duracion_minutos, estado, asistio, evento_calendar_id, reserva_id "
+    "  FROM citas "
+)
+
+#: Los tres estados de la marca, dichos para la bitácora. `_anotar` no admite un `nuevo`
+#: nulo --la columna es NOT NULL-- así que desmarcar no puede escribirse como un NULL: sería
+#: indistinguible de «no se registró nada». `sin_marcar` es un valor y se lee como tal.
+MARCA: dict[bool | None, str] = {True: "asistio", False: "no_asistio", None: "sin_marcar"}
+
+
+class CitaInexistente(ValueError):
+    """Ese id no corresponde a ninguna cita.
+
+    Hereda de `ValueError` para no romper a quien ya captura `ValueError` --y porque lo es--,
+    y existe aparte para que `runtime.py` pueda responder 404 en vez de 400 sin leerle el
+    mensaje al error. `panel.py` no conoce códigos HTTP y no puede conocerlos: la frontera de
+    capas lo prohíbe (`.claude/rules/frontera-agentes.md`).
+    """
+
+
+def _fila_a_cita(fila) -> dict[str, Any]:
+    """Los ids en TEXTO, no como `uuid.UUID`.
+
+    Es lo que espera todo lo que ya existe: `Correccion.cita_id` está declarado `str`, las
+    claves de idempotencia de `_mover_porque_la_movieron` se arman interpolando `cita['id']`,
+    y las escrituras de `persistencia` reciben el id como cadena desde la fase 3.
+    """
+    cita = dict(zip(_COLUMNAS_CITA, fila))
+    cita["id"] = str(cita["id"])
+    cita["conversacion_id"] = str(cita["conversacion_id"])
+    return cita
+
+
+def citas_del_dia(conn, *, desde: datetime, hasta: datetime) -> list[dict[str, Any]]:
+    """Citas vivas de ese rango, con `asistio`, ordenadas por `inicio`.
+
+    **No corta el pasado**, y esa es la diferencia con `persistencia.citas_activas_de_telefono`:
+    la agenda existe justo para poder mirar hacia atrás y marcar quién asistió. Una cita
+    cancelada tampoco sale -- para la clínica ya no ocupa la hora, y pintarla llenaría el día
+    de bloques que nadie va a atender.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            _SELECT_CITA
+            + " WHERE inicio >= %s AND inicio < %s"
+              "   AND estado IN ('confirmada', 'reprogramada')"
+              " ORDER BY inicio",
+            (desde, hasta),
+        )
+        return [_fila_a_cita(f) for f in cur.fetchall()]
+
+
+def marcar_asistencia(
+    conn, *, cita_id: str, valor: bool | None, usuario: str
+) -> dict[str, Any]:
+    """Escribe `citas.asistio` y su fila de bitácora, en UNA transacción.
+
+    Devuelve la cita ya actualizada, con la misma forma que una entrada de `citas_del_dia`:
+    la pantalla repinta esa fila sin volver a pedir el día entero.
+
+    Tres cosas se rechazan, y ninguna es un capricho:
+
+    - **Un id que no existe** (`CitaInexistente`). Se comprueba antes que nada que la cadena
+      sea siquiera un UUID: el id llega desde una URL, y una cadena cualquiera hace que
+      Postgres aborte la transacción con `invalid input syntax for type uuid` -- un 500 que
+      además deja la conexión inservible para lo que venga detrás.
+    - **Una cita cancelada.** No hubo cita: no hay asistencia que registrar, y un «no asistió»
+      sobre una cita que la clínica canceló le echa al paciente una falta que no cometió.
+    - **Una cita que todavía no ha ocurrido.** Marcar el futuro es adivinar. La columna
+      alimenta la única medida real del proyecto --si la gente llega-- y un dato inventado
+      ahí la vuelve inútil sin que nadie lo note.
+
+    Marcar dos veces lo mismo no escribe nada: una bitácora que anota cambios que no
+    ocurrieron es tan inútil como la que se calla los que sí (el mismo criterio que
+    `guardar_ficha` aplica al interruptor de aprobación).
+    """
+    id_limpio = str(cita_id or "")
+    try:
+        uuid.UUID(id_limpio)
+    except (AttributeError, TypeError, ValueError):
+        raise CitaInexistente("esa cita no existe") from None
+
+    with conn.cursor() as cur:
+        cur.execute(_SELECT_CITA + " WHERE id = %s", (id_limpio,))
+        fila = cur.fetchone()
+        if fila is None:
+            raise CitaInexistente("esa cita no existe")
+        cita = _fila_a_cita(fila)
+
+        if cita["estado"] == "cancelada":
+            raise ValueError("esa cita está cancelada: no hay asistencia que marcar")
+        if cita["inicio"] > datetime.now(ZONA_BOGOTA):
+            raise ValueError("esa cita todavía no ha ocurrido")
+
+        anterior = cita["asistio"]
+        if anterior is valor:
+            return cita
+
+        cur.execute(
+            "UPDATE citas SET asistio = %s, actualizada_en = now() WHERE id = %s",
+            (valor, id_limpio),
+        )
+        _anotar(cur, tabla="citas", clave=id_limpio, anterior=MARCA[anterior],
+                nuevo=MARCA[valor], usuario=usuario)
+    conn.commit()
+
+    cita["asistio"] = valor
+    return cita
+
+
+def citas_sin_marcar(
+    conn, *, desde: datetime, hasta: datetime, limite: int = 50
+) -> list[dict[str, Any]]:
+    """Las de ese rango cuya hora pasó y siguen con `asistio IS NULL`.
+
+    De la más reciente a la más vieja, y eso decide qué se pierde cuando hay más de `limite`:
+    lo que la clínica va a marcar es lo de ayer, no lo del mes pasado. Al revés, el tope
+    devolvería las más antiguas y las de ayer no aparecerían nunca.
+
+    `inicio < now()` va además del rango porque el rango puede incluir el día de hoy, donde
+    hay citas que todavía no han ocurrido: esas no están «sin marcar», están sin ocurrir.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            _SELECT_CITA
+            + " WHERE inicio >= %s AND inicio < %s AND inicio < now()"
+              "   AND asistio IS NULL"
+              "   AND estado IN ('confirmada', 'reprogramada')"
+              " ORDER BY inicio DESC LIMIT %s",
+            (desde, hasta, max(1, min(limite, 200))),
+        )
+        return [_fila_a_cita(f) for f in cur.fetchall()]

@@ -7,13 +7,16 @@ from __future__ import annotations
 
 import os
 import re
+import uuid
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import psycopg
 import pytest
 from fastapi.testclient import TestClient
 
-from maxicare_daniela import contratos, panel, persistencia, runtime
+from maxicare_daniela import atencion, contratos, panel, persistencia, runtime
+from maxicare_daniela.calendario import ZONA_BOGOTA, CalendarioCaido, CalendarioDoble
 from maxicare_daniela.config import cargar_dotenv
 
 CORE = ("precio", "duracion", "profesional")
@@ -513,3 +516,440 @@ def test_es_admin_sale_de_quien_pregunta_no_del_caso():
             assert r.json()["es_admin"] is esperado, f"{rol} -> es_admin debía ser {esperado}"
         finally:
             runtime.app.dependency_overrides.clear()
+
+
+# ==========================================================================================
+# La agenda del día y la marca de asistencia (fase 8, tarea 2)
+# ==========================================================================================
+#
+# Las fechas de este bloque son RELATIVAS a propósito y solo las usan las pruebas de Neon.
+# Una hora clavada aquí sería una hora que un día cae del lado equivocado de `now()` --el
+# mismo defecto que ya dejó doce pruebas en rojo el 16/09/2026-- y lo que estas pruebas
+# necesitan es justo lo contrario que las offline: que «ayer» siga siendo ayer siempre.
+# Las offline de más abajo sí clavan el presente, y por eso piden el día por la URL.
+
+
+def _a_las_nueve(dias: int) -> datetime:
+    """Las 9:00 de Bogotá, `dias` días desde hoy. Nunca cruza la frontera de `now()`."""
+    return (datetime.now(ZONA_BOGOTA) + timedelta(days=dias)).replace(
+        hour=9, minute=0, second=0, microsecond=0
+    )
+
+
+AYER_A_LAS_NUEVE = _a_las_nueve(-1)
+MANANA_A_LAS_NUEVE = _a_las_nueve(1)
+
+
+def _sembrar_cita(
+    conn, *, inicio: datetime, estado: str = "confirmada", asistio: bool | None = None,
+    telefono: str = "573009998877",
+) -> str:
+    """Una cita mínima en el esquema `pruebas`, sin reserva ni evento de Calendar.
+
+    No pasa por `persistencia.registrar_cita` porque esa exige un `reserva_id` y aquí no
+    hace falta ninguno: `citas.reserva_id` es nullable y lo que se prueba es el SQL del
+    panel, no el reparto de cupos.
+    """
+    conversacion = persistencia.asegurar_conversacion(conn, telefono=telefono)
+    id_cita = str(uuid.uuid4())
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO citas (id, conversacion_id, nombre_completo, telefono, tratamiento, "
+            "                   inicio, duracion_minutos, estado, asistio) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+            (id_cita, conversacion, "Paciente De Prueba", telefono, "valoracion", inicio,
+             60, estado, asistio),
+        )
+    conn.commit()
+    return id_cita
+
+
+def _limpiar_citas(conn, telefono: str = "573009998877") -> None:
+    """El esquema `pruebas` persiste entre corridas: lo que siembra una prueba lo borra ella.
+
+    Sin esto, `citas_sin_marcar` iría acumulando las citas pasadas de todas las corridas
+    anteriores y las aserciones de conteo dejarían de significar nada.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "DELETE FROM cambios_configuracion WHERE tabla = 'citas' AND clave IN "
+            "(SELECT id::text FROM citas WHERE telefono = %s)",
+            (telefono,),
+        )
+        cur.execute("DELETE FROM citas WHERE telefono = %s", (telefono,))
+        cur.execute("DELETE FROM conversaciones WHERE telefono = %s", (telefono,))
+    conn.commit()
+
+
+def _asistio(conn, cita_id: str) -> bool | None:
+    with conn.cursor() as cur:
+        cur.execute("SELECT asistio FROM citas WHERE id = %s", (cita_id,))
+        return cur.fetchone()[0]
+
+
+@pytest.mark.neon
+def test_la_bitacora_admite_citas_y_sigue_siendo_una_lista_cerrada(conn):
+    """La 021 abrió el CHECK de `cambios_configuracion.tabla` a `citas`, y a nada más.
+
+    La 007 lo cerró en tres valores y la marca de asistencia es el cuarto. Sin él, `_anotar`
+    revienta con `CheckViolation` y --como el cambio y su registro van en la misma
+    transacción-- se cae con ella el `UPDATE`: `citas.asistio` quedaría inescribible desde
+    el panel. La otra cara, que es la que hace que el CHECK siga sirviendo de algo: una
+    tabla inventada la sigue rechazando Postgres.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO cambios_configuracion (tabla, clave, valor_nuevo, usuario) "
+            "VALUES ('citas', 'x', 'asistio', 'prueba')"
+        )
+    conn.rollback()
+
+    with conn.cursor() as cur, pytest.raises(psycopg.errors.CheckViolation):
+        cur.execute(
+            "INSERT INTO cambios_configuracion (tabla, clave, valor_nuevo, usuario) "
+            "VALUES ('pacientes', 'x', 'y', 'prueba')"
+        )
+    conn.rollback()
+
+
+@pytest.mark.neon
+def test_marcar_asistencia_escribe_la_columna_y_su_bitacora(conn):
+    try:
+        cita = _sembrar_cita(conn, inicio=AYER_A_LAS_NUEVE)
+        panel.marcar_asistencia(conn, cita_id=cita, valor=True, usuario="recepcion")
+        assert _asistio(conn, cita) is True
+        fila = panel.historial(conn, limite=1)[0]
+        assert (fila["tabla"], fila["clave"], fila["valor_nuevo"]) == ("citas", cita, "asistio")
+        assert fila["usuario"] == "recepcion"
+    finally:
+        _limpiar_citas(conn)
+
+
+@pytest.mark.neon
+def test_corregir_una_marca_deja_el_valor_anterior_en_la_bitacora(conn):
+    try:
+        cita = _sembrar_cita(conn, inicio=AYER_A_LAS_NUEVE)
+        panel.marcar_asistencia(conn, cita_id=cita, valor=False, usuario="recepcion")
+        panel.marcar_asistencia(conn, cita_id=cita, valor=True, usuario="admin")
+        fila = panel.historial(conn, limite=1)[0]
+        assert (fila["valor_anterior"], fila["valor_nuevo"]) == ("no_asistio", "asistio")
+        assert fila["usuario"] == "admin"
+    finally:
+        _limpiar_citas(conn)
+
+
+@pytest.mark.neon
+def test_desmarcar_es_un_valor_y_no_un_campo_ausente(conn):
+    """`null` vuelve la cita a «sin marcar», y eso también se registra.
+
+    Quien se equivoca al marcar tiene que poder dejar la cita como estaba; sin este camino,
+    un clic mal dado convertía un dato desconocido en un «no asistió» permanente.
+    """
+    try:
+        cita = _sembrar_cita(conn, inicio=AYER_A_LAS_NUEVE)
+        panel.marcar_asistencia(conn, cita_id=cita, valor=True, usuario="recepcion")
+        panel.marcar_asistencia(conn, cita_id=cita, valor=None, usuario="recepcion")
+        assert _asistio(conn, cita) is None
+        fila = panel.historial(conn, limite=1)[0]
+        assert (fila["valor_anterior"], fila["valor_nuevo"]) == ("asistio", "sin_marcar")
+    finally:
+        _limpiar_citas(conn)
+
+
+@pytest.mark.neon
+def test_una_cita_que_todavia_no_ha_ocurrido_no_se_puede_marcar(conn):
+    try:
+        cita = _sembrar_cita(conn, inicio=MANANA_A_LAS_NUEVE)
+        with pytest.raises(ValueError, match="todavía no"):
+            panel.marcar_asistencia(conn, cita_id=cita, valor=False, usuario="recepcion")
+        # La otra mitad: no basta con que lance. Si además hubiera escrito, el error sería
+        # decorativo -- ver «verde por el motivo equivocado» en `.claude/rules/pruebas.md`.
+        assert _asistio(conn, cita) is None
+    finally:
+        _limpiar_citas(conn)
+
+
+@pytest.mark.neon
+def test_una_cita_cancelada_no_tiene_asistencia_que_marcar(conn):
+    try:
+        cita = _sembrar_cita(conn, inicio=AYER_A_LAS_NUEVE, estado="cancelada")
+        with pytest.raises(ValueError, match="cancelada"):
+            panel.marcar_asistencia(conn, cita_id=cita, valor=True, usuario="recepcion")
+        assert _asistio(conn, cita) is None
+    finally:
+        _limpiar_citas(conn)
+
+
+@pytest.mark.neon
+def test_marcar_una_cita_que_no_existe_no_revienta_la_conexion(conn):
+    """Un UUID que no está, y una cadena que ni siquiera es un UUID.
+
+    La segunda importa: el id llega por la URL, y sin la comprobación previa Postgres
+    responde `invalid input syntax for type uuid`, que sale como un 500 y deja la
+    transacción abortada para todo lo que venga después en la misma conexión.
+    """
+    for inventado in (str(uuid.uuid4()), "no-soy-un-uuid"):
+        with pytest.raises(panel.CitaInexistente, match="no existe"):
+            panel.marcar_asistencia(conn, cita_id=inventado, valor=True, usuario="recepcion")
+    # La conexión sigue sirviendo: si la de arriba hubiera llegado a Postgres con basura,
+    # esto lanzaría `InFailedSqlTransaction`.
+    assert panel.vocabulario_activo(conn)
+
+
+@pytest.mark.neon
+def test_el_dia_trae_las_citas_vivas_en_orden_y_no_las_canceladas(conn):
+    try:
+        dia = _a_las_nueve(30)
+        desde = dia.replace(hour=0)
+        hasta = desde + timedelta(days=1)
+
+        tarde = _sembrar_cita(conn, inicio=dia.replace(hour=15))
+        manana = _sembrar_cita(conn, inicio=dia.replace(hour=9))
+        cancelada = _sembrar_cita(conn, inicio=dia.replace(hour=11), estado="cancelada")
+        otro_dia = _sembrar_cita(conn, inicio=dia.replace(hour=9) + timedelta(days=1))
+
+        filas = panel.citas_del_dia(conn, desde=desde, hasta=hasta)
+        ids = [f["id"] for f in filas]
+
+        assert ids == [manana, tarde], "el orden es por `inicio`, y solo las de ese día"
+        assert cancelada not in ids
+        assert otro_dia not in ids
+        assert filas[0]["asistio"] is None
+        assert filas[0]["tratamiento"] == "valoracion"
+        assert filas[0]["telefono"] == "573009998877"
+    finally:
+        _limpiar_citas(conn)
+
+
+@pytest.mark.neon
+def test_sin_marcar_no_devuelve_las_ya_marcadas(conn):
+    try:
+        desde = AYER_A_LAS_NUEVE.replace(hour=0) - timedelta(days=6)
+        hasta = AYER_A_LAS_NUEVE.replace(hour=0) + timedelta(days=1)
+
+        pendiente = _sembrar_cita(conn, inicio=AYER_A_LAS_NUEVE)
+        marcada = _sembrar_cita(conn, inicio=_a_las_nueve(-2))
+        futura = _sembrar_cita(conn, inicio=MANANA_A_LAS_NUEVE)
+        panel.marcar_asistencia(conn, cita_id=marcada, valor=True, usuario="recepcion")
+
+        ids = [f["id"] for f in panel.citas_sin_marcar(conn, desde=desde, hasta=hasta)]
+
+        # Las dos caras: la que sigue sin marcar está, la que ya se marcó no. Sin la
+        # primera, un SELECT que no devolviera nunca nada también pasaría.
+        assert pendiente in ids
+        assert marcada not in ids
+        # Y una cita que todavía no ha ocurrido no puede estar «sin marcar»: no hay nada
+        # que marcar. Está fuera del rango además, que es el segundo cinturón.
+        assert futura not in ids
+    finally:
+        _limpiar_citas(conn)
+
+
+# ------------------------------------------------------------------------------------------
+# Los dos endpoints -- offline, con el presente clavado y sin tocar Neon
+# ------------------------------------------------------------------------------------------
+
+
+_DIA = "2026-09-20"
+
+_CITA_DE_AGENDA = {
+    "id": "11111111-2222-3333-4444-555555555555",
+    "conversacion_id": "66666666-7777-8888-9999-000000000000",
+    "telefono": "573001112233",
+    "nombre_completo": "Paciente De Prueba",
+    "tratamiento": "valoracion",
+    "inicio": datetime(2026, 9, 20, 9, 0, tzinfo=ZONA_BOGOTA),
+    "duracion_minutos": 60,
+    "estado": "confirmada",
+    "asistio": None,
+    "evento_calendar_id": None,
+    "reserva_id": None,
+}
+
+
+def _sin_base(monkeypatch, *, citas=None, sin_marcar=None):
+    """Deja el endpoint de la agenda sin base de datos y sin Google."""
+    monkeypatch.setattr(persistencia, "conectar", lambda url: _ConexionFalsaSinResolver())
+    monkeypatch.setattr(
+        persistencia, "leer_configuracion", lambda conn: dict(persistencia.CONFIGURACION_POR_DEFECTO)
+    )
+    monkeypatch.setattr(
+        panel, "citas_del_dia",
+        lambda conn, **kw: [dict(c) for c in (citas if citas is not None else [_CITA_DE_AGENDA])],
+    )
+    monkeypatch.setattr(
+        panel, "citas_sin_marcar", lambda conn, **kw: [dict(c) for c in (sin_marcar or [])]
+    )
+
+
+def test_sin_calendario_la_agenda_responde_igual(monkeypatch):
+    """Google caído no deja a la clínica sin ver su día. Lo dice, y sigue.
+
+    `calendario_disponible: False` es lo que la pantalla necesita para no pintar una agenda
+    sin bloqueos como si fuera una agenda libre.
+    """
+    _sin_base(monkeypatch)
+    monkeypatch.setattr(
+        atencion, "_calendario_por_defecto", lambda config: CalendarioCaido(motivo="sin credenciales")
+    )
+    runtime.app.dependency_overrides[runtime.usuario_actual] = _como("recepcion")
+    try:
+        r = TestClient(runtime.app).get(f"/api/agenda?dia={_DIA}")
+        assert r.status_code == 200
+        cuerpo = r.json()
+        assert set(cuerpo) == {
+            "dia", "citas", "bloqueos", "correcciones", "sin_marcar", "calendario_disponible"
+        }
+        assert cuerpo["calendario_disponible"] is False
+        assert cuerpo["dia"] == _DIA
+        assert cuerpo["bloqueos"] == [] and cuerpo["correcciones"] == []
+        # Y las citas salen igual: sin calendario no hay reconciliación, pero el día sí está.
+        assert len(cuerpo["citas"]) == 1
+        cita = cuerpo["citas"][0]
+        assert set(cita) >= {
+            "id", "telefono", "nombre_completo", "tratamiento", "inicio", "duracion_minutos",
+            "estado", "asistio",
+        }
+        assert cita["inicio"].startswith("2026-09-20T09:00:00")
+        assert cita["asistio"] is None
+    finally:
+        runtime.app.dependency_overrides.clear()
+
+
+def test_un_calendario_doble_no_cuenta_como_calendario(monkeypatch):
+    """El no negociable 1, mirado desde la agenda.
+
+    En una máquina sin credenciales de Google `calendario_desde_config` devuelve un
+    `CalendarioDoble`, que está VACÍO. Pasárselo a la reconciliación sería decirle que
+    ninguna cita del día existe ya en Calendar: las cancelaría TODAS, en silencio y con la
+    pantalla diciendo que el calendario está disponible.
+    """
+    _sin_base(monkeypatch)
+    monkeypatch.setattr(atencion, "_calendario_por_defecto", lambda config: CalendarioDoble())
+    runtime.app.dependency_overrides[runtime.usuario_actual] = _como("admin")
+    try:
+        r = TestClient(runtime.app).get(f"/api/agenda?dia={_DIA}")
+        assert r.status_code == 200
+        assert r.json()["calendario_disponible"] is False
+        assert len(r.json()["citas"]) == 1, "la cita del día sigue ahí, sin cancelar"
+    finally:
+        runtime.app.dependency_overrides.clear()
+
+
+def test_un_dia_que_no_es_un_dia_no_llega_a_la_base(monkeypatch):
+    """Un `dia` ilegible se rechaza antes de abrir una conexión, no con un 500 de psycopg."""
+    def revienta(*args, **kw):
+        raise AssertionError("no se debía llegar hasta aquí")
+
+    monkeypatch.setattr(persistencia, "conectar", revienta)
+    monkeypatch.setattr(atencion, "_calendario_por_defecto", revienta)
+    runtime.app.dependency_overrides[runtime.usuario_actual] = _como("doctor")
+    try:
+        r = TestClient(runtime.app).get("/api/agenda?dia=el-martes")
+        assert r.status_code == 422
+        assert "AAAA-MM-DD" in r.json()["detalle"]
+    finally:
+        runtime.app.dependency_overrides.clear()
+
+
+def _marca_falsa(monkeypatch) -> list[dict]:
+    """Doble de `panel.marcar_asistencia` que anota con qué lo llamaron."""
+    llamadas: list[dict] = []
+
+    def falsa(conn, *, cita_id, valor, usuario):
+        llamadas.append({"cita_id": cita_id, "valor": valor, "usuario": usuario})
+        return dict(_CITA_DE_AGENDA, asistio=valor)
+
+    monkeypatch.setattr(persistencia, "conectar", lambda url: _ConexionFalsaSinResolver())
+    monkeypatch.setattr(panel, "marcar_asistencia", falsa)
+    return llamadas
+
+
+def test_recepcion_puede_marcar_asistencia(monkeypatch):
+    llamadas = _marca_falsa(monkeypatch)
+    runtime.app.dependency_overrides[runtime.usuario_actual] = _como("recepcion")
+    try:
+        c = TestClient(runtime.app)
+        r = c.patch(f"/api/agenda/citas/{_CITA_DE_AGENDA['id']}", json={"asistio": True})
+        assert r.status_code == 200
+        # Devuelve la cita YA actualizada, con la forma de una entrada de `citas_del_dia`:
+        # la pantalla repinta esa fila sin recargar el día entero.
+        assert r.json()["asistio"] is True
+        assert r.json()["id"] == _CITA_DE_AGENDA["id"]
+        assert r.json()["inicio"].startswith("2026-09-20T09:00:00")
+        assert llamadas == [{
+            "cita_id": _CITA_DE_AGENDA["id"], "valor": True, "usuario": "x.recepcion",
+        }]
+    finally:
+        runtime.app.dependency_overrides.clear()
+
+
+def test_null_es_desmarcar_y_no_un_campo_ausente(monkeypatch):
+    """`asistio: null` tiene que llegar como `None`, y omitir el campo tiene que ser un 422.
+
+    Son dos cosas distintas y el modelo las distingue a propósito: `Field(...)` lo declara
+    obligatorio y anulable. Con un default, un cuerpo mal formado desmarcaría la cita.
+    """
+    llamadas = _marca_falsa(monkeypatch)
+    runtime.app.dependency_overrides[runtime.usuario_actual] = _como("doctor")
+    try:
+        c = TestClient(runtime.app)
+        r = c.patch(f"/api/agenda/citas/{_CITA_DE_AGENDA['id']}", json={"asistio": None})
+        assert r.status_code == 200
+        assert r.json()["asistio"] is None
+        assert llamadas[-1]["valor"] is None
+
+        r = c.patch(f"/api/agenda/citas/{_CITA_DE_AGENDA['id']}", json={})
+        assert r.status_code == 422
+        assert "marca de asistencia" in r.json()["detalle"]
+        assert len(llamadas) == 1, "un cuerpo sin el campo no puede llegar a la base"
+    finally:
+        runtime.app.dependency_overrides.clear()
+
+
+def test_un_rol_inventado_no_puede_marcar(monkeypatch):
+    """Los tres roles del panel pueden marcar; cualquier otro, no. El botón se esconde en
+    la pantalla por comodidad, pero el control vive en `exigir_rol`."""
+    llamadas = _marca_falsa(monkeypatch)
+    for rol, esperado in [("admin", 200), ("doctor", 200), ("recepcion", 200),
+                          ("mercadeo", 403)]:
+        runtime.app.dependency_overrides[runtime.usuario_actual] = _como(rol)
+        try:
+            r = TestClient(runtime.app).patch(
+                f"/api/agenda/citas/{_CITA_DE_AGENDA['id']}", json={"asistio": False}
+            )
+            assert r.status_code == esperado, f"{rol} obtuvo {r.status_code}"
+        finally:
+            runtime.app.dependency_overrides.clear()
+    assert len(llamadas) == 3, "el rol inventado no llegó a la base"
+
+
+def test_una_cita_que_no_existe_da_404_y_una_ya_pasada_da_400(monkeypatch):
+    """Los dos errores del PATCH, que NO son el mismo y la pantalla los cuenta distinto.
+
+    `CitaInexistente` hereda de `ValueError` a propósito: `panel.py` no conoce códigos HTTP
+    --no puede, la frontera lo prohíbe-- y esto es lo que le deja a `runtime.py` distinguir
+    «ese id no está» de «ese id está y no se puede marcar» sin leerle el mensaje al error.
+    """
+    monkeypatch.setattr(persistencia, "conectar", lambda url: _ConexionFalsaSinResolver())
+    runtime.app.dependency_overrides[runtime.usuario_actual] = _como("admin")
+    try:
+        c = TestClient(runtime.app)
+
+        def no_existe(conn, **kw):
+            raise panel.CitaInexistente("esa cita no existe")
+
+        monkeypatch.setattr(panel, "marcar_asistencia", no_existe)
+        r = c.patch(f"/api/agenda/citas/{_CITA_DE_AGENDA['id']}", json={"asistio": True})
+        assert r.status_code == 404
+        assert "no existe" in r.json()["detalle"]
+
+        def todavia_no(conn, **kw):
+            raise ValueError("esa cita todavía no ha ocurrido")
+
+        monkeypatch.setattr(panel, "marcar_asistencia", todavia_no)
+        r = c.patch(f"/api/agenda/citas/{_CITA_DE_AGENDA['id']}", json={"asistio": True})
+        assert r.status_code == 400
+        assert "todavía no" in r.json()["detalle"]
+    finally:
+        runtime.app.dependency_overrides.clear()

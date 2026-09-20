@@ -42,6 +42,7 @@ import html
 import logging
 import time
 
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -58,6 +59,7 @@ from . import (
     autenticacion,
     contratos,
     conversacion,
+    herramientas,
     ingesta,
     lectura,
     panel,
@@ -66,7 +68,13 @@ from . import (
     reseteo,
     seguimientos,
 )
-from .calendario import CalendarioCaido, CalendarioDoble, Jornada, calendario_desde_config
+from .calendario import (
+    ZONA_BOGOTA,
+    CalendarioCaido,
+    CalendarioDoble,
+    Jornada,
+    calendario_desde_config,
+)
 from .canales import Telegram, WhatsApp
 from .config import Config, cargar_dotenv, descartar_vacias_de_terceros
 from .contratos import ContextoDaniela
@@ -121,6 +129,8 @@ _NOMBRE_DEL_CAMPO = {
     "concepto": "el concepto de la ficha",
     "contenido": "el contenido de la ficha",
     "nota_pendiente": "la nota de qué falta por definir",
+    "dia": "el día de la agenda",
+    "asistio": "la marca de asistencia",
     "usuario": "el usuario",
     "contrasena": "la contraseña",
     "mensaje": "el mensaje",
@@ -1797,6 +1807,198 @@ async def api_sin_resolver(quien: dict = Depends(usuario_actual)) -> dict:
     with persistencia.conectar(config.database_url) as conn:
         casos = persistencia.casos_recientes(conn)
     return {"casos": casos, "es_admin": quien["rol"] == "admin"}
+
+
+# ------------------------------------------------------------------------------------------
+# Panel: la agenda del día y la marca de asistencia
+# ------------------------------------------------------------------------------------------
+
+
+#: Cuántos días hacia atrás mira la lista de «se te quedaron sin marcar». Una semana es lo que
+#: cabe en la cabeza de quien atiende el mostrador: más allá, nadie se acuerda de si el
+#: paciente llegó, y marcar de memoria es peor que no marcar.
+DIAS_SIN_MARCAR = 7
+
+
+def _cita_en_json(cita: dict[str, Any]) -> dict[str, Any]:
+    """La cita como la lee la pantalla, y solo eso.
+
+    `evento_calendar_id` y `reserva_id` se quedan fuera a propósito: son identificadores de
+    otros sistemas que la agenda no usa para nada y que no tienen por qué viajar al navegador.
+    """
+    return {
+        "id": str(cita["id"]),
+        "conversacion_id": str(cita["conversacion_id"]),
+        "telefono": cita["telefono"],
+        "nombre_completo": cita["nombre_completo"],
+        "tratamiento": cita["tratamiento"],
+        "inicio": cita["inicio"].isoformat(),
+        "duracion_minutos": cita["duracion_minutos"],
+        "estado": cita["estado"],
+        "asistio": cita["asistio"],
+    }
+
+
+def _correccion_en_json(correccion: herramientas.Correccion) -> dict[str, Any]:
+    """Los seis campos de `Correccion`, con las horas en ISO.
+
+    `hora_nueva` en `null` es lo que distingue «la movieron» de «ya no está». La pantalla lo
+    necesita entero: lo que esto cuenta es un cambio que la clínica hizo en Google Calendar y
+    que el panel acaba de escribir en Neon delante de quien está mirando.
+    """
+    return {
+        "cita_id": str(correccion.cita_id),
+        "que_paso": correccion.que_paso,
+        "hora_vieja": correccion.hora_vieja.isoformat(),
+        "hora_nueva": correccion.hora_nueva.isoformat() if correccion.hora_nueva else None,
+        "tratamiento": correccion.tratamiento,
+        "nombre_completo": correccion.nombre_completo,
+    }
+
+
+def _calendario_de_la_agenda():
+    """El calendario real, o `None` si no hay ninguno en el que se pueda confiar.
+
+    Descarta DOS cosas, no una, y la segunda es el no negociable 1 visto desde aquí:
+
+    - `CalendarioCaido`: Google no arrancó. Cada llamada lanza `ErrorDeCalendario`.
+    - **`CalendarioDoble`: un calendario VACÍO que dice que sí a todo.** Es lo que devuelve
+      `calendario_desde_config` en una máquina sin credenciales de Google. Pasárselo a la
+      reconciliación sería afirmar que ninguna cita del día sigue en Calendar: las cancelaría
+      TODAS, soltaría sus cupos y la pantalla diría que el calendario está disponible. El
+      doble miente igual leyendo que escribiendo.
+    """
+    try:
+        calendario = atencion._calendario_por_defecto(config)
+    except Exception:  # noqa: BLE001 -- una agenda que no se pinta es peor que una sin bloqueos
+        log.exception("no se pudo construir el calendario para la agenda del panel")
+        return None
+    if isinstance(calendario, (CalendarioCaido, CalendarioDoble)):
+        log.warning(
+            "la agenda del panel corre sin Google Calendar (%s): no hay bloqueos que pintar "
+            "y no se reconcilia nada",
+            type(calendario).__name__,
+        )
+        return None
+    return calendario
+
+
+@app.get("/api/agenda")
+async def api_agenda(dia: str | None = None, quien: dict = Depends(usuario_actual)) -> dict:
+    """El día ya reconciliado contra Google Calendar.
+
+    OJO: este GET ESCRIBE. Reconciliar corrige Neon (mueve, cancela, toca cupos), y esta
+    pantalla es el mejor disparador que esa reconciliación va a tener: hoy solo corre cuando
+    un paciente pregunta por su cita, y no hay ningún barrido. Lo que corrija sale en
+    `correcciones`, con la hora vieja dentro, para que quien esté mirando la pantalla entienda
+    por qué una cita cambió de sitio mientras la miraba.
+
+    Una cita que el doctor movió a OTRO día desaparece de `citas` y solo queda en
+    `correcciones`: la lista es del día que se pidió, y `hora_nueva` dice a dónde se fue.
+    """
+    try:
+        el_dia = date.fromisoformat(dia) if dia else datetime.now(ZONA_BOGOTA).date()
+    except ValueError as e:
+        raise HTTPException(
+            status_code=422, detail="El día de la agenda tiene que venir como AAAA-MM-DD."
+        ) from e
+
+    desde = datetime(el_dia.year, el_dia.month, el_dia.day, tzinfo=ZONA_BOGOTA)
+    hasta = desde + timedelta(days=1)
+    ahora = datetime.now(ZONA_BOGOTA)
+
+    with persistencia.conectar(config.database_url) as conn:
+        operativa = persistencia.leer_configuracion(conn)
+        citas = panel.citas_del_dia(conn, desde=desde, hasta=hasta)
+
+    calendario = _calendario_de_la_agenda()
+    correcciones: list[herramientas.Correccion] = []
+    bloqueos: list[Any] = []
+
+    if calendario is not None:
+        citas, correcciones = await herramientas.reconciliar_con_calendar(
+            database_url=config.database_url,
+            calendario=calendario,
+            citas=citas,
+            ahora=ahora,
+            jornada=Jornada(
+                apertura=operativa.get("hora_apertura", 8),
+                cierre=operativa.get("hora_cierre", 17),
+                cierre_sabado=operativa.get("hora_cierre_sabado", 15),
+                atiende_domingo=bool(operativa.get("atiende_domingo", 0)),
+            ),
+            capacidad_por_hora=operativa.get("capacidad_por_hora", 2),
+            duracion_cita_minutos=operativa.get("duracion_cita_minutos", 60),
+            hora_recordatorio_vispera=operativa.get("hora_recordatorio_vispera", 18),
+            horas_minimas_para_recordar=operativa.get("horas_minimas_para_recordar", 4),
+        )
+        citas = [c for c in citas if desde <= c["inicio"] < hasta]
+        try:
+            bloqueos = await asyncio.to_thread(calendario.bloqueos, desde, hasta)
+        except Exception:  # noqa: BLE001 -- ver abajo
+            # Y si los bloqueos no se pudieron leer, el calendario NO está disponible aunque
+            # la reconciliación haya funcionado. Pintar el día sin los bloqueos del doctor y
+            # decir que el calendario está bien enseña como libres horas que están apartadas:
+            # es la misma mentira del `CalendarioDoble`, por la otra puerta.
+            log.warning("no se pudieron leer los bloqueos del día %s", el_dia, exc_info=True)
+            calendario = None
+            bloqueos = []
+
+    with persistencia.conectar(config.database_url) as conn:
+        sin_marcar = panel.citas_sin_marcar(
+            conn, desde=desde - timedelta(days=DIAS_SIN_MARCAR), hasta=desde
+        )
+
+    return {
+        "dia": el_dia.isoformat(),
+        "citas": [_cita_en_json(c) for c in citas],
+        "bloqueos": [
+            {"inicio": b.inicio.isoformat(), "fin": b.fin.isoformat(), "titulo": b.titulo}
+            for b in bloqueos
+        ],
+        "correcciones": [_correccion_en_json(c) for c in correcciones],
+        "sin_marcar": [_cita_en_json(c) for c in sin_marcar],
+        "calendario_disponible": calendario is not None,
+    }
+
+
+class MarcaDeAsistencia(BaseModel):
+    #: `Field(...)` es obligatorio Y anulable, y las dos mitades importan: `null` ES
+    #: desmarcar, y un cuerpo al que se le olvidó el campo no puede significar lo mismo. Con
+    #: un `= None` por default, una petición mal formada borraría la marca en silencio.
+    asistio: bool | None = Field(...)
+
+
+@app.patch("/api/agenda/citas/{cita_id}")
+async def api_marcar_asistencia(
+    cita_id: str,
+    cuerpo: MarcaDeAsistencia,
+    quien: dict = Depends(exigir_rol("admin", "doctor", "recepcion")),
+) -> dict:
+    """Marca si el paciente asistió, y devuelve la cita ya actualizada.
+
+    Recepción entra en la lista porque es quien ve llegar al paciente: dejar esto solo para
+    admin significaría que la columna se llena tarde, de memoria, o no se llena.
+
+    Devuelve la cita con la misma forma que una entrada de `citas`, para que la pantalla
+    repinte esa fila sin volver a pedir el día entero -- que, siendo este un GET que escribe,
+    sería reconciliar contra Google otra vez por un clic.
+    """
+    try:
+        with persistencia.conectar(config.database_url) as conn:
+            cita = panel.marcar_asistencia(
+                conn, cita_id=cita_id, valor=cuerpo.asistio, usuario=quien["usuario"]
+            )
+    except panel.CitaInexistente as e:
+        # Antes que `ValueError`, del que hereda. Al revés nunca se alcanzaría.
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    log.info(
+        "%s marcó la cita %s como %s",
+        quien["usuario"], cita_id, panel.MARCA[cuerpo.asistio],
+    )
+    return _cita_en_json(cita)
 
 
 @app.on_event("startup")
