@@ -184,7 +184,13 @@ function TarjetaCita({
   marcar: (id: string, v: boolean | null) => void
 }) {
   const sinMarcar = pasada && cita.asistio === null
-  const alto = Math.max(cita.duracion_minutos * 1.6, 72)
+  /* Lo que cabe en la fila de su hora: los 96 px menos los 20 de `pt-3 pb-2`. La maqueta
+     ponía `duracion * 1.6` sin tope y no se le notaba porque todas sus citas de ejemplo
+     duraban 45 minutos; con datos reales la duración por defecto de la clínica son 60, que a
+     1.6 dan los 96 px enteros y la tarjeta se derramaba sobre la hora siguiente --encima de
+     las tarjetas de esa hora--. Lo que la altura deja de contar lo dice el rango horario que
+     ahora se pinta arriba a la derecha, que además es un dato y no una proporción. */
+  const alto = Math.min(Math.max(cita.duracion_minutos * 1.6, 72), ALTO_HORA - 20)
 
   return (
     <div
@@ -229,7 +235,12 @@ function TarjetaCita({
             )}
           </div>
         </div>
-        <p className="text-xs font-medium shrink-0" style={{ color: '#9CA3AF' }}>{hhmm(cita.inicio)}</p>
+        <div className="shrink-0 text-right">
+          <p className="text-xs font-medium" style={{ color: '#9CA3AF' }}>{hhmm(cita.inicio)}</p>
+          <p className="text-[10px]" style={{ color: '#D1D5DB' }}>
+            a {FMT_HORA.format(instante(cita.inicio) + cita.duracion_minutos * 60_000)}
+          </p>
+        </div>
       </div>
 
       {/* El botón solo existe si la hora de inicio ya pasó. Un «no asistió» puesto a las 8:00
@@ -333,19 +344,34 @@ export default function Agenda({ alCaducarSesion }: { alCaducarSesion: () => voi
     caducar.current = alCaducarSesion
   })
 
-  // El día viaja como argumento, no como dependencia: así `recargar` sigue con las deps
-  // vacías y el efecto de abajo decide cuándo se pide.
+  /* El día que se está pidiendo ahora mismo. Va en una `ref` y no en el estado porque lo leen
+     los `await` de abajo, no el render, y porque tiene que estar puesto ANTES de la petición.
+     Es lo que descarta una respuesta que ya no corresponde a lo que la pantalla muestra. */
+  const pedido = useRef(dia)
+
+  /* El día viaja como ARGUMENTO, no como dependencia: así `recargar` conserva las deps vacías
+     que exige la regla 3 de `web/CLAUDE.md` y el efecto de abajo decide cuándo se pide.
+
+     Dos lecturas en vuelo es el caso normal, no el raro: cada una reconcilia contra Google y
+     tarda de 3 a 5 segundos, y llegar al lunes son dos clics en «Ayer» seguidos. Si la de D-1
+     resolviera después de la de D-2, la cabecera se quedaría en D-2 y la rejilla en D-1 --y
+     no por cinco segundos, sino para siempre--: alguien marcaría la asistencia de un paciente
+     mirando el nombre de otro día. Por eso cada respuesta comprueba que su día siga siendo el
+     pedido, y si no, se tira entera: ni datos, ni error, ni apagar el «cargando» que la
+     petición buena todavía necesita encendido. */
   const recargar = useCallback(async (queDia: string) => {
+    pedido.current = queDia
     setCargando(true)
     try {
       const datosDelDia = await leerAgenda(queDia)
+      if (pedido.current !== queDia) return
       setDatos(datosDelDia)
       setError('')
     } catch (e) {
       if (e instanceof SesionCaducada) caducar.current()
-      else setError(mensajeDe(e))
+      else if (pedido.current === queDia) setError(mensajeDe(e))
     } finally {
-      setCargando(false)
+      if (pedido.current === queDia) setCargando(false)
     }
   }, [])
 
@@ -423,7 +449,13 @@ export default function Agenda({ alCaducarSesion }: { alCaducarSesion: () => voi
 
   const marco = { fontFamily: SP, backgroundColor: '#F9FAFB' }
 
-  if (cargando && datos === null) {
+  /* Mientras carga NO se enseña el día anterior, ni siquiera atenuado, y no es una cuestión de
+     pulcritud: la cabecera ya dice el día nuevo, la reconciliación contra Google tarda de 3 a
+     5 segundos, y en esos segundos alguien puede pulsar el botón verde de una cita de HOY
+     creyendo que está cerrando lo de AYER. Un contenido viejo bajo un rótulo nuevo es lo único
+     que esta pantalla no se puede permitir. Se reemplaza entero, como hacen `Tratamientos` y
+     `SinResolver`; la cabecera se queda para que se pueda seguir navegando. */
+  if (cargando) {
     return (
       <div className="flex-1 flex flex-col min-w-0 overflow-hidden" style={marco}>
         <Cabecera dia={dia} irA={setDia} resumen={null} />
