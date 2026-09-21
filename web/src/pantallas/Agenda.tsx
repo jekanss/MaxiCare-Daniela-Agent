@@ -186,14 +186,17 @@ function TarjetaCita({
   const sinMarcar = pasada && cita.asistio === null
   /* Un MÍNIMO, no una altura: lo que de verdad mide la tarjeta lo decide su contenido, y con
      los dos botones de marcar son 137 px. Por eso el desborde no lo arregla este número --se
-     intentó, acotándolo a lo que cabe en una fila de 96 px, y la tarjeta siguió midiendo 137--
-     sino la rejilla, que ahora deja crecer la fila de cada hora. El detalle está abajo, donde
-     se pintan las horas.
+     intentó, acotándolo a `ALTO_HORA - 20`, y la tarjeta siguió midiendo 137-- sino la
+     rejilla, que ahora deja crecer la fila de cada hora. El detalle está abajo, donde se
+     pintan las horas.
 
-     Lo que este número sí hace es que una cita corta no quede raquítica y que una larga se vea
-     más alta que una de media hora. Lo que la altura deja de contar --que ya no es una
-     proporción exacta-- lo dice el rango horario de la esquina, que es un dato. */
-  const alto = Math.min(Math.max(cita.duracion_minutos * 1.6, 72), ALTO_HORA - 20)
+     Y por eso aquí ya no hay tope. Aquel `Math.min(..., ALTO_HORA - 20)` era lo que quedaba
+     del intento fallido, y una vez que la fila crece no acotaba nada: solo aplanaba 60, 120 y
+     180 minutos a los mismos 76 px, o sea que hacía a esta línea mentir sobre lo único que
+     sirve para. Sin él, una cita larga se ve larga otra vez.
+
+     El suelo de 72 px sí se queda: una cita de media hora sin él quedaría raquítica. */
+  const alto = Math.max(cita.duracion_minutos * 1.6, 72)
 
   return (
     <div
@@ -545,8 +548,17 @@ export default function Agenda({ alCaducarSesion }: { alCaducarSesion: () => voi
             </button>
           </div>
 
+          {/* Acotada y con scroll PROPIO, y es el mismo fallo de la rejilla por la otra
+              puerta. `citas_sin_marcar` devuelve hasta 50 filas y este panel es `shrink-0`
+              dentro de una raíz `overflow-hidden`: sin cota, con doce o quince pendientes
+              desplegadas las últimas quedan recortadas **y sin ningún scroll que las
+              alcance** --el de la rejilla es del hermano de abajo, no de este--. Invisibles
+              y no marcables, que es exactamente lo que esta pantalla no puede permitirse:
+              una cita que nadie marca es la que rompe la única medida real del proyecto.
+              `40vh` deja ver cinco o seis de un vistazo y le garantiza a la rejilla más de
+              la mitad de la altura, que es donde se trabaja el día de hoy. */}
           {verSinMarcar && (
-            <ul className="mt-3 flex flex-col gap-2">
+            <ul className="mt-3 flex flex-col gap-2 max-h-[40vh] overflow-y-auto pr-1">
               {datos.sin_marcar.map((c) => (
                 <li
                   key={c.id}

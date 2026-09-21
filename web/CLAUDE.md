@@ -59,8 +59,17 @@ uv run uvicorn maxicare_daniela.runtime:app --port 8080
   - **La línea del «ahora» se sitúa en un porcentaje de SU fila**, no multiplicando `ALTO_HORA`
     desde arriba de la rejilla. Esa cuenta vieja daba por hecho que todas las filas miden lo
     mismo: en cuanto una crece, apunta a la hora equivocada.
-  **Nada de esto lo caza una prueba.** No hay arnés de frontend: el único guardián es abrir la
+  **Lo vigila `tests/test_agenda_pantalla.py`, y conviene saber hasta dónde llega.** Es una
+  prueba de TEXTO sobre este archivo: caza que alguien reponga una altura fija o devuelva la
+  línea del «ahora» a la cuenta vieja, y no puede cazar nada más, porque no hay motor de
+  maquetación. **Un arnés de jsdom sería peor que nada**: `getBoundingClientRect` devuelve
+  ceros y pasaría en verde sobre la pantalla rota. El guardián de verdad sigue siendo abrir la
   pantalla con dos citas seguidas de 60 minutos y comprobar que los dos botones se pulsan.
+- **La lista de «citas sin marcar» va acotada (`max-h-[40vh]`) y con scroll PROPIO.** Es el
+  mismo fallo por la otra puerta: el panel es `shrink-0` dentro de una raíz `overflow-hidden` y
+  `citas_sin_marcar` devuelve hasta **50** filas, así que sin cota las últimas quedan recortadas
+  **y sin ningún scroll que las alcance** —el de la rejilla es de otro elemento—. Invisibles y
+  no marcables.
 - **La marca de asistencia no funciona sin la migración 021, y falla ENTERA.** La 007 dejó
   `cambios_configuracion.tabla` cerrado en tres valores y `citas` no estaba; como
   `panel.marcar_asistencia` mete el `UPDATE` y su fila de bitácora en la MISMA transacción,
