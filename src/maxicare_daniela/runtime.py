@@ -1950,6 +1950,27 @@ def _calendario_de_la_agenda():
     return calendario
 
 
+#: Por qué un día se pintó SIN contrastarlo contra Google Calendar. Viaja en
+#: `motivo_sin_calendario`, y su valor lo decide este archivo y nadie más: la pantalla lo
+#: consume, no lo deduce.
+#:
+#: Existen porque los dos casos no significan lo mismo y la pantalla los pinta distinto.
+#: `fuera_de_ventana` es rutina --el día es viejo y la cota de `_fuera_de_la_ventana` decidió
+#: no contrastarlo--; `no_disponible` es una avería --Google no contestó, o no hay calendario
+#: en el que confiar--. Con un solo booleano la pantalla enseñaba la MISMA alarma roja en los
+#: dos, y como `DIAS_SIN_MARCAR` (7) es más ancho que la ventana (2), cinco de los siete días
+#: a los que lleva el botón «Ver ese día» caen fuera: la alarma salía a diario por un motivo
+#: inocuo. Una alarma que suena por nada deja de leerse el día que significa algo, y lo que
+#: significa aquí es que una fila desfasada puede poner a un paciente en la hora equivocada.
+#:
+#: **La invariante que sostienen entre los dos: `motivo_sin_calendario` es `None` si y solo si
+#: `calendario_disponible` es `True`.** Quien añada un tercer motivo lo declara aquí, no en el
+#: cuerpo del endpoint, y lo añade también al `MotivoSinCalendario` de `web/src/api.ts` -- lo
+#: ata `tests/test_agenda_pantalla.py`.
+MOTIVO_FUERA_DE_VENTANA = "fuera_de_ventana"
+MOTIVO_CALENDARIO_NO_DISPONIBLE = "no_disponible"
+
+
 def _fuera_de_la_ventana(el_dia: date, ahora: datetime) -> bool:
     """¿El día que piden es demasiado viejo para contrastarlo contra Google Calendar?
 
@@ -1978,9 +1999,19 @@ def _fuera_de_la_ventana(el_dia: date, ahora: datetime) -> bool:
     --vino o no vino-- y lo único que se gana cancelándola es borrar el dato que dice cuál de
     las dos cosas pasó.
 
-    El día viejo se pinta con lo que dice Neon y `calendario_disponible: false`, que es cierto
-    --ese día no se contrastó-- y la pantalla ya sabe explicarlo. De paso deja de costar los
+    El día viejo se pinta con lo que dice Neon, `calendario_disponible: false` y
+    `motivo_sin_calendario: "fuera_de_ventana"` --que es lo que deja a la pantalla decir la
+    verdad: no falló nada, es que ese día ya no se contrasta--. De paso deja de costar los
     3-5 s de N llamadas a Google por cada paseo hacia atrás.
+
+    **Es la misma CONSTANTE que usa Daniela, no la misma ventana**, y conviene tenerlo claro
+    antes de afinar el `<`: el núcleo corta por INSTANTE (`ctx.ahora - N días`) y esto corta
+    por DÍA, así que en el día frontera el panel es hasta 24 h más ancho --a las 18:00,
+    Daniela ya no mira las 9:00 de hace dos días y el panel sí--. El desfase cae siempre del
+    lado permisivo: el panel puede contrastar un rato de más, nunca de menos, y contrastar de
+    más es lo que el NN20 quiere. Si algún día tuviera que ser exacto, la comparación sube a
+    instantes; cerrarlo por el otro lado dejaría al panel contando una historia distinta de la
+    que Daniela le cuenta al paciente.
     """
     return el_dia < ahora.date() - timedelta(days=herramientas.DIAS_HACIA_ATRAS_AL_SINCRONIZAR)
 
@@ -1998,8 +2029,11 @@ async def api_agenda(dia: str | None = None, quien: dict = Depends(usuario_actua
     Una cita que el doctor movió a OTRO día desaparece de `citas` y solo queda en
     `correcciones`: la lista es del día que se pidió, y `hora_nueva` dice a dónde se fue.
 
-    **Y no se reconcilia cualquier día: solo los que caen dentro de la misma ventana que usa
-    Daniela** (`herramientas.DIAS_HACIA_ATRAS_AL_SINCRONIZAR`). Ver `_fuera_de_la_ventana`.
+    **Y no se reconcilia cualquier día: solo los que caen dentro de la ventana que marca la
+    misma constante que usa Daniela** (`herramientas.DIAS_HACIA_ATRAS_AL_SINCRONIZAR`; la cota
+    de aquí es de DÍA y la del núcleo de INSTANTE, ver `_fuera_de_la_ventana`). Cuando no se
+    contrastó, `calendario_disponible` sale en `false` y `motivo_sin_calendario` dice cuál de
+    los dos motivos fue, que no se parecen: rutina o avería.
     """
     ahora = _ahora_en_bogota()
     try:
@@ -2016,7 +2050,18 @@ async def api_agenda(dia: str | None = None, quien: dict = Depends(usuario_actua
         operativa = persistencia.leer_configuracion(conn)
         citas = panel.citas_del_dia(conn, desde=desde, hasta=hasta)
 
-    calendario = None if _fuera_de_la_ventana(el_dia, ahora) else _calendario_de_la_agenda()
+    # El motivo se decide AQUÍ, donde se sabe, y no se deduce después: en este punto la
+    # distinción entre «el día es viejo» y «no hay calendario» todavía existe, y tres líneas
+    # más abajo ya se habría perdido dentro de un `calendario is None`.
+    fuera_de_ventana = _fuera_de_la_ventana(el_dia, ahora)
+    calendario = None if fuera_de_ventana else _calendario_de_la_agenda()
+    if fuera_de_ventana:
+        motivo_sin_calendario: str | None = MOTIVO_FUERA_DE_VENTANA
+    elif calendario is None:
+        motivo_sin_calendario = MOTIVO_CALENDARIO_NO_DISPONIBLE
+    else:
+        motivo_sin_calendario = None
+
     correcciones: list[herramientas.Correccion] = []
     bloqueos: list[Any] = []
 
@@ -2047,6 +2092,10 @@ async def api_agenda(dia: str | None = None, quien: dict = Depends(usuario_actua
             # es la misma mentira del `CalendarioDoble`, por la otra puerta.
             log.warning("no se pudieron leer los bloqueos del día %s", el_dia, exc_info=True)
             calendario = None
+            # Y el motivo con él, o la invariante «`None` si y solo si disponible» dejaría de
+            # ser cierta justo aquí: la pantalla se quedaría sin ningún aviso que pintar sobre
+            # un día al que le faltan los bloqueos del doctor.
+            motivo_sin_calendario = MOTIVO_CALENDARIO_NO_DISPONIBLE
             bloqueos = []
 
     with persistencia.conectar(config.database_url) as conn:
@@ -2064,6 +2113,8 @@ async def api_agenda(dia: str | None = None, quien: dict = Depends(usuario_actua
         "correcciones": [_correccion_en_json(c) for c in correcciones],
         "sin_marcar": [_cita_en_json(c) for c in sin_marcar],
         "calendario_disponible": calendario is not None,
+        # Aditivo: un cliente viejo lo ignora y sigue viendo lo mismo que veía.
+        "motivo_sin_calendario": motivo_sin_calendario,
     }
 
 

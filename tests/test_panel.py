@@ -22,6 +22,7 @@ from maxicare_daniela.calendario import (
     Bloqueo,
     CalendarioCaido,
     CalendarioDoble,
+    ErrorDeCalendario,
 )
 from maxicare_daniela.config import cargar_dotenv
 
@@ -898,6 +899,11 @@ def test_sin_calendario_la_agenda_responde_igual(monkeypatch):
     `calendario_disponible: False` es lo que la pantalla necesita para no pintar una agenda
     sin bloqueos como si fuera una agenda libre. Y no se reconcilia NADA: contrastar contra
     un calendario que lanza en cada llamada solo sirve para tragarse errores.
+
+    **Y el motivo tiene que ser `no_disponible`, no el otro.** Es la mitad que la pantalla usa
+    para decidir el TONO: esta es la avería --lo que se ve puede estar desfasado y eso pone a
+    un paciente en la hora equivocada-- y va en rojo. Si alguien la etiquetara como el día
+    viejo, la única alarma que tiene esta pantalla se pintaría como rutina gris.
     """
     _sin_base(monkeypatch)
     _nadie_reconcilia(monkeypatch)
@@ -908,9 +914,11 @@ def test_sin_calendario_la_agenda_responde_igual(monkeypatch):
         assert r.status_code == 200
         cuerpo = r.json()
         assert set(cuerpo) == {
-            "dia", "citas", "bloqueos", "correcciones", "sin_marcar", "calendario_disponible"
+            "dia", "citas", "bloqueos", "correcciones", "sin_marcar", "calendario_disponible",
+            "motivo_sin_calendario",
         }
         assert cuerpo["calendario_disponible"] is False
+        assert cuerpo["motivo_sin_calendario"] == runtime.MOTIVO_CALENDARIO_NO_DISPONIBLE
         assert cuerpo["dia"] == _DIA
         assert cuerpo["bloqueos"] == [] and cuerpo["correcciones"] == []
         # Y las citas salen igual: sin calendario no hay reconciliación, pero el día sí está.
@@ -1073,6 +1081,41 @@ def test_con_calendario_las_correcciones_y_los_bloqueos_salen_enteros(monkeypatc
         runtime.app.dependency_overrides.clear()
 
 
+def test_si_los_bloqueos_fallan_el_motivo_dice_que_es_una_averia(monkeypatch):
+    """La tercera puerta hasta `calendario_disponible: False`, y la única sin prueba propia.
+
+    La reconciliación funcionó y los bloqueos no: el día se pinta sin las franjas que el
+    doctor tiene apartadas, así que enseña como libres horas que no lo están. Eso es una
+    AVERÍA --la misma mentira del `CalendarioDoble` por la otra puerta-- y tiene que salir por
+    la franja roja, no por la gris de «este día ya es antiguo».
+
+    Sin esta prueba, olvidar el motivo en ese `except` deja la respuesta diciendo
+    `calendario_disponible: False` con `motivo_sin_calendario: null`: rompe la invariante
+    «`null` si y solo si disponible» sin que nada falle, y la pantalla se queda a merced de su
+    propio `else`.
+    """
+    class _SinBloqueos(_CalendarioDeLaAgenda):
+        def bloqueos(self, desde, hasta):
+            raise ErrorDeCalendario("Google no contestó")
+
+    _sin_base(monkeypatch)
+    monkeypatch.setattr(runtime, "_calendario", _SinBloqueos())
+
+    async def reconciliar(**kw):
+        return kw["citas"], []
+
+    monkeypatch.setattr(herramientas, "reconciliar_con_calendar", reconciliar)
+    runtime.app.dependency_overrides[runtime.usuario_actual] = _como("recepcion")
+    try:
+        cuerpo = TestClient(runtime.app).get(f"/api/agenda?dia={_DIA}").json()
+        assert cuerpo["calendario_disponible"] is False
+        assert cuerpo["motivo_sin_calendario"] == runtime.MOTIVO_CALENDARIO_NO_DISPONIBLE
+        # Y el día se sigue pintando: lo que se pierde es el contraste, no la agenda.
+        assert len(cuerpo["citas"]) == 1 and cuerpo["bloqueos"] == []
+    finally:
+        runtime.app.dependency_overrides.clear()
+
+
 def test_una_cita_que_se_fueron_a_otro_dia_sale_de_la_lista_del_dia(monkeypatch):
     """Solo queda en `correcciones`, con `hora_nueva` diciendo a dónde se fue.
 
@@ -1129,6 +1172,9 @@ def test_un_dia_dentro_de_la_ventana_si_se_reconcilia(monkeypatch):
         cuerpo = r.json()
         assert reconciliados, "el día de anteayer dejó de contrastarse contra Calendar"
         assert cuerpo["calendario_disponible"] is True
+        # La otra mitad de la invariante: `null` si y solo si el día SÍ se contrastó. Sin
+        # esto, un motivo puesto de más pintaría un aviso sobre un día que no tiene nada.
+        assert cuerpo["motivo_sin_calendario"] is None
         assert len(cuerpo["citas"]) == 1
     finally:
         runtime.app.dependency_overrides.clear()
@@ -1148,6 +1194,13 @@ def test_un_dia_mas_viejo_que_la_ventana_no_se_reconcilia_ni_toca_la_base(monkey
     `_calendario_de_la_agenda` revienta --el día viejo no llega ni a pedir calendario, que es
     lo que lo vuelve instantáneo-- y `marcar_cita_cancelada` revienta por si algún día
     apareciera un tercer camino hasta la cancelación.
+
+    **Y el motivo tiene que ser `fuera_de_ventana`, que es lo que le permite a la pantalla no
+    mentir.** Con el booleano a secas, este día --el caso NORMAL: `DIAS_SIN_MARCAR` es 7 y la
+    ventana 2, así que cinco de los siete días a los que lleva «Ver ese día» caen aquí-- salía
+    con la franja roja «No se pudo consultar Google Calendar», que es falso: no falló nada. Y
+    el daño no era el rótulo, era gastar a diario la ÚNICA señal que avisa de que se está
+    mirando Neon sin contrastar, que es la que sí tiene consecuencia clínica.
     """
     def revienta(*args, **kw):
         raise AssertionError("un día fuera de la ventana no puede llegar hasta aquí")
@@ -1166,6 +1219,7 @@ def test_un_dia_mas_viejo_que_la_ventana_no_se_reconcilia_ni_toca_la_base(monkey
         assert r.status_code == 200
         cuerpo = r.json()
         assert cuerpo["calendario_disponible"] is False
+        assert cuerpo["motivo_sin_calendario"] == runtime.MOTIVO_FUERA_DE_VENTANA
         assert cuerpo["correcciones"] == [] and cuerpo["bloqueos"] == []
         # El día se pinta igual: lo que se pierde es el contraste, no la agenda.
         assert len(cuerpo["citas"]) == 1
