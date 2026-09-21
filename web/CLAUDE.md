@@ -103,9 +103,13 @@ uv run uvicorn maxicare_daniela.runtime:app --port 8080
     desde arriba de la rejilla. Esa cuenta vieja daba por hecho que todas las filas miden lo
     mismo: en cuanto una crece, apunta a la hora equivocada.
   **Lo vigila `tests/test_agenda_pantalla.py`, y conviene saber hasta dónde llega.** Es una
-  prueba de TEXTO sobre este archivo: caza que alguien reponga una altura fija o devuelva la
-  línea del «ahora» a la cuenta vieja, y no puede cazar nada más, porque no hay motor de
-  maquetación. **Un arnés de jsdom sería peor que nada**: `getBoundingClientRect` devuelve
+  prueba de TEXTO sobre este archivo: caza que alguien reponga una altura fija —en el CSS de
+  `style` **y** como clase de Tailwind, que es el dialecto normal del archivo: `h-24`,
+  `h-[96px]`— o devuelva la línea del «ahora» a la cuenta vieja, y no puede cazar nada más,
+  porque no hay motor de maquetación. Los topes y los mínimos (`max-h-`, `min-h-`) no
+  cuentan, y las alturas fijas menores de `h-4` tampoco: un punto o una línea de un pelo no
+  envuelven a nadie y no pueden tapar un botón. Para fijar otra hay una lista blanca con el
+  motivo escrito al lado. **Un arnés de jsdom sería peor que nada**: `getBoundingClientRect` devuelve
   ceros y pasaría en verde sobre la pantalla rota. El guardián de verdad sigue siendo abrir la
   pantalla con dos citas seguidas de 60 minutos y comprobar que los dos botones se pulsan.
 - **La lista de «citas sin marcar» va acotada (`max-h-[40vh]`) y con scroll PROPIO.** Es el

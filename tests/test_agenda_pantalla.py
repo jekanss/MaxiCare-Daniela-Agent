@@ -66,18 +66,64 @@ def test_la_fila_de_cada_hora_puede_crecer(fuente: str) -> None:
     )
 
 
+#: Las alturas de Tailwind que esta pantalla sí puede fijar, con su motivo. La lista es
+#: corta a propósito: añadir una es una decisión, y quien la añada escribe aquí por qué.
+#:
+#: - `h-full`, `h-auto`, `h-fit`, `h-min`, `h-max`: no fijan nada, la altura la sigue
+#:   decidiendo el contenido o el padre. Son justo lo contrario del fallo.
+#: - `h-px` y todo lo que mida menos de `h-4` (1 rem): un punto o una línea de un pelo. La
+#:   línea del «ahora» es `h-0.5` y su punto `h-2.5`; ninguno de los dos puede tapar un
+#:   botón porque ninguno de los dos contiene nada.
+_ALTURAS_DE_TAILWIND_PERMITIDAS = {"h-full", "h-auto", "h-fit", "h-min", "h-max", "h-px"}
+
+#: Por debajo de esto (en la escala de Tailwind, donde 4 = 1 rem = 16 px) una altura fija no
+#: es maqueta: es un adorno que no envuelve a nadie.
+_ESCALA_INOFENSIVA = 4
+
+
 def test_no_queda_ninguna_altura_fija_en_la_pantalla(fuente: str) -> None:
     """Ni una sola. La minúscula de `height:` es lo que la distingue de `minHeight:`.
 
     Se mira el archivo ENTERO y no solo la rejilla, porque el mismo fallo apareció en dos
     sitios: la tarjeta de una cita y la de un bloqueo del doctor (un bloqueo de cuatro horas
     tapaba las citas de después). Las dos se arreglaron igual.
+
+    **Y se miran las DOS formas de escribir una altura, no solo el CSS de `style`.** Esta
+    guarda nació escaneando `height:` y nada más, y este archivo usa Tailwind para el layout
+    por convención declarada en `web/CLAUDE.md`: un `h-24` o un `h-[96px]` en el `className`
+    de la fila reintroduce el fallo ENTERO --los botones de marcar tapados por la tarjeta de
+    la hora siguiente-- y la guarda seguía en verde. Era el hueco más barato de cerrar del
+    arnés que sustituyó a Playwright, y encima el dialecto normal del archivo, que es lo que
+    lo volvía probable.
     """
     fijas = re.findall(r"[^a-zA-Z]height:\s*[^;'\"}\n]+", fuente)
     assert not fijas, (
         "apareció una altura fija en Agenda.tsx: "
         f"{fijas}. En esta pantalla la altura la decide el CONTENIDO -- los botones de "
         "marcar miden lo que miden y no se encogen. Usa `minHeight`."
+    )
+
+    # `(?<![\w-])` es lo que impide que `max-h-[40vh]` o `min-h-0` cuenten como alturas
+    # fijas: un tope y un mínimo son exactamente lo contrario de este fallo.
+    de_tailwind = re.findall(r"(?<![\w-])h-(\[[^\]\s\"']+\]|[\w.]+)", fuente)
+    sospechosas = []
+    for valor in de_tailwind:
+        clase = f"h-{valor}"
+        if clase in _ALTURAS_DE_TAILWIND_PERMITIDAS:
+            continue
+        try:
+            if float(valor) < _ESCALA_INOFENSIVA:
+                continue
+        except ValueError:
+            pass  # `h-[96px]`, `h-screen`, `h-dvh`: se decide a mano, no por descuido
+        sospechosas.append(clase)
+
+    assert not sospechosas, (
+        f"apareció una altura fija de Tailwind en Agenda.tsx: {sospechosas}. Es el mismo "
+        "fallo que `height:`, escrito en el dialecto de este archivo: con la fila de la hora "
+        "a 96 px, la tarjeta de una cita de 60 minutos mide 137 px, se sale de su hora y la "
+        "tarjeta de la hora siguiente le tapa los botones de marcar. Usa `min-h-`, o añade "
+        "la clase a `_ALTURAS_DE_TAILWIND_PERMITIDAS` con el motivo escrito."
     )
 
 
