@@ -42,6 +42,7 @@ import html
 import logging
 import time
 
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -58,6 +59,7 @@ from . import (
     autenticacion,
     contratos,
     conversacion,
+    herramientas,
     ingesta,
     lectura,
     panel,
@@ -66,7 +68,13 @@ from . import (
     reseteo,
     seguimientos,
 )
-from .calendario import CalendarioCaido, CalendarioDoble, Jornada, calendario_desde_config
+from .calendario import (
+    ZONA_BOGOTA,
+    CalendarioCaido,
+    CalendarioDoble,
+    Jornada,
+    calendario_desde_config,
+)
 from .canales import Telegram, WhatsApp
 from .config import Config, cargar_dotenv, descartar_vacias_de_terceros
 from .contratos import ContextoDaniela
@@ -121,6 +129,8 @@ _NOMBRE_DEL_CAMPO = {
     "concepto": "el concepto de la ficha",
     "contenido": "el contenido de la ficha",
     "nota_pendiente": "la nota de qué falta por definir",
+    "dia": "el día de la agenda",
+    "asistio": "la marca de asistencia",
     "usuario": "el usuario",
     "contrasena": "la contraseña",
     "mensaje": "el mensaje",
@@ -1778,10 +1788,31 @@ async def api_guardar_ficha(
     return guardada
 
 
+#: Lo que NO baja al panel «Últimos cambios» de la pantalla de Tratamientos.
+#:
+#: Esa pantalla existe, y lo dice su propio texto, para «reconstruir qué decía un precio antes
+#: y quién lo cambió». `panel.historial` devuelve las 100 filas más recientes, y desde la
+#: fase 8 la marca de asistencia escribe una fila por cita marcada --tres por cada corrección,
+#: porque «Corregir marcación» desmarca primero--. Con quince citas al día, esas 100 filas son
+#: **todas** marcas de asistencia en menos de una semana, y el cambio de precio de la semana
+#: pasada deja de verse en la única pantalla desde la que se puede ver.
+#:
+#: Eso tumbaría además la renuncia escrita de `web/CLAUDE.md`: dos personas editando la misma
+#: ficha se pisan, y lo que lo hace aceptable es que `cambios_configuracion` guarda el valor
+#: anterior. Una edición pisada es recuperable solo mientras se pueda encontrar.
+#:
+#: **Las filas se quedan en la tabla**: son la pista de auditoría de quién marcó qué y cuándo,
+#: y ninguna consulta futura las pierde. Lo único que se recorta es esta ventana. El día que
+#: la agenda quiera su propia bitácora, es otra consulta, no este endpoint.
+TABLAS_FUERA_DEL_HISTORIAL = ("citas",)
+
+
 @app.get("/api/historial")
 async def api_historial(quien: dict = Depends(usuario_actual)) -> dict:
     with persistencia.conectar(config.database_url) as conn:
-        return {"cambios": panel.historial(conn)}
+        return {
+            "cambios": panel.historial(conn, excluir_tablas=TABLAS_FUERA_DEL_HISTORIAL)
+        }
 
 
 @app.get("/api/sin-resolver")
@@ -1797,6 +1828,333 @@ async def api_sin_resolver(quien: dict = Depends(usuario_actual)) -> dict:
     with persistencia.conectar(config.database_url) as conn:
         casos = persistencia.casos_recientes(conn)
     return {"casos": casos, "es_admin": quien["rol"] == "admin"}
+
+
+# ------------------------------------------------------------------------------------------
+# Panel: la agenda del día y la marca de asistencia
+# ------------------------------------------------------------------------------------------
+
+
+#: Cuántos días hacia atrás mira la lista de «se te quedaron sin marcar». Una semana es lo que
+#: cabe en la cabeza de quien atiende el mostrador: más allá, nadie se acuerda de si el
+#: paciente llegó, y marcar de memoria es peor que no marcar.
+DIAS_SIN_MARCAR = 7
+
+
+def _ahora_en_bogota() -> datetime:
+    """El presente de la agenda, en un solo sitio para poder clavarlo en una prueba.
+
+    No es ceremonia. Desde que la reconciliación del panel tiene cota hacia atrás
+    (`api_agenda`), el endpoint COMPARA el día que le piden contra hoy, así que su
+    comportamiento depende del reloj. Una prueba offline que clave el día pedido y deje el
+    reloj suelto envejece sola: tres días después ese mismo día cae fuera de la ventana y la
+    prueba pasa —o falla— por un motivo que nadie escribió. Ya ha pasado tres veces en este
+    proyecto (`.claude/rules/pruebas.md`), y la regla de allí es la que se aplica aquí: los
+    scripts cuentan hacia delante contra la agenda real, las pruebas offline CLAVAN el
+    presente. Esta función es la costura que se lo permite.
+    """
+    return datetime.now(ZONA_BOGOTA)
+
+#: Lo que se pinta cuando la cita no tiene a quién ponerle nombre.
+#:
+#: `citas.nombre_completo` puede traer el literal `PENDIENTE` (`persistencia.NOMBRE_PENDIENTE`):
+#: lo escribe `relevo.crear_cita_del_relevo` cuando el doctor agenda desde el hilo de Telegram
+#: para un número que todavía no tiene ficha. Es un marcador interno, y la regla de esta fase
+#: es que **`PENDIENTE` no llega a una pantalla de cara al usuario**: la agenda mostraría un
+#: bloque de las 9:00 a nombre de «PENDIENTE», que se lee como el nombre de alguien.
+#:
+#: No se manda una cadena vacía porque el contrato de la pantalla declara `nombre_completo:
+#: string` y el bloque quedaría con el título en blanco, que parece una avería. Esta frase no
+#: se puede confundir con el nombre de una persona y dice la verdad: nadie se lo ha preguntado
+#: todavía. El teléfono viaja igual, así que la clínica sabe a quién llamar.
+SIN_NOMBRE = "Sin nombre registrado"
+
+
+def _nombre_para_la_pantalla(nombre: str | None) -> str:
+    """El nombre del paciente, o la frase que dice que no hay ninguno. Nunca `PENDIENTE`."""
+    limpio = (nombre or "").strip()
+    if not limpio or limpio == persistencia.NOMBRE_PENDIENTE:
+        return SIN_NOMBRE
+    return limpio
+
+
+def _cita_en_json(cita: dict[str, Any]) -> dict[str, Any]:
+    """La cita como la lee la pantalla, y solo eso.
+
+    `evento_calendar_id` y `reserva_id` se quedan fuera a propósito: son identificadores de
+    otros sistemas que la agenda no usa para nada y que no tienen por qué viajar al navegador.
+    """
+    return {
+        "id": str(cita["id"]),
+        "conversacion_id": str(cita["conversacion_id"]),
+        "telefono": cita["telefono"],
+        "nombre_completo": _nombre_para_la_pantalla(cita["nombre_completo"]),
+        "tratamiento": cita["tratamiento"],
+        "inicio": cita["inicio"].isoformat(),
+        "duracion_minutos": cita["duracion_minutos"],
+        "estado": cita["estado"],
+        "asistio": cita["asistio"],
+    }
+
+
+def _correccion_en_json(correccion: herramientas.Correccion) -> dict[str, Any]:
+    """Los seis campos de `Correccion`, con las horas en ISO.
+
+    `hora_nueva` en `null` es lo que distingue «la movieron» de «ya no está». La pantalla lo
+    necesita entero: lo que esto cuenta es un cambio que la clínica hizo en Google Calendar y
+    que el panel acaba de escribir en Neon delante de quien está mirando.
+
+    El nombre pasa por el mismo filtro que el de una cita: sale de la MISMA columna, así que
+    una corrección sobre una cita del relevo traería el literal `PENDIENTE` por esta puerta.
+    """
+    return {
+        "cita_id": str(correccion.cita_id),
+        "que_paso": correccion.que_paso,
+        "hora_vieja": correccion.hora_vieja.isoformat(),
+        "hora_nueva": correccion.hora_nueva.isoformat() if correccion.hora_nueva else None,
+        "tratamiento": correccion.tratamiento,
+        "nombre_completo": _nombre_para_la_pantalla(correccion.nombre_completo),
+    }
+
+
+def _calendario_de_la_agenda():
+    """El calendario del PROCESO, o `None` si no hay ninguno en el que se pueda confiar.
+
+    No construye nada. `CalendarioGoogle.__init__` firma credenciales y hace una lectura real
+    contra Google --es su comprobación de acceso--, y esto corre dentro de un `async def`: una
+    construcción por petición congelaría el bucle de eventos mientras dura ese viaje, con la
+    respuesta del paciente que esté escribiendo en ese momento, la ventana del búfer de
+    `atencion.py` y el webhook de Telegram esperando detrás. Por eso `_calendario` se
+    construye UNA vez en el arranque, y la agenda lo reutiliza como lo reutiliza el webhook.
+
+    `_construir_el_calendario` ya degrada ahí el `CalendarioDoble` a `CalendarioCaido`, así
+    que lo que llega aquí solo puede ser `CalendarioGoogle`, `CalendarioCaido` o `None`. Las
+    dos clases se comprueban igual, y no es adorno: es lo que impide que un día alguien le
+    pase a esta función el `_CALENDARIO_WEB`, que sí es un doble.
+
+    - `None`: el arranque todavía no corrió (o esto es una prueba). No se reconcilia nada.
+    - `CalendarioCaido`: Google no arrancó. Cada llamada lanza `ErrorDeCalendario`.
+    - **`CalendarioDoble`: un calendario VACÍO que dice que sí a todo.** Pasárselo a la
+      reconciliación sería afirmar que ninguna cita del día sigue en Calendar: las cancelaría
+      TODAS, soltaría sus cupos y la pantalla diría que el calendario está disponible. El
+      doble miente igual leyendo que escribiendo.
+    """
+    calendario = _calendario
+    if calendario is None or isinstance(calendario, (CalendarioCaido, CalendarioDoble)):
+        log.warning(
+            "la agenda del panel corre sin Google Calendar (%s): no hay bloqueos que pintar "
+            "y no se reconcilia nada",
+            type(calendario).__name__,
+        )
+        return None
+    return calendario
+
+
+#: Por qué un día se pintó SIN contrastarlo contra Google Calendar. Viaja en
+#: `motivo_sin_calendario`, y su valor lo decide este archivo y nadie más: la pantalla lo
+#: consume, no lo deduce.
+#:
+#: Existen porque los dos casos no significan lo mismo y la pantalla los pinta distinto.
+#: `fuera_de_ventana` es rutina --el día es viejo y la cota de `_fuera_de_la_ventana` decidió
+#: no contrastarlo--; `no_disponible` es una avería --Google no contestó, o no hay calendario
+#: en el que confiar--. Con un solo booleano la pantalla enseñaba la MISMA alarma roja en los
+#: dos, y como `DIAS_SIN_MARCAR` (7) es más ancho que la ventana (2), cinco de los siete días
+#: a los que lleva el botón «Ver ese día» caen fuera: la alarma salía a diario por un motivo
+#: inocuo. Una alarma que suena por nada deja de leerse el día que significa algo, y lo que
+#: significa aquí es que una fila desfasada puede poner a un paciente en la hora equivocada.
+#:
+#: **La invariante que sostienen entre los dos: `motivo_sin_calendario` es `None` si y solo si
+#: `calendario_disponible` es `True`.** Quien añada un tercer motivo lo declara aquí, no en el
+#: cuerpo del endpoint, y lo añade también al `MotivoSinCalendario` de `web/src/api.ts` -- lo
+#: ata `tests/test_agenda_pantalla.py`.
+MOTIVO_FUERA_DE_VENTANA = "fuera_de_ventana"
+MOTIVO_CALENDARIO_NO_DISPONIBLE = "no_disponible"
+
+
+def _fuera_de_la_ventana(el_dia: date, ahora: datetime) -> bool:
+    """¿El día que piden es demasiado viejo para contrastarlo contra Google Calendar?
+
+    **Esto no contradice el no negociable 20; lo restaura.** El NN20 dice que para una cita
+    que YA existe manda Calendar, y describe el camino de Daniela — que nunca miró más atrás
+    de `herramientas.DIAS_HACIA_ATRAS_AL_SINCRONIZAR` (`herramientas.py`, usada en
+    `_consultar_citas`), con su motivo escrito: cazar la cita que el doctor arrastró de ayer a
+    mañana. «Manda Calendar» nunca significó «mira Calendar hasta 2025». El panel amplió ese
+    alcance a infinito sin decirlo, y esta función lo devuelve a donde estaba. Por eso la cota
+    vive AQUÍ y no en el núcleo: el camino de Daniela no se toca.
+
+    Lo que pasaba sin ella, y es la razón de que exista. La recepcionista ve «14 citas de días
+    anteriores sin marcar», pulsa «Ver ese día» sobre una del martes pasado, y entretanto un
+    doctor había limpiado de su Calendar los eventos de la semana anterior --orden, no
+    cancelaciones--. `obtener_evento` devuelve `None` para cada una, la reconciliación las
+    marca `cancelada` en Neon y suelta sus cupos, y el PATCH pasa a responder 400 «esa cita
+    está cancelada». **Las catorce quedan inmarcables para siempre**, las que ya estaban
+    marcadas quedan con `asistio = true` sobre una fila `cancelada`, no hay fila en
+    `cambios_configuracion` --la reconciliación no anota-- ni error en ningún log. La acción
+    que lo dispara es MIRAR, y lo que destruye es la métrica de asistencia, que es el
+    entregable entero de esta fase.
+
+    Y el desempate cae del lado de no destruir, que es el principio del proyecto. Para una
+    cita FUTURA, cancelarla al ver el evento borrado es el acto seguro: el paciente no puede
+    oír que tiene una cita que no existe. Para una cita YA OCURRIDA no hay a quién proteger
+    --vino o no vino-- y lo único que se gana cancelándola es borrar el dato que dice cuál de
+    las dos cosas pasó.
+
+    El día viejo se pinta con lo que dice Neon, `calendario_disponible: false` y
+    `motivo_sin_calendario: "fuera_de_ventana"` --que es lo que deja a la pantalla decir la
+    verdad: no falló nada, es que ese día ya no se contrasta--. De paso deja de costar los
+    3-5 s de N llamadas a Google por cada paseo hacia atrás.
+
+    **Es la misma CONSTANTE que usa Daniela, no la misma ventana**, y conviene tenerlo claro
+    antes de afinar el `<`: el núcleo corta por INSTANTE (`ctx.ahora - N días`) y esto corta
+    por DÍA, así que en el día frontera el panel es hasta 24 h más ancho --a las 18:00,
+    Daniela ya no mira las 9:00 de hace dos días y el panel sí--. El desfase cae siempre del
+    lado permisivo: el panel puede contrastar un rato de más, nunca de menos, y contrastar de
+    más es lo que el NN20 quiere. Si algún día tuviera que ser exacto, la comparación sube a
+    instantes; cerrarlo por el otro lado dejaría al panel contando una historia distinta de la
+    que Daniela le cuenta al paciente.
+    """
+    return el_dia < ahora.date() - timedelta(days=herramientas.DIAS_HACIA_ATRAS_AL_SINCRONIZAR)
+
+
+@app.get("/api/agenda")
+async def api_agenda(dia: str | None = None, quien: dict = Depends(usuario_actual)) -> dict:
+    """El día ya reconciliado contra Google Calendar.
+
+    OJO: este GET ESCRIBE. Reconciliar corrige Neon (mueve, cancela, toca cupos), y esta
+    pantalla es el mejor disparador que esa reconciliación va a tener: hoy solo corre cuando
+    un paciente pregunta por su cita, y no hay ningún barrido. Lo que corrija sale en
+    `correcciones`, con la hora vieja dentro, para que quien esté mirando la pantalla entienda
+    por qué una cita cambió de sitio mientras la miraba.
+
+    Una cita que el doctor movió a OTRO día desaparece de `citas` y solo queda en
+    `correcciones`: la lista es del día que se pidió, y `hora_nueva` dice a dónde se fue.
+
+    **Y no se reconcilia cualquier día: solo los que caen dentro de la ventana que marca la
+    misma constante que usa Daniela** (`herramientas.DIAS_HACIA_ATRAS_AL_SINCRONIZAR`; la cota
+    de aquí es de DÍA y la del núcleo de INSTANTE, ver `_fuera_de_la_ventana`). Cuando no se
+    contrastó, `calendario_disponible` sale en `false` y `motivo_sin_calendario` dice cuál de
+    los dos motivos fue, que no se parecen: rutina o avería.
+    """
+    ahora = _ahora_en_bogota()
+    try:
+        el_dia = date.fromisoformat(dia) if dia else ahora.date()
+    except ValueError as e:
+        raise HTTPException(
+            status_code=422, detail="El día de la agenda tiene que venir como AAAA-MM-DD."
+        ) from e
+
+    desde = datetime(el_dia.year, el_dia.month, el_dia.day, tzinfo=ZONA_BOGOTA)
+    hasta = desde + timedelta(days=1)
+
+    with persistencia.conectar(config.database_url) as conn:
+        operativa = persistencia.leer_configuracion(conn)
+        citas = panel.citas_del_dia(conn, desde=desde, hasta=hasta)
+
+    # El motivo se decide AQUÍ, donde se sabe, y no se deduce después: en este punto la
+    # distinción entre «el día es viejo» y «no hay calendario» todavía existe, y tres líneas
+    # más abajo ya se habría perdido dentro de un `calendario is None`.
+    fuera_de_ventana = _fuera_de_la_ventana(el_dia, ahora)
+    calendario = None if fuera_de_ventana else _calendario_de_la_agenda()
+    if fuera_de_ventana:
+        motivo_sin_calendario: str | None = MOTIVO_FUERA_DE_VENTANA
+    elif calendario is None:
+        motivo_sin_calendario = MOTIVO_CALENDARIO_NO_DISPONIBLE
+    else:
+        motivo_sin_calendario = None
+
+    correcciones: list[herramientas.Correccion] = []
+    bloqueos: list[Any] = []
+
+    if calendario is not None:
+        citas, correcciones = await herramientas.reconciliar_con_calendar(
+            database_url=config.database_url,
+            calendario=calendario,
+            citas=citas,
+            ahora=ahora,
+            jornada=Jornada(
+                apertura=operativa.get("hora_apertura", 8),
+                cierre=operativa.get("hora_cierre", 17),
+                cierre_sabado=operativa.get("hora_cierre_sabado", 15),
+                atiende_domingo=bool(operativa.get("atiende_domingo", 0)),
+            ),
+            capacidad_por_hora=operativa.get("capacidad_por_hora", 2),
+            duracion_cita_minutos=operativa.get("duracion_cita_minutos", 60),
+            hora_recordatorio_vispera=operativa.get("hora_recordatorio_vispera", 18),
+            horas_minimas_para_recordar=operativa.get("horas_minimas_para_recordar", 4),
+        )
+        citas = [c for c in citas if desde <= c["inicio"] < hasta]
+        try:
+            bloqueos = await asyncio.to_thread(calendario.bloqueos, desde, hasta)
+        except Exception:  # noqa: BLE001 -- ver abajo
+            # Y si los bloqueos no se pudieron leer, el calendario NO está disponible aunque
+            # la reconciliación haya funcionado. Pintar el día sin los bloqueos del doctor y
+            # decir que el calendario está bien enseña como libres horas que están apartadas:
+            # es la misma mentira del `CalendarioDoble`, por la otra puerta.
+            log.warning("no se pudieron leer los bloqueos del día %s", el_dia, exc_info=True)
+            calendario = None
+            # Y el motivo con él, o la invariante «`None` si y solo si disponible» dejaría de
+            # ser cierta justo aquí: la pantalla se quedaría sin ningún aviso que pintar sobre
+            # un día al que le faltan los bloqueos del doctor.
+            motivo_sin_calendario = MOTIVO_CALENDARIO_NO_DISPONIBLE
+            bloqueos = []
+
+    with persistencia.conectar(config.database_url) as conn:
+        sin_marcar = panel.citas_sin_marcar(
+            conn, desde=desde - timedelta(days=DIAS_SIN_MARCAR), hasta=desde
+        )
+
+    return {
+        "dia": el_dia.isoformat(),
+        "citas": [_cita_en_json(c) for c in citas],
+        "bloqueos": [
+            {"inicio": b.inicio.isoformat(), "fin": b.fin.isoformat(), "titulo": b.titulo}
+            for b in bloqueos
+        ],
+        "correcciones": [_correccion_en_json(c) for c in correcciones],
+        "sin_marcar": [_cita_en_json(c) for c in sin_marcar],
+        "calendario_disponible": calendario is not None,
+        # Aditivo: un cliente viejo lo ignora y sigue viendo lo mismo que veía.
+        "motivo_sin_calendario": motivo_sin_calendario,
+    }
+
+
+class MarcaDeAsistencia(BaseModel):
+    #: `Field(...)` es obligatorio Y anulable, y las dos mitades importan: `null` ES
+    #: desmarcar, y un cuerpo al que se le olvidó el campo no puede significar lo mismo. Con
+    #: un `= None` por default, una petición mal formada borraría la marca en silencio.
+    asistio: bool | None = Field(...)
+
+
+@app.patch("/api/agenda/citas/{cita_id}")
+async def api_marcar_asistencia(
+    cita_id: str,
+    cuerpo: MarcaDeAsistencia,
+    quien: dict = Depends(exigir_rol("admin", "doctor", "recepcion")),
+) -> dict:
+    """Marca si el paciente asistió, y devuelve la cita ya actualizada.
+
+    Recepción entra en la lista porque es quien ve llegar al paciente: dejar esto solo para
+    admin significaría que la columna se llena tarde, de memoria, o no se llena.
+
+    Devuelve la cita con la misma forma que una entrada de `citas`, para que la pantalla
+    repinte esa fila sin volver a pedir el día entero -- que, siendo este un GET que escribe,
+    sería reconciliar contra Google otra vez por un clic.
+    """
+    try:
+        with persistencia.conectar(config.database_url) as conn:
+            cita = panel.marcar_asistencia(
+                conn, cita_id=cita_id, valor=cuerpo.asistio, usuario=quien["usuario"]
+            )
+    except panel.CitaInexistente as e:
+        # Antes que `ValueError`, del que hereda. Al revés nunca se alcanzaría.
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    log.info(
+        "%s marcó la cita %s como %s",
+        quien["usuario"], cita_id, panel.MARCA[cuerpo.asistio],
+    )
+    return _cita_en_json(cita)
 
 
 @app.on_event("startup")

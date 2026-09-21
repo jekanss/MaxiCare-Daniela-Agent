@@ -56,6 +56,20 @@ TABLAS_DEL_HISTORIAL = ("agent_sessions", "agent_messages")
 #: esquemas porque `/clearstate` toca los dos.
 TABLAS_DEL_CONSENTIMIENTO = ("contactos", "consentimientos")
 
+#: El valor que la 021 le añade al CHECK de `cambios_configuracion.tabla`. No es una tabla
+#: nueva que se pueda buscar por nombre: es una restricción que se AMPLÍA, y por eso los dos
+#: bloques de arriba no sirven de molde tal cual.
+#:
+#: La 007 dejó ese CHECK cerrado en tres valores porque entonces el panel solo escribía
+#: configuración. La fase 8 añadió la cuarta escritura --`citas.asistio`, la marca de
+#: asistencia-- y `panel.marcar_asistencia` mete el UPDATE y su fila de bitácora en la MISMA
+#: transacción: con el CHECK viejo, el INSERT revienta con `CheckViolation` y arrastra al
+#: UPDATE. La columna queda inescribible desde el panel y el fallo no se ve hasta que alguien
+#: del mostrador intenta marcar a un paciente.
+#:
+#: Sin este bloque, `--solo-verificar` decía OK sobre una base en ese estado exacto.
+VALOR_DE_LA_021 = "citas"
+
 
 def _enmascarar(url: str) -> str:
     """Deja ver a qué host se conectó, nunca las credenciales."""
@@ -73,6 +87,35 @@ def _tablas_de(conn, esquema: str) -> set[str]:
             (esquema,),
         )
         return {fila[0] for fila in cur.fetchall()}
+
+
+def _bitacora_admite(conn, esquema: str, valor: str) -> bool:
+    """¿El CHECK de `cambios_configuracion.tabla` de ese esquema deja pasar `valor`?
+
+    Se lee la definición del constraint en vez de intentar el INSERT: probarlo escribiendo
+    dejaría una fila falsa en la bitácora de la clínica --o exigiría un ROLLBACK a mano
+    dentro de un script que también hace commits-- y `--solo-verificar` no escribe nada.
+
+    Se busca por TABLA y ESQUEMA, no por nombre de constraint: la 021 tiene que borrar dos
+    nombres posibles (el que Postgres le puso solo en la 007 y el explícito que ella deja),
+    así que el nombre no es una llave fiable. Y se recorren todos los CHECK de la tabla
+    porque puede haber más de uno.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT pg_get_constraintdef(c.oid)
+              FROM pg_constraint c
+              JOIN pg_class t ON t.oid = c.conrelid
+              JOIN pg_namespace n ON n.oid = t.relnamespace
+             WHERE n.nspname = %s
+               AND t.relname = 'cambios_configuracion'
+               AND c.contype = 'c'
+            """,
+            (esquema,),
+        )
+        definiciones = [fila[0] for fila in cur.fetchall()]
+    return any(f"'{valor}'" in definicion for definicion in definiciones)
 
 
 def _existe_esquema(conn, esquema: str) -> bool:
@@ -257,9 +300,37 @@ def main() -> int:
             if faltan:
                 return 1
 
+        # ---------------------------------------------------------------------------
+        # 8. La MIGRACIÓN 021 (la bitácora admite `citas`), en los dos esquemas.
+        #
+        #    No se comprueba una tabla nueva sino un CHECK ampliado, así que no vale el
+        #    molde de los dos bloques de arriba: una base con la 021 sin aplicar tiene
+        #    todas las tablas en su sitio y pasaría por sana. Y el fallo que esconde es
+        #    silencioso -- la marca de asistencia revienta entera, con su UPDATE, la
+        #    primera vez que alguien del mostrador la usa.
+        # ---------------------------------------------------------------------------
+        print()
+        print("=" * 78)
+        print("VERIFICACIÓN DE LA 021 (la bitácora admite la marca de asistencia)")
+        print("=" * 78)
+
+        for esquema in ("public", esquema_pruebas):
+            if esquema != "public" and not _existe_esquema(conn, esquema):
+                print(f"\n  {esquema}: no existe todavía (nada que verificar)")
+                continue
+            admite = _bitacora_admite(conn, esquema, VALOR_DE_LA_021)
+            print(f"\n  {esquema}: {'OK  ' if admite else 'FALLA'} "
+                  + (f"cambios_configuracion.tabla admite '{VALOR_DE_LA_021}'" if admite
+                     else f"cambios_configuracion.tabla NO admite '{VALOR_DE_LA_021}' -- la "
+                          "marca de asistencia del panel está rota (el UPDATE y su bitácora "
+                          "van en la misma transacción); corre este script sin "
+                          "--solo-verificar"))
+            if not admite:
+                return 1
+
     print("\n" + "=" * 78)
     print("FASE 1 — segunda mitad: OK  ·  FASE 7 — el historial: OK  ·  019 — contacto y "
-          "consentimiento: OK")
+          "consentimiento: OK  ·  021 — la marca de asistencia: OK")
     print("=" * 78)
     return 0
 

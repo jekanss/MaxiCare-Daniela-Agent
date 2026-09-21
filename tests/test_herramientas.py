@@ -1932,6 +1932,158 @@ def test_si_NO_cambio_nada_el_texto_no_lleva_ninguna_novedad(monkeypatch):
     assert "clínica" not in texto and "no es un error" not in texto, texto
 
 
+# ==========================================================================================
+# El nucleo de la reconciliacion: los mismos datos, sin las frases
+#
+# La agenda del panel necesita esto mismo, y no puede leer prosa. `reconciliar_con_calendar`
+# devuelve `Correccion`es; `_sincronizar_con_calendar` las traduce a las frases de Daniela.
+# Lo que estas pruebas sostienen es la frontera: los textos no se mueven un caracter, y el
+# nucleo sirve para dias que Daniela nunca mira.
+# ==========================================================================================
+
+
+def _reconciliando(monkeypatch, ctx, escrituras):
+    """Como `_sincronizando`, pero para quien entra directo a la reconciliacion.
+
+    `_sincronizando` gasta la PRIMERA llamada a `_con_base` devolviendo las citas, porque
+    quien llama alli es `_consultar_citas`, que lee antes de contrastar. Aqui no hay lectura
+    previa, asi que `_con_base` tiene que EJECUTAR el trabajo desde la primera vez: si no, la
+    escritura no llega a ocurrir y una prueba que mira una ausencia pasaria por no haber
+    llegado nunca hasta donde tenia que llegar.
+
+    Devuelve la `ColaFalsa` que instalo `_sincronizando`.
+    """
+    cola = _sincronizando(monkeypatch, ctx, [], escrituras)
+
+    async def base_falsa(_ctx, trabajo):
+        return trabajo(BaseFalsa())
+
+    monkeypatch.setattr(h, "_con_base", base_falsa)
+    return cola
+
+
+def test_el_texto_de_la_novedad_no_cambia_al_refactorizar(monkeypatch):
+    """Si alguien toca las frases, esto cae. Son lo que Daniela le dice al paciente.
+
+    Caracter a caracter y con la hora VIEJA dentro (no negociable 20): sin ella el modelo ve
+    un hueco en vez de una explicacion y no puede atar lo que dijo el turno pasado con lo que
+    lee ahora. Eso fue un escalamiento real cinco segundos despues de la correccion.
+    """
+    ctx = contexto(identidad_verificada=True, ahora=INICIO - timedelta(hours=1))
+    manana = INICIO + timedelta(days=1)  # miercoles 16/9 a las 9:00
+    ctx.calendario.eventos["ev-1"] = (manana, 60, "limpieza")
+    escrituras: list = []
+    _reconciliando(monkeypatch, ctx, escrituras)
+
+    _, novedades = asyncio.run(
+        h._sincronizar_con_calendar(
+            ctx, [_cita(inicio=INICIO, evento_calendar_id="ev-1", reserva_id=7)]
+        )
+    )
+
+    assert novedades == [
+        "La clínica movió en su calendario la cita de limpieza: estaba para "
+        "el martes 15/9 a las 09:00 y ahora es el "
+        "miércoles 16/9 a las 09:00. Es un hecho confirmado, no es un error del "
+        "sistema: si en un mensaje anterior le dijiste la hora vieja, corrígesela."
+    ]
+
+
+def test_el_texto_de_la_cancelacion_no_cambia_al_refactorizar(monkeypatch):
+    """La otra frase, la del evento que la clinica borro. Mismo motivo y mismo caracter."""
+    ctx = contexto(identidad_verificada=True, ahora=INICIO - timedelta(hours=1))
+    escrituras: list = []
+    _reconciliando(monkeypatch, ctx, escrituras)
+
+    _, novedades = asyncio.run(
+        h._sincronizar_con_calendar(
+            ctx, [_cita(inicio=INICIO, evento_calendar_id="ev-borrado", reserva_id=7)]
+        )
+    )
+
+    assert novedades == [
+        "La clínica eliminó de su calendario la cita de limpieza que "
+        "estaba para el martes 15/9 a las 09:00, así que acaba de quedar "
+        "CANCELADA. Es un hecho confirmado, no es un error del sistema y no hay nada "
+        "que verificar: díselo al paciente con naturalidad, discúlpate por el cambio "
+        "y ofrécele buscar otro horario."
+    ]
+
+
+def test_reconciliar_una_cita_pasada_no_programa_recordatorio(monkeypatch):
+    """La agenda reconcilia cualquier dia, tambien uno de la semana pasada.
+
+    Un dia que ya ocurrio no puede dejar programado el recordatorio de algo que ya paso: el
+    despachador lo mandaria por una cita que el paciente ya tuvo. Y la ausencia se comprueba
+    con el camino delante -- la correccion SI se escribio --, para que el cero recordatorios
+    sea una decision y no un reventon a mitad de camino.
+    """
+    ctx = contexto(identidad_verificada=True)
+    la_semana_pasada = AHORA - timedelta(days=7)
+    destino = la_semana_pasada + timedelta(hours=2)
+    ctx.calendario.eventos["ev-1"] = (destino, 60, "limpieza")
+    escrituras: list = []
+    cola = _reconciliando(monkeypatch, ctx, escrituras)
+
+    al_dia, correcciones = asyncio.run(
+        h.reconciliar_con_calendar(
+            database_url=ctx.database_url,
+            calendario=ctx.calendario,
+            citas=[_cita(inicio=la_semana_pasada, evento_calendar_id="ev-1", reserva_id=7)],
+            ahora=AHORA,
+            jornada=ctx.jornada,
+            capacidad_por_hora=ctx.capacidad_por_hora,
+            duracion_cita_minutos=ctx.duracion_cita_minutos,
+            hora_recordatorio_vispera=ctx.hora_recordatorio_vispera,
+            horas_minimas_para_recordar=ctx.horas_minimas_para_recordar,
+        )
+    )
+
+    assert ("mover", "cita-1", 99, destino) in escrituras, "la correccion tiene que ocurrir"
+    assert cola.filas == [], "una cita de la semana pasada no lleva recordatorio"
+    assert [c.que_paso for c in correcciones] == ["movida"]
+    assert [c.hora_vieja for c in correcciones] == [la_semana_pasada]
+    assert [c.hora_nueva for c in correcciones] == [destino]
+    assert [c["inicio"] for c in al_dia] == [destino]
+
+
+def test_la_correccion_de_una_cita_borrada_no_lleva_hora_nueva(monkeypatch):
+    """`hora_nueva` en None es lo que distingue «la movieron» de «ya no esta».
+
+    El panel la va a serializar tal cual: si una cancelada trajera una hora nueva, la agenda
+    pintaria una cita en un hueco que la clinica ya solto.
+    """
+    ctx = contexto(identidad_verificada=True, ahora=INICIO - timedelta(hours=1))
+    escrituras: list = []
+    _reconciliando(monkeypatch, ctx, escrituras)
+
+    al_dia, correcciones = asyncio.run(
+        h.reconciliar_con_calendar(
+            database_url=ctx.database_url,
+            calendario=ctx.calendario,
+            citas=[_cita(inicio=INICIO, evento_calendar_id="ev-borrado", reserva_id=7)],
+            ahora=ctx.ahora,
+            jornada=ctx.jornada,
+            capacidad_por_hora=ctx.capacidad_por_hora,
+            duracion_cita_minutos=ctx.duracion_cita_minutos,
+            hora_recordatorio_vispera=ctx.hora_recordatorio_vispera,
+            horas_minimas_para_recordar=ctx.horas_minimas_para_recordar,
+        )
+    )
+
+    assert any(e[0] == "cancelar" for e in escrituras), "la cancelacion tiene que ocurrir"
+    assert al_dia == [], "una cita cancelada no vuelve en la agenda"
+    assert len(correcciones) == 1
+    c = correcciones[0]
+    assert (c.cita_id, c.que_paso, c.hora_vieja, c.hora_nueva) == (
+        "cita-1",
+        "cancelada",
+        INICIO,
+        None,
+    )
+    assert (c.tratamiento, c.nombre_completo) == ("limpieza", "Ana Ruiz")
+
+
 def test_consultar_citas_exige_identidad_como_las_tres_de_escritura():
     """Lee datos de un paciente, así que cae del lado estricto del guardrail.
 

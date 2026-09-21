@@ -194,3 +194,108 @@ export async function listarSinResolver(): Promise<{
 }> {
   return pedir<{ casos: CasoSinResolver[]; es_admin: boolean }>('/api/sin-resolver')
 }
+
+// ------------------------------------------------------------------------------------------
+// Agenda y marca de asistencia
+// ------------------------------------------------------------------------------------------
+
+/** Una cita del día, tal como la devuelve el endpoint.
+ *
+ *  No hay `origen` del paciente y no es un olvido: ese dato NO EXISTE en la base --`citas` no
+ *  tiene la columna y `conversaciones.canal` solo distingue `whatsapp` de `web`--. La maqueta
+ *  de la pantalla se lo inventaba; declararlo aquí volvería a invitar a pintarlo.
+ *
+ *  `asistio` tiene TRES valores: `true`, `false` y `null` (sin marcar todavía). Colapsar el
+ *  `null` con el `false` diría que el paciente no vino cuando lo único cierto es que nadie lo
+ *  ha marcado. La respuesta puede traer más claves --`evento_calendar_id`, `reserva_id`...--;
+ *  aquí se declaran solo las que la pantalla pinta. */
+export type CitaDeAgenda = {
+  id: string
+  telefono: string
+  nombre_completo: string
+  tratamiento: string
+  /** ISO. Si viene sin zona es hora de pared de Bogotá: la pantalla lo resuelve en un sitio. */
+  inicio: string
+  duracion_minutos: number
+  estado: string
+  asistio: boolean | null
+}
+
+/** Una franja que el doctor bloqueó en Google Calendar. No es una cita de Daniela: no se
+ *  marca, no tiene paciente y no cuenta en el resumen del día. */
+export type BloqueoDeAgenda = { inicio: string; fin: string; titulo: string }
+
+/** Lo que la reconciliación contra Google Calendar corrigió al abrir el día.
+ *
+ *  `hora_nueva` en `null` significa CANCELADA, no movida: es lo único que distingue los dos
+ *  casos, y por eso `que_paso` viaja aparte en vez de deducirse. */
+export type CorreccionDeAgenda = {
+  cita_id: string
+  que_paso: 'movida' | 'cancelada'
+  hora_vieja: string
+  hora_nueva: string | null
+  tratamiento: string
+  nombre_completo: string
+}
+
+/** Por qué el servidor pintó un día SIN contrastarlo contra Google Calendar.
+ *
+ *  Los dos literales los decide Python --`runtime.MOTIVO_FUERA_DE_VENTANA` y
+ *  `runtime.MOTIVO_CALENDARIO_NO_DISPONIBLE`--, y este archivo es el ÚNICO sitio de
+ *  TypeScript donde se escriben: las pantallas comparan contra las constantes de abajo, nunca
+ *  contra la cadena. Que las dos copias no se separen en silencio lo ata una prueba de Python
+ *  (`tests/test_agenda_pantalla.py`), porque cruzar el borde de lenguaje sin nada que ate los
+ *  dos lados es exactamente cómo un aviso vuelve a mentir sin que nadie se entere.
+ *
+ *  Y los dos casos NO son el mismo: `fuera_de_ventana` es rutina --el día es viejo y por eso
+ *  ya no se contrasta-- y `no_disponible` es una avería. Colapsarlos deja la pantalla dando
+ *  la alarma roja a diario por nada, y una alarma que suena por nada deja de leerse el día
+ *  que significa algo. */
+export type MotivoSinCalendario = 'fuera_de_ventana' | 'no_disponible'
+
+/** El día es más viejo que `herramientas.DIAS_HACIA_ATRAS_AL_SINCRONIZAR`. No falló nada. */
+export const MOTIVO_FUERA_DE_VENTANA: MotivoSinCalendario = 'fuera_de_ventana'
+/** Google no contestó, o no hay un calendario en el que se pueda confiar. Eso sí es avería. */
+export const MOTIVO_CALENDARIO_NO_DISPONIBLE: MotivoSinCalendario = 'no_disponible'
+
+export type AgendaDelDia = {
+  dia: string
+  citas: CitaDeAgenda[]
+  bloqueos: BloqueoDeAgenda[]
+  correcciones: CorreccionDeAgenda[]
+  /** Las de días anteriores cuya hora pasó y siguen sin marcar. */
+  sin_marcar: CitaDeAgenda[]
+  /** `false` cuando ese día NO se contrastó contra Google Calendar, y eso pasa por dos
+   *  motivos distintos: que Google no contestara, o que el día sea demasiado viejo para que
+   *  se contraste. `motivo_sin_calendario` dice cuál. La agenda se pinta igual, con su aviso,
+   *  y la marca de asistencia funciona en los dos casos. */
+  calendario_disponible: boolean
+  /** Por qué no se contrastó, o `null` cuando sí se contrastó. Es `null` si y solo si
+   *  `calendario_disponible` es `true`: el servidor sostiene esa invariante. */
+  motivo_sin_calendario: MotivoSinCalendario | null
+}
+
+/** El día reconciliado. Con `dia` en `null` el servidor decide: hoy en hora de Bogotá.
+ *
+ *  Esta lectura ESCRIBE en la base --puede mover o cancelar una cita que en Google ya cambió--.
+ *  Queda dicho aquí porque un `GET` que escribe sorprende a cualquiera que lo lea después. */
+export async function leerAgenda(dia: string | null): Promise<AgendaDelDia> {
+  const ruta = dia ? `/api/agenda?dia=${encodeURIComponent(dia)}` : '/api/agenda'
+  return pedir<AgendaDelDia>(ruta)
+}
+
+/** Marca la asistencia, o la desmarca con `null`.
+ *
+ *  El `null` viaja explícito en el cuerpo --`{"asistio": null}`-- y no omitiendo el campo:
+ *  «desmarcar» tiene que distinguirse de «no lo mandé», o corregir una marca equivocada sería
+ *  imposible. Devuelve la cita ya actualizada, que es lo que la pantalla pinta: releer el día
+ *  entero para ver un booleano costaría la reconciliación completa contra Google. */
+export async function marcarAsistencia(
+  citaId: string,
+  valor: boolean | null,
+): Promise<CitaDeAgenda> {
+  return pedir<CitaDeAgenda>(`/api/agenda/citas/${encodeURIComponent(citaId)}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ asistio: valor }),
+  })
+}

@@ -52,6 +52,23 @@ argument 'group_id'`). **Quien cambie una de esas firmas corre los seis que no g
   ponerlo después.
 - `probar_panel.py` MITAD A cambia un precio por HTTP contra `public`, la base real de la
   clínica, y **lo restaura en un `finally` comprobando la restauración con una aserción**.
+  Desde la fase 8 **siembra también un día de agenda en `public`**: una conversación y tres
+  citas (dos de ayer, una de mañana) con un teléfono imposible, `TELEFONO_SEMBRADO`. Tres
+  cosas suyas que no se pueden cambiar sin entender qué sostienen:
+  - **Las citas se insertan con SQL, con `evento_calendar_id`, `reserva_id` y `paciente_id`
+    en NULL.** No es pereza: `reconciliar_con_calendar` se salta toda cita sin evento, así
+    que la siembra no se contrasta contra Google ni puede acabar cancelada por él; no toca
+    ningún cupo; y no crea ninguna ficha en `pacientes`. Sembrar con `crear_cita` le dejaría
+    al doctor un evento fantasma en su calendario real y una hora ocupada.
+  - **`TestClient(app)` sin `with` no dispara los `startup`**, así que `runtime._calendario`
+    es `None` y la agenda no reconcilia nada. El script lo **afirma**
+    (`calendario_disponible` tiene que ser `False`) en vez de callárselo: el día que alguien
+    envuelva ese cliente en un `with`, esas aserciones caen y le avisan de que acaba de
+    poner a un entregable a hablar con el Google Calendar de la clínica.
+  - **La limpieza va por TELÉFONO, no por los ids que devolvió la siembra**, que no existen
+    si la siembra revienta a mitad. Y **sí borra sus filas de `cambios_configuracion`**, al
+    revés que el cambio de precio: aquellas cuentan algo cierto sobre una ficha real, estas
+    apuntarían con `clave` al UUID de una cita que el propio script acaba de borrar.
 - `probar_calendario.py --diagnosticar` **solo lee**: es lo primero que hay que correr
   cuando Calendar «no funciona».
 - `probar_atencion.py` tiene **un fallo intermitente conocido**, y no es del producto: la

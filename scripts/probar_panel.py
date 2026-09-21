@@ -1,4 +1,4 @@
-"""El entregable de la fase 8, primera mitad: el panel de tratamientos de punta a punta.
+"""El entregable de la fase 8: el panel de tratamientos y la agenda, de punta a punta.
 
     uv run python scripts/probar_panel.py            # sin gastar un token
     uv run python scripts/probar_panel.py --chat     # tambien el modelo de verdad. GASTA TOKENS.
@@ -37,6 +37,24 @@ Y el punto que mas importa del script entero: crear un tratamiento nuevo NO abre
 `LecturaArchivo(tratamiento="carillas")` tiene que seguir lanzando `ValidationError` despues
 de que `carillas` ya es un tratamiento activo y cotizable -- ese `Literal` no se toca desde
 ninguna pantalla.
+
+La agenda y la marca de asistencia (pasos 8 y 9)
+------------------------------------------------------------------------------------------
+Van en la MITAD A --por HTTP, contra `public`, sin gastar un token-- y siguen su misma regla
+dura: lo que siembran se borra en el `finally` y el borrado se comprueba con aserciones, no
+se da por hecho. Lo que prueban es el camino que hasta esta fase no existia: sembrar una cita
+de ayer, leerla por `GET /api/agenda`, marcarla, CORREGIR la marca, y exigir que
+`cambios_configuracion` tenga las dos filas con el valor anterior correcto. Esa bitacora es
+la unica forma de saber quien le puso una falta a un paciente y que decia antes.
+
+Dos cosas que este script NO prueba, y conviene saberlo antes de creerle:
+
+- **La reconciliacion contra Google Calendar.** `TestClient(app)` sin `with` no dispara los
+  eventos de `startup`, asi que `runtime._calendario` es `None` y la agenda no contrasta
+  nada: el paso 8 lo AFIRMA (`calendario_disponible` tiene que ser `False`) en vez de
+  callarselo. Y es lo que hace que sembrar contra `public` sea seguro. Lo que si la cubre es
+  `tests/test_panel.py` y `scripts/probar_calendario.py`.
+- **La pantalla.** Que la rejilla pinte el bloque en la hora correcta no se ve desde aqui.
 """
 
 from __future__ import annotations
@@ -44,7 +62,10 @@ from __future__ import annotations
 import argparse
 import random
 import sys
+import uuid
+from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
@@ -60,12 +81,18 @@ from fastapi.testclient import TestClient  # noqa: E402
 from pydantic import ValidationError  # noqa: E402
 
 from maxicare_daniela import autenticacion, contratos, panel, persistencia, runtime  # noqa: E402
+from maxicare_daniela.calendario import ZONA_BOGOTA  # noqa: E402
 
 #: Prefijo `zzz.` para que salgan al final de `--listar` y se noten de lejos si alguna vez
 #: sobreviven a un corte de luz a mitad del script.
 ADMIN = "zzz.panel.admin.temporal"
 RECEPCION = "zzz.panel.recepcion.temporal"
 CLAVE = "clave de verificacion temporal 2026"
+
+#: El telefono de la cita sembrada. Un prefijo imposible (+57 empieza por 3 en movil y por 1
+#: en fijo de Bogota): ningun paciente real puede colisionar con el, y si una fila sobrevive
+#: a un corte de luz se reconoce de un vistazo.
+TELEFONO_SEMBRADO = "+570000000008"
 
 fallos = 0
 
@@ -101,8 +128,92 @@ def _precio_de_prueba() -> tuple[str, str]:
     return numero, contenido
 
 
+# ------------------------------------------------------------------------------------------
+# La agenda del dia y la marca de asistencia (fase 8, segunda mitad)
+# ------------------------------------------------------------------------------------------
+#
+# Se siembra DIRECTO con SQL, no por las tools de Daniela, y eso es deliberado. `crear_cita`
+# toma un cupo real en `reservas` y crea un evento en el Google Calendar de la clinica: una
+# verificacion que no gasta tokens no puede dejarle un evento fantasma al doctor ni ocupar una
+# hora de su agenda.
+#
+# Las tres columnas que se dejan en NULL son las que hacen que esto sea seguro:
+#
+#   `evento_calendar_id`  la reconciliacion se salta toda cita sin evento
+#                         (`herramientas.reconciliar_con_calendar`), asi que la cita sembrada
+#                         no se contrasta contra Google ni puede acabar cancelada por el.
+#   `reserva_id`          no se toca ningun cupo, ni al sembrar ni al limpiar.
+#   `paciente_id`         no se crea ninguna ficha en `pacientes`.
+#
+# Y se siembra AYER a proposito: `panel.marcar_asistencia` rechaza marcar una cita que
+# todavia no ha ocurrido, que es justo lo que el paso 9 comprueba con la del dia siguiente.
+
+
+def _sembrar_dia_de_agenda(url: str) -> dict[str, Any]:
+    """Una conversacion y dos citas de ayer. Devuelve los ids para poder borrarlos."""
+    ayer = (datetime.now(ZONA_BOGOTA) - timedelta(days=1)).date()
+
+    def a_las(hora: int) -> datetime:
+        return datetime(ayer.year, ayer.month, ayer.day, hora, 0, tzinfo=ZONA_BOGOTA)
+
+    manana = (datetime.now(ZONA_BOGOTA) + timedelta(days=1)).replace(
+        hour=10, minute=0, second=0, microsecond=0
+    )
+
+    sembrado = {
+        "dia": ayer.isoformat(),
+        "conversacion_id": str(uuid.uuid4()),
+        "con_nombre": str(uuid.uuid4()),
+        "sin_nombre": str(uuid.uuid4()),
+        "futura": str(uuid.uuid4()),
+        "hora_con_nombre": a_las(9),
+    }
+    with persistencia.conectar(url) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO conversaciones (id, telefono, canal) VALUES (%s, %s, 'whatsapp')",
+                (sembrado["conversacion_id"], TELEFONO_SEMBRADO),
+            )
+            for id_cita, nombre, inicio in (
+                (sembrado["con_nombre"], "Verificacion Agenda Temporal", a_las(9)),
+                # El literal `PENDIENTE` es lo que escribe `relevo.crear_cita_del_relevo`
+                # cuando el doctor agenda para un numero sin ficha. Sembrarlo aqui es la
+                # unica forma de comprobar de punta a punta que NO llega a la pantalla.
+                (sembrado["sin_nombre"], persistencia.NOMBRE_PENDIENTE, a_las(10)),
+                (sembrado["futura"], "Verificacion Agenda Futura", manana),
+            ):
+                cur.execute(
+                    "INSERT INTO citas (id, conversacion_id, nombre_completo, telefono, "
+                    "                   tratamiento, inicio, duracion_minutos, estado) "
+                    "VALUES (%s, %s, %s, %s, 'valoracion', %s, 60, 'confirmada')",
+                    (id_cita, sembrado["conversacion_id"], nombre, TELEFONO_SEMBRADO, inicio),
+                )
+        conn.commit()
+    return sembrado
+
+
+def _bitacora_de(url: str, cita_id: str) -> list[tuple[str, str, str]]:
+    """Las filas que la marca de asistencia dejo para esa cita, de la mas vieja a la mas nueva.
+
+    Mismo desempate por `id` que `panel.historial` (y por el mismo motivo): `cambiado_en` es
+    el instante de la TRANSACCION, asi que dos filas escritas en la misma pueden empatar. Aqui
+    no empatan --son dos PATCH distintos-- pero ordenar de dos maneras distintas la misma tabla
+    es como se cuela una prueba que pasa por casualidad.
+    """
+    with persistencia.conectar(url) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT valor_anterior, valor_nuevo, usuario FROM cambios_configuracion "
+                " WHERE tabla = 'citas' AND clave = %s ORDER BY cambiado_en, id",
+                (cita_id,),
+            )
+            return [tuple(f) for f in cur.fetchall()]
+
+
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Entregable de la fase 8 (primera mitad).")
+    parser = argparse.ArgumentParser(
+        description="Entregable de la fase 8: el panel de tratamientos y la agenda."
+    )
     parser.add_argument(
         "--chat",
         action="store_true",
@@ -228,12 +339,105 @@ def main() -> int:
             detalle[:200],
         )
 
+        print("\n8. GET /api/agenda trae el dia de ayer con la cita sembrada")
+        sembrado = _sembrar_dia_de_agenda(url_public)
+        r = cliente_admin.get(f"/api/agenda?dia={sembrado['dia']}")
+        revisar("GET /api/agenda responde 200", r.status_code == 200, str(r.status_code)[:200])
+        dia = r.json() if r.status_code == 200 else {}
+        revisar("el dia que devuelve es el que se pidio", dia.get("dia") == sembrado["dia"],
+                str(dia.get("dia")))
+        por_id = {c["id"]: c for c in dia.get("citas", [])}
+        con_nombre = por_id.get(sembrado["con_nombre"], {})
+        sin_nombre = por_id.get(sembrado["sin_nombre"], {})
+        revisar("la cita sembrada de las 09:00 sale en la agenda", bool(con_nombre))
+        revisar("sale sin marcar (asistio = null)", con_nombre.get("asistio", "?") is None,
+                str(con_nombre.get("asistio")))
+        revisar("sale con su duracion y su tratamiento",
+                con_nombre.get("duracion_minutos") == 60 and con_nombre.get("tratamiento") == "valoracion",
+                str(con_nombre)[:160])
+        # El no negociable de esta fase: `PENDIENTE` es un marcador interno y no puede
+        # aparecer en una pantalla. La cita de las 10:00 se sembro con ese literal exacto.
+        revisar(
+            "una cita con nombre PENDIENTE se pinta como '" + runtime.SIN_NOMBRE + "'",
+            sin_nombre.get("nombre_completo") == runtime.SIN_NOMBRE,
+            str(sin_nombre.get("nombre_completo")),
+        )
+        revisar("y la palabra PENDIENTE no viaja en esa cita",
+                "PENDIENTE" not in str(sin_nombre))
+        # Sin arrancar los eventos de `startup` no hay `runtime._calendario`, asi que la
+        # agenda no reconcilia ni lee bloqueos. Se afirma en vez de callarse: este script
+        # NO esta probando la reconciliacion contra Google, y decir lo contrario seria la
+        # unica forma de que un entregable mienta sin fallar. Lo que la cubre son
+        # `tests/test_panel.py` y `scripts/probar_calendario.py`.
+        revisar("el script corre SIN calendario, y la agenda lo dice",
+                dia.get("calendario_disponible") is False,
+                str(dia.get("calendario_disponible")))
+        revisar("sin calendario no hay correcciones que inventar", dia.get("correcciones") == [])
+        revisar("un dia ilegible da 422 y no un 500",
+                cliente_admin.get("/api/agenda?dia=el-martes").status_code == 422)
+
+        print("\n9. La marca de asistencia: se marca, se corrige, y la bitacora lo cuenta")
+        r = cliente_admin.patch(
+            f"/api/agenda/citas/{sembrado['con_nombre']}", json={"asistio": True}
+        )
+        revisar("PATCH asistio=true responde 200", r.status_code == 200, str(r.status_code)[:200])
+        revisar("devuelve la cita ya marcada", r.status_code == 200 and r.json().get("asistio") is True,
+                str(r.json())[:160] if r.status_code == 200 else "")
+        # La correccion, que es el caso que justifica la bitacora entera: alguien se
+        # equivoco y hay que poder saber que decia antes y quien lo cambio.
+        r = cliente_admin.patch(
+            f"/api/agenda/citas/{sembrado['con_nombre']}", json={"asistio": False}
+        )
+        revisar("PATCH asistio=false (la correccion) responde 200", r.status_code == 200,
+                str(r.status_code)[:200])
+        revisar("la cita queda en no asistio", r.status_code == 200 and r.json().get("asistio") is False)
+
+        filas = _bitacora_de(url_public, sembrado["con_nombre"])
+        revisar("la bitacora tiene EXACTAMENTE dos filas", len(filas) == 2, str(filas)[:200])
+        revisar(
+            "la primera dice sin_marcar -> asistio, a nombre del admin temporal",
+            len(filas) == 2 and filas[0] == ("sin_marcar", "asistio", ADMIN),
+            str(filas[0]) if filas else "no hay filas",
+        )
+        revisar(
+            "la segunda trae el valor ANTERIOR correcto: asistio -> no_asistio",
+            len(filas) == 2 and filas[1] == ("asistio", "no_asistio", ADMIN),
+            str(filas[1]) if len(filas) > 1 else "no hay segunda fila",
+        )
+        # Marcar dos veces lo mismo no es un cambio: una bitacora que anota cambios que no
+        # ocurrieron es tan inutil como la que se calla los que si.
+        cliente_admin.patch(f"/api/agenda/citas/{sembrado['con_nombre']}", json={"asistio": False})
+        revisar("volver a marcar lo mismo no escribe una tercera fila",
+                len(_bitacora_de(url_public, sembrado["con_nombre"])) == 2)
+
+        r = cliente_recepcion.patch(
+            f"/api/agenda/citas/{sembrado['sin_nombre']}", json={"asistio": True}
+        )
+        revisar("recepcion SI puede marcar asistencia (ve llegar al paciente)",
+                r.status_code == 200, str(r.status_code))
+        revisar("y su marca queda a su nombre",
+                _bitacora_de(url_public, sembrado["sin_nombre"]) == [("sin_marcar", "asistio", RECEPCION)],
+                str(_bitacora_de(url_public, sembrado["sin_nombre"]))[:160])
+
+        r = cliente_admin.patch(f"/api/agenda/citas/{sembrado['futura']}", json={"asistio": True})
+        revisar("una cita que todavia no ha ocurrido da 400 y no se marca",
+                r.status_code == 400, str(r.status_code))
+        revisar("y no dejo rastro en la bitacora", _bitacora_de(url_public, sembrado["futura"]) == [])
+
+        r = cliente_admin.patch(
+            f"/api/agenda/citas/{uuid.uuid4()}", json={"asistio": True}
+        )
+        revisar("un id que no existe da 404", r.status_code == 404, str(r.status_code))
+        r = cliente_admin.patch("/api/agenda/citas/no-es-un-uuid", json={"asistio": True})
+        revisar("un id que ni siquiera es un UUID da 404, no un 500 de psycopg",
+                r.status_code == 404, str(r.status_code))
+
         if args.chat:
             print("\n" + "=" * 78)
             print("MITAD B -- el modelo de verdad, contra pruebas_web (GASTA TOKENS)")
             print("=" * 78)
 
-            print("\n8. El precio de implantes se escribe DIRECTO en pruebas_web (panel.guardar_ficha)")
+            print("\n10. El precio de implantes se escribe DIRECTO en pruebas_web (panel.guardar_ficha)")
             url_pruebas = runtime._preparar_esquema_de_pruebas()
             with persistencia.conectar(url_pruebas) as conn:
                 filas_pruebas_antes = persistencia.leer_conocimiento(conn, "implantes", "precio")
@@ -244,7 +448,7 @@ def main() -> int:
                     aprobado=True, nota_pendiente=None, usuario=ADMIN,
                 )
 
-            print("\n9. Le pregunta a Daniela cuanto cuesta un implante")
+            print("\n11. Le pregunta a Daniela cuanto cuesta un implante")
             r = cliente_admin.post(
                 "/api/pruebas/chat",
                 json={"mensaje": "Hola, cuanto cuesta un implante dental?", "conversacion": None},
@@ -261,7 +465,7 @@ def main() -> int:
                 if d["tripwires"]:
                     print(f"       (saltaron guardrails: {', '.join(d['tripwires'])})")
 
-            print("\n10. Se crea 'carillas' en pruebas_web (panel.crear_tratamiento) y se le pone precio")
+            print("\n12. Se crea 'carillas' en pruebas_web (panel.crear_tratamiento) y se le pone precio")
             with persistencia.conectar(url_pruebas) as conn:
                 panel.crear_tratamiento(conn, clave="carillas", etiqueta="Carillas", usuario=ADMIN)
                 # `Daniela` lee este vocabulario en cada turno (`agentes.instrucciones_daniela`);
@@ -274,7 +478,7 @@ def main() -> int:
                     aprobado=True, nota_pendiente=None, usuario=ADMIN,
                 )
 
-            print("\n11. Le pregunta a Daniela cuanto cuestan las carillas")
+            print("\n13. Le pregunta a Daniela cuanto cuestan las carillas")
             r = cliente_admin.post(
                 "/api/pruebas/chat",
                 json={"mensaje": "Hola, cuanto cuestan las carillas?", "conversacion": None},
@@ -293,9 +497,9 @@ def main() -> int:
         else:
             print("\nMITAD B -- omitida. Anade --chat para probarla (gasta tokens de verdad).")
 
-        print("\n12. Crear un tratamiento NO abrio el muro: LecturaArchivo sigue rechazando 'carillas'")
+        print("\n14. Crear un tratamiento NO abrio el muro: LecturaArchivo sigue rechazando 'carillas'")
         # Sin `--chat` nadie llamo nunca a `contratos.fijar_vocabulario` con 'carillas' dentro
-        # (eso solo pasa en el paso 10, adentro del `if args.chat`). Si se comprobara el muro
+        # (eso solo pasa en el paso 12, adentro del `if args.chat`). Si se comprobara el muro
         # tal cual, `carillas` seria rechazada porque NO EXISTE en el vocabulario de negocio,
         # no porque el muro haya resistido -- la corrida sin --chat reportaria OK en el punto
         # mas importante del script sin haberlo probado de verdad. Por eso se fuerza aqui,
@@ -396,6 +600,55 @@ def main() -> int:
             except Exception as e:  # noqa: BLE001
                 revisar("limpieza de pruebas_web", False, str(e))
 
+        # 2b. El dia de agenda sembrado -- citas, bitacora y conversacion.
+        #
+        #     Se borra por TELEFONO y no por los ids que devolvio la siembra: si
+        #     `_sembrar_dia_de_agenda` revienta despues de insertar la primera cita, esos ids
+        #     nunca llegaron a nadie y la fila se quedaria en `public` para siempre. El
+        #     telefono es la unica llave que existe antes de la siembra y sigue existiendo
+        #     despues de un fallo a mitad.
+        #
+        #     Y SI se borran las filas de `cambios_configuracion`, al reves que en el cambio
+        #     de precio de implantes. No es incoherencia: ese precio es una ficha REAL de la
+        #     clinica que de verdad cambio y de verdad se restauro, asi que sus dos filas
+        #     cuentan algo cierto. Estas apuntarian con `clave` al UUID de una cita que este
+        #     script acaba de borrar -- dos renglones de una pantalla que lee gente, sobre
+        #     una cita que no existe, empujando fuera de la vista dos cambios de verdad.
+        try:
+            with persistencia.conectar(url_public) as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "DELETE FROM cambios_configuracion WHERE tabla = 'citas' AND clave IN "
+                        "  (SELECT id::text FROM citas WHERE telefono = %s)",
+                        (TELEFONO_SEMBRADO,),
+                    )
+                    # Ninguna de las tres citas sembradas encola un recordatorio --nada las
+                    # crea por las tools-- pero `seguimientos.cita_id` es `ON DELETE CASCADE`
+                    # y el DELETE de abajo se las llevaria igual. Se dice aqui para que quien
+                    # lea esto no busque una limpieza que no hace falta.
+                    cur.execute("DELETE FROM citas WHERE telefono = %s", (TELEFONO_SEMBRADO,))
+                    cur.execute("DELETE FROM conversaciones WHERE telefono = %s", (TELEFONO_SEMBRADO,))
+                conn.commit()
+                with conn.cursor() as cur:
+                    cur.execute("SELECT count(*) FROM citas WHERE telefono = %s", (TELEFONO_SEMBRADO,))
+                    quedan_citas = cur.fetchone()[0]
+                    cur.execute("SELECT count(*) FROM conversaciones WHERE telefono = %s",
+                                (TELEFONO_SEMBRADO,))
+                    quedan_conversaciones = cur.fetchone()[0]
+                    cur.execute(
+                        "SELECT count(*) FROM cambios_configuracion WHERE tabla = 'citas' "
+                        "   AND usuario IN (%s, %s)",
+                        (ADMIN, RECEPCION),
+                    )
+                    quedan_filas = cur.fetchone()[0]
+            revisar("no quedo ninguna cita sembrada en public", quedan_citas == 0, str(quedan_citas))
+            revisar("no quedo la conversacion sembrada en public", quedan_conversaciones == 0,
+                    str(quedan_conversaciones))
+            revisar("no quedo ninguna fila de bitacora de las marcas temporales",
+                    quedan_filas == 0, str(quedan_filas))
+        except Exception as e:  # noqa: BLE001
+            revisar("limpieza del dia de agenda sembrado", False, str(e))
+
         # 3. El vocabulario vivo del proceso vuelve a reflejar solo lo activo en public.
         try:
             with persistencia.conectar(url_public) as conn:
@@ -449,7 +702,7 @@ def main() -> int:
             revisar("restauracion de public verificada", False, str(e))
 
     print("\n" + "=" * 78)
-    print("FASE 8 (primera mitad) -- panel de tratamientos: " + ("OK" if fallos == 0 else f"{fallos} FALLAS"))
+    print("FASE 8 -- panel de tratamientos y agenda: " + ("OK" if fallos == 0 else f"{fallos} FALLAS"))
     print("=" * 78)
     return 0 if fallos == 0 else 1
 

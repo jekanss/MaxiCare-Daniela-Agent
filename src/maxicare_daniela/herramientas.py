@@ -52,9 +52,10 @@ from __future__ import annotations
 import asyncio
 import html
 import logging
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from functools import partial
-from typing import Any, Callable
+from typing import Any, Callable, Literal, Protocol
 
 from agents import RunContextWrapper, function_tool
 
@@ -64,6 +65,7 @@ from .calendario import (
     Bloqueo,
     ErrorDeCalendario,
     EventoDelCalendario,
+    Jornada,
     bloques_del_dia,
 )
 from .canales import Telegram
@@ -129,11 +131,34 @@ def _a_fecha(valor: str, campo: str) -> datetime:
     return momento if momento.tzinfo else momento.replace(tzinfo=ZONA_BOGOTA)
 
 
-async def _con_base(ctx: ContextoDaniela, trabajo: Callable[[Any], Any]) -> Any:
+class ConLaBase(Protocol):
+    """Lo único que `_con_base` le pide a quien lo llama: dónde está la base.
+
+    **El parámetro es MÁS ANCHO que `ContextoDaniela` a propósito. No lo estreches.** Desde la
+    fase 8, quien reconcilia contra Calendar puede ser la agenda del panel, que no tiene
+    conversación, ni teléfono, ni turno: entra con un `_SoloLaBase` y no con un contexto de
+    Daniela, y ése es justo el punto del refactor que partió `reconciliar_con_calendar`.
+
+    Por qué un `Protocol` y no la anotación cómoda: con la firma prometiendo un
+    `ContextoDaniela` entero, añadir aquí un `log.debug("...", ctx.id_conversacion)` es lo más
+    razonable del mundo -- y deja la suite ENTERA en verde mientras el panel revienta en
+    producción con un `AttributeError`. Todas las pruebas de esa zona doblan `_con_base` con
+    `monkeypatch`, así que el camino real `reconciliar_con_calendar -> _con_base ->
+    persistencia.conectar` no lo ejecuta ninguna. Que el tipo diga la verdad es lo que pone el
+    error en el sitio donde se comete.
+    """
+
+    database_url: str
+
+
+async def _con_base(ctx: ConLaBase, trabajo: Callable[[Any], Any]) -> Any:
     """Corre una función que necesita conexión, fuera del hilo del bucle de eventos.
 
     `psycopg` es síncrono: llamarlo directamente desde una corrida `async` bloquearía a
     todos los demás pacientes mientras dura la consulta.
+
+    `ctx` es cualquier cosa con `database_url`: un `ContextoDaniela` en los veinte usos de
+    Daniela, un `_SoloLaBase` cuando quien reconcilia es el panel. Ver `ConLaBase`.
     """
 
     def _ejecutar() -> Any:
@@ -1684,9 +1709,56 @@ async def escalar_a_doctores(
 DIAS_HACIA_ATRAS_AL_SINCRONIZAR = 2
 
 
-async def _sincronizar_con_calendar(
-    ctx: ContextoDaniela, citas: list[dict[str, Any]]
-) -> tuple[list[dict[str, Any]], list[str]]:
+@dataclass(frozen=True)
+class _SoloLaBase:
+    """Un `ConLaBase` de usar y tirar: el contexto mínimo que `_con_base` sabe abrir.
+
+    El núcleo recibe una `database_url` suelta y no un `ContextoDaniela` --el panel no tiene
+    conversación, ni teléfono, ni turno--, pero sigue entrando por `_con_base` a nivel de
+    módulo en vez de abrir la conexión por su cuenta. No es ceremonia: `_con_base` es el
+    punto que las pruebas doblan con `monkeypatch`, y una copia local con otro nombre dejaría
+    a media suite intentando conectarse a Neon de verdad. Pasar por aquí es lo que mantiene
+    esa red en pie.
+
+    Que esto valga lo dice el `Protocol` `ConLaBase`, y no la casualidad de que hoy
+    `_con_base` no lea nada más.
+    """
+
+    database_url: str
+
+
+@dataclass(frozen=True)
+class Correccion:
+    """Lo que Calendar dijo y Neon no sabía, en datos y sin una sola frase.
+
+    Es la mitad que el panel puede usar. Daniela necesita prosa --se la da `_frase_de`--,
+    pero una agenda necesita campos: quién, qué, de cuándo a cuándo. Escribir las dos cosas
+    en el mismo sitio era lo que ataba la reconciliación a un solo consumidor.
+
+    `hora_nueva` en None es lo que distingue «la movieron» de «ya no está»: una cancelada no
+    tiene destino, y pintarle uno sería pintar una cita en un hueco que la clínica ya soltó.
+    """
+
+    cita_id: str
+    que_paso: Literal["movida", "cancelada"]
+    hora_vieja: datetime
+    hora_nueva: datetime | None
+    tratamiento: str
+    nombre_completo: str
+
+
+async def reconciliar_con_calendar(
+    *,
+    database_url: str,
+    calendario: Any | None,
+    citas: list[dict[str, Any]],
+    ahora: datetime,
+    jornada: Jornada,
+    capacidad_por_hora: int,
+    duracion_cita_minutos: int,
+    hora_recordatorio_vispera: int,
+    horas_minimas_para_recordar: int,
+) -> tuple[list[dict[str, Any]], list[Correccion]]:
     """Devuelve esas citas como están HOY en Google Calendar, corrigiendo Neon si hace falta.
 
     ------------------------------------------------------------------------------------
@@ -1719,7 +1791,7 @@ async def _sincronizar_con_calendar(
     lo que un humano puede ver y corregir.
 
     ------------------------------------------------------------------------------------
-    Y lo segundo que devuelve: las NOVEDADES (14/09/2026, tarde)
+    Y lo segundo que devuelve: las CORRECCIONES (14/09/2026, tarde)
     ------------------------------------------------------------------------------------
 
     Corregir Neon en silencio no bastaba. El paciente borró su evento a mano, la cita se
@@ -1738,22 +1810,37 @@ async def _sincronizar_con_calendar(
 
     Solo cuando hay algo que contar. Un «tu cita sigue donde estaba» en cada consulta es
     ruido que el modelo acabaría repitiéndole al paciente.
+
+    ------------------------------------------------------------------------------------
+    Por qué es esto y no `_sincronizar_con_calendar` (20/09/2026)
+    ------------------------------------------------------------------------------------
+
+    Hasta hoy esta función devolvía las frases ya escritas, así que solo le servía a Daniela:
+    la agenda del panel necesita los MISMOS hechos y no puede leer prosa. Aquí queda el
+    núcleo --datos: `Correccion`-- y encima `_sincronizar_con_calendar`, que los traduce con
+    `_frase_de`. Ni el orden de las operaciones ni las claves de idempotencia cambian: son
+    las de la corrección que YA ocurrió en Google.
+
+    `duracion_cita_minutos` no lo usa este cuerpo todavía y viaja igual: es lo que la agenda
+    necesita para pintar cuánto dura un bloque, y dos firmas para la misma reconciliación
+    serían dos sitios donde recordar pasarlo.
     """
     if not citas:
         return citas, []
 
-    novedades: list[str] = []
+    base = _SoloLaBase(database_url=database_url)
+    correcciones: list[Correccion] = []
     al_dia: list[dict[str, Any]] = []
     for cita in citas:
         evento_id = cita.get("evento_calendar_id")
-        if not evento_id or ctx.calendario is None:
+        if not evento_id or calendario is None:
             # Una cita sin evento no tiene con qué contrastarse. Las hay: se crean así
             # cuando Calendar falla en mitad de un relevo.
             al_dia.append(cita)
             continue
 
         try:
-            evento = await asyncio.to_thread(ctx.calendario.obtener_evento, evento_id)
+            evento = await asyncio.to_thread(calendario.obtener_evento, evento_id)
         except ErrorDeCalendario as e:
             log.warning("no se pudo contrastar la cita %s con Calendar: %s", cita["id"], e)
             al_dia.append(cita)
@@ -1765,13 +1852,16 @@ async def _sincronizar_con_calendar(
 
         if evento is None:
             log.info("la cita %s ya no está en Calendar: se cancela", cita["id"])
-            await _con_base(ctx, partial(_cancelar_porque_ya_no_esta, cita))
-            novedades.append(
-                f"La clínica eliminó de su calendario la cita de {cita['tratamiento']} que "
-                f"estaba para el {_formatear_hora(cita['inicio'])}, así que acaba de quedar "
-                "CANCELADA. Es un hecho confirmado, no es un error del sistema y no hay nada "
-                "que verificar: díselo al paciente con naturalidad, discúlpate por el cambio "
-                "y ofrécele buscar otro horario."
+            await _con_base(base, partial(_cancelar_porque_ya_no_esta, cita))
+            correcciones.append(
+                Correccion(
+                    cita_id=cita["id"],
+                    que_paso="cancelada",
+                    hora_vieja=cita["inicio"],
+                    hora_nueva=None,
+                    tratamiento=cita["tratamiento"],
+                    nombre_completo=cita["nombre_completo"],
+                )
             )
             continue
 
@@ -1785,14 +1875,18 @@ async def _sincronizar_con_calendar(
             cita["inicio"],
             evento.inicio,
         )
-        novedades.append(
-            f"La clínica movió en su calendario la cita de {cita['tratamiento']}: estaba para "
-            f"el {_formatear_hora(cita['inicio'])} y ahora es el "
-            f"{_formatear_hora(evento.inicio)}. Es un hecho confirmado, no es un error del "
-            "sistema: si en un mensaje anterior le dijiste la hora vieja, corrígesela."
+        correcciones.append(
+            Correccion(
+                cita_id=cita["id"],
+                que_paso="movida",
+                hora_vieja=cita["inicio"],
+                hora_nueva=evento.inicio,
+                tratamiento=cita["tratamiento"],
+                nombre_completo=cita["nombre_completo"],
+            )
         )
         # El CUÁNDO se calcula FUERA de la transacción, igual que en `crear_cita` y en
-        # `reprogramar_cita`: es una función pura del destino, de `ctx.ahora` y de la jornada,
+        # `reprogramar_cita`: es una función pura del destino, de `ahora` y de la jornada,
         # y nada de eso depende de que la fila se haya corregido. Dentro de
         # `_mover_porque_la_movieron` quedan solo escrituras, así que un error calculando el
         # momento no puede deshacer una corrección que en Google Calendar YA ocurrió.
@@ -1804,10 +1898,10 @@ async def _sincronizar_con_calendar(
         try:
             cuando_recordar = seguimientos.momento_del_recordatorio(
                 inicio_cita=evento.inicio,
-                ahora=ctx.ahora,
-                jornada=ctx.jornada,
-                hora_vispera=ctx.hora_recordatorio_vispera,
-                horas_minimas=ctx.horas_minimas_para_recordar,
+                ahora=ahora,
+                jornada=jornada,
+                hora_vispera=hora_recordatorio_vispera,
+                horas_minimas=horas_minimas_para_recordar,
             )
         except Exception:  # noqa: BLE001 -- ver arriba
             log.exception("fallo calculando el recordatorio de la cita %s", cita["id"])
@@ -1815,11 +1909,65 @@ async def _sincronizar_con_calendar(
 
         al_dia.append(
             await _con_base(
-                ctx, partial(_mover_porque_la_movieron, ctx, cita, evento, cuando_recordar)
+                base,
+                partial(
+                    _mover_porque_la_movieron,
+                    cita,
+                    evento,
+                    cuando_recordar,
+                    capacidad_por_hora=capacidad_por_hora,
+                    ahora=ahora,
+                ),
             )
         )
 
-    return al_dia, novedades
+    return al_dia, correcciones
+
+
+def _frase_de(correccion: Correccion) -> str:
+    """La corrección contada como se la cuenta al modelo. Los dos literales, sin tocar.
+
+    Que estén aquí y no en el núcleo es toda la frontera de este refactor: el panel lee
+    `Correccion`, Daniela lee esto. Si alguien mueve una coma, cae
+    `test_el_texto_de_la_novedad_no_cambia_al_refactorizar`, que existe para eso.
+    """
+    if correccion.que_paso == "cancelada":
+        return (
+            f"La clínica eliminó de su calendario la cita de {correccion.tratamiento} que "
+            f"estaba para el {_formatear_hora(correccion.hora_vieja)}, así que acaba de quedar "
+            "CANCELADA. Es un hecho confirmado, no es un error del sistema y no hay nada "
+            "que verificar: díselo al paciente con naturalidad, discúlpate por el cambio "
+            "y ofrécele buscar otro horario."
+        )
+    return (
+        f"La clínica movió en su calendario la cita de {correccion.tratamiento}: estaba para "
+        f"el {_formatear_hora(correccion.hora_vieja)} y ahora es el "
+        f"{_formatear_hora(correccion.hora_nueva)}. Es un hecho confirmado, no es un error del "
+        "sistema: si en un mensaje anterior le dijiste la hora vieja, corrígesela."
+    )
+
+
+async def _sincronizar_con_calendar(
+    ctx: ContextoDaniela, citas: list[dict[str, Any]]
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Igual que antes para quien llama: las citas al día y las frases para el modelo.
+
+    La reconciliación entera vive ahora en `reconciliar_con_calendar`; esto es la capa de
+    presentación de Daniela y nada más. Lo que el paciente acaba oyendo no cambió ni un
+    carácter -- ver `_frase_de`.
+    """
+    al_dia, correcciones = await reconciliar_con_calendar(
+        database_url=ctx.database_url,
+        calendario=ctx.calendario,
+        citas=citas,
+        ahora=ctx.ahora,
+        jornada=ctx.jornada,
+        capacidad_por_hora=ctx.capacidad_por_hora,
+        duracion_cita_minutos=ctx.duracion_cita_minutos,
+        hora_recordatorio_vispera=ctx.hora_recordatorio_vispera,
+        horas_minimas_para_recordar=ctx.horas_minimas_para_recordar,
+    )
+    return al_dia, [_frase_de(c) for c in correcciones]
 
 
 def _cancelar_porque_ya_no_esta(cita: dict[str, Any], conn) -> None:
@@ -1831,13 +1979,19 @@ def _cancelar_porque_ya_no_esta(cita: dict[str, Any], conn) -> None:
 
 
 def _mover_porque_la_movieron(
-    ctx: ContextoDaniela,
     cita: dict[str, Any],
     evento: EventoDelCalendario,
     cuando_recordar: datetime | None,
     conn,
+    *,
+    capacidad_por_hora: int,
+    ahora: datetime,
 ) -> dict[str, Any]:
     """Pone la fila donde dice Calendar, con su recordatorio. Devuelve la cita ya corregida.
+
+    Recibe la capacidad y el instante sueltos, y no un `ContextoDaniela`: quien reconcilia
+    puede ser el panel, que no tiene conversación ni turno. Son los dos únicos datos del
+    contexto que esta escritura necesitaba.
 
     **La cascada del recordatorio es la misma que hace `reprogramar_cita`, y tiene que estar
     aquí por una razón concreta: G1 caza el BORRADO de una cita, no su movimiento.** Cuando el
@@ -1858,7 +2012,7 @@ def _mover_porque_la_movieron(
     cupo = persistencia.tomar_cupo(
         conn,
         inicio=evento.inicio,
-        capacidad=ctx.capacidad_por_hora,
+        capacidad=capacidad_por_hora,
         # La arma el código, como las otras cuatro (no negociable 2). Lleva la hora destino
         # dentro, así que sincronizar dos veces la misma cita no toma dos cupos.
         clave_idempotencia=f"calendar:{cita['id']}:{evento.inicio.isoformat()}",
@@ -1874,11 +2028,11 @@ def _mover_porque_la_movieron(
 
     # Los mismos tres componentes que la clave de `reprogramar_cita`, y por los mismos motivos:
     # la cita para que la cascada sepa de qué cuelga, la hora destino para que dos horas no
-    # compartan fila, y `ctx.ahora` --fijo dentro del turno-- para que un A -> B -> A -> B
+    # compartan fila, y `ahora` --fijo dentro del turno-- para que un A -> B -> A -> B
     # hecho a mano en Calendar no acierte la clave de un movimiento anterior y se quede sin
     # recordatorio. La arma el código, nunca el modelo.
     clave_recordatorio = (
-        f"calendar:recordatorio:{cita['id']}:{evento.inicio.isoformat()}:{ctx.ahora.isoformat()}"
+        f"calendar:recordatorio:{cita['id']}:{evento.inicio.isoformat()}:{ahora.isoformat()}"
     )
 
     persistencia.mover_cita(

@@ -110,6 +110,15 @@ EOF
 echo "==> Aplicando migraciones"
 # Antes de levantar el servicio, no despues: si el esquema no esta al dia, el contenedor
 # nuevo aceptaria webhooks que no puede registrar. Corre en un contenedor de un solo uso.
+#
+# ESTE PASO ES LO QUE HACE SEGURO SUBIR LA FASE 8. La marca de asistencia del panel escribe
+# `citas.asistio` y su fila de bitacora en la MISMA transaccion, y hasta la migracion 021 el
+# CHECK de `cambios_configuracion.tabla` no admitia 'citas': sin ella, el INSERT revienta y
+# se lleva por delante el UPDATE, asi que la columna queda inescribible y la pantalla de
+# Agenda sale rota en produccion. Saltarse este paso --o desplegar por cualquier otro
+# camino-- es lo unico que puede dejar ese estado. `inicializar_base.py` verifica la 021 en
+# los dos esquemas al terminar y sale con codigo 1 si falta, asi que este comando falla
+# RUIDOSAMENTE antes de levantar nada.
 ssh "$VPS" "cd '$DESTINO' && docker compose run --rm --no-deps daniela \
     uv run python scripts/inicializar_base.py"
 

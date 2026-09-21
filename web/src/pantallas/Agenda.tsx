@@ -1,100 +1,203 @@
-import { useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import {
+  leerAgenda,
+  marcarAsistencia,
+  MOTIVO_FUERA_DE_VENTANA,
+  SesionCaducada,
+  type AgendaDelDia,
+  type BloqueoDeAgenda,
+  type CitaDeAgenda,
+  type CorreccionDeAgenda,
+} from '@/api'
 
 const SP = "'Space Grotesk', sans-serif"
 
-/* La Agenda tal como la diseñó Figma Make, con la jerarquía visual intacta: la acción de
- * asistencia es la más grande y la más fácil de encontrar de toda la aplicación, que es
- * exactamente lo que la especificación exige ("es el dato más importante de todo el
- * producto y hoy no existe en ningún sistema, vive en un cuaderno").
+/* La Agenda, con la jerarquía visual que trajo de Figma intacta: la acción de asistencia es la
+ * más grande y la más fácil de encontrar de toda la aplicación. Es deliberado y no es estética:
+ * lo pulsa alguien de pie, con prisa, entre un paciente y el siguiente, y es el dato más
+ * importante del producto --hoy vive en un cuaderno--.
  *
- * ------------------------------------------------------------------------------------
- * Lo que esta pantalla NO hace todavía, y por qué se dice en pantalla y no solo aquí
- * ------------------------------------------------------------------------------------
+ * Lo que la maqueta inventaba y aquí no está: el `origen` del paciente («Instagram», «Google
+ * Ads», «referido»). Ese dato NO EXISTE en la base. No se sustituye por una suposición
+ * plausible ni se pinta un `PENDIENTE`: en una pantalla de cara al usuario, lo que no existe no
+ * se muestra.
  *
- * No lee de Neon y no escribe nada. Los datos son de ejemplo y marcar una asistencia solo
- * cambia el estado de React: al recargar vuelve como estaba.
- *
- * Escribir la asistencia de verdad es el entregable de la fase 8 --y necesita una columna
- * que la tabla `citas` todavía no tiene--, así que fingirlo aquí sería la peor versión
- * posible: alguien de la clínica marcaría un día entero creyendo que quedó guardado. Por
- * eso el aviso de arriba no se puede cerrar. */
+ * Abrir un día ESCRIBE: el servidor reconcilia contra Google Calendar y puede mover o cancelar
+ * una cita. Lo que corrija baja en `correcciones` y se pinta arriba, con la hora vieja dentro,
+ * porque una cita que se fue a otro día deja un hueco que nadie sabría explicar. */
 
-type Asistencia = 'asistio' | 'no_asistio' | null
+const ZONA = 'America/Bogota'
 
-type Cita = {
-  id: string
-  tipo: 'cita'
-  inicio: number // minutos desde las 8:00
-  duracion: number
-  paciente: string
-  telefono: string
-  tratamiento: string
-  origen: 'whatsapp' | 'google_ads' | 'instagram' | 'referido'
-  asistencia: Asistencia
+const FMT_HORA = new Intl.DateTimeFormat('es-CO', {
+  timeZone: ZONA,
+  hour: '2-digit',
+  minute: '2-digit',
+  hour12: false,
+})
+const FMT_DIA = new Intl.DateTimeFormat('en-CA', {
+  timeZone: ZONA,
+  year: 'numeric',
+  month: '2-digit',
+  day: '2-digit',
+})
+const FMT_PALABRAS = new Intl.DateTimeFormat('es-CO', {
+  timeZone: 'UTC',
+  weekday: 'long',
+  day: 'numeric',
+  month: 'long',
+  year: 'numeric',
+})
+const FMT_CORTA = new Intl.DateTimeFormat('es-CO', {
+  timeZone: ZONA,
+  day: 'numeric',
+  month: 'short',
+})
+
+/* Un ISO sin zona es hora de pared de Bogotá --el servidor arma los rangos del día con
+   `ZONA_BOGOTA`--, y `new Date` lo leería con la zona del navegador: un portátil en otro huso
+   pintaría toda la agenda corrida. Colombia no tiene horario de verano, así que el desfase fijo
+   de -05:00 es exacto todo el año. Si el ISO ya trae zona, se respeta la suya. */
+function instante(iso: string): number {
+  const conZona = /(?:Z|[+-]\d{2}:?\d{2})$/.test(iso)
+  return new Date(conZona ? iso : `${iso}-05:00`).getTime()
 }
 
-type Bloqueo = {
-  id: string
-  tipo: 'bloqueo'
-  inicio: number
-  duracion: number
-  titulo: string
-  doctor: string
+function hhmm(iso: string): string {
+  return FMT_HORA.format(instante(iso))
 }
 
-type Franja = Cita | Bloqueo
-
-const MINUTO_ACTUAL = 6 * 60 + 35 // 14:35
-
-const FRANJAS: Franja[] = [
-  { id: 'a1', tipo: 'cita', inicio: 0, duracion: 45, paciente: 'Carlos Mendoza', telefono: '311 820 4471', tratamiento: 'Valoración ortodoncia', origen: 'instagram', asistencia: 'asistio' },
-  { id: 'b1', tipo: 'bloqueo', inicio: 60, duracion: 30, titulo: 'Reunión médica', doctor: 'Dr. Ramírez' },
-  { id: 'a2', tipo: 'cita', inicio: 90, duracion: 45, paciente: 'María Castillo', telefono: '300 541 9382', tratamiento: 'Blanqueamiento dental', origen: 'whatsapp', asistencia: null },
-  { id: 'a3', tipo: 'cita', inicio: 120, duracion: 45, paciente: 'Santiago Vargas', telefono: '315 762 0093', tratamiento: 'Implante dental', origen: 'google_ads', asistencia: 'no_asistio' },
-  { id: 'a4', tipo: 'cita', inicio: 180, duracion: 45, paciente: 'Laura Jiménez', telefono: '312 488 5521', tratamiento: 'Diseño de sonrisa', origen: 'referido', asistencia: 'asistio' },
-  { id: 'b2', tipo: 'bloqueo', inicio: 240, duracion: 60, titulo: 'Almuerzo', doctor: 'Dr. Salcedo' },
-  { id: 'a5', tipo: 'cita', inicio: 300, duracion: 45, paciente: 'Andrés Restrepo', telefono: '317 293 6610', tratamiento: 'Endodoncia', origen: 'whatsapp', asistencia: null },
-  { id: 'a6', tipo: 'cita', inicio: 360, duracion: 45, paciente: 'Valentina Torres', telefono: '301 654 8823', tratamiento: 'Prótesis dental', origen: 'google_ads', asistencia: null },
-  { id: 'a7', tipo: 'cita', inicio: 420, duracion: 45, paciente: 'Juan Pablo Ríos', telefono: '314 711 2259', tratamiento: 'Valoración ortodoncia', origen: 'instagram', asistencia: null },
-  { id: 'a8', tipo: 'cita', inicio: 480, duracion: 45, paciente: 'Camila Herrera', telefono: '310 382 7741', tratamiento: 'Blanqueamiento dental', origen: 'whatsapp', asistencia: null },
-]
-
-const AYER_SIN_MARCAR = [
-  { paciente: 'Sofía Mora', tratamiento: 'Diseño de sonrisa', hora: '10:00' },
-  { paciente: 'Ricardo Patiño', tratamiento: 'Implante dental', hora: '14:00' },
-  { paciente: 'Natalia Guerrero', tratamiento: 'Ortodoncia — ajuste', hora: '16:00' },
-]
-
-const ORIGEN_ETIQUETA: Record<string, string> = {
-  whatsapp: 'Daniela · WhatsApp',
-  google_ads: 'Google Ads',
-  instagram: 'Instagram',
-  referido: 'Referido',
+function minutosDelDia(iso: string): number {
+  const [h, m] = hhmm(iso).split(':').map(Number)
+  return h * 60 + m
 }
 
-const ORIGEN_COLOR: Record<string, string> = {
-  whatsapp: '#059669',
-  google_ads: '#7C3AED',
-  instagram: '#7C3AED',
-  referido: '#D97706',
+function fechaCorta(iso: string): string {
+  return FMT_CORTA.format(instante(iso))
 }
 
-function aHora(m: number): string {
-  const h = Math.floor(m / 60) + 8
-  return `${String(h).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`
+/** El día de un ISO en Bogotá, como `YYYY-MM-DD`. */
+function diaDe(iso: string): string {
+  return FMT_DIA.format(instante(iso))
+}
+
+function hoyEnBogota(): string {
+  return FMT_DIA.format(new Date())
+}
+
+/** Aritmética de días sobre `YYYY-MM-DD`, en UTC para que ningún cambio de huso del navegador
+ *  convierta «ayer» en «hoy». */
+function sumarDias(dia: string, n: number): string {
+  const [a, m, d] = dia.split('-').map(Number)
+  return new Date(Date.UTC(a, m - 1, d + n)).toISOString().slice(0, 10)
+}
+
+function enPalabras(dia: string): string {
+  const [a, m, d] = dia.split('-').map(Number)
+  const texto = FMT_PALABRAS.format(new Date(Date.UTC(a, m - 1, d)))
+  return texto.charAt(0).toUpperCase() + texto.slice(1)
+}
+
+function mensajeDe(err: unknown): string {
+  return err instanceof Error && err.message ? err.message : 'Algo salió mal.'
+}
+
+const ALTO_HORA = 96
+
+// ------------------------------------------------------------------------------------------
+
+function Cabecera({
+  dia,
+  irA,
+  resumen,
+}: {
+  dia: string
+  irA: (d: string) => void
+  resumen: { etiqueta: string; valor: string; color: string }[] | null
+}) {
+  const hoy = hoyEnBogota()
+  return (
+    <header
+      className="shrink-0 flex items-center justify-between gap-6 px-8 py-4 border-b flex-wrap"
+      style={{ backgroundColor: '#FFFFFF', borderColor: '#E5E7EB' }}
+    >
+      <div className="min-w-0">
+        <h1 className="text-lg font-bold" style={{ color: '#111827' }}>Agenda</h1>
+        <p className="text-sm truncate" style={{ color: '#6B7280' }}>{enPalabras(dia)}</p>
+      </div>
+
+      <div className="flex items-center gap-2">
+        <button
+          onClick={() => irA(sumarDias(dia, -1))}
+          className="px-3 py-1.5 rounded-lg text-sm border hover:bg-gray-50 transition-colors"
+          style={{ borderColor: '#E5E7EB', color: '#374151', backgroundColor: '#FFFFFF' }}
+        >
+          ← Ayer
+        </button>
+        <button
+          onClick={() => irA(hoy)}
+          className="px-3 py-1.5 rounded-lg text-sm font-semibold border"
+          style={
+            dia === hoy
+              ? { borderColor: '#7C3AED', color: '#7C3AED', backgroundColor: '#F5F3FF' }
+              : { borderColor: '#E5E7EB', color: '#374151', backgroundColor: '#FFFFFF' }
+          }
+        >
+          Hoy
+        </button>
+        <button
+          onClick={() => irA(sumarDias(dia, 1))}
+          className="px-3 py-1.5 rounded-lg text-sm border hover:bg-gray-50 transition-colors"
+          style={{ borderColor: '#E5E7EB', color: '#374151', backgroundColor: '#FFFFFF' }}
+        >
+          Mañana →
+        </button>
+        <input
+          type="date"
+          value={dia}
+          onChange={(e) => e.target.value && irA(e.target.value)}
+          aria-label="Ver otro día"
+          className="px-3 py-1.5 rounded-lg text-sm border"
+          style={{ borderColor: '#E5E7EB', color: '#374151', backgroundColor: '#FFFFFF' }}
+        />
+      </div>
+
+      <div className="flex items-center gap-5">
+        {resumen?.map((r) => (
+          <div key={r.etiqueta} className="text-center">
+            <p className="text-xl font-bold" style={{ color: r.color }}>{r.valor}</p>
+            <p className="text-[10px]" style={{ color: '#9CA3AF' }}>{r.etiqueta}</p>
+          </div>
+        ))}
+      </div>
+    </header>
+  )
 }
 
 function TarjetaCita({
   cita,
   pasada,
+  ocupada,
   marcar,
 }: {
-  cita: Cita
+  cita: CitaDeAgenda
   pasada: boolean
-  marcar: (id: string, v: Asistencia) => void
+  ocupada: boolean
+  marcar: (id: string, v: boolean | null) => void
 }) {
-  const sinMarcar = pasada && cita.asistencia === null
-  const alto = Math.max(cita.duracion * 1.6, 72)
+  const sinMarcar = pasada && cita.asistio === null
+  /* Un MÍNIMO, no una altura: lo que de verdad mide la tarjeta lo decide su contenido, y con
+     los dos botones de marcar son 137 px. Por eso el desborde no lo arregla este número --se
+     intentó, acotándolo a `ALTO_HORA - 20`, y la tarjeta siguió midiendo 137-- sino la
+     rejilla, que ahora deja crecer la fila de cada hora. El detalle está abajo, donde se
+     pintan las horas.
+
+     Y por eso aquí ya no hay tope. Aquel `Math.min(..., ALTO_HORA - 20)` era lo que quedaba
+     del intento fallido, y una vez que la fila crece no acotaba nada: solo aplanaba 60, 120 y
+     180 minutos a los mismos 76 px, o sea que hacía a esta línea mentir sobre lo único que
+     sirve para. Sin él, una cita larga se ve larga otra vez.
+
+     El suelo de 72 px sí se queda: una cita de media hora sin él quedaría raquítica. */
+  const alto = Math.max(cita.duracion_minutos * 1.6, 72)
 
   return (
     <div
@@ -104,14 +207,15 @@ function TarjetaCita({
         backgroundColor: sinMarcar ? '#FFFBEB' : '#FFFFFF',
         border: `1.5px solid ${sinMarcar ? '#FCD34D' : '#E5E7EB'}`,
         boxShadow: sinMarcar ? '0 0 0 3px rgba(251,191,36,0.15)' : '0 1px 3px rgba(0,0,0,0.06)',
+        opacity: ocupada ? 0.6 : 1,
       }}
     >
       <div
         className="absolute left-0 top-0 bottom-0 w-1 rounded-l-xl"
         style={{
           backgroundColor:
-            cita.asistencia === 'asistio' ? '#10B981'
-            : cita.asistencia === 'no_asistio' ? '#EF4444'
+            cita.asistio === true ? '#10B981'
+            : cita.asistio === false ? '#EF4444'
             : sinMarcar ? '#F59E0B'
             : '#7C3AED',
         }}
@@ -120,37 +224,49 @@ function TarjetaCita({
       <div className="pl-1 flex items-start justify-between gap-3">
         <div className="min-w-0">
           <div className="flex items-center gap-2 mb-0.5">
-            <p className="text-sm font-semibold truncate" style={{ color: '#111827' }}>{cita.paciente}</p>
-            {cita.asistencia === 'asistio' && (
+            <p className="text-sm font-semibold truncate" style={{ color: '#111827' }}>{cita.nombre_completo}</p>
+            {cita.asistio === true && (
               <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded-full shrink-0" style={{ backgroundColor: '#D1FAE5', color: '#065F46' }}>✓ Asistió</span>
             )}
-            {cita.asistencia === 'no_asistio' && (
+            {cita.asistio === false && (
               <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded-full shrink-0" style={{ backgroundColor: '#FEE2E2', color: '#991B1B' }}>✗ No asistió</span>
             )}
           </div>
           <p className="text-xs truncate" style={{ color: '#6B7280' }}>{cita.tratamiento}</p>
           <div className="flex items-center gap-1.5 mt-1">
-            <span className="text-[10px] font-medium px-1.5 py-0.5 rounded-full" style={{ backgroundColor: '#F3F4F6', color: ORIGEN_COLOR[cita.origen] }}>
-              {ORIGEN_ETIQUETA[cita.origen]}
-            </span>
             <span className="text-[10px]" style={{ color: '#9CA3AF' }}>{cita.telefono}</span>
+            {cita.estado === 'reprogramada' && (
+              <span className="text-[10px] font-medium px-1.5 py-0.5 rounded-full" style={{ backgroundColor: '#F3F4F6', color: '#6B7280' }}>
+                Reprogramada
+              </span>
+            )}
           </div>
         </div>
-        <p className="text-xs font-medium shrink-0" style={{ color: '#9CA3AF' }}>{aHora(cita.inicio)}</p>
+        <div className="shrink-0 text-right">
+          <p className="text-xs font-medium" style={{ color: '#9CA3AF' }}>{hhmm(cita.inicio)}</p>
+          <p className="text-[10px]" style={{ color: '#D1D5DB' }}>
+            a {FMT_HORA.format(instante(cita.inicio) + cita.duracion_minutos * 60_000)}
+          </p>
+        </div>
       </div>
 
-      {pasada && cita.asistencia === null && (
+      {/* El botón solo existe si la hora de inicio ya pasó. Un «no asistió» puesto a las 8:00
+          sobre una cita de las 16:00 sería una marca falsa sobre alguien que todavía va a
+          venir --y el servidor la rechaza igual--. */}
+      {pasada && cita.asistio === null && (
         <div className="pl-1 flex gap-2 mt-1">
           <button
-            onClick={() => marcar(cita.id, 'asistio')}
-            className="flex-1 py-2.5 rounded-lg text-sm font-bold transition-colors flex items-center justify-center gap-1.5 hover:brightness-95"
+            onClick={() => marcar(cita.id, true)}
+            disabled={ocupada}
+            className="flex-1 py-2.5 rounded-lg text-sm font-bold transition-colors flex items-center justify-center gap-1.5 hover:brightness-95 disabled:cursor-wait"
             style={{ backgroundColor: '#10B981', color: '#FFFFFF', boxShadow: '0 2px 8px rgba(16,185,129,0.35)' }}
           >
             ✓ Asistió
           </button>
           <button
-            onClick={() => marcar(cita.id, 'no_asistio')}
-            className="flex-1 py-2.5 rounded-lg text-sm font-bold transition-colors flex items-center justify-center gap-1.5 hover:brightness-95"
+            onClick={() => marcar(cita.id, false)}
+            disabled={ocupada}
+            className="flex-1 py-2.5 rounded-lg text-sm font-bold transition-colors flex items-center justify-center gap-1.5 hover:brightness-95 disabled:cursor-wait"
             style={{ backgroundColor: '#FEF2F2', color: '#DC2626', border: '1.5px solid #FECACA' }}
           >
             ✗ No asistió
@@ -158,11 +274,12 @@ function TarjetaCita({
         </div>
       )}
 
-      {pasada && cita.asistencia !== null && (
+      {pasada && cita.asistio !== null && (
         <div className="pl-1">
           <button
             onClick={() => marcar(cita.id, null)}
-            className="text-[10px] hover:underline"
+            disabled={ocupada}
+            className="text-[10px] hover:underline disabled:cursor-wait"
             style={{ color: '#9CA3AF' }}
           >
             Corregir marcación
@@ -173,169 +290,441 @@ function TarjetaCita({
   )
 }
 
-function TarjetaBloqueo({ bloqueo }: { bloqueo: Bloqueo }) {
+function TarjetaBloqueo({ bloqueo }: { bloqueo: BloqueoDeAgenda }) {
+  const inicio = minutosDelDia(bloqueo.inicio)
+  const fin = minutosDelDia(bloqueo.fin)
+  const dura = fin > inicio ? fin - inicio : 24 * 60 - inicio
+
   return (
     <div
       className="rounded-xl px-4 py-3 flex items-center gap-3"
       style={{
-        minHeight: Math.max(bloqueo.duracion * 1.6, 52),
+        minHeight: Math.max(dura * 1.6, 52),
         backgroundColor: '#F3F4F6',
         border: '1.5px dashed #D1D5DB',
       }}
     >
       <div className="w-1 self-stretch rounded-full" style={{ backgroundColor: '#9CA3AF' }} />
-      <div>
-        <p className="text-sm font-medium" style={{ color: '#6B7280' }}>{bloqueo.titulo}</p>
+      <div className="min-w-0">
+        <p className="text-sm font-medium truncate" style={{ color: '#6B7280' }}>{bloqueo.titulo}</p>
         <p className="text-[11px]" style={{ color: '#9CA3AF' }}>
-          {bloqueo.doctor} · {aHora(bloqueo.inicio)}–{aHora(bloqueo.inicio + bloqueo.duracion)}
+          {hhmm(bloqueo.inicio)}–{hhmm(bloqueo.fin)}
         </p>
       </div>
-      <span className="ml-auto text-[10px] font-semibold px-2 py-0.5 rounded-full" style={{ backgroundColor: '#E5E7EB', color: '#6B7280' }}>
+      <span className="ml-auto text-[10px] font-semibold px-2 py-0.5 rounded-full shrink-0" style={{ backgroundColor: '#E5E7EB', color: '#6B7280' }}>
         Google Calendar
       </span>
     </div>
   )
 }
 
-export default function Agenda() {
-  const [franjas, setFranjas] = useState<Franja[]>(FRANJAS)
-  const [verBanner, setVerBanner] = useState(true)
-  const fecha = 'Jueves 11 de septiembre, 2026'
+/** Una corrección de la reconciliación, en la frase que la recepcionista necesita: la hora
+ *  vieja dentro, porque el hueco que dejó es lo que ella está mirando. */
+function frase(c: CorreccionDeAgenda): string {
+  const vieja = `${fechaCorta(c.hora_vieja)} a las ${hhmm(c.hora_vieja)}`
+  if (c.que_paso === 'cancelada' || !c.hora_nueva) {
+    return `estaba el ${vieja} y ya no está en Google Calendar: se canceló`
+  }
+  return `estaba el ${vieja} y ahora es el ${fechaCorta(c.hora_nueva)} a las ${hhmm(c.hora_nueva)}`
+}
 
-  function marcar(id: string, valor: Asistencia) {
-    setFranjas((prev) =>
-      prev.map((f) => (f.id === id && f.tipo === 'cita' ? { ...f, asistencia: valor } : f)),
+// ------------------------------------------------------------------------------------------
+
+export default function Agenda({ alCaducarSesion }: { alCaducarSesion: () => void }) {
+  const [dia, setDia] = useState<string>(hoyEnBogota)
+  const [datos, setDatos] = useState<AgendaDelDia | null>(null)
+  const [cargando, setCargando] = useState(true)
+  const [error, setError] = useState('')
+  const [aviso, setAviso] = useState('')
+  const [ocupadas, setOcupadas] = useState<string[]>([])
+  const [verSinMarcar, setVerSinMarcar] = useState(false)
+  const [ahora, setAhora] = useState(() => Date.now())
+
+  /* `alCaducarSesion` entra por una `ref` y NO por las dependencias de `recargar`. No es
+     estilo: `App.tsx` lo pasa como una flecha nueva en cada render, así que meterlo en las
+     deps cambiaría la identidad de `recargar` en cada render y el efecto que depende de ella
+     volvería a leer Neon sin parar --y aquí cada lectura además llama a Google Calendar--.
+     No hay prueba ni regla de lint que lo atrape: se vería como lentitud y una factura rara.
+     Es la trampa documentada en `web/CLAUDE.md`. */
+  const caducar = useRef(alCaducarSesion)
+  useEffect(() => {
+    caducar.current = alCaducarSesion
+  })
+
+  /* El día que se está pidiendo ahora mismo. Va en una `ref` y no en el estado porque lo leen
+     los `await` de abajo, no el render, y porque tiene que estar puesto ANTES de la petición.
+     Es lo que descarta una respuesta que ya no corresponde a lo que la pantalla muestra. */
+  const pedido = useRef(dia)
+
+  /* El día viaja como ARGUMENTO, no como dependencia: así `recargar` conserva las deps vacías
+     que exige la regla 3 de `web/CLAUDE.md` y el efecto de abajo decide cuándo se pide.
+
+     Dos lecturas en vuelo es el caso normal, no el raro: cada una reconcilia contra Google y
+     tarda de 3 a 5 segundos, y llegar al lunes son dos clics en «Ayer» seguidos. Si la de D-1
+     resolviera después de la de D-2, la cabecera se quedaría en D-2 y la rejilla en D-1 --y
+     no por cinco segundos, sino para siempre--: alguien marcaría la asistencia de un paciente
+     mirando el nombre de otro día. Por eso cada respuesta comprueba que su día siga siendo el
+     pedido, y si no, se tira entera: ni datos, ni error, ni apagar el «cargando» que la
+     petición buena todavía necesita encendido. */
+  const recargar = useCallback(async (queDia: string) => {
+    pedido.current = queDia
+    setCargando(true)
+    try {
+      const datosDelDia = await leerAgenda(queDia)
+      if (pedido.current !== queDia) return
+      setDatos(datosDelDia)
+      setError('')
+    } catch (e) {
+      if (e instanceof SesionCaducada) caducar.current()
+      else if (pedido.current === queDia) setError(mensajeDe(e))
+    } finally {
+      if (pedido.current === queDia) setCargando(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    void recargar(dia)
+  }, [dia, recargar])
+
+  // El reloj de la pantalla. Sin esto, una cita que empieza mientras alguien tiene la agenda
+  // abierta no estrenaría su botón hasta que alguien recargara la página.
+  useEffect(() => {
+    const t = setInterval(() => setAhora(Date.now()), 60_000)
+    return () => clearInterval(t)
+  }, [])
+
+  async function marcar(id: string, valor: boolean | null) {
+    setOcupadas((prev) => [...prev, id])
+    setAviso('')
+    try {
+      const actualizada = await marcarAsistencia(id, valor)
+      setDatos((prev) =>
+        prev === null
+          ? prev
+          : {
+              ...prev,
+              citas: prev.citas.map((c) => (c.id === id ? { ...c, ...actualizada } : c)),
+              // Una cita que acaba de quedar marcada deja de estar pendiente; si se desmarcó,
+              // se queda donde está.
+              sin_marcar:
+                actualizada.asistio === null
+                  ? prev.sin_marcar
+                  : prev.sin_marcar.filter((c) => c.id !== id),
+            },
+      )
+    } catch (e) {
+      if (e instanceof SesionCaducada) caducar.current()
+      else setAviso(mensajeDe(e))
+    } finally {
+      setOcupadas((prev) => prev.filter((x) => x !== id))
+    }
+  }
+
+  const citas = datos?.citas ?? []
+  const bloqueos = datos?.bloqueos ?? []
+  const pasada = (iso: string) => instante(iso) <= ahora
+
+  const sinMarcarHoy = citas.filter((c) => pasada(c.inicio) && c.asistio === null).length
+  const resumen = datos
+    ? [
+        { etiqueta: 'Agendadas', valor: String(citas.length), color: '#111827' },
+        { etiqueta: 'Asistieron', valor: String(citas.filter((c) => c.asistio === true).length), color: '#10B981' },
+        { etiqueta: 'No asistieron', valor: String(citas.filter((c) => c.asistio === false).length), color: '#EF4444' },
+        { etiqueta: 'Sin marcar', valor: String(sinMarcarHoy), color: sinMarcarHoy > 0 ? '#D97706' : '#10B981' },
+      ]
+    : null
+
+  // La rejilla cubre la jornada, y se estira si hay algo fuera de ella: una cita a las 7:00 o
+  // un bloqueo a las 20:00 tienen que verse, no esconderse.
+  const arranques = [...citas.map((c) => minutosDelDia(c.inicio)), ...bloqueos.map((b) => minutosDelDia(b.inicio))]
+  const finales = [
+    ...citas.map((c) => minutosDelDia(c.inicio) + c.duracion_minutos),
+    ...bloqueos.map((b) => {
+      const i = minutosDelDia(b.inicio)
+      const f = minutosDelDia(b.fin)
+      return f > i ? f : 24 * 60
+    }),
+  ]
+  const desde = Math.floor(Math.min(8 * 60, ...arranques) / 60) * 60
+  const hasta = Math.ceil(Math.max(19 * 60, ...finales) / 60) * 60
+  const horas = Array.from({ length: Math.max(1, (hasta - desde) / 60) }, (_, i) => desde + i * 60)
+
+  // La línea del ahora y el sombreado de las horas pasadas solo tienen sentido en el día que
+  // de verdad está corriendo: en ayer o en mañana, `-1` las apaga las dos.
+  const isoAhora = new Date(ahora).toISOString()
+  const minutoAhora = dia === diaDe(isoAhora) ? minutosDelDia(isoAhora) : -1
+
+  const marco = { fontFamily: SP, backgroundColor: '#F9FAFB' }
+
+  /* Mientras carga NO se enseña el día anterior, ni siquiera atenuado, y no es una cuestión de
+     pulcritud: la cabecera ya dice el día nuevo, la reconciliación contra Google tarda de 3 a
+     5 segundos, y en esos segundos alguien puede pulsar el botón verde de una cita de HOY
+     creyendo que está cerrando lo de AYER. Un contenido viejo bajo un rótulo nuevo es lo único
+     que esta pantalla no se puede permitir. Se reemplaza entero, como hacen `Tratamientos` y
+     `SinResolver`; la cabecera se queda para que se pueda seguir navegando. */
+  if (cargando) {
+    return (
+      <div className="flex-1 flex flex-col min-w-0 overflow-hidden" style={marco}>
+        <Cabecera dia={dia} irA={setDia} resumen={null} />
+        <p className="px-8 py-8 text-sm" style={{ color: '#9CA3AF' }}>
+          Cargando la agenda y contrastándola con Google Calendar…
+        </p>
+      </div>
     )
   }
 
-  const horas = Array.from({ length: 10 }, (_, i) => i * 60)
-  const citas = franjas.filter((f): f is Cita => f.tipo === 'cita')
-  const sinMarcar = citas.filter((c) => c.inicio < MINUTO_ACTUAL && c.asistencia === null).length
-
-  const resumen = [
-    { etiqueta: 'Agendadas', valor: String(citas.length), color: '#111827' },
-    { etiqueta: 'Asistieron', valor: String(citas.filter((c) => c.asistencia === 'asistio').length), color: '#10B981' },
-    { etiqueta: 'No asistieron', valor: String(citas.filter((c) => c.asistencia === 'no_asistio').length), color: '#EF4444' },
-    { etiqueta: 'Sin marcar', valor: String(sinMarcar), color: sinMarcar > 0 ? '#D97706' : '#10B981' },
-  ]
+  if (error) {
+    return (
+      <div className="flex-1 flex flex-col min-w-0 overflow-hidden" style={marco}>
+        <Cabecera dia={dia} irA={setDia} resumen={null} />
+        <div className="px-8 py-8">
+          <div role="alert" className="rounded-xl px-4 py-3 max-w-2xl" style={{ backgroundColor: '#FEF2F2', border: '1px solid #FECACA' }}>
+            <p className="text-sm" style={{ color: '#B91C1C' }}>{error}</p>
+            <button
+              onClick={() => void recargar(dia)}
+              className="mt-2 text-xs font-semibold underline"
+              style={{ color: '#B91C1C' }}
+            >
+              Reintentar
+            </button>
+          </div>
+        </div>
+      </div>
+    )
+  }
 
   return (
-    <div className="flex-1 flex flex-col min-w-0 overflow-hidden" style={{ fontFamily: SP, backgroundColor: '#F9FAFB' }}>
-      {/* Sin botón de cerrar, y es deliberado: mientras la pantalla no lea de Neon, quien la
-          mire tiene que saberlo todo el tiempo, no hasta que lo descarte una vez. */}
-      <div
-        className="shrink-0 flex items-center gap-3 px-8 py-2.5 border-b"
-        style={{ backgroundColor: '#EEF2FF', borderColor: '#C7D2FE' }}
-      >
-        <span
-          className="text-[10px] font-bold px-2 py-1 rounded uppercase tracking-wide shrink-0"
-          style={{ backgroundColor: '#4F46E5', color: '#FFFFFF' }}
-        >
-          Datos de ejemplo
-        </span>
-        <p className="text-xs" style={{ color: '#3730A3' }}>
-          Esta pantalla todavía no lee de la base ni guarda nada. Marcar una asistencia aquí
-          no la registra — al recargar vuelve como estaba. <strong>Fase 8.</strong>
-        </p>
-      </div>
+    <div className="flex-1 flex flex-col min-w-0 overflow-hidden" style={marco}>
+      <Cabecera dia={dia} irA={setDia} resumen={resumen} />
 
-      <header className="shrink-0 flex items-center justify-between px-8 py-4 border-b" style={{ backgroundColor: '#FFFFFF', borderColor: '#E5E7EB' }}>
-        <div>
-          <h1 className="text-lg font-bold" style={{ color: '#111827' }}>Agenda</h1>
-          <p className="text-sm" style={{ color: '#6B7280' }}>{fecha}</p>
-        </div>
+      {/* El día se pintó SIN contrastar contra Google Calendar, y eso pasa por dos motivos
+          que no se parecen en nada. La distinción la hace el servidor (`motivo_sin_calendario`)
+          y no esta pantalla: calcularla aquí comparando `dia` con hoy obligaría a repetir en
+          TypeScript la constante de `herramientas.DIAS_HACIA_ATRAS_AL_SINCRONIZAR`, y el día
+          que alguien la suba a 3 este aviso volvería a mentir sin que nada lo delate.
 
-        <div className="flex items-center gap-2">
-          <button className="px-3 py-1.5 rounded-lg text-sm border hover:bg-gray-50 transition-colors" style={{ borderColor: '#E5E7EB', color: '#374151', backgroundColor: '#FFFFFF' }}>← Ayer</button>
-          <button className="px-3 py-1.5 rounded-lg text-sm font-semibold border" style={{ borderColor: '#7C3AED', color: '#7C3AED', backgroundColor: '#F5F3FF' }}>Hoy</button>
-          <button className="px-3 py-1.5 rounded-lg text-sm border hover:bg-gray-50 transition-colors" style={{ borderColor: '#E5E7EB', color: '#374151', backgroundColor: '#FFFFFF' }}>Mañana →</button>
-        </div>
+          - **Viejo: franja NEUTRA.** Es rutina. `DIAS_SIN_MARCAR` (7) es más ancho que la
+            ventana (2), así que CINCO de los siete días a los que lleva «Ver ese día» caen
+            aquí: con la franja roja, la recepcionista veía una alarma diaria por nada.
+          - **Cualquier otra cosa: franja ROJA.** Google no contestó y lo que se ve puede
+            estar desfasado -- una fila vieja pone a un paciente en la hora equivocada. Es la
+            ÚNICA señal de eso que tiene la pantalla, y por eso la rutina no puede gastarla.
 
-        <div className="flex items-center gap-5">
-          {resumen.map((r) => (
-            <div key={r.etiqueta} className="text-center">
-              <p className="text-xl font-bold" style={{ color: r.color }}>{r.valor}</p>
-              <p className="text-[10px]" style={{ color: '#9CA3AF' }}>{r.etiqueta}</p>
-            </div>
-          ))}
-          <button className="ml-4 px-4 py-2 rounded-lg text-sm font-semibold hover:brightness-95 transition-all" style={{ backgroundColor: '#7C3AED', color: '#FFFFFF' }}>
-            + Nueva cita
-          </button>
-        </div>
-      </header>
-
-      {verBanner && AYER_SIN_MARCAR.length > 0 && (
-        <div className="shrink-0 flex items-center gap-4 px-8 py-3 border-b" style={{ backgroundColor: '#FFFBEB', borderColor: '#FCD34D' }}>
-          <span className="text-lg">⚠️</span>
-          <p className="text-sm font-semibold flex-1" style={{ color: '#92400E' }}>
-            {AYER_SIN_MARCAR.length} citas de ayer sin marcar —{' '}
-            <span className="font-normal">
-              {AYER_SIN_MARCAR.map((c) => `${c.paciente} (${c.hora})`).join(' · ')}
+          El `else` se queda con lo desconocido a propósito: un motivo que esta versión no
+          conozca (un servidor más nuevo, o uno viejo que no mande el campo) sale por el lado
+          ruidoso, que es el barato de equivocarse. */}
+      {datos && datos.calendario_disponible === false && (
+        datos.motivo_sin_calendario === MOTIVO_FUERA_DE_VENTANA ? (
+          <div className="shrink-0 flex items-center gap-3 px-8 py-2.5 border-b" style={{ backgroundColor: '#F3F4F6', borderColor: '#E5E7EB' }}>
+            <span className="text-[10px] font-bold px-2 py-1 rounded uppercase tracking-wide shrink-0" style={{ backgroundColor: '#6B7280', color: '#FFFFFF' }}>
+              Día antiguo
             </span>
+            <p className="text-xs" style={{ color: '#4B5563' }}>
+              Este día ya es antiguo y por eso no se contrasta con Google Calendar. No falló
+              nada. Esto es lo que hay en la base: si el doctor movió algo en su calendario,
+              aquí todavía no se ve. Marcar asistencia sigue funcionando.
+            </p>
+          </div>
+        ) : (
+          <div className="shrink-0 flex items-center gap-3 px-8 py-2.5 border-b" style={{ backgroundColor: '#FEF2F2', borderColor: '#FECACA' }}>
+            <span className="text-[10px] font-bold px-2 py-1 rounded uppercase tracking-wide shrink-0" style={{ backgroundColor: '#DC2626', color: '#FFFFFF' }}>
+              Sin calendario
+            </span>
+            <p className="text-xs" style={{ color: '#991B1B' }}>
+              No se pudo consultar Google Calendar. Esto es lo que hay en la base: si el doctor
+              movió algo en su calendario, aquí todavía no se ve. Marcar asistencia sigue
+              funcionando.
+            </p>
+          </div>
+        )
+      )}
+
+      {aviso && (
+        <div role="alert" className="shrink-0 flex items-center gap-3 px-8 py-2.5 border-b" style={{ backgroundColor: '#FEF2F2', borderColor: '#FECACA' }}>
+          <p className="text-xs flex-1" style={{ color: '#991B1B' }}>{aviso}</p>
+          <button className="text-sm shrink-0" style={{ color: '#9CA3AF' }} onClick={() => setAviso('')} aria-label="Ocultar aviso">✕</button>
+        </div>
+      )}
+
+      {datos && datos.correcciones.length > 0 && (
+        <div className="shrink-0 px-8 py-3 border-b" style={{ backgroundColor: '#F5F3FF', borderColor: '#DDD6FE' }}>
+          <p className="text-xs font-bold uppercase tracking-wide mb-1" style={{ color: '#5B21B6' }}>
+            Cambios que venían de Google Calendar
           </p>
-          <button className="text-xs font-semibold underline shrink-0" style={{ color: '#D97706' }}>Ver ayer</button>
-          <button className="text-sm shrink-0" style={{ color: '#9CA3AF' }} onClick={() => setVerBanner(false)} aria-label="Ocultar aviso">✕</button>
+          <ul className="flex flex-col gap-0.5">
+            {datos.correcciones.map((c) => (
+              <li key={`${c.cita_id}-${c.hora_vieja}`} className="text-sm" style={{ color: '#4C1D95' }}>
+                <strong>{c.nombre_completo}</strong> ({c.tratamiento}) {frase(c)}.
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {datos && datos.sin_marcar.length > 0 && (
+        <div className="shrink-0 px-8 py-3 border-b" style={{ backgroundColor: '#FFFBEB', borderColor: '#FCD34D' }}>
+          <div className="flex items-center gap-4">
+            <span className="text-lg">⚠️</span>
+            <p className="text-sm font-semibold flex-1" style={{ color: '#92400E' }}>
+              {datos.sin_marcar.length}{' '}
+              {datos.sin_marcar.length === 1 ? 'cita de días anteriores sin marcar' : 'citas de días anteriores sin marcar'}
+            </p>
+            <button
+              onClick={() => setVerSinMarcar((v) => !v)}
+              className="text-xs font-semibold underline shrink-0"
+              style={{ color: '#D97706' }}
+            >
+              {verSinMarcar ? 'Ocultar' : 'Marcarlas ahora'}
+            </button>
+          </div>
+
+          {/* Acotada y con scroll PROPIO, y es el mismo fallo de la rejilla por la otra
+              puerta. `citas_sin_marcar` devuelve hasta 50 filas y este panel es `shrink-0`
+              dentro de una raíz `overflow-hidden`: sin cota, con doce o quince pendientes
+              desplegadas las últimas quedan recortadas **y sin ningún scroll que las
+              alcance** --el de la rejilla es del hermano de abajo, no de este--. Invisibles
+              y no marcables, que es exactamente lo que esta pantalla no puede permitirse:
+              una cita que nadie marca es la que rompe la única medida real del proyecto.
+              `40vh` deja ver cinco o seis de un vistazo y le garantiza a la rejilla más de
+              la mitad de la altura, que es donde se trabaja el día de hoy. */}
+          {verSinMarcar && (
+            <ul className="mt-3 flex flex-col gap-2 max-h-[40vh] overflow-y-auto pr-1">
+              {datos.sin_marcar.map((c) => (
+                <li
+                  key={c.id}
+                  className="flex items-center gap-3 rounded-lg px-3 py-2"
+                  style={{ backgroundColor: '#FFFFFF', border: '1px solid #FDE68A', opacity: ocupadas.includes(c.id) ? 0.6 : 1 }}
+                >
+                  <div className="min-w-0 flex-1">
+                    <p className="text-sm font-semibold truncate" style={{ color: '#111827' }}>{c.nombre_completo}</p>
+                    <p className="text-xs truncate" style={{ color: '#6B7280' }}>
+                      {c.tratamiento} · {fechaCorta(c.inicio)} a las {hhmm(c.inicio)}
+                    </p>
+                  </div>
+                  <button
+                    onClick={() => setDia(diaDe(c.inicio))}
+                    className="text-xs shrink-0 hover:underline"
+                    style={{ color: '#9CA3AF' }}
+                  >
+                    Ver ese día
+                  </button>
+                  <button
+                    onClick={() => marcar(c.id, true)}
+                    disabled={ocupadas.includes(c.id)}
+                    className="px-4 py-2 rounded-lg text-sm font-bold shrink-0 hover:brightness-95 disabled:cursor-wait"
+                    style={{ backgroundColor: '#10B981', color: '#FFFFFF' }}
+                  >
+                    ✓ Asistió
+                  </button>
+                  <button
+                    onClick={() => marcar(c.id, false)}
+                    disabled={ocupadas.includes(c.id)}
+                    className="px-4 py-2 rounded-lg text-sm font-bold shrink-0 hover:brightness-95 disabled:cursor-wait"
+                    style={{ backgroundColor: '#FEF2F2', color: '#DC2626', border: '1.5px solid #FECACA' }}
+                  >
+                    ✗ No asistió
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
         </div>
       )}
 
       <div className="flex-1 overflow-y-auto">
-        <div className="flex">
-          <div className="shrink-0 w-16 relative" style={{ paddingTop: 8 }}>
-            {horas.map((h) => (
-              <div key={h} className="flex items-start justify-end pr-3" style={{ height: 96 }}>
-                <span className="text-xs font-medium" style={{ color: h < MINUTO_ACTUAL ? '#D1D5DB' : '#9CA3AF', marginTop: -8 }}>
-                  {aHora(h)}
-                </span>
-              </div>
-            ))}
-          </div>
+        {citas.length === 0 && bloqueos.length === 0 && (
+          <p className="px-8 pt-6 text-sm" style={{ color: '#9CA3AF' }}>
+            Nada agendado este día.
+          </p>
+        )}
 
-          <div className="flex-1 pr-8 py-2 relative">
-            {MINUTO_ACTUAL >= 0 && MINUTO_ACTUAL <= 540 && (
-              <div className="absolute left-0 right-8 flex items-center gap-2 z-10 pointer-events-none" style={{ top: 8 + (MINUTO_ACTUAL / 60) * 96 - 1 }}>
-                <div className="w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: '#7C3AED', marginLeft: -5 }} />
-                <div className="flex-1 h-0.5 rounded-full" style={{ backgroundColor: '#7C3AED', opacity: 0.5 }} />
-                <span className="text-[10px] font-bold shrink-0 px-1.5 py-0.5 rounded" style={{ backgroundColor: '#F5F3FF', color: '#7C3AED' }}>
-                  {aHora(MINUTO_ACTUAL)}
-                </span>
-              </div>
-            )}
+        {/* La hora y sus tarjetas van en la MISMA fila, no en dos columnas paralelas, y la fila
+            crece si lo que lleva dentro no cabe (`minHeight`, nunca `height`).
 
-            {horas.map((h) => {
-              const deLaHora = franjas.filter((f) => f.inicio >= h && f.inicio < h + 60)
-              const horaPasada = h + 60 <= MINUTO_ACTUAL
+            Las dos cosas son la misma corrección, verificada en pantalla el 20/09/2026 y no
+            deducida del código. Con dos columnas de altura fija de 96 px, una tarjeta de una
+            cita de 60 minutos --la duración POR DEFECTO de esta clínica-- mide 137 px con sus
+            dos botones, se sale de su hora y **la tarjeta de la hora siguiente se pinta
+            encima**. No es un defecto cosmético: los botones «Asistió» y «No asistió» de toda
+            cita seguida de otra quedan FÍSICAMENTE tapados y no se pueden pulsar. Se midió con
+            un navegador de verdad: el clic se reintentó treinta segundos contra
+            «subtree intercepts pointer events» y nunca llegó. Con citas consecutivas --la
+            agenda normal de una clínica-- solo la última de la tanda era marcable, que es
+            justo la acción que esta fase entera existe para permitir.
 
-              return (
-                <div
-                  key={h}
-                  className="relative flex gap-3 pl-3"
-                  style={{ height: 96, borderTop: '1px solid #F3F4F6', backgroundColor: horaPasada ? 'rgba(0,0,0,0.01)' : 'transparent' }}
-                >
-                  {deLaHora.length === 0 ? (
-                    <div className="flex items-center" style={{ paddingTop: 12 }}>
-                      {!horaPasada && (
-                        <button className="text-xs px-2 py-1 rounded transition-colors" style={{ color: '#E5E7EB' }}>
-                          + Agendar
-                        </button>
-                      )}
-                    </div>
-                  ) : (
+            Encogerlos no era opción: el tamaño de esos dos botones es deliberado (lo pulsa
+            alguien de pie, con prisa), así que lo que cede es la rejilla. Lo que se pierde es
+            la proporcionalidad de la columna del tiempo, que esta pantalla ya había renunciado
+            a tener --lo dice el rango horario de cada tarjeta, que es un dato y no una
+            proporción--. Lo que se gana es que la fila y su rótulo no se puedan desalinear:
+            ahora son el mismo elemento. */}
+        <div className="py-2">
+          {horas.map((h) => {
+            const citasDeLaHora = citas.filter((c) => {
+              const m = minutosDelDia(c.inicio)
+              return m >= h && m < h + 60
+            })
+            const bloqueosDeLaHora = bloqueos.filter((b) => {
+              const m = minutosDelDia(b.inicio)
+              return m >= h && m < h + 60
+            })
+            const vacia = citasDeLaHora.length === 0 && bloqueosDeLaHora.length === 0
+            const horaPasada = minutoAhora >= 0 && h + 60 <= minutoAhora
+            const esLaHoraDeAhora = minutoAhora >= h && minutoAhora < h + 60
+
+            return (
+              <div
+                key={h}
+                className="relative flex"
+                style={{ minHeight: ALTO_HORA, borderTop: '1px solid #F3F4F6', backgroundColor: horaPasada ? 'rgba(0,0,0,0.01)' : 'transparent' }}
+              >
+                {/* La línea del ahora vive DENTRO de su hora y se sitúa en un porcentaje de
+                    ella. Antes se calculaba desde arriba de la rejilla multiplicando por
+                    ALTO_HORA, lo que daba por hecho que todas las filas miden lo mismo: en
+                    cuanto una crece, esa cuenta apunta a la hora equivocada. */}
+                {esLaHoraDeAhora && (
+                  <div
+                    className="absolute left-16 right-8 flex items-center gap-2 z-10 pointer-events-none"
+                    style={{ top: `${((minutoAhora - h) / 60) * 100}%` }}
+                  >
+                    <div className="w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: '#7C3AED', marginLeft: -5 }} />
+                    <div className="flex-1 h-0.5 rounded-full" style={{ backgroundColor: '#7C3AED', opacity: 0.5 }} />
+                    <span className="text-[10px] font-bold shrink-0 px-1.5 py-0.5 rounded" style={{ backgroundColor: '#F5F3FF', color: '#7C3AED' }}>
+                      {String(Math.floor(minutoAhora / 60)).padStart(2, '0')}:{String(minutoAhora % 60).padStart(2, '0')}
+                    </span>
+                  </div>
+                )}
+
+                <div className="shrink-0 w-16 flex items-start justify-end pr-3">
+                  <span className="text-xs font-medium" style={{ color: minutoAhora >= 0 && h < minutoAhora ? '#D1D5DB' : '#9CA3AF', marginTop: -8 }}>
+                    {String(Math.floor(h / 60)).padStart(2, '0')}:{String(h % 60).padStart(2, '0')}
+                  </span>
+                </div>
+
+                <div className="flex-1 min-w-0 pl-3 pr-8">
+                  {!vacia && (
                     <div className="flex gap-3 w-full pt-3 pb-2">
-                      {deLaHora.map((f) => (
-                        <div key={f.id} className="flex-1">
-                          {f.tipo === 'bloqueo' ? (
-                            <TarjetaBloqueo bloqueo={f} />
-                          ) : (
-                            <TarjetaCita cita={f} pasada={f.inicio + f.duracion <= MINUTO_ACTUAL} marcar={marcar} />
-                          )}
+                      {bloqueosDeLaHora.map((b) => (
+                        <div key={`b-${b.inicio}-${b.titulo}`} className="flex-1 min-w-0">
+                          <TarjetaBloqueo bloqueo={b} />
+                        </div>
+                      ))}
+                      {citasDeLaHora.map((c) => (
+                        <div key={c.id} className="flex-1 min-w-0">
+                          <TarjetaCita
+                            cita={c}
+                            pasada={pasada(c.inicio)}
+                            ocupada={ocupadas.includes(c.id)}
+                            marcar={marcar}
+                          />
                         </div>
                       ))}
                     </div>
                   )}
                 </div>
-              )
-            })}
-          </div>
+              </div>
+            )
+          })}
         </div>
       </div>
     </div>
