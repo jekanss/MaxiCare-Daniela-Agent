@@ -211,7 +211,9 @@ def _bitacora_de(url: str, cita_id: str) -> list[tuple[str, str, str]]:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Entregable de la fase 8 (primera mitad).")
+    parser = argparse.ArgumentParser(
+        description="Entregable de la fase 8: el panel de tratamientos y la agenda."
+    )
     parser.add_argument(
         "--chat",
         action="store_true",
