@@ -609,6 +609,64 @@ async def sin_lectura_clinica(
     )
 
 
+def _mensaje_del_paciente(entrada: Any) -> str:
+    """Lo que el paciente acaba de escribir, separado del historial que viene pegado.
+
+    **Un guardrail de ENTRADA no recibe el mensaje: recibe la conversación entera.**
+    Comprobado con una sonda contra la 0.22.2 instalada: cuando hay `session` --y Daniela
+    siempre la tiene-- `Runner.run(agente, "que tratamientos tienes?", session=...)` le
+    entrega al guardrail el `prepared_input`, que es el historial de la sesión con el mensaje
+    nuevo al final, en forma de LISTA de items. La cadena que uno pasó no llega nunca.
+
+    Hasta el 21/09/2026 aquí se hacía `str(entrada)` y el bulto entero iba al evaluador. Lo
+    que eso producía está medido en producción, y es un TRINQUETE: cuando el guardrail
+    dispara, el modelo no llega a contestar pero el SDK guarda igual el mensaje del paciente,
+    así que el historial va acumulando mensajes de usuario sin una sola respuesta. Después de
+    que alguien pidiera un bucle infinito a las 14:50, el evaluador leía esto en el turno de
+    las 14:57:
+
+        [user] ...un ensayo me ayudas a resumir esto "Una empresa identificó que..."
+        [user] ...sobre unicoronios... me podrias decir cuanto es 2 + 2?
+        [user] Vale que tratamientos tienes?
+
+    Y disparó, claro: dos tercios de lo que veía era un encargo ajeno. «Vale que tratamientos
+    tienes?» y «quiero agendar una cita» --las dos preguntas para las que existe la clínica--
+    recibieron la frase de fuera de alcance, y cada disparo metía otro mensaje envenenado que
+    hacía el siguiente más seguro. La conversación quedó muerta sin un error en ningún log.
+
+    De paso cierra otro agujero que el `.claude/rules/perimetro-seguridad.md` daba por
+    cerrado: `atencion._acotar` limita el mensaje de CADA turno, pero el historial lo rearma
+    el SDK después, así que lo que llegaba al evaluador era la suma de todos los turnos y no
+    tenía tope. Con el mensaje suelto, el tope vuelve a ser el que se midió.
+
+    Si no reconoce la forma --el SDK puede cambiarla en una versión-- devuelve el bulto
+    entero, que es el comportamiento viejo. Nunca la cadena vacía: a un evaluador al que no
+    se le enseña nada no dispara jamás, y eso apagaría el guardrail de inyección en silencio.
+    Un falso positivo se ve; un falso negativo, no.
+    """
+    if isinstance(entrada, str):
+        return entrada
+    if isinstance(entrada, list):
+        for item in reversed(entrada):
+            if not isinstance(item, dict) or item.get("role") != "user":
+                continue
+            contenido = item.get("content")
+            if isinstance(contenido, str) and contenido.strip():
+                return contenido
+            # La forma troceada: la usa `lectura.py` al montar un turno con archivo, y es la
+            # que devuelve el SDK cuando el contenido no era texto plano.
+            if isinstance(contenido, list):
+                trozos = [
+                    t.get("text", "")
+                    for t in contenido
+                    if isinstance(t, dict) and isinstance(t.get("text"), str)
+                ]
+                junto = " ".join(p for p in trozos if p).strip()
+                if junto:
+                    return junto
+    return str(entrada)
+
+
 @input_guardrail(name="uso_indebido", run_in_parallel=True)
 async def uso_indebido(
     wrapper: RunContextWrapper[ContextoDaniela], agente: Any, entrada: Any
@@ -633,7 +691,7 @@ async def uso_indebido(
             output_info="quick reply de plantilla: no es texto del paciente",
             tripwire_triggered=False,
         )
-    texto = entrada if isinstance(entrada, str) else str(entrada)
+    texto = _mensaje_del_paciente(entrada)
     veredicto = await _preguntar(_evaluador_uso, texto, ctx=wrapper.context)
     categoria = veredicto.categoria or CATEGORIA_ATAQUE
     if veredicto.dispara:

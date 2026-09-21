@@ -281,6 +281,25 @@ una —qué se midió, qué costó— está en la regla que cubre ese archivo.
    tope**, y eso es la 26 mirada de cerca: lo que el modelo escala llamando a la tool sale
    siempre. El detalle, en `.claude/rules/perimetro-seguridad.md`.
 
+28. **Un guardrail de ENTRADA no recibe el mensaje del paciente: recibe la CONVERSACIÓN
+   ENTERA**, como lista de items, porque hay `session`. Comprobado con una sonda contra la
+   0.22.2. `uso_indebido` hacía `str(entrada)` y le mandaba el bulto al evaluador, que
+   disparaba por lo que había dicho el paciente HACE TRES TURNOS. **Y es un trinquete**: al
+   disparar, el modelo no contesta pero el SDK guarda igual el mensaje, así que el historial
+   acumula `[user]` sin una sola respuesta y cada disparo hace el siguiente más seguro. El
+   21/09/2026 alguien pidió un resumen de un ensayo a las 14:50 y a partir de ahí «¿qué
+   tratamientos tienes?» y «quiero agendar una cita» recibieron «yo solo sé de MaxiCare»:
+   cuatro `[user]` en `agent_messages`, cero de Daniela, conversación muerta y **ni un error
+   en ningún log**. Lo arregla `guardrails._mensaje_del_paciente`, que se queda con el ÚLTIMO
+   item de rol `user`; si no reconoce la forma devuelve el bulto entero y **nunca la cadena
+   vacía** —a un evaluador al que no se le enseña nada no dispara jamás, y eso es apagar el
+   guardrail de inyección en silencio—. **La suite llevaba en verde por el motivo equivocado
+   desde el principio**: las seis pruebas le pasaban una cadena escrita a mano, que es lo
+   único que este guardrail no recibe nunca. Hacen falta LAS DOS pruebas —la que dobla la
+   forma y la que atraviesa `Runner.run` con sesión de verdad— o una versión del SDK que
+   cambie el formato pasa entera. Y esto acota lo que promete el truncado de la 27: `_acotar`
+   limita cada turno, pero el historial lo rearma el SDK DESPUÉS.
+
 # Dónde está el resto
 
 El detalle de cada área se carga solo cuando tocas sus archivos:

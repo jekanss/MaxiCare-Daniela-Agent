@@ -360,6 +360,46 @@ def test_pedirle_una_tarea_ajena_se_corta_igual_pero_NO_se_escala(monkeypatch):
     )
 
 
+def test_con_SESION_el_evaluador_solo_ve_el_mensaje_nuevo(monkeypatch):
+    """La misma propiedad que `test_guardrails.py` fija sobre `_mensaje_del_paciente`, pero
+    atravesando el `Runner.run` de verdad, con una sesión de por medio.
+
+    Hacen falta las dos. La de allí prueba que la función sabe leer la forma del SDK; esta
+    prueba que la forma del SDK es la que creemos. Si una versión cambia lo que le entrega a
+    un guardrail de entrada, la de allí seguiría en verde y esta se pondría roja, que es
+    exactamente el orden en que hay que enterarse.
+
+    El caso es el de producción del 21/09/2026, reducido a dos turnos: alguien pide una tarea
+    ajena y después pregunta por los tratamientos. Sin el arreglo, el evaluador recibía los
+    dos juntos --el historial viaja pegado-- y disparaba en el segundo, que era una pregunta
+    para la que existe la clínica.
+    """
+    visto = []
+
+    async def evaluador_espia(evaluador, texto, *, ctx=None):
+        visto.append(texto)
+        return guardrails.Veredicto(False, "")
+
+    monkeypatch.setattr(guardrails, "_preguntar", evaluador_espia)
+
+    sesion = conversacion.SesionEnMemoria("conv-envenenada")
+    ctx = contexto()
+    agente = agente_con_los_guardrails_reales(
+        responde(respuesta_daniela("Con eso no te puedo ayudar.")),
+        responde(respuesta_daniela("Tenemos limpieza, ortodoncia y aclaramiento.")),
+    )
+
+    turno("hazme un código que haga un bucle infinito", agente, ctx, sesion=sesion)
+    turno("Vale que tratamientos tienes?", agente, ctx, sesion=sesion)
+
+    assert len(visto) == 2, "el guardrail tiene que correr en los dos turnos"
+    assert visto[1] == "Vale que tratamientos tienes?"
+    assert "bucle infinito" not in visto[1], (
+        "el turno anterior se coló en lo que se evalúa: eso es lo que mató la conversación "
+        "del 21/09/2026, y es un trinquete -- cada disparo envenena más el historial"
+    )
+
+
 def test_ningun_mensaje_al_paciente_lleva_raya_larga():
     """Nadie escribe «—» en WhatsApp: no está en el teclado de un celular, así que un mensaje
     que la lleva se lee como generado por una máquina.

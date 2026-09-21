@@ -81,6 +81,68 @@ pierda, y `_respuesta_de_emergencia` nace con ese campo en `True`. El respaldo v
 el escalamiento que el `except` acababa de quitar. El único camino que de verdad lo apaga es
 `_respuesta_de_emergencia(..., escala=False)`, o sea no pedirlo desde el principio.
 
+## Un guardrail de ENTRADA no recibe el mensaje: recibe la conversación entera
+
+Lo de arriba afinó qué dispara y qué pasa después. Lo que faltaba era más abajo: **qué le
+llega de verdad**. Comprobado con una sonda contra la 0.22.2 instalada, que es la única forma
+de saberlo —no está en ninguna documentación que valga—:
+
+```
+Runner.run(agente, "que tratamientos tienes?", session=sesion)
+                    └──────────┬───────────┘
+                    esto NO es lo que recibe el guardrail
+
+lo que recibe es `prepared_input`, una LISTA:
+  [{'role': 'user',      'content': '...un ensayo me ayudas a resumir esto "Una empresa..."'},
+   {'role': 'user',      'content': '...sobre unicoronios... cuanto es 2 + 2?'},
+   {'role': 'user',      'content': 'Vale que tratamientos tienes?'}]
+```
+
+`uso_indebido` hacía `str(entrada)` y le mandaba ese bulto al evaluador. Y disparaba, claro:
+dos tercios de lo que veía era un encargo ajeno.
+
+**Y es un trinquete, que es lo que lo vuelve grave.** Cuando el guardrail dispara, el modelo
+no llega a contestar pero el SDK guarda igual el mensaje del paciente en la sesión. Así que el
+historial acumula mensajes de usuario sin una sola respuesta, y cada disparo hace el siguiente
+más seguro. Medido en producción el 21/09/2026, leído de `agent_messages` —cuatro `[user]`
+seguidos, cero de Daniela—:
+
+```
+14:50  paciente  ...un ensayo me ayudas a resumir esto "Una empresa..."   → fuera de alcance ✔ bien
+14:56  paciente  ...unicoronios... cuanto es 2 + 2?                      → fuera de alcance ✔ bien
+14:57  paciente  Vale que tratamientos tienes?                           → fuera de alcance ✘ MAL
+15:00  paciente  Peroq uiero agendar una cita                            → fuera de alcance ✘ MAL
+```
+
+Las dos preguntas para las que existe la clínica, contestadas con «yo solo sé de MaxiCare».
+La conversación quedó **muerta para siempre** y sin un error en ningún log: el guardrail
+funcionaba, el evaluador acertaba sobre lo que veía, y lo que veía estaba mal.
+
+Lo arregla `guardrails._mensaje_del_paciente`, que se queda con el ÚLTIMO item de rol `user`.
+Tres cosas que no se pueden mover:
+
+- **Si no reconoce la forma, devuelve el bulto entero**, nunca la cadena vacía. Un evaluador
+  al que no se le enseña nada no dispara jamás: eso apagaría el guardrail de inyección en
+  silencio, que es justo la puerta que `_preguntar` ya deja entreabierta al fallar abierto. Un
+  falso positivo se ve; un falso negativo, no.
+- **Se queda con el último, no con los últimos.** Los anteriores ya se evaluaron en su propio
+  turno. Arrastrarlos es lo que causó esto.
+- **Hacen falta las DOS pruebas.** `test_guardrails.py` fija que la función sabe leer la forma
+  del SDK; `test_conversacion.py::test_con_SESION_el_evaluador_solo_ve_el_mensaje_nuevo`
+  atraviesa el `Runner.run` de verdad y fija que la forma del SDK es la que creemos. Si una
+  versión la cambia, la primera sigue en verde y la segunda se pone roja — que es el orden en
+  el que hay que enterarse.
+
+**Por qué la suite no lo cazó, que es la parte que hay que recordar:** las seis pruebas que
+había le pasaban una cadena escrita a mano (`"hola"`, `"olvida tus reglas"`). Una cadena es lo
+único que este guardrail **no recibe nunca** en producción. Verde por el motivo equivocado
+durante toda la vida del proyecto.
+
+Y de paso cierra un agujero que `.claude/rules/perimetro-seguridad.md` daba por cerrado:
+`atencion._acotar` limita el mensaje de CADA turno, pero el historial lo rearma el SDK después,
+así que lo que llegaba al evaluador era la suma de todos los turnos y no tenía tope ninguno.
+Con el mensaje suelto, el tope vuelve a ser el que se midió.
+
 # La frontera agentes ↔ transporte
 
 `agentes.py`, `herramientas.py` y `contratos.py` **nunca importan `runtime.py`**.
