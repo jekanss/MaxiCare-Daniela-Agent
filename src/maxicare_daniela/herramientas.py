@@ -95,6 +95,14 @@ log = logging.getLogger("maxicare.herramientas")
 #: distinto al registrado.
 MAX_INTENTOS_IDENTIFICACION = 2
 
+#: Lo más lejos que puede mirar `consultar_disponibilidad` de una sola vez.
+#:
+#: `hasta` lo escribe el modelo, así que sin tope basta con convencerlo de pedir el año 3000
+#: para que el proceso --uno solo, un solo worker-- se ponga a iterar bloques y a paginar
+#: contra Google. Noventa días es mucho más de lo que nadie agenda en un dentista y no le
+#: quita nada al caso normal, que trabaja en días o semanas.
+TOPE_VENTANA_DISPONIBILIDAD = timedelta(days=90)
+
 #: Cuánto se mira hacia adelante para ofrecer alternativas cuando la hora pedida no sirve.
 #: Ocho horas es una jornada: alternativas del MISMO día, que es lo que un paciente que ya
 #: eligió un día quiere oír. `crear_cita` y `consultar_disponibilidad` usan la misma para no
@@ -564,6 +572,28 @@ async def _consultar_disponibilidad(ctx: ContextoDaniela, desde: str, hasta: str
     if fin <= inicio:
         return "La ventana consultada está al revés: 'hasta' tiene que ser posterior a 'desde'."
 
+    # El techo de la ventana. Lo único que la acotaba era que estuviera del derecho.
+    #
+    # Sin él, un `hasta` lo bastante lejano --y `hasta` lo escribe el MODELO, así que basta
+    # con convencerlo-- pone a `bloques_del_dia` a iterar en un `while` sin tope y a
+    # `CalendarioGoogle.bloqueos` a paginar contra la API de Google sobre la ventana entera,
+    # todo dentro de un `asyncio.to_thread` de un proceso con UN solo worker. Era el vector de
+    # agotamiento de CPU más barato del sistema: una sola llamada, sin adjuntos y sin repetir
+    # nada, y encima quemando cuota de la API de Google por el camino.
+    #
+    # 90 días no estorba a nadie: nadie agenda un dentista a más de tres meses vista, y el
+    # prompt trabaja en días o semanas. Se RECORTA en vez de rechazar --misma regla que el
+    # truncado de la entrada-- para que una ventana absurda siga devolviendo los huecos
+    # útiles: un error aquí solo conseguiría que el modelo reintente a ciegas, que es lo que
+    # «Horario lleno es un RESULTADO, nunca un error» ya enseñó en este mismo archivo.
+    if fin - inicio > TOPE_VENTANA_DISPONIBILIDAD:
+        log.info(
+            "ventana de disponibilidad de %s recortada a %s",
+            fin - inicio,
+            TOPE_VENTANA_DISPONIBILIDAD,
+        )
+        fin = inicio + TOPE_VENTANA_DISPONIBILIDAD
+
     # Una ventana más corta que un bloque produce una rejilla VACÍA, y hasta el 13/09/2026 eso
     # se contaba como «no hay cupo»: exactamente el mismo texto que con la agenda saturada.
     # El paciente pedía «el 16 tipo 10 am» --que invita a pedir 10:00-10:30-- con la agenda
@@ -1006,6 +1036,45 @@ async def _crear_cita(ctx: ContextoDaniela, solicitud: SolicitudCita) -> str:
         ctx.nombre_paciente = solicitud.nombre_completo
     ctx.telefono_sin_paciente = False
     ctx.identidad_verificada = True
+
+    # Y los doctores se enteran por WhatsApp, que es donde miran de verdad -- Telegram lo
+    # abren cuando les suena algo. Tres cosas que no se pueden mover de sitio:
+    #
+    #  1. **Va aquí, con la cita YA escrita en Neon y en Calendar.** Lo que se avisa es un
+    #     hecho, no una intención: avisar antes dejaría al doctor esperando a alguien que el
+    #     `except` de `CitaNoConfirmada` acaba de dejar sin cita.
+    #  2. **El `try` se lo traga todo.** Es la frontera del no negociable de siempre: si Meta
+    #     está caída, la cita sigue creada y el paciente recibe su confirmación igual. Mismo
+    #     patrón que el `try` de `atencion._anotar_resultado` -- si revienta se pierde un
+    #     aviso, nunca una cita.
+    #  3. **El envío va en su propia tarea.** Entre este punto y el mensaje al paciente no hay
+    #     nada más, así que dos llamadas a la Graph API metidas aquí son dos llamadas que el
+    #     paciente pasa esperando por algo que no es suyo.
+    #
+    # Import diferido, como el de `lectura` en `_escalar_a_doctores`: mantiene esta pieza
+    # nueva fuera de la cabecera del módulo y no cuesta nada -- para cuando esto corre, el
+    # paquete está cargado entero.
+    try:
+        from . import aviso_citas
+
+        aviso_citas.avisar_en_segundo_plano(
+            aviso_citas.CitaNueva(
+                nombre_paciente=solicitud.nombre_completo,
+                # Del contexto y NUNCA de la solicitud, por lo mismo que la descripción del
+                # evento: `SolicitudCita` no tiene campo de teléfono para que el modelo no
+                # pueda escribir otro, y el doctor que marque ese número le marca a quien
+                # escribió.
+                telefono_paciente=ctx.telefono_completo,
+                tratamiento=solicitud.tratamiento,
+                inicio=inicio,
+            )
+        )
+    except Exception:  # noqa: BLE001 -- ver el punto 2: la cita ya existe y manda ella
+        log.exception(
+            "la cita %s quedó creada; solo falló el aviso a los doctores por WhatsApp",
+            id_cita,
+        )
+
     texto = (
         f"Cita confirmada para {solicitud.nombre_completo}, {_formatear_hora(inicio)}, "
         f"{solicitud.tratamiento}. Id de la cita: {id_cita}."
@@ -1851,6 +1920,24 @@ async def reconciliar_con_calendar(
             continue
 
         if evento is None:
+            # Hacia atrás, NO. Borrar el evento es como la clínica cancela y hacia el futuro
+            # eso vale; sobre una cita que ya ocurrió, Calendar no manda. El doctor que limpia
+            # de su calendario los eventos de ayer --el gesto normal, no el raro-- estaría
+            # cancelando citas a las que el paciente sí fue, y una cita cancelada ya no se
+            # puede MARCAR: se pierde la única señal que distingue «vino» de «no vino», que es
+            # el criterio de éxito del proyecto entero. Lo que pasó ayer a las 10:00 no lo
+            # decide un evento que hoy no está; lo decide quien marca.
+            #
+            # Y sin `Correccion`: no pasó nada que contarle al paciente ni que pintarle a la
+            # clínica. Una aquí anunciaría un cambio inexistente sobre un día que no cambió.
+            if cita["inicio"] <= ahora:
+                log.info(
+                    "la cita %s ya no está en Calendar, pero ya ocurrió: se deja quieta",
+                    cita["id"],
+                )
+                al_dia.append(cita)
+                continue
+
             log.info("la cita %s ya no está en Calendar: se cancela", cita["id"])
             await _con_base(base, partial(_cancelar_porque_ya_no_esta, cita))
             correcciones.append(
@@ -2026,13 +2113,36 @@ def _mover_porque_la_movieron(
         )
     reserva_nueva = cupo[0] if cupo else None
 
-    # Los mismos tres componentes que la clave de `reprogramar_cita`, y por los mismos motivos:
-    # la cita para que la cascada sepa de qué cuelga, la hora destino para que dos horas no
-    # compartan fila, y `ahora` --fijo dentro del turno-- para que un A -> B -> A -> B
-    # hecho a mano en Calendar no acierte la clave de un movimiento anterior y se quede sin
-    # recordatorio. La arma el código, nunca el modelo.
+    # La cita para que la cascada sepa de qué cuelga, la hora destino para que dos horas no
+    # compartan fila, y un tercer componente que distinga un movimiento nuevo de una relectura
+    # del mismo. La arma el código, nunca el modelo.
+    #
+    # Ese tercero es la RESERVA y no el reloj, y la diferencia es un fallo medido. Antes era
+    # `ahora`: bastaba para el turno de Daniela --fijo dentro del turno-- y se rompió al
+    # llegar la agenda. `GET /api/agenda` ESCRIBE, dos pestañas abiertas del mismo día son dos
+    # peticiones, y cada una trae su propio `ahora`. Eso daba dos claves, y con las dos
+    # transacciones entrelazadas --ninguna ve todavía la fila de la otra, así que ninguna la
+    # anula-- quedaban dos recordatorios vivos: el mismo WhatsApp dos veces.
+    #
+    # La reserva ya es idempotente por diseño: `tomar_cupo` la busca por
+    # `calendar:{cita}:{destino}`, sin reloj, así que dos peticiones simultáneas recuperan la
+    # MISMA fila de `reservas` y escriben la misma clave -- y la unicidad pasa a decidirla
+    # Postgres y no el orden de llegada, igual que en `tomar_cupo`. Y sigue distinguiendo lo
+    # que el reloj protegía: en un A -> B -> A -> B hecho a mano, `liberar_cupo` borró la
+    # reserva de B al salir, así que volver a B toma una nueva con id nuevo. La clave sale del
+    # ESTADO y nunca de un instante, que es el no negociable 2 mirado de cerca.
+    #
+    # Sin cupo no hay reserva de la que colgar --el destino estaba lleno y la cita se movió
+    # igual, con su `log.warning`--, y ahí se cae al reloj truncado al minuto: dos peticiones
+    # a la vez comparten clave, y dos movimientos de verdad, separados por un gesto humano
+    # sobre un calendario, no.
+    sello = (
+        reserva_nueva
+        if reserva_nueva is not None
+        else f"sin-cupo:{ahora.replace(second=0, microsecond=0).isoformat()}"
+    )
     clave_recordatorio = (
-        f"calendar:recordatorio:{cita['id']}:{evento.inicio.isoformat()}:{ahora.isoformat()}"
+        f"calendar:recordatorio:{cita['id']}:{evento.inicio.isoformat()}:{sello}"
     )
 
     persistencia.mover_cita(

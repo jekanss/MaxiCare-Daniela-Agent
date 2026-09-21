@@ -2153,6 +2153,128 @@ def test_un_texto_normal_no_se_disfraza_de_boton():
     )
 
     assert entrada == "Confirmar"
+
+
+# ==========================================================================================
+# El tope de lo que ve el modelo
+#
+# Por qué importa, y no es el ahorro de tokens: `guardrails._preguntar` atrapa TODA excepción
+# y devuelve «no dispara». Es la decisión correcta --un evaluador caído no puede dejar al
+# paciente sin respuesta, y un sistema mudo no protege a nadie-- pero convierte «reventar el
+# contexto del evaluador» en «apagar el guardrail de inyección», en silencio y dejando solo un
+# `log.error`. Una entrada suficientemente larga era la forma más limpia de desarmar la
+# defensa, y no había que vulnerar nada para conseguirla: bastaba con escribir mucho.
+#
+# El tope quita la causa. Y TRUNCA en vez de rechazar, porque quien escribe de más casi
+# siempre es una persona pegando el informe entero de otra clínica: rechazar la deja sin
+# respuesta, truncar le contesta a lo que cabe.
+#
+# Detrás hay además un multiplicador barato: `_Bufer.mensajes` es una lista sin tope, así que
+# 300 mensajes de 4.096 caracteres dentro de la ventana de 45 segundos armaban UNA entrada de
+# más de un megabyte.
+# ==========================================================================================
+
+
+MARCA_DE_RECORTE = "[El mensaje era muy largo y se recortó aquí.]"
+
+
+@pytest.mark.parametrize("largo", [0, 1, 99, 100], ids=["vacio", "uno", "casi", "justo"])
+def test_lo_que_cabe_en_el_tope_llega_intacto(largo):
+    """Hasta el tope inclusive no se toca ni un carácter, y el borde se prueba a propósito.
+
+    Un truncado que muerde un mensaje legítimo es peor que el gasto que evita: el modelo
+    contesta a medias a un paciente que escribió entero, y nadie se entera de que faltaba
+    texto salvo por un `log.warning` que nadie mira.
+    """
+    entrada = "x" * largo
+
+    assert atencion._acotar(entrada, 100) == entrada
+
+
+def test_por_encima_del_tope_se_recorta_y_queda_dicho():
+    """La marca no es decorativa: va dentro de los corchetes de sistema para que el modelo
+    sepa que falta algo.
+
+    Sin ella, Daniela contestaría con seguridad sobre un texto que solo vio a medias -- que en
+    una conversación de salud es exactamente el modo de equivocarse que no se puede permitir.
+    Es la misma razón por la que se trunca y no se rechaza: el paciente recibe una respuesta a
+    lo que cabía, no un silencio.
+    """
+    salida = atencion._acotar("x" * 250, 100)
+
+    assert salida.startswith("x" * 100)
+    assert "x" * 101 not in salida, "se recortó por encima del tope"
+    assert salida.endswith(MARCA_DE_RECORTE)
+
+
+def test_el_tope_por_defecto_es_el_de_config():
+    """El default del parámetro sale de `config.TOPE_ENTRADA_CARACTERES` y no de un número
+    escrito aquí. Dos topes en dos sitios son dos topes que un día discrepan, y el que no se
+    puede mover desde el `.env` es el que se queda corriendo en producción."""
+    from maxicare_daniela.config import TOPE_ENTRADA_CARACTERES
+
+    assert atencion._acotar("x" * (TOPE_ENTRADA_CARACTERES + 1)).endswith(MARCA_DE_RECORTE)
+    assert atencion._acotar("x" * TOPE_ENTRADA_CARACTERES) == "x" * TOPE_ENTRADA_CARACTERES
+
+
+def test_la_entrada_de_un_solo_mensaje_respeta_el_tope_que_le_pasan():
+    """`atender` le pasa `config.tope_entrada_caracteres`, no el default del módulo.
+
+    Ese es todo el sentido de que el tope sea una variable de entorno: poder bajarlo en
+    caliente el día que alguien esté inundando el número, sin desplegar. Si el parámetro no
+    llegara hasta `_acotar`, el `.env` no movería nada y el fallo sería invisible -- el
+    sistema seguiría truncando, solo que donde no se le pidió.
+    """
+    salida = atencion._entrada_del_grupo([mensaje_texto("x" * 500)], tope=100)
+
+    assert salida.endswith(MARCA_DE_RECORTE)
+    assert len(salida) == 100 + len(MARCA_DE_RECORTE) + 1  # +1 por el salto de línea
+
+
+def test_la_entrada_de_un_grupo_respeta_el_tope_que_le_pasan():
+    """El mismo tope, por el camino que de verdad lo necesita.
+
+    Un mensaje suelto lo acota WhatsApp en 4.096 caracteres; lo que no acota nadie es el
+    GRUPO, porque `_Bufer.mensajes` es una lista sin tope y esto los une con `"\\n".join`.
+    O sea: el único carril donde la entrada puede crecer sin límite es precisamente el que
+    esta prueba vigila.
+
+    **Nació en rojo, y conviene que quede escrito por qué.** El 21/09/2026 la rama de VARIOS
+    mensajes llamaba a `_acotar(...)` sin reenviarle `tope` --se perdió en una edición
+    automatizada que sí acertó la rama de un solo mensaje-- así que
+    `MAXICARE_TOPE_ENTRADA_CARACTERES` no movía nada justo en el caso que multiplica.
+
+    Con el default de 8.000 en los dos sitios el defecto era invisible, y la suite entera
+    estaba en verde con él dentro: habría aparecido el día que alguien bajara la variable para
+    frenar una inundación. La habría bajado, no habría pasado nada, y no habría habido un
+    error en ningún log. Lo que estaba roto no era el freno, era el mando a distancia.
+    """
+    mensajes = [mensaje_texto("x" * 500, wamid="w1"), mensaje_texto("y" * 500, wamid="w2")]
+
+    salida = atencion._entrada_del_grupo(mensajes, tope=100)
+
+    assert salida.endswith(MARCA_DE_RECORTE)
+    assert len(salida) <= 100 + len(MARCA_DE_RECORTE) + 1
+
+
+def test_el_grupo_sigue_acotado_aunque_sea_por_el_default():
+    """El cinturón del `xfail` de arriba, y la razón de que no sea una urgencia.
+
+    Aunque el `tope` que le pasan se pierda, el grupo SÍ se acota: por el default del módulo,
+    que es el mismo número que trae `Config`. El megabyte de 300 mensajes no llega al modelo.
+    Lo que está roto es el mando a distancia, no el freno -- y esta prueba es la que distingue
+    las dos cosas, para que nadie lea el `xfail` como «el búfer no tiene tope».
+    """
+    from maxicare_daniela.config import TOPE_ENTRADA_CARACTERES
+
+    mensajes = [mensaje_texto("x" * 9000, wamid="w1"), mensaje_texto("y" * 9000, wamid="w2")]
+
+    salida = atencion._entrada_del_grupo(mensajes)
+
+    assert salida.endswith(MARCA_DE_RECORTE)
+    assert len(salida) == TOPE_ENTRADA_CARACTERES + len(MARCA_DE_RECORTE) + 1
+
+
 # ==========================================================================================
 # El rastro que el turno deja en el informe de «sin resolver»
 #

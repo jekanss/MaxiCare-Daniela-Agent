@@ -23,10 +23,16 @@ import logging
 
 from agents import RunConfig, Runner
 
-from . import persistencia
+from . import consumo, persistencia
 from .agentes import VERSION_PROMPT_LECTOR, lector_archivos
 from .canales import ArchivoDescargado
-from .config import TRACE_INCLUDE_SENSITIVE_DATA, WORKFLOW_NAME, config_de_corrida
+from .config import (
+    LECTORES_CONCURRENTES,
+    MODELO_LECTOR,
+    TRACE_INCLUDE_SENSITIVE_DATA,
+    WORKFLOW_NAME,
+    config_de_corrida,
+)
 from .contratos import LecturaArchivo, LecturaNoClinica
 
 log = logging.getLogger("maxicare.lectura")
@@ -369,8 +375,41 @@ def _config_de_corrida(group_id: str | None) -> RunConfig:
     )
 
 
+# ==========================================================================================
+# El techo de lecturas simultáneas
+# ==========================================================================================
+#
+# El lector es el consumidor más caro del sistema --modelo flagship, y una imagen o un PDF
+# entran como muchos tokens-- y era el único que corría SIN ningún freno: `ingesta` arranca
+# una `asyncio.Task` por ARCHIVO, fuera del búfer y fuera del candado por teléfono. Cincuenta
+# archivos seguidos eran cincuenta llamadas en paralelo mientras el búfer las agrupaba, muy
+# correctamente, en un solo turno de Daniela. El búfer protege a Daniela; al lector no lo
+# protegía nada.
+#
+# No es una cuota por teléfono --esa vive en `atencion`-- sino el techo del proceso entero: es
+# lo que impide que N archivos grandes estén a la vez en memoria en un contenedor de un solo
+# worker, que es el vector de agotamiento más barato que tiene el sistema.
+#
+# Perezoso porque el módulo se importa antes de que exista un bucle de eventos, y un
+# `Semaphore` creado en el import se ataría al bucle equivocado en las pruebas.
+_semaforo: asyncio.Semaphore | None = None
+
+
+def _permiso_para_leer() -> asyncio.Semaphore:
+    global _semaforo
+    if _semaforo is None:
+        _semaforo = asyncio.Semaphore(LECTORES_CONCURRENTES)
+    return _semaforo
+
+
 async def leer_archivo(
-    archivo: ArchivoDescargado, *, tipo: str, correr=None, group_id: str | None = None
+    archivo: ArchivoDescargado,
+    *,
+    tipo: str,
+    correr=None,
+    group_id: str | None = None,
+    database_url: str | None = None,
+    telefono: str | None = None,
 ) -> LecturaArchivo | None:
     """Corre `lector_archivos`. Devuelve `None` si falla, y NUNCA propaga.
 
@@ -385,10 +424,28 @@ async def leer_archivo(
         )
     )
     try:
-        corrida = await ejecutar(entrada_para_el_lector(archivo, tipo))
+        # El `async with` envuelve solo la llamada, no el `entrada_para_el_lector`: ese es el
+        # `base64`, que es CPU y no red, y tenerlo dentro alargaría el tiempo que cada lector
+        # ocupa una plaza sin estar hablando con nadie.
+        entrada = entrada_para_el_lector(archivo, tipo)
+        async with _permiso_para_leer():
+            corrida = await ejecutar(entrada)
     except Exception:  # noqa: BLE001 -- ver el docstring
         log.exception("el lector no pudo con %s", archivo.nombre)
         return None
+
+    if database_url:
+        # `database_url` opcional: las pruebas llaman a esto con un doble en `correr` y sin
+        # base, y una lectura no puede exigir Postgres para funcionar. Sin él no se anota y
+        # ya está -- la lectura es lo que importa, la contabilidad es instrumentación.
+        await consumo.anotar(
+            corrida,
+            agente="lector",
+            modelo=MODELO_LECTOR,
+            database_url=database_url,
+            id_conversacion=group_id,
+            telefono=telefono,
+        )
     return corrida.final_output
 
 
@@ -439,6 +496,8 @@ async def leer_y_repartir(
     correr=None,
     group_id: str | None = None,
     silencioso: bool = False,
+    database_url: str | None = None,
+    telefono: str | None = None,
 ) -> LecturaNoClinica | None:
     """Lee, manda lo clínico al tema del paciente y devuelve SOLO la mitad no clínica.
 
@@ -450,7 +509,14 @@ async def leer_y_repartir(
     acompaña al archivo y suena exactamente donde sonó él. Si notificara por su cuenta,
     haber callado el archivo no habría servido de nada. Ver NOTA DEL SILENCIO en `canales`.
     """
-    leida = await leer_archivo(archivo, tipo=tipo, correr=correr, group_id=group_id)
+    leida = await leer_archivo(
+        archivo,
+        tipo=tipo,
+        correr=correr,
+        group_id=group_id,
+        database_url=database_url,
+        telefono=telefono,
+    )
     if leida is None:
         try:
             await telegram.enviar_mensaje(

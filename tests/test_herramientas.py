@@ -2010,6 +2010,161 @@ def test_el_texto_de_la_cancelacion_no_cambia_al_refactorizar(monkeypatch):
     ]
 
 
+def test_una_cita_PASADA_no_se_cancela_porque_le_borraran_el_evento(monkeypatch):
+    """EL FALLO: el doctor limpia de Calendar los eventos de ayer y la agenda los cancela.
+
+    Una cita cancelada ya no se puede MARCAR, y la marca de asistencia es la unica señal que
+    distingue una cita cumplida de una a la que el paciente no llego -- el criterio de exito
+    entero del proyecto. El paciente fue, el doctor ordeno su calendario, y el dato se perdio
+    sin un error en ningun log.
+
+    Hacia el futuro la cancelacion SI sirve y se queda como esta
+    (`test_la_correccion_de_una_cita_borrada_no_lleva_hora_nueva`): borrar el evento es como
+    la clinica cancela. Lo que no puede es reescribir el pasado, que ya ocurrio y sobre el que
+    Calendar no manda: lo que paso a las 10:00 de ayer no lo decide un evento que hoy no esta,
+    lo decide quien marca.
+
+    Y sin `Correccion`, a proposito: no paso nada que contarle a nadie. Una correccion aqui le
+    anunciaria al paciente un cambio inexistente y le pintaria a la clinica una alarma roja
+    sobre un dia en el que no cambio nada.
+    """
+    ctx = contexto(identidad_verificada=True)
+    ayer = AHORA - timedelta(days=1)
+    escrituras: list = []
+    cola = _reconciliando(monkeypatch, ctx, escrituras)
+
+    al_dia, correcciones = asyncio.run(
+        h.reconciliar_con_calendar(
+            database_url=ctx.database_url,
+            calendario=ctx.calendario,
+            citas=[_cita(inicio=ayer, evento_calendar_id="ev-borrado", reserva_id=7)],
+            ahora=AHORA,
+            jornada=ctx.jornada,
+            capacidad_por_hora=ctx.capacidad_por_hora,
+            duracion_cita_minutos=ctx.duracion_cita_minutos,
+            hora_recordatorio_vispera=ctx.hora_recordatorio_vispera,
+            horas_minimas_para_recordar=ctx.horas_minimas_para_recordar,
+        )
+    )
+
+    assert escrituras == [], "una cita que ya ocurrio no se toca"
+    assert correcciones == [], "no paso nada que contarle al paciente ni a la clinica"
+    assert [c["inicio"] for c in al_dia] == [ayer], "sigue viva, y por tanto marcable"
+    assert cola.filas == [], "ni recordatorio de algo que ya paso"
+
+
+def test_dos_peticiones_de_la_agenda_no_dejan_DOS_recordatorios(monkeypatch):
+    """`GET /api/agenda` ESCRIBE, y dos pestañas abiertas del mismo dia son dos peticiones.
+
+    El estado que leen es el mismo --la misma cita, el mismo destino en Calendar-- y lo unico
+    que las distingue es el reloj: cada peticion HTTP calcula su propio `ahora`. Con `ahora`
+    dentro de la clave de idempotencia eso daba dos claves, dos filas y dos recordatorios
+    vivos: el paciente recibe el mismo WhatsApp dos veces.
+
+    La clave cuelga ahora de la RESERVA, que ya es idempotente por diseño: el cupo se toma con
+    `calendar:{cita}:{destino}`, sin reloj, asi que las dos peticiones recuperan la MISMA
+    reserva y escriben la misma clave. Es el no negociable 2 mirado de cerca -- la clave sale
+    del estado, nunca de un instante.
+
+    **Lo que se cuenta son las FILAS, no los vivos, y la diferencia es el fallo entero.** En
+    secuencia dos claves distintas dejan un solo vivo, porque la cascada de la segunda anula
+    la fila de la primera: mirar los vivos aqui da verde con el fallo dentro. Lo que rompe son
+    dos transacciones ENTRELAZADAS, donde ninguna ve la fila de la otra todavia y por tanto
+    ninguna la anula -- y entonces las dos quedan vivas. Con una sola clave eso no puede pasar
+    en ningun entrelazado: la segunda insercion choca contra `ON CONFLICT DO NOTHING` y la
+    unicidad la decide Postgres, no el orden en que llegaron. Es la misma forma de `tomar_cupo`
+    y por el mismo motivo.
+    """
+    ctx = contexto(identidad_verificada=True, ahora=INICIO - timedelta(hours=1))
+    manana = INICIO + timedelta(days=1)
+    ctx.calendario.eventos["ev-1"] = (manana, 60, "limpieza")
+    cita = _cita(inicio=INICIO, evento_calendar_id="ev-1", reserva_id=7)
+    cola = ColaFalsa().instalar(monkeypatch)
+
+    async def base_falsa(_ctx, trabajo):
+        return trabajo(BaseFalsa())
+
+    monkeypatch.setattr(h, "_con_base", base_falsa)
+    monkeypatch.setattr(
+        persistencia,
+        "mover_cita",
+        lambda conn, id_cita, *, reserva_id, inicio, commit=True: None,
+    )
+    monkeypatch.setattr(persistencia, "liberar_cupo", lambda conn, reserva_id: None)
+    # La misma reserva las dos veces, que es lo que de verdad devuelve `tomar_cupo` ante una
+    # clave repetida: mira `reservas` por `clave_idempotencia` ANTES de intentar insertar.
+    monkeypatch.setattr(persistencia, "tomar_cupo", lambda conn, **kw: (99, 1))
+
+    for microsegundos in (0, 137):
+        asyncio.run(
+            h.reconciliar_con_calendar(
+                database_url=ctx.database_url,
+                calendario=ctx.calendario,
+                citas=[dict(cita)],
+                ahora=ctx.ahora + timedelta(microseconds=microsegundos),
+                jornada=ctx.jornada,
+                capacidad_por_hora=ctx.capacidad_por_hora,
+                duracion_cita_minutos=ctx.duracion_cita_minutos,
+                hora_recordatorio_vispera=ctx.hora_recordatorio_vispera,
+                horas_minimas_para_recordar=ctx.horas_minimas_para_recordar,
+            )
+        )
+
+    assert len(cola.filas) == 1, "dos pestañas escriben UNA fila, no dos"
+    assert len(cola.vivos("cita-1")) == 1
+
+
+def test_un_movimiento_NUEVO_al_mismo_destino_si_recupera_su_recordatorio(monkeypatch):
+    """La otra mitad, y es la que `ahora` estaba protegiendo: A -> B -> A -> B a mano.
+
+    Al volver a B la clave no puede acertar la de la primera vez: esa fila ya la anulo la
+    cascada, y `ON CONFLICT (clave_idempotencia) DO NOTHING` haria que la reinsercion no
+    escribiera nada -- cita corregida y CERO recordatorios vivos, que es el fallo silencioso
+    que este proyecto paga caro.
+
+    Colgar de la reserva lo cubre solo: al mover la cita fuera de B, `liberar_cupo` borra esa
+    reserva, y volver a B toma una NUEVA con un id nuevo. Distinta reserva, distinta clave.
+    """
+    ctx = contexto(identidad_verificada=True, ahora=INICIO - timedelta(hours=1))
+    manana = INICIO + timedelta(days=1)
+    ctx.calendario.eventos["ev-1"] = (manana, 60, "limpieza")
+    cita = _cita(inicio=INICIO, evento_calendar_id="ev-1", reserva_id=7)
+    cola = ColaFalsa().instalar(monkeypatch)
+
+    async def base_falsa(_ctx, trabajo):
+        return trabajo(BaseFalsa())
+
+    monkeypatch.setattr(h, "_con_base", base_falsa)
+    monkeypatch.setattr(
+        persistencia,
+        "mover_cita",
+        lambda conn, id_cita, *, reserva_id, inicio, commit=True: None,
+    )
+    monkeypatch.setattr(persistencia, "liberar_cupo", lambda conn, reserva_id: None)
+    reservas = iter([(99, 1), (100, 1)])
+    monkeypatch.setattr(persistencia, "tomar_cupo", lambda conn, **kw: next(reservas))
+
+    for _ in range(2):
+        asyncio.run(
+            h.reconciliar_con_calendar(
+                database_url=ctx.database_url,
+                calendario=ctx.calendario,
+                citas=[dict(cita)],
+                ahora=ctx.ahora,
+                jornada=ctx.jornada,
+                capacidad_por_hora=ctx.capacidad_por_hora,
+                duracion_cita_minutos=ctx.duracion_cita_minutos,
+                hora_recordatorio_vispera=ctx.hora_recordatorio_vispera,
+                horas_minimas_para_recordar=ctx.horas_minimas_para_recordar,
+            )
+        )
+
+    vivos = cola.vivos("cita-1")
+    assert len(vivos) == 1, "una cita no puede quedarse sin ningun recordatorio vivo"
+    assert len(cola.filas) == 2, "la reserva nueva escribe una fila nueva"
+    assert vivos[0]["clave"].endswith(":100"), "el vivo es el de la reserva nueva"
+
+
 def test_reconciliar_una_cita_pasada_no_programa_recordatorio(monkeypatch):
     """La agenda reconcilia cualquier dia, tambien uno de la semana pasada.
 

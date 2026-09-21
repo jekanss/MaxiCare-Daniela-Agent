@@ -271,9 +271,8 @@
   {
     "tratamiento": "blanqueamiento",
     "concepto": "incluye",
-    "contenido": "Qué cubre el precio: valoración, procedimiento, controles.",
-    "aprobado": false,
-    "nota_pendiente": "Lo que falta por confirmar con la clínica sobre «incluye»."
+    "contenido": "Qué cubre el precio en cada modalidad: la de consultorio y la de casa.",
+    "aprobado": true
   },
   {
     "tratamiento": "blanqueamiento",

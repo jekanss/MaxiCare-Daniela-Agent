@@ -188,7 +188,11 @@ def _montar(monkeypatch, modelo: ModeloGuionizado) -> BaseFalsa:
     monkeypatch.setattr(conversacion, "_guardar_estado", lambda ctx, resultado: None)
 
     # --- El lector: lo único que se dobla del camino de la lectura --------------------
-    async def lector_doblado(archivo, *, tipo, correr=None, group_id=None) -> LecturaArchivo:
+    # `**kwargs` y no la firma exacta: al doble le da igual `database_url` o `telefono` --que
+    # solo sirven para anotar el consumo-- y clavarlos aquí haría que esta prueba del MURO se
+    # cayera cada vez que la instrumentación del lector cambie de parámetros. Lo que este
+    # archivo vigila es qué mitad de la lectura sale por dónde, no cómo se le pide.
+    async def lector_doblado(archivo, *, tipo, correr=None, group_id=None, **kwargs) -> LecturaArchivo:
         return _lo_que_leyo_el_lector()
 
     monkeypatch.setattr(lectura_mod, "leer_archivo", lector_doblado)

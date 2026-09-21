@@ -355,6 +355,7 @@ async def procesar_mensaje(
     telegram: Telegram,
     database_url: str,
     tema_general: int | None = None,
+    leer_archivos: bool = True,
 ) -> Resultado:
     """Recibe → deduplica → descarga → reenvía → registra.
 
@@ -425,7 +426,20 @@ async def procesar_mensaje(
             # al General, el arranque del lector— puede convertir esta entrega en un fallo,
             # así que el aviso queda en su propio try/except y el lector arranca ANTES de
             # intentarlo: un aviso que revienta no puede quitarle al doctor la lectura.
-            if lectura_mod.vale_la_pena_leer(m.tipo, archivo.tamano):
+            # `leer_archivos` lo calcula `runtime` y vale dos cosas a la vez: el freno de mano
+            # (`MAXICARE_DANIELA_RESPONDE`) y la cuota de archivos del número.
+            #
+            # Lo primero tapaba un agujero que hacía inútil el freno. `procesar_mensaje` corre
+            # ANTES que `atencion.atender`, y el chequeo de `daniela_responde` vive dentro de
+            # `atender`: con la variable en 0, cada imagen seguía pagando una llamada al
+            # modelo caro. El interruptor que existe para callar a Daniela en diez segundos no
+            # apagaba el gasto MÁS grande del sistema, y eso no se veía en ningún log porque
+            # el lector no responde al paciente -- solo deposita en el tema del doctor.
+            #
+            # Y da igual cuál de las dos lo apague: **el archivo ya está entregado** cuando se
+            # llega aquí. Lo que se salta es la lectura, nunca la entrega. Esa es la garantía
+            # de la fase 2 y no la toca ningún freno de este perímetro.
+            if leer_archivos and lectura_mod.vale_la_pena_leer(m.tipo, archivo.tamano):
                 # El `group_id` del lector es la conversación viva, si la hay -- pero se
                 # resuelve DENTRO de la tarea de fondo, nunca antes de crearla:
                 # `_conversacion_viva` habla con Neon, y esperarla aquí retrasaría el
@@ -450,6 +464,12 @@ async def procesar_mensaje(
                         # suena exactamente donde sonó él. Si notificara aparte, callar el
                         # archivo no habría servido de nada.
                         silencioso=bool(tema) and not en_relevo,
+                        # Para anotar lo que costó esta lectura. El lector corre con el modelo
+                        # flagship, así que es el consumidor cuyo gasto más hace falta ver por
+                        # separado del de Daniela: un pico aquí es alguien mandando archivos y
+                        # se arregla con la cuota, no con el búfer.
+                        database_url=database_url,
+                        telefono=m.telefono,
                     )
 
                 tarea = asyncio.create_task(_leer_con_grupo())

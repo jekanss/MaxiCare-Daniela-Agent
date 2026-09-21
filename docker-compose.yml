@@ -35,11 +35,58 @@ services:
     # que el servidor termine de esperar, la espera no sirve de nada.
     stop_grace_period: 120s
 
+    # El techo de RAM del contenedor, y no es cosmético.
+    #
+    # Un archivo de WhatsApp se carga ENTERO en memoria y se re-serializa hacia Telegram: dos
+    # copias por archivo, más una tercera del base64 si además va al modelo. Y el webhook
+    # encola cada mensaje sin límite de concurrencia. `canales.TOPE_DESCARGA_MB` acota cada
+    # archivo; esto acota la suma, que es lo que un atacante controla mandando varios a la vez.
+    #
+    # 1 GiB con holgura: el proceso en reposo anda muy por debajo, y el día que se acerque es
+    # que está pasando algo que hay que mirar. Sin esto, el contenedor se come la RAM del VPS
+    # y se lleva por delante a Traefik y al túnel -- es decir, el ataque a Daniela tumbaría
+    # todo lo demás que hay en la máquina.
+    mem_limit: 1g
+
+    # Y el techo de procesos. Barato, y cierra la otra forma de agotar el host.
+    pids_limit: 512
+
     labels:
       - traefik.enable=true
       - traefik.http.routers.daniela.rule=Host(`daniela.maxicarecol.com`)
       - traefik.http.routers.daniela.entrypoints=web
       - traefik.http.services.daniela.loadbalancer.server.port=8080
+
+      # ---------------------------------------------------------------------------------
+      # Los dos frenos del borde
+      # ---------------------------------------------------------------------------------
+      #
+      # Traefik no tenía NINGÚN middleware: ni límite de tamaño de cuerpo, ni rate limit. La
+      # app tampoco --`await request.body()` lee lo que venga-- ni uvicorn. O sea que el único
+      # límite de tamaño en toda la cadena era el de Cloudflare, que es de 100 MB.
+      #
+      # `buffering`: un webhook de Meta son unos pocos KB. 2 MiB es cien veces lo que hace
+      # falta y corta en seco cualquier cuerpo absurdo ANTES de que llegue a Python, que es
+      # donde dejaría de ser gratis.
+      - traefik.http.middlewares.daniela-cuerpo.buffering.maxRequestBodyBytes=2097152
+      - traefik.http.middlewares.daniela-cuerpo.buffering.memRequestBodyBytes=2097152
+
+      # `rateLimit`: peticiones por segundo por IP de origen, promediadas en un minuto.
+      # Meta manda una petición por mensaje, así que 20/s con ráfagas de 50 no lo estorba ni
+      # en la hora punta de una clínica -- y deja fuera el barrido de `/api/entrar`, que era
+      # el endpoint caro y sin freno.
+      #
+      # OJO: esto cuenta por IP de ORIGEN, y detrás del túnel de Cloudflare todas las
+      # peticiones llegan con la IP del proxy. Para que sirva de algo, Traefik tiene que estar
+      # arrancado con `--entrypoints.web.forwardedHeaders.trustedIPs` apuntando al túnel, y
+      # eso vive en `/opt/sinpiloto`, fuera de este repositorio. Mientras no esté, este
+      # middleware protege del tráfico interno y poco más: el freno real para el exterior es
+      # el de Cloudflare.
+      - traefik.http.middlewares.daniela-ritmo.ratelimit.average=20
+      - traefik.http.middlewares.daniela-ritmo.ratelimit.burst=50
+      - traefik.http.middlewares.daniela-ritmo.ratelimit.period=1s
+
+      - traefik.http.routers.daniela.middlewares=daniela-cuerpo,daniela-ritmo
       # Traefik solo manda tráfico a un contenedor sano: durante un despliegue, los webhooks
       # de Meta siguen yendo al anterior hasta que el nuevo responde `/salud`.
       - traefik.http.services.daniela.loadbalancer.healthcheck.path=/salud

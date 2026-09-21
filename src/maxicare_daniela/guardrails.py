@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -50,6 +51,7 @@ from agents import (
 )
 from pydantic import BaseModel, Field
 
+from . import consumo
 from .config import MODELO_EVALUADOR, TELEFONO_PRIVACIDAD, config_de_corrida
 from .contratos import ContextoDaniela, RespuestaDaniela
 
@@ -376,6 +378,60 @@ _evaluador_uso = Agent(
 )
 
 
+# ==========================================================================================
+# Cuántas veces se cayó un evaluador, y cuándo eso deja de ser mala suerte
+# ==========================================================================================
+#
+# `_preguntar` falla ABIERTO, y seguirá haciéndolo: bloquear ante la duda deja al paciente sin
+# respuesta cada vez que el proveedor tenga un mal minuto. Pero eso convierte este `except` en
+# la puerta por la que se desarma el guardrail de inyección, y hasta ahora se cruzaba sin que
+# sonara nada.
+#
+# En memoria y no en Postgres a propósito: es una señal de AHORA --«se están cayendo los
+# evaluadores en este momento»-- y no un histórico que alguien vaya a consultar. Se pierde al
+# reiniciar, y está bien que se pierda: después de un reinicio la pregunta vuelve a ser si
+# está pasando ahora.
+
+#: Ventana en la que se cuentan los fallos. Diez minutos: suficiente para que un problema real
+#: del proveedor acumule varios, corto para que los de ayer no ensucien los de hoy.
+VENTANA_FALLOS_SEGUNDOS = 600.0
+
+#: A partir de aquí se avisa. Cinco y no uno: los evaluadores se caen sueltos de vez en cuando
+#: --un timeout, un 429-- y avisar del primero sería el ruido que este proyecto ya sabe que
+#: mata un canal de alertas. Cinco en diez minutos ya no es mala suerte.
+UMBRAL_FALLOS_EVALUADOR = 5
+
+_fallos_de_evaluador: list[float] = []
+
+
+def _anotar_fallo_de_evaluador(nombre: str) -> None:
+    """Apunta que un evaluador se cayó, y poda lo que ya salió de la ventana."""
+    ahora = time.monotonic()
+    _fallos_de_evaluador.append(ahora)
+    del _fallos_de_evaluador[: len(_fallos_de_evaluador) - 500]  # techo duro de memoria
+    vivos = [t for t in _fallos_de_evaluador if ahora - t <= VENTANA_FALLOS_SEGUNDOS]
+    _fallos_de_evaluador[:] = vivos
+    log.warning(
+        "fallo del evaluador %s: van %d en los últimos %d minutos",
+        nombre,
+        len(vivos),
+        int(VENTANA_FALLOS_SEGUNDOS // 60),
+    )
+
+
+def fallos_recientes_de_evaluador() -> int:
+    """Cuántos fallos hay dentro de la ventana. Lo lee el vigilante de `runtime`."""
+    ahora = time.monotonic()
+    vivos = [t for t in _fallos_de_evaluador if ahora - t <= VENTANA_FALLOS_SEGUNDOS]
+    _fallos_de_evaluador[:] = vivos
+    return len(vivos)
+
+
+def olvidar_fallos_de_evaluador() -> None:
+    """Para las pruebas, y para después de avisar: el contador arranca de cero otra vez."""
+    _fallos_de_evaluador.clear()
+
+
 async def _preguntar(evaluador: Agent, texto: str, *, ctx=None) -> Veredicto:
     """Corre un evaluador y nunca deja que su fallo bloquee la conversación.
 
@@ -404,9 +460,27 @@ async def _preguntar(evaluador: Agent, texto: str, *, ctx=None) -> Veredicto:
                 # poner el de Daniela aquí sería un dato plausible y falso.
             ),
         )
+        await consumo.anotar(
+            resultado,
+            agente="evaluador",
+            modelo=MODELO_EVALUADOR,
+            database_url=getattr(ctx, "database_url", "") or "",
+            id_conversacion=getattr(ctx, "id_conversacion", None),
+            telefono=getattr(ctx, "telefono_completo", None),
+        )
         veredicto: VeredictoEvaluador = resultado.final_output
         return Veredicto(veredicto.dispara, veredicto.razon)
     except Exception as e:  # noqa: BLE001
+        # Se sigue dejando pasar, y eso NO cambia: la alternativa --bloquear ante la duda--
+        # deja al paciente sin respuesta cada vez que el proveedor tenga un mal minuto.
+        #
+        # Lo que cambia es que deja de ser SILENCIOSO. Este `except` es la puerta por la que
+        # se desarma el guardrail de inyección: una entrada lo bastante larga para reventar el
+        # contexto del evaluador cae aquí, devuelve «no dispara», y `uso_indebido` queda
+        # apagado para ese turno dejando solo un `log.error` que nadie mira. El tope de
+        # `TOPE_ENTRADA_CARACTERES` quita la causa más común; esto vigila el resto, porque un
+        # PICO de fallos del evaluador es exactamente la firma de alguien probando el desarme.
+        _anotar_fallo_de_evaluador(evaluador.name)
         log.error("el evaluador %s falló (%s); se deja pasar", evaluador.name, e)
         return Veredicto(False)
 

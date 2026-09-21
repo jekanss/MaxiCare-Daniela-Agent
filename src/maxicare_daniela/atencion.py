@@ -84,6 +84,7 @@ from .config import (
     MARGEN_LECTURA_SEGUNDOS,
     RETARDO_RESPUESTA_SEGUNDOS,
     TOPE_BUFER_SEGUNDOS,
+    TOPE_ENTRADA_CARACTERES,
     VENTANA_SILENCIO_SEGUNDOS,
     Config,
 )
@@ -836,7 +837,10 @@ def _entrada_para_el_modelo(
 
 
 def _entrada_del_grupo(
-    mensajes: list[MensajeEntrante], leidas: dict[str, LecturaNoClinica] | None = None
+    mensajes: list[MensajeEntrante],
+    leidas: dict[str, LecturaNoClinica] | None = None,
+    *,
+    tope: int = TOPE_ENTRADA_CARACTERES,
 ) -> str:
     """Los mensajes del grupo como UNA sola entrada para el modelo.
 
@@ -851,13 +855,49 @@ def _entrada_del_grupo(
     """
     leidas = leidas or {}
     if len(mensajes) == 1:
-        return _entrada_para_el_modelo(mensajes[0], leidas.get(mensajes[0].wamid))
+        return _acotar(
+            _entrada_para_el_modelo(mensajes[0], leidas.get(mensajes[0].wamid)), tope
+        )
     partes = [_entrada_para_el_modelo(m, leidas.get(m.wamid)) for m in mensajes]
-    return (
+    return _acotar(
         "[El paciente escribió esto en varios mensajes seguidos, como se escribe en "
         "WhatsApp. Es una sola idea partida en trozos: léela entera y contéstale UNA vez, "
-        "sin ir mensaje por mensaje ni numerar las respuestas.]\n" + "\n".join(partes)
+        "sin ir mensaje por mensaje ni numerar las respuestas.]\n" + "\n".join(partes),
+        tope,
     )
+
+
+def _acotar(entrada: str, tope: int = TOPE_ENTRADA_CARACTERES) -> str:
+    """El tope de lo que ve el modelo. TRUNCA, nunca rechaza.
+
+    No existía ninguno en el carril de WhatsApp, y esa ausencia tenía dos filos.
+
+    El barato: `_Bufer.mensajes` es una lista sin tope y esto las une con `"\\n".join`, así
+    que 300 mensajes de 4.096 caracteres dentro de la ventana de 45 segundos armaban UNA
+    entrada de más de un megabyte -- del orden de 300.000 tokens, que además cruza el techo de
+    TPM de la cuenta.
+
+    El que de verdad importa: `guardrails._preguntar` atrapa toda excepción y devuelve «no
+    dispara». Es la decisión correcta --un sistema mudo no protege a nadie-- pero convierte
+    «reventar el contexto del evaluador» en «apagar el guardrail de inyección», en silencio y
+    dejando solo un `log.error`. Una entrada suficientemente larga era la forma más limpia de
+    desarmar la defensa, y no había que vulnerar nada para conseguirla.
+
+    **Truncar y no rechazar** porque quien escribe de más casi siempre es una persona
+    pegando el informe entero de otra clínica, no un atacante. Rechazar le deja sin respuesta;
+    truncar le contesta a lo que cabe, que es lo que haría una recepcionista con un texto
+    larguísimo.
+
+    Y la marca va dentro de los corchetes de sistema para que el modelo sepa que falta algo:
+    sin ella, contestaría con seguridad sobre un texto que solo vio a medias.
+
+    La asimetría que esto cierra: el chat web del panel ya validaba `max_length=4000`
+    (`runtime.MensajeDePrueba`). El carril validado era el interno y el que da a internet no.
+    """
+    if len(entrada) <= tope:
+        return entrada
+    log.warning("entrada de %d caracteres recortada a %d", len(entrada), tope)
+    return entrada[:tope] + "\n[El mensaje era muy largo y se recortó aquí.]"
 
 
 async def _esperar_el_silencio(bufer: _Bufer, ventana: float, tope: float) -> None:
@@ -947,6 +987,7 @@ async def atender(
             wamid=mensaje.wamid, id_conversacion=None, respondido=False, motivo="apagado"
         )
 
+
     # El doble check azul mientras Daniela «escribe» es lo que hace creíble la espera. Después
     # del retardo no sirve de nada: para entonces ya llegó la respuesta.
     #
@@ -1027,7 +1068,7 @@ async def atender(
     wamids = [m.wamid for m in mensajes]
     if len(mensajes) > 1:
         log.info("%s: %d mensajes en un solo turno", mensaje.telefono, len(mensajes))
-    texto = _entrada_del_grupo(mensajes, leidas)
+    texto = _entrada_del_grupo(mensajes, leidas, tope=config.tope_entrada_caracteres)
     # Y aparte, lo que el paciente escribió de verdad. NO es `texto`: esa es la entrada que
     # se le arma al modelo, con la cabecera de «esto vino en varios mensajes» y, si hubo
     # archivo, un aviso que lleva el NOMBRE del archivo dentro. Eso acaba en la pantalla de

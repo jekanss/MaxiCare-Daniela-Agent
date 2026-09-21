@@ -70,6 +70,18 @@ TABLAS_DEL_CONSENTIMIENTO = ("contactos", "consentimientos")
 #: Sin este bloque, `--solo-verificar` decía OK sobre una base en ese estado exacto.
 VALOR_DE_LA_021 = "citas"
 
+#: Las tres tablas de la 022, el perímetro contra el abuso de coste.
+#:
+#: `consumo_modelo` es la contabilidad --sin ella el sistema vuelve a ser ciego a su propia
+#: factura-- y las otras dos son lo que impide que la defensa se convierta en el ruido: sin
+#: `cuotas_avisadas`, un número que se pasa recibe una frase por CADA mensaje y el doctor un
+#: Telegram por cada uno; sin `alertas_gasto`, el día que se cruce el umbral el vigilante
+#: manda 288 avisos idénticos.
+#:
+#: Si faltan, nada revienta: `cuotas.revisar` falla abierto a propósito y el perímetro queda
+#: apagado en silencio. Por eso se verifican.
+TABLAS_DEL_PERIMETRO = ("consumo_modelo", "cuotas_avisadas", "alertas_gasto")
+
 
 def _enmascarar(url: str) -> str:
     """Deja ver a qué host se conectó, nunca las credenciales."""
@@ -328,9 +340,40 @@ def main() -> int:
             if not admite:
                 return 1
 
+        # ---------------------------------------------------------------------------
+        # 9. La MIGRACIÓN 022 (las cuotas y el consumo), en los dos esquemas.
+        #
+        #    Vuelve al molde de los bloques de tablas --la 022 añade tres y un índice--
+        #    pero se verifica igual, y por la lección de la 021: una migración sin
+        #    bloque de verificación pasa por sana mirando a otro lado.
+        #
+        #    Lo que esconde si falta: `cuotas.revisar` atrapa toda excepción y devuelve
+        #    «permitido» (fallo abierto deliberado), así que sin estas tablas el
+        #    perímetro NO frena a nadie y no hay un solo error visible. El freno
+        #    silenciosamente apagado es justo el modo de fallo que este proyecto ya
+        #    conoce de la degradación de temas al General.
+        # ---------------------------------------------------------------------------
+        print()
+        print("=" * 78)
+        print("VERIFICACIÓN DE LA 022 (las cuotas y el consumo)")
+        print("=" * 78)
+
+        for esquema in ("public", esquema_pruebas):
+            if esquema != "public" and not _existe_esquema(conn, esquema):
+                print(f"\n  {esquema}: no existe todavía (nada que verificar)")
+                continue
+            faltan = set(TABLAS_DEL_PERIMETRO) - _tablas_de(conn, esquema)
+            print(f"\n  {esquema}: {'OK  ' if not faltan else 'FALLA'} "
+                  + (", ".join(TABLAS_DEL_PERIMETRO) if not faltan
+                     else f"faltan {sorted(faltan)} -- el perímetro NO está frenando a "
+                          "nadie y no hay error visible; corre este script sin "
+                          "--solo-verificar"))
+            if faltan:
+                return 1
+
     print("\n" + "=" * 78)
     print("FASE 1 — segunda mitad: OK  ·  FASE 7 — el historial: OK  ·  019 — contacto y "
-          "consentimiento: OK  ·  021 — la marca de asistencia: OK")
+          "consentimiento: OK  ·  021 — la marca de asistencia: OK  ·  022 — el perímetro: OK")
     print("=" * 78)
     return 0
 
