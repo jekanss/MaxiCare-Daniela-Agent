@@ -16,6 +16,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from maxicare_daniela import atencion, contratos, herramientas, panel, persistencia, runtime
+from maxicare_daniela import calendario as calendario_real
 from maxicare_daniela.calendario import (
     ZONA_BOGOTA,
     Bloqueo,
@@ -926,6 +927,25 @@ def test_la_agenda_no_construye_un_calendario_por_peticion(monkeypatch):
     escribiendo a la vez, se retrasan su respuesta, la ventana del búfer de `atencion.py` y
     el webhook de Telegram. Y encima duplicaría la degradación doble -> caído que
     `_construir_el_calendario` ya hace una sola vez al arrancar.
+
+    **Lo que vigila son las tres puertas por las que se construye uno**, y no el cuerpo de la
+    respuesta. Esta prueba doblaba `atencion._calendario_por_defecto` --que la agenda dejó de
+    llamar en `7dddfdf`-- y afirmaba `calendario_disponible is False` sobre `_calendario =
+    None`. Con esa pareja, reintroducir la construcción por petición hacía dos cosas, y
+    ninguna era fallar por el motivo correcto:
+
+    - **En un entorno SIN credenciales, la prueba quedaba en verde.**
+      `calendario_desde_config` devuelve ahí un `CalendarioDoble` que
+      `_calendario_de_la_agenda` rechaza igual, así que la respuesta sale idéntica. Ese es el
+      entorno de cualquiera que clone el repositorio.
+    - **En uno CON credenciales --esta máquina--, la suite offline se ponía a hablar con
+      Google de verdad.** Lo que la delataba era `_nadie_reconcilia`, o sea otra guarda, y
+      después de un viaje de red que una prueba offline no debe hacer nunca.
+
+    En los dos casos la prueba no vigilaba lo que su nombre promete. Ahora sí: las tres
+    puertas revientan si alguien las llama, y la aserción del cuerpo se queda como control de
+    que el camino llegó hasta el final en vez de morirse antes (`.claude/rules/pruebas.md`,
+    «verde por el motivo equivocado»).
     """
     _sin_base(monkeypatch)
     _nadie_reconcilia(monkeypatch)
@@ -933,6 +953,8 @@ def test_la_agenda_no_construye_un_calendario_por_peticion(monkeypatch):
     def revienta(*args, **kw):
         raise AssertionError("la agenda no puede construir un calendario en cada petición")
 
+    monkeypatch.setattr(runtime, "calendario_desde_config", revienta)
+    monkeypatch.setattr(calendario_real, "CalendarioGoogle", revienta)
     monkeypatch.setattr(atencion, "_calendario_por_defecto", revienta)
     monkeypatch.setattr(runtime, "_calendario", None)  # el arranque todavía no corrió
     runtime.app.dependency_overrides[runtime.usuario_actual] = _como("doctor")
