@@ -54,9 +54,9 @@ from agents import (
     UserError,
 )
 
-from . import persistencia
+from . import consumo, persistencia
 from .agentes import VERSION_PROMPT, daniela as agente_daniela
-from .config import LIMITE_TURNOS, WORKFLOW_NAME, config_de_corrida
+from .config import LIMITE_TURNOS, MODELO_DANIELA, WORKFLOW_NAME, config_de_corrida
 from .contratos import ContextoDaniela, MotivoEscalamiento, RespuestaDaniela
 
 log = logging.getLogger("maxicare.conversacion")
@@ -322,6 +322,19 @@ def _config_de_corrida(ctx: ContextoDaniela) -> RunConfig:
     )
 
 
+def _modelo_de(agente: Agent) -> str:
+    """El identificador del modelo que usa ese agente, para poder ponerle precio.
+
+    `Agent.model` admite un string o un objeto `Model`, y las pruebas le pasan un
+    `ModeloGuionizado` que no es ninguno de los dos. Un `str()` a secas escribiría el `repr`
+    de ese objeto en la columna `modelo` de cada fila; se prefiere el nombre de producción,
+    que al menos es un identificador real, y así el consumo de las pruebas no ensucia el
+    informe con una categoría inventada.
+    """
+    modelo = getattr(agente, "model", None)
+    return modelo if isinstance(modelo, str) and modelo else MODELO_DANIELA
+
+
 async def responder(
     entrada: str,
     *,
@@ -354,13 +367,29 @@ async def responder(
     resultado = Resultado(respuesta=_respuesta_de_emergencia(MENSAJE_FALLO_TECNICO), turno=ctx.turno_actual)
 
     async def _correr(texto: str, *, usando: Agent | None = None) -> RespuestaDaniela:
+        en_uso = usando or agente
         corrida = await Runner.run(
-            usando or agente,
+            en_uso,
             texto,
             context=ctx,
             session=sesion,
             max_turns=max_turns,
             run_config=run_config,
+        )
+        # Una fila POR CORRIDA, así que una regeneración cuenta aparte y se ve como lo que
+        # es: el turno que costó el doble. Sumada a la primera se perdería justo el dato que
+        # hace falta para saber si alguien está forzando tripwires a propósito.
+        #
+        # `consumo.anotar` no propaga nunca -- ver su docstring. Va sin `try` aquí porque
+        # ponerlo sugeriría que puede lanzar, y lo que hay que poder leer en esta función es
+        # que lo único que la corta es un tripwire.
+        await consumo.anotar(
+            corrida,
+            agente="daniela",
+            modelo=_modelo_de(en_uso),
+            database_url=ctx.database_url,
+            id_conversacion=ctx.id_conversacion,
+            telefono=ctx.telefono_completo,
         )
         return corrida.final_output
 

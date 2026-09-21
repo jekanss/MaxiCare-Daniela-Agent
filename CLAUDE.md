@@ -85,7 +85,9 @@ una —qué se midió, qué costó— está en la regla que cubre ese archivo.
    `extendedProperties.private.origen = "daniela"` es lo que impide que la clínica atienda
    a uno por hora en vez de a dos.
 8. **`uv run pytest -q` a secas NO caza una regresión en `tocar_conversacion`.** Quien toque
-   esa función corre además las de Neon y `scripts/probar_atencion.py`.
+   esa función corre además las de Neon y `scripts/probar_atencion.py`. **Ni caza las de
+   `tests/test_panel.py`, que también son de Neon**: una colisión de helper dejó dos en rojo
+   durante tres commits con la suite offline entera en verde. Quien toque el panel corre `-m neon`.
 9. **El historial del diálogo YA está en Postgres** (`agent_sessions` / `agent_messages`,
    `session_id = id_conversacion`). Quien toque `/clearstate` tiene que borrarlo, y va
    ANTES del `DELETE FROM conversaciones`: los `session_id` SON esos ids.
@@ -249,6 +251,20 @@ una —qué se midió, qué costó— está en la regla que cubre ese archivo.
    doctor N de M veces» y ese N tiene que ser cierto. Es la misma mentira que ya evita el
    camino del reventón, por la otra puerta.
 
+27. **El perímetro de coste falla ABIERTO, así que su ausencia no se ve en ningún log.**
+   `cuotas.revisar` atrapa toda excepción y deja pasar --deliberado: un freno que tumba turnos
+   cuando Postgres tiene un mal minuto ES la caída que pretendía evitar-- de modo que **sin las
+   tablas de la 022 el perímetro no frena a nadie y nada falla**. Lo caza `inicializar_base.py`
+   (bloque 9), que `desplegar.sh` corre antes de levantar. La cuota vive en `runtime._entregar`
+   y NO en `atencion.atender`: metida ahí añade una conexión a Neon al principio del turno y
+   desordena los dobles de tres pruebas medidas, incluida la invariante de que Neon se cierra
+   antes de llamar al modelo. **Y `MAXICARE_LEER_ARCHIVOS` es INDEPENDIENTE de
+   `MAXICARE_DANIELA_RESPONDE`**: aquel promete por escrito que el doctor sigue recibiendo sus
+   archivos y sus lecturas, así que colgar el lector de él le quitaría justo lo que promete
+   conservar, y en el momento en que alguien lo acciona. **`escalar_a_doctores` se queda SIN
+   tope**, y eso es la 26 mirada de cerca: lo que el modelo escala llamando a la tool sale
+   siempre. El detalle, en `.claude/rules/perimetro-seguridad.md`.
+
 # Dónde está el resto
 
 El detalle de cada área se carga solo cuando tocas sus archivos:
@@ -261,6 +277,7 @@ El detalle de cada área se carga solo cuando tocas sus archivos:
 | `.claude/rules/calendario.md` | Google Calendar y la cuenta de servicio |
 | `.claude/rules/despliegue.md` | `desplegar.sh`, el Dockerfile y el `.env` del VPS |
 | `.claude/rules/scripts-entregables.md` | qué dobla cada script de `scripts/` y su trampa |
+| `.claude/rules/perimetro-seguridad.md` | las cuotas, el contador de gasto y los dos frenos de mano |
 | `.claude/rules/pruebas.md` · `frontera-agentes.md` · `migraciones.md` · `base-conocimiento.md` · `contratos-diseno.md` | lo que ya había |
 
 # Trampas de este entorno

@@ -57,8 +57,11 @@ from . import (
     analista,
     atencion,
     autenticacion,
+    consumo,
     contratos,
     conversacion,
+    cuotas,
+    guardrails,
     herramientas,
     ingesta,
     lectura,
@@ -192,7 +195,11 @@ async def _validacion_en_el_vocabulario_del_frontend(
                         status_code=422)
 
 
-_whatsapp = WhatsApp(config.whatsapp_token, config.whatsapp_phone_number_id)
+_whatsapp = WhatsApp(
+    config.whatsapp_token,
+    config.whatsapp_phone_number_id,
+    tope_descarga_mb=config.tope_descarga_mb,
+)
 _telegram = Telegram(config.telegram_bot_token, config.telegram_chat_doctores)
 
 #: El tema General del supergrupo. Se lee una vez al arrancar, no en cada mensaje: es
@@ -1015,6 +1022,33 @@ async def _entregar(m: ingesta.MensajeEntrante) -> None:
     primero-- cualquier fallo del turno se llevaría por delante la entrega del archivo, y
     nadie se enteraría hasta que un paciente mandara una radiografía urgente.
     """
+    # ¿Se le pasa este archivo al modelo? El archivo le llega al doctor pase lo que pase --eso
+    # es la fase 2 y no lo toca nada-- así que esto decide SOLO si además se paga una lectura.
+    #
+    # **Y NO cuelga de `MAXICARE_DANIELA_RESPONDE`, aunque la tentación era grande.** Ese
+    # interruptor promete una cosa concreta y documentada: se apaga la respuesta al paciente y
+    # el doctor sigue recibiendo sus archivos EXACTAMENTE como antes. La lectura clínica es
+    # del doctor, no del paciente, así que atarla ahí le quitaría al doctor lo que ese
+    # interruptor le promete conservar -- y encima en el momento en que alguien lo acciona,
+    # que es justo cuando está mirando el sistema de cerca.
+    #
+    # Son dos emergencias distintas y por eso son dos interruptores: «Daniela dice tonterías»
+    # se apaga con `MAXICARE_DANIELA_RESPONDE`, «el lector se está comiendo el saldo» con
+    # `MAXICARE_LEER_ARCHIVOS`. Encadenarlos dejaría sin apagar por separado justo lo que hay
+    # que poder apagar por separado.
+    #
+    # La cuota solo se consulta si hay archivo: un mensaje de texto no tiene por qué pagar
+    # una consulta que no le aplica.
+    leer_archivos = config.leer_archivos
+    if leer_archivos and m.trae_archivo:
+        leer_archivos = await cuotas.puede_leer_archivos(
+            m.telefono, config=config, tipos=lectura.TIPOS_QUE_SE_LEEN
+        )
+        if not leer_archivos:
+            log.warning(
+                "%s pasó la cuota de archivos del día: se entrega sin leer", m.telefono
+            )
+
     entrega = None
     try:
         entrega = await ingesta.procesar_mensaje(
@@ -1023,6 +1057,7 @@ async def _entregar(m: ingesta.MensajeEntrante) -> None:
             telegram=_telegram,
             database_url=config.database_url,
             tema_general=_tema_general,
+            leer_archivos=leer_archivos,
         )
     except Exception:  # noqa: BLE001
         log.exception("fallo inesperado entregando %s", m.wamid)
@@ -1053,6 +1088,53 @@ async def _entregar(m: ingesta.MensajeEntrante) -> None:
     # texto sigue su camino hasta Daniela como cualquier otro mensaje.
     if reseteo.es_comando(m.texto) and reseteo.autorizado(m.telefono, config.telefonos_prueba):
         await _resetear_numero(m)
+        return
+
+    # ------------------------------------------------------------------------------------
+    # La cuota: el techo de lo que un solo número puede hacer gastar
+    # ------------------------------------------------------------------------------------
+    #
+    # Va AQUÍ y no dentro de `atencion.atender`, y el sitio importa por dos razones. La
+    # primera es de diseño: este es el punto donde el proyecto ya decide si un mensaje se
+    # atiende --el dedupe de Meta justo arriba, `/clearstate` a continuación-- así que una
+    # tercera razón para no atender pertenece a la misma lista y se lee con ella.
+    #
+    # La segunda la enseñaron las pruebas. Metida en `atender`, esta consulta añadía una
+    # conexión a Neon al principio del turno y tumbaba tres pruebas de `test_atencion.py`: una
+    # cuenta los bloques de conexión --la invariante de que Neon se cierra ANTES de llamar al
+    # modelo-- y otras dos dependen de qué conexión revienta en qué orden. Que una defensa
+    # nueva desordene los dobles de un camino medido es la señal de que está en el sitio
+    # equivocado, no de que las pruebas sobren.
+    #
+    # `m.telefono` sale del webhook de Meta, nunca del modelo -- misma regla que
+    # `entrada_solo_de_botones`. Un límite que el modelo pudiera mover no sería un límite.
+    veredicto = await cuotas.revisar(m.telefono, config=config)
+    if veredicto.avisar:
+        # Una sola vez por ventana, y quien lo decide es Postgres en `toca_avisar_cuota`, no
+        # un `if` de aquí: dos mensajes simultáneos del mismo número pasarían los dos por una
+        # lectura antes de que ninguno escribiera. Los dos envíos van en `try` separados: el
+        # aviso al doctor no puede depender de que Meta acepte la frase, ni al revés.
+        if not veredicto.permitido:
+            try:
+                await _whatsapp.enviar_texto(m.telefono, cuotas.FRASE_DE_CUOTA)
+            except Exception:  # noqa: BLE001
+                log.exception("no se pudo avisar de la cuota a %s", m.telefono)
+        try:
+            await _telegram.enviar_mensaje(
+                cuotas.aviso_para_el_doctor(
+                    m.telefono, veredicto, corto=config.cuota_modo_observacion
+                )
+            )
+        except Exception:  # noqa: BLE001
+            log.exception("no se pudo avisar al General de la cuota de %s", m.telefono)
+
+    if not veredicto.permitido:
+        log.warning(
+            "%s pasó la cuota de %s (%d en la ventana): no se abre turno",
+            m.telefono,
+            veredicto.clase,
+            veredicto.cuantos,
+        )
         return
 
     try:
@@ -1225,7 +1307,18 @@ async def salud() -> dict:
             estado["relevos_abiertos"] = persistencia.contar_relevos_abiertos(conn)
         estado["base_de_datos"] = "ok"
     except Exception as e:  # noqa: BLE001
-        estado["base_de_datos"] = f"FALLA: {e}"
+        # El texto de la excepción va al LOG, no a la respuesta. `/salud` es público --lo
+        # necesitan los healthchecks de Docker y de Traefik-- y psycopg mete en el mensaje el
+        # host, el puerto y el usuario de Neon: «connection to server at "ep-….aws.neon.tech",
+        # port 5432 failed: FATAL: password authentication failed for user "…"». Eso es medio
+        # par de credenciales servido a cualquiera que pida la URL, y encima justo cuando el
+        # sistema está caído y nadie lo está mirando.
+        #
+        # Lo que se conserva es la señal: que la base falla se sigue viendo desde fuera, que
+        # es para lo que la clínica mira esto. El porqué está en el log del contenedor, que es
+        # donde va a buscarlo quien pueda arreglarlo.
+        log.error("la base de datos no responde en /salud: %s", e)
+        estado["base_de_datos"] = "FALLA"
 
     faltantes = [
         nombre
@@ -1239,8 +1332,23 @@ async def salud() -> dict:
         )
         if not valor
     ]
-    estado["configuracion"] = "ok" if not faltantes else {"faltan": faltantes}
-    estado["tema_general"] = _tema_general
+    # La LISTA va al log; hacia fuera sale solo si está completa o no.
+    #
+    # `{"faltan": ["WHATSAPP_APP_SECRET", ...]}` en un endpoint público es un mapa de
+    # reconocimiento gratuito: le dice a un desconocido exactamente qué credencial no está
+    # puesta y, con ella, si el webhook de WhatsApp tiene firma verificable o si el relevo de
+    # Telegram está abierto. Es decirle a quien esté probando la puerta cuál está sin llave.
+    #
+    # La señal que la clínica necesita --«falta algo por configurar»-- se conserva entera, y
+    # QUÉ falta lo ve quien entra al contenedor o al panel, que es quien puede ponerlo.
+    if faltantes:
+        log.warning("configuración incompleta, faltan: %s", ", ".join(faltantes))
+    estado["configuracion"] = "ok" if not faltantes else "incompleta"
+
+    # Booleano y no el id: el número de un tema de Telegram no abre nada por sí solo --hace
+    # falta el token del bot-- pero es una pieza más del mapa, y aquí no la necesita nadie.
+    # Lo que se mira desde fuera es si el tema General está resuelto o no.
+    estado["tema_general"] = bool(_tema_general)
 
     # QUÉ calendario acabó en `_calendario`, no si la variable está puesta. Sin esta línea, el
     # único rastro de un calendario que no arrancó es un `log.error` del arranque que nadie
@@ -1418,26 +1526,158 @@ class Credenciales(BaseModel):
     contrasena: str = Field(min_length=1, max_length=512)
 
 
+# ==========================================================================================
+# La puerta del panel: que probar contraseñas cueste algo
+# ==========================================================================================
+#
+# `/api/entrar` era el único endpoint público con efecto real y no tenía ningún freno: ni
+# contador de intentos, ni bloqueo, ni CAPTCHA, ni retardo. La tabla `usuarios` no tiene
+# columna de intentos fallidos. Contra un panel con datos clínicos, eso son intentos
+# ilimitados a la velocidad que dé la red.
+#
+# Y es además un amplificador: cada intento con usuario existente cuesta un scrypt de 16 MiB
+# y ~60 ms **en el único worker que también atiende los webhooks de WhatsApp**. Bastante
+# concurrencia aquí deja a los pacientes sin respuesta sin haber adivinado ninguna clave.
+#
+# En memoria y no en Postgres: el proceso es uno solo (ver `.claude/rules/despliegue.md`), y
+# una tabla de intentos convertiría cada intento fallido en una escritura, que es justo lo que
+# un atacante querría provocar. Se pierde al reiniciar, y eso es aceptable: un reinicio no es
+# algo que el atacante pueda provocar desde aquí.
+
+#: Intentos fallidos antes de cerrar la puerta. Ocho: un doctor que se equivoca de verdad no
+#: llega, y quien prueba un diccionario se queda en la puerta a los ocho.
+MAX_INTENTOS_LOGIN = 8
+
+#: Y cuánto dura el castigo. Cinco minutos: suficiente para que un ataque por diccionario sea
+#: inviable, corto para que alguien que se equivocó de verdad no se quede fuera de su turno.
+VENTANA_LOGIN_SEGUNDOS = 300.0
+
+_intentos_de_ingreso: dict[str, list[float]] = {}
+
+_senuelo: str | None = None
+
+
+def _scrypt_senuelo() -> str:
+    """Un hash real contra el que verificar cuando el usuario NO existe.
+
+    Tiene que ser un hash de verdad, con los mismos parámetros que los de la tabla, o el
+    tiempo no coincidiría y el canal lateral seguiría abierto: es todo el punto.
+
+    Perezoso y cacheado -- cuesta los mismos ~60 ms que cualquier otro, y pagarlos al importar
+    el módulo retrasaría el arranque del servidor por una defensa que quizá no se use nunca.
+    """
+    global _senuelo
+    if _senuelo is None:
+        _senuelo = autenticacion.hash_contrasena("senuelo-que-nadie-usa-jamas")
+    return _senuelo
+
+
+def _quien_llama(peticion: Request) -> str:
+    """La IP del cliente, para contar sus intentos.
+
+    Detrás de Cloudflare y Traefik, `peticion.client.host` es la IP del proxy y sería la misma
+    para todo el mundo -- es decir, un solo atacante bloquearía a la clínica entera. Por eso
+    se prefiere el primer salto de `X-Forwarded-For`, que es lo que uvicorn rellena con
+    `--proxy-headers`.
+
+    Esa cabecera se puede falsificar, y conviene decirlo en vez de fingir que no: alguien que
+    la rote se salta el contador. Contra eso no protege esto, protege el rate limit del borde
+    (Cloudflare y las labels de Traefik). Lo que este freno cierra es el caso normal --un
+    script probando contraseñas desde una máquina-- y sobre todo evita el bloqueo cruzado, que
+    es el modo en que un contador por IP mal hecho se convierte en la denegación de servicio.
+    """
+    reenviado = peticion.headers.get("x-forwarded-for", "")
+    if reenviado:
+        return reenviado.split(",")[0].strip()[:64]
+    cliente = getattr(peticion, "client", None)
+    return (getattr(cliente, "host", None) or "desconocido")[:64]
+
+
+def _vivos(quien: str) -> list[float]:
+    ahora = time.monotonic()
+    vivos = [
+        t for t in _intentos_de_ingreso.get(quien, ()) if ahora - t <= VENTANA_LOGIN_SEGUNDOS
+    ]
+    if vivos:
+        _intentos_de_ingreso[quien] = vivos
+    else:
+        _intentos_de_ingreso.pop(quien, None)
+    return vivos
+
+
+def _puede_intentar(quien: str) -> bool:
+    return len(_vivos(quien)) < MAX_INTENTOS_LOGIN
+
+
+def _anotar_intento_fallido(quien: str) -> None:
+    vivos = _vivos(quien)
+    vivos.append(time.monotonic())
+    _intentos_de_ingreso[quien] = vivos
+    # Techo de memoria: sin él, un atacante que rote la cabecera `X-Forwarded-For` haría
+    # crecer este diccionario sin fin, y el freno acabaría siendo la fuga. Se tira lo más
+    # viejo, que es lo que menos falta hace.
+    if len(_intentos_de_ingreso) > 5000:
+        for clave in sorted(_intentos_de_ingreso, key=lambda k: _intentos_de_ingreso[k][-1])[:1000]:
+            _intentos_de_ingreso.pop(clave, None)
+
+
+def _olvidar_intentos(quien: str) -> None:
+    """Un ingreso correcto borra la cuenta: quien acertó no arrastra sus equivocaciones."""
+    _intentos_de_ingreso.pop(quien, None)
+
+
 @app.post("/api/entrar")
-async def entrar(credenciales: Credenciales, respuesta: Response) -> dict:
+async def entrar(
+    credenciales: Credenciales, respuesta: Response, peticion: Request
+) -> dict:
     """Verifica y pone la cookie. El mismo mensaje para los tres modos de fallo.
 
     Usuario inexistente, contraseña equivocada y acceso retirado responden exactamente lo
     mismo. Distinguirlos le confirmaría a quien prueba nombres cuáles existen en la clínica.
+
+    Eso era cierto en el CUERPO de la respuesta y falso en el RELOJ, que es la parte que este
+    endpoint no miraba. Ver `_scrypt_senuelo` y `_puede_intentar`.
     """
     secreto = _exigir_panel_habilitado()
     generico = "Usuario o contraseña incorrectos."
 
+    quien = _quien_llama(peticion)
+    if not _puede_intentar(quien):
+        # 429 y no 401: el que se pasó de intentos tiene que poder distinguir «me estás
+        # frenando» de «la contraseña está mal», o seguirá probando contra un muro creyendo
+        # que el muro es la contraseña. A quien ataca no le revela nada que no sepa ya --lo
+        # está midiendo con el reloj-- y a un doctor que olvidó su clave le ahorra media hora.
+        log.warning("demasiados intentos de ingreso desde %s", quien)
+        raise HTTPException(
+            status_code=429,
+            detail="Demasiados intentos. Espera unos minutos y vuelve a probar.",
+        )
+
     with persistencia.conectar(config.database_url) as conn:
         fila = persistencia.buscar_usuario(conn, credenciales.usuario)
-        valido = bool(
-            fila
-            and fila["activo"]
-            and autenticacion.verificar_contrasena(credenciales.contrasena, fila["hash_contrasena"])
-        )
+        if fila is None:
+            # El señuelo. Sin él, el `and` cortocircuita y `verificar_contrasena` NO se llama:
+            # un usuario inexistente responde en ~1 ms y uno real paga los ~60 ms de scrypt.
+            # Tres órdenes de magnitud, medibles con cualquier cliente HTTP, y la defensa del
+            # mensaje genérico --escrita a propósito, ver el docstring-- quedaba anulada por
+            # el canal lateral: quien probara nombres sabría cuáles existen sin acertar una
+            # sola contraseña.
+            #
+            # Se paga el mismo coste para no decir nada. Es exactamente el precio de callar.
+            autenticacion.verificar_contrasena(credenciales.contrasena, _scrypt_senuelo())
+            valido = False
+        else:
+            valido = bool(
+                fila["activo"]
+                and autenticacion.verificar_contrasena(
+                    credenciales.contrasena, fila["hash_contrasena"]
+                )
+            )
         if not valido:
+            _anotar_intento_fallido(quien)
             log.warning("ingreso fallido para %r", credenciales.usuario[:60])
             raise HTTPException(status_code=401, detail=generico)
+        _olvidar_intentos(quien)
         persistencia.marcar_acceso(conn, fila["usuario"])
 
     respuesta.set_cookie(
@@ -2442,6 +2682,98 @@ async def _parar_despacho_de_recordatorios() -> None:
     _tarea_de_recordatorios.cancel()
     try:
         await _tarea_de_recordatorios
+    except (asyncio.CancelledError, Exception):  # noqa: BLE001
+        pass
+
+
+# ==========================================================================================
+# El vigilante del gasto
+# ==========================================================================================
+#
+# El sistema era ciego a su propia factura: cuatro consumidores de modelo y ninguna forma de
+# saber cuánto llevaban gastado sin abrir el dashboard de OpenAI a mano. Eso significa que un
+# ataque de coste y un martes con mucha demanda se veían exactamente igual --no se veían-- y
+# que uno se enteraba cuando Daniela empezaba a fallar por saldo agotado, con pacientes reales
+# dentro.
+#
+# Esto NO corta nada, y la diferencia importa: cortar por gasto dejaría a los pacientes sin
+# respuesta por una cifra, y esa decisión es de la clínica y no del código. Lo que hace es
+# avisar, que es lo que convierte una sorpresa en una decisión.
+
+#: Cada cuánto se mira. Cinco minutos y no uno: el gasto de un día no cambia de forma
+#: interesante en sesenta segundos, y cada vuelta es una consulta a Neon que no hace falta
+#: pagar doce veces por minuto.
+SEGUNDOS_ENTRE_VIGILANCIAS = 300.0
+
+_tarea_de_vigilancia: asyncio.Task | None = None
+
+
+async def _vigilar_el_gasto_sin_parar() -> None:
+    """Mira el gasto del día y los fallos de evaluador. Tarea propia, como los recordatorios.
+
+    Propia por la misma razón que aquella: el barrido de relevos no arranca sin Telegram, y
+    quedarse sin vigilancia de gasto en un despliegue sin grupo de doctores sería justo al
+    revés de lo que hace falta.
+    """
+    while True:
+        await asyncio.sleep(SEGUNDOS_ENTRE_VIGILANCIAS)
+        try:
+            revision = await asyncio.to_thread(
+                consumo.gasto_y_alerta,
+                config.database_url,
+                umbral_usd=config.alerta_gasto_diario_usd,
+            )
+            if revision is not None:
+                gasto, hay_que_avisar = revision
+                if hay_que_avisar:
+                    log.warning("el gasto del día cruzó el umbral: %.2f USD", gasto)
+                    await _telegram.enviar_mensaje(
+                        f"💸 <b>Aviso de gasto</b>\n\nHoy se llevan gastados "
+                        f"<b>{gasto:.2f} USD</b> en modelo, por encima del umbral de "
+                        f"{config.alerta_gasto_diario_usd:.2f}.\n\n"
+                        "Daniela <b>sigue funcionando con normalidad</b>: esto es un aviso, "
+                        "no un corte. Si no esperabas este volumen, conviene mirar quién "
+                        "está escribiendo."
+                    )
+
+            # Un PICO de fallos del evaluador es la firma de alguien probando a desarmar el
+            # guardrail de inyección: `_preguntar` falla abierto --a propósito-- así que
+            # reventarlo es la forma más limpia de que `uso_indebido` deje de mirar. Sueltos
+            # son mala suerte del proveedor; cinco en diez minutos, no.
+            fallos = guardrails.fallos_recientes_de_evaluador()
+            if fallos >= guardrails.UMBRAL_FALLOS_EVALUADOR:
+                guardrails.olvidar_fallos_de_evaluador()
+                log.error("pico de fallos del evaluador: %d en la ventana", fallos)
+                await _telegram.enviar_mensaje(
+                    f"⚠️ <b>Los evaluadores de seguridad están fallando</b>\n\n"
+                    f"{fallos} fallos en los últimos "
+                    f"{int(guardrails.VENTANA_FALLOS_SEGUNDOS // 60)} minutos.\n\n"
+                    "Cuando un evaluador falla, el sistema <b>deja pasar el mensaje</b> para "
+                    "no dejar a nadie sin respuesta. Suele ser el proveedor teniendo un mal "
+                    "rato; si sigue, conviene mirar los logs."
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 -- tiene que seguir vivo mañana
+            log.exception("la vigilancia del gasto falló; se reintenta en el ciclo siguiente")
+
+
+@app.on_event("startup")
+async def _arrancar_vigilancia_del_gasto() -> None:
+    global _tarea_de_vigilancia
+    if not config.database_url:
+        log.info("sin base configurada: no arranca la vigilancia del gasto")
+        return
+    _tarea_de_vigilancia = asyncio.create_task(_vigilar_el_gasto_sin_parar())
+
+
+@app.on_event("shutdown")
+async def _parar_vigilancia_del_gasto() -> None:
+    if _tarea_de_vigilancia is None:
+        return
+    _tarea_de_vigilancia.cancel()
+    try:
+        await _tarea_de_vigilancia
     except (asyncio.CancelledError, Exception):  # noqa: BLE001
         pass
 

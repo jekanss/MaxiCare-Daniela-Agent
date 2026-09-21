@@ -3083,3 +3083,201 @@ def olvidar_ejemplos_de(conn, telefono: str) -> int:
         conn.rollback()
         raise
     return cuantas
+
+
+# ==========================================================================================
+# El perimetro: contar el gasto y contar las cuotas
+# ==========================================================================================
+#
+# Migracion 022. Las tres tablas y el indice estan explicados alli; aqui va solo lo que el
+# codigo tiene que saber para usarlas.
+#
+# Lo que une a todas estas funciones: **ninguna puede tumbar un turno**. Son instrumentacion y
+# frenos, no atencion al paciente. Quien las llama lo hace dentro de un `try` que traga, con
+# el mismo criterio que `_anotar_resultado`: si la contabilidad revienta se pierde una fila,
+# nunca una respuesta. Por eso aqui SI se deja propagar --el que llama decide-- y por eso
+# ninguna hace `conn.commit()` sin su `rollback` correspondiente.
+
+
+def anotar_consumo(
+    conn,
+    *,
+    agente: str,
+    modelo: str,
+    llamadas: int,
+    tokens_entrada: int,
+    tokens_entrada_cacheados: int,
+    tokens_salida: int,
+    costo_usd: float,
+    id_conversacion: str | None = None,
+    telefono: str | None = None,
+) -> None:
+    """Una fila por corrida del modelo. Ver `consumo_modelo` en la 022.
+
+    El desglose por `agente` es lo que hace accionable el numero: un pico en `lector` y uno en
+    `daniela` se arreglan de forma distinta --el primero es alguien mandando archivos, el
+    segundo alguien conversando-- y sumados en una sola cifra serian indistinguibles.
+    """
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO consumo_modelo (
+                    agente, modelo, id_conversacion, telefono,
+                    llamadas, tokens_entrada, tokens_entrada_cacheados, tokens_salida,
+                    costo_usd
+                ) VALUES (
+                    %(agente)s, %(modelo)s, %(conv)s, %(tel)s,
+                    %(llamadas)s, %(entrada)s, %(cacheados)s, %(salida)s,
+                    %(costo)s
+                )
+                """,
+                {
+                    "agente": agente,
+                    "modelo": modelo,
+                    "conv": id_conversacion,
+                    "tel": telefono,
+                    "llamadas": llamadas,
+                    "entrada": tokens_entrada,
+                    "cacheados": tokens_entrada_cacheados,
+                    "salida": tokens_salida,
+                    "costo": costo_usd,
+                },
+            )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+
+def gasto_del_dia(conn) -> float:
+    """Cuantos dolares lleva gastados el dia de HOY, en la zona del servidor.
+
+    `COALESCE` porque un dia sin filas devuelve `NULL` y no `0`: sin el, el primer minuto de
+    cada dia compararia `None` contra el umbral y reventaria el vigilante entero.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT COALESCE(SUM(costo_usd), 0) FROM consumo_modelo
+             WHERE momento >= date_trunc('day', now())
+            """
+        )
+        fila = cur.fetchone()
+    return float(fila[0]) if fila else 0.0
+
+
+def mensajes_en_la_ultima_hora(conn, telefono: str) -> int:
+    """Cuantos mensajes ha mandado este numero en la ultima hora.
+
+    Se cuenta sobre `mensajes_entrantes` --la tabla de los HECHOS-- y no sobre un contador
+    aparte, que podria desincronizarse de lo que cuenta. Lo hace barato el indice
+    `mensajes_entrantes_telefono_recibido_idx` de la 022: sin el, esto seria un scan de la
+    tabla en cada mensaje que entra, y el freno costaria mas que lo que frena.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT count(*) FROM mensajes_entrantes
+             WHERE telefono = %(tel)s
+               AND recibido_en >= now() - interval '1 hour'
+            """,
+            {"tel": telefono},
+        )
+        fila = cur.fetchone()
+    return int(fila[0]) if fila else 0
+
+
+def archivos_del_dia(conn, telefono: str, tipos: Sequence[str]) -> int:
+    """Cuantos archivos LEIBLES ha mandado este numero hoy.
+
+    `tipos` entra por parametro y no se cablea aqui: la lista de lo que el lector sabe leer
+    vive en `lectura.TIPOS_QUE_SE_LEEN` y es suya. Duplicarla aqui significaria que el dia que
+    el lector aprenda un tipo nuevo, la cuota siga contando los de antes -- y nadie lo notaria,
+    porque el fallo es que un freno deja de frenar.
+
+    No cuenta `audio`, `voice`, `video` ni `sticker` aunque tambien se descarguen: esos no
+    llegan al modelo, asi que no son gasto de tokens. A ellos los acotan el tope de bytes y el
+    semaforo, que es donde esta su riesgo (la RAM), no aqui.
+    """
+    if not tipos:
+        return 0
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT count(*) FROM mensajes_entrantes
+             WHERE telefono = %(tel)s
+               AND tipo = ANY(%(tipos)s)
+               AND recibido_en >= date_trunc('day', now())
+            """,
+            {"tel": telefono, "tipos": list(tipos)},
+        )
+        fila = cur.fetchone()
+    return int(fila[0]) if fila else 0
+
+
+def toca_avisar_cuota(conn, telefono: str, clase: str, *, ventana_horas: int = 1) -> bool:
+    """`True` si a este numero hay que avisarle --y avisar al doctor-- de que se paso.
+
+    Sin esto, un numero que se pasa recibe una frase fija por CADA mensaje y el doctor un
+    Telegram por cada uno: exactamente la inundacion que la cuota existe para evitar, servida
+    por la propia defensa. Es el error que el no negociable 26 ya pago una vez con los
+    escalamientos.
+
+    **Un solo `INSERT ... ON CONFLICT DO UPDATE ... WHERE`, y no leer-y-despues-escribir.** Dos
+    mensajes simultaneos del mismo numero pasarian los dos por la lectura antes de que ninguno
+    escribiera, y saldrian dos avisos. Aqui la unicidad la decide Postgres y no el orden de
+    llegada, igual que en `tomar_cupo` y que la deduplicacion por `wamid`.
+
+    El `RETURNING` es la respuesta: si devuelve fila, esta corrida es la que gano y le toca
+    avisar. Si no devuelve nada, es que ya se aviso dentro de la ventana y esta se calla.
+    """
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO cuotas_avisadas (telefono, clase)
+                     VALUES (%(tel)s, %(clase)s)
+                ON CONFLICT (telefono, clase) DO UPDATE
+                        SET avisado_en = now()
+                      WHERE cuotas_avisadas.avisado_en
+                            < now() - make_interval(hours => %(ventana)s)
+                  RETURNING telefono
+                """,
+                {"tel": telefono, "clase": clase, "ventana": ventana_horas},
+            )
+            gano = cur.fetchone() is not None
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    return gano
+
+
+def toca_avisar_gasto(conn, *, gasto_usd: float) -> bool:
+    """`True` si hay que avisar HOY de que el gasto cruzo el umbral. Una vez por dia.
+
+    Mismo mecanismo que `toca_avisar_cuota` y por la misma razon: el vigilante corre cada
+    minuto, asi que sin una marca el dia que se cruce el umbral el doctor recibiria 1.440
+    Telegram identicos.
+
+    La clave es el DIA y no un contador, para que a medianoche vuelva a avisar solo: un
+    contador habria que acordarse de reiniciarlo, y de eso no se acuerda nadie.
+    """
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO alertas_gasto (dia, gasto_usd)
+                     VALUES (current_date, %(gasto)s)
+                ON CONFLICT (dia) DO NOTHING
+                  RETURNING dia
+                """,
+                {"gasto": gasto_usd},
+            )
+            gano = cur.fetchone() is not None
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    return gano

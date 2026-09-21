@@ -19,7 +19,7 @@ import logging
 from agents import Agent, Runner
 from pydantic import BaseModel, Field
 
-from . import persistencia
+from . import consumo, persistencia
 from .config import MODELO_EVALUADOR, config_de_corrida
 from .guardrails import cifras_de
 
@@ -165,6 +165,16 @@ async def analizar_pendientes(*, database_url: str, limite: int = 5) -> int:
                     texto_del_caso(caso),
                     max_turns=1,
                     run_config=config_de_corrida(canal="informe"),
+                )
+                # Sin `id_conversacion` ni `telefono`: un informe agrupa casos de VARIOS
+                # pacientes --ese es todo su valor-- así que atarlo a uno solo sería falso.
+                # El gasto del analista se mira por agente, que es como se decide si vale lo
+                # que cuesta.
+                await consumo.anotar(
+                    corrida,
+                    agente="analista",
+                    modelo=MODELO_EVALUADOR,
+                    database_url=database_url,
                 )
                 informe: InformeDelCaso = corrida.final_output
             except Exception as e:  # noqa: BLE001 -- se reintenta en el ciclo siguiente

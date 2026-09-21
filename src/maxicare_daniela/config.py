@@ -28,8 +28,11 @@ este archivo, para que haya un solo lugar donde mirarlos.
 
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass
+
+log = logging.getLogger(__name__)
 
 # ==========================================================================================
 # Constantes que el plan fija y que NO son variables de entorno
@@ -259,6 +262,107 @@ MARGEN_LECTURA_SEGUNDOS = 3.0
 
 
 # ==========================================================================================
+# El perímetro: que un desconocido no pueda quemar el saldo
+# ==========================================================================================
+#
+# El número de WhatsApp de una clínica es público -- es un negocio, tiene que serlo. Eso
+# significa que la firma HMAC de Meta, que es lo único que protege el webhook, no distingue a
+# un paciente de alguien que quiere gastar el saldo de OpenAI: los dos entran por la puerta
+# principal y los dos vienen firmados. Todo lo que sigue asume eso.
+#
+# Los defaults están calibrados contra el volumen REAL del 21/09/2026 --4 conversaciones y 11
+# turnos al día, ver `docs/antes-de-produccion.md`-- y van muy por encima del uso legítimo a
+# propósito: un freno que muerde a un paciente real es peor que el ataque que evita. Se suben
+# o se bajan por `.env` sin desplegar código, que es justo lo que los hace útiles.
+
+#: Mensajes de un mismo teléfono en una hora antes de dejar de llamar al modelo. Una
+#: conversación intensa de verdad son 15-20; 40 es el doble largo.
+#:
+#: Se cuentan sobre `mensajes_entrantes`, que ya existe, y no sobre un contador aparte: una
+#: tabla de contadores puede desincronizarse del hecho que cuenta, y la de los hechos no.
+CUOTA_MENSAJES_HORA = 40
+
+#: Archivos de un mismo teléfono en un día antes de dejar de LEERLOS. El archivo le sigue
+#: llegando al doctor siempre -- eso no lo apaga nada, es la garantía de la fase 2. Lo que se
+#: apaga es la llamada al modelo caro.
+#:
+#: El lector es el único consumidor que corre FUERA del búfer y FUERA del candado por
+#: teléfono, así que es el multiplicador de coste más grande del sistema: N archivos son N
+#: llamadas al modelo flagship, en paralelo y sin serializar.
+#:
+#: **30 y no 12, y el número lo fija un caso clínico, no el coste.** La primera versión eran
+#: 12, calculados sobre «una tanda de radiografías son 3-6». Está mal contado: **una serie
+#: periapical completa son 14-18 placas**, y un paciente que las mande todas habría cruzado
+#: la cuota a mitad de la serie. El doctor habría seguido recibiendo los archivos --eso no lo
+#: apaga nada-- pero sin la ficha que le escribe el lector, y justo en el caso en que más
+#: falta hace: dieciocho placas sin leer son dieciocho imágenes que alguien tiene que abrir
+#: una por una.
+#:
+#: 30 deja pasar esa serie entera con margen y sigue cortando el abuso, que empieza mucho más
+#: arriba. Es la regla 1 de `cuotas.py` aplicada: un freno que muerde a un paciente real es
+#: peor que el ataque que evita.
+CUOTA_ARCHIVOS_DIA = 30
+
+#: Lecturas de archivo simultáneas en todo el proceso. No es una cuota por teléfono: es el
+#: techo absoluto de llamadas concurrentes al modelo caro, que además es lo que impide que N
+#: archivos grandes estén a la vez en memoria en un contenedor de un solo worker.
+LECTORES_CONCURRENTES = 3
+
+#: Dólares al día a partir de los cuales el General recibe UN aviso. No corta nada: avisa.
+#: Cortar por gasto dejaría a los pacientes sin respuesta por una cifra, y esa decisión es de
+#: la clínica y no del código.
+#:
+#: Referencia medida: una conversación de agendamiento completa de 6 turnos cuesta $0,095. El
+#: umbral son ~50 conversaciones al día, muy por encima de las 4 de hoy.
+ALERTA_GASTO_DIARIO_USD = 5.0
+
+#: Hasta dónde se le pasa al modelo lo que escribió el paciente. Por encima se TRUNCA con una
+#: marca visible, nunca se rechaza: rechazar deja al paciente sin respuesta.
+#:
+#: Existe por un fallo concreto y silencioso. `guardrails._preguntar` atrapa toda excepción y
+#: devuelve «no dispara» --decisión correcta: un sistema mudo no protege a nadie-- así que una
+#: entrada lo bastante larga para reventar el contexto del evaluador DESACTIVA el guardrail de
+#: inyección para ese turno, dejando solo un `log.error`. El tope quita la causa.
+#:
+#: 8000 es el doble de lo que el panel ya exige a su chat de pruebas (`max_length=4000`). Esa
+#: asimetría era el hueco: el carril validado era el interno y el que da a internet, no.
+TOPE_ENTRADA_CARACTERES = 8000
+
+#: Megabytes por encima de los cuales un archivo ni se descarga. Se mira el `Content-Length`
+#: ANTES de bajar los bytes: hoy el archivo se carga entero en RAM y se re-serializa hacia
+#: Telegram, o sea dos copias simultáneas por archivo, sin límite de concurrencia.
+#:
+#: 55 y no menos, y el número está elegido para NO cambiar nada que hoy funcione: Telegram
+#: rechaza por encima de 50 MB, así que un archivo que cruce este tope ya está fallando hoy.
+#: El freno contra la inundación es la cuota y el semáforo, no el tamaño -- bajarlo costaría
+#: radiografías legítimas, que es exactamente lo que no se puede perder.
+TOPE_DESCARGA_MB = 55
+
+#: Precio por millón de tokens, por modelo: (entrada, entrada_cacheada, salida).
+#:
+#: El cacheado va aparte porque el proyecto corre con `prompt_cache_retention="24h"` y
+#: cobrarlo al precio de entrada daría una factura inventada. Un modelo que no esté aquí se
+#: anota con costo 0 y sus tokens igual: perder la cifra en dólares es aceptable, perder el
+#: rastro de que hubo consumo no lo es.
+PRECIOS_POR_MILLON: dict[str, tuple[float, float, float]] = {
+    "gpt-5.6-terra": (2.00, 0.20, 12.00),
+    "gpt-5.6-sol": (4.00, 0.40, 20.00),
+    "gpt-5.6-luna": (0.20, 0.02, 1.20),
+}
+
+
+#: Los WhatsApp de los doctores que reciben el aviso de cada cita nueva, en formato
+#: internacional sin `+` -- que es como los quiere la Graph API de Meta.
+#:
+#: Que estén aquí y no solo en el `.env` es deliberado y tiene precedente en este archivo
+#: (`POLITICA_DATOS_URL`): no son un secreto, y son algo que no puede dejar de funcionar
+#: porque alguien olvidó una variable al desplegar. Un aviso de cita que no sale no falla en
+#: ninguna parte -- simplemente el doctor no se entera, y eso no se nota hasta que un paciente
+#: llega a una cita que nadie esperaba.
+WHATSAPP_DOCTORES: tuple[str, ...] = ("573106492282", "573185790008")
+
+
+# ==========================================================================================
 # Configuración de despliegue
 # ==========================================================================================
 
@@ -296,6 +400,36 @@ def _opcional(nombre: str, default: str = "") -> str:
     Para los campos cuyo default es `""` esto no cambia nada.
     """
     return os.environ.get(nombre, "").strip() or default
+
+
+def _entero(nombre: str, default: int) -> int:
+    """Un número entero de una variable, o el default si falta, está vacía o no es un número.
+
+    Lo último es lo que importa. Un `MAXICARE_CUOTA_MENSAJES_HORA=cuarenta` con `int()` a
+    secas tumbaría el arranque del servidor entero por una cuota mal escrita, y un webhook
+    caído es peor que una cuota en su valor por defecto. Se registra y se sigue: el freno
+    queda puesto en el número de fábrica, que es un estado seguro y no un agujero.
+    """
+    crudo = os.environ.get(nombre, "").strip()
+    if not crudo:
+        return default
+    try:
+        return int(crudo)
+    except ValueError:
+        log.warning("%s no es un entero (%r); se usa el default %s", nombre, crudo, default)
+        return default
+
+
+def _decimal(nombre: str, default: float) -> float:
+    """Lo mismo para un umbral con decimales. Ver `_entero`."""
+    crudo = os.environ.get(nombre, "").strip()
+    if not crudo:
+        return default
+    try:
+        return float(crudo)
+    except ValueError:
+        log.warning("%s no es un número (%r); se usa el default %s", nombre, crudo, default)
+        return default
 
 
 #: Los tres modelos, confirmados el 2026-09-12 contra el catálogo de la cuenta y la
@@ -460,6 +594,61 @@ class Config:
     #: permite pasar de una fila de `consentimientos` al archivo exacto de `docs/politica/`.
     politica_datos_version: str = POLITICA_DATOS_VERSION
 
+    # --------------------------------------------------------------------------------------
+    # El perímetro. Los siete llevan default para que un `.env` viejo siga arrancando: un
+    # despliegue que olvide una variable no puede significar quedarse SIN freno.
+    # --------------------------------------------------------------------------------------
+
+    cuota_mensajes_hora: int = CUOTA_MENSAJES_HORA
+    cuota_archivos_dia: int = CUOTA_ARCHIVOS_DIA
+    lectores_concurrentes: int = LECTORES_CONCURRENTES
+    alerta_gasto_diario_usd: float = ALERTA_GASTO_DIARIO_USD
+    tope_entrada_caracteres: int = TOPE_ENTRADA_CARACTERES
+    tope_descarga_mb: int = TOPE_DESCARGA_MB
+
+    #: El segundo freno de mano, hermano de `daniela_responde` y deliberadamente INDEPENDIENTE
+    #: de él.
+    #:
+    #: Con `MAXICARE_LEER_ARCHIVOS=0` los archivos siguen llegándole al doctor igual --eso no
+    #: lo apaga nada-- y lo único que se corta es la llamada al modelo que los lee. Es el
+    #: interruptor para la emergencia económica, porque el lector es el consumidor más caro
+    #: del sistema y el único que corre fuera del búfer y fuera del candado por teléfono.
+    #:
+    #: No cuelga de `daniela_responde` porque son dos emergencias distintas: «Daniela dice
+    #: tonterías» y «el lector se está comiendo el saldo». Y porque ese interruptor promete,
+    #: por escrito, que el doctor sigue recibiendo sus archivos y sus lecturas como siempre.
+    #:
+    #: `!= "0"`, como `daniela_responde`: el default es leer, y hace falta un 0 explícito.
+    leer_archivos: bool = True
+
+    #: A `1`, las cuotas CUENTAN y AVISAN pero no cortan a nadie.
+    #:
+    #: Existe porque el 21/09/2026 todavía no se sabe cuál es el uso normal: con 4
+    #: conversaciones al día, cualquier umbral es una corazonada. Esto permite encender la
+    #: medición hoy y el corte cuando haya datos para elegir el número. El default es cortar
+    #: --el riesgo está abierto ahora mismo-- pero la puerta de atrás existe y es de una
+    #: variable, no de un despliegue.
+    cuota_modo_observacion: bool = False
+
+    #: Los WhatsApp de los doctores que reciben el aviso de cada cita nueva. Van en el código
+    #: y no solo en el `.env` por el mismo motivo que `politica_datos_url`: no son un secreto
+    #: --son los teléfonos de la clínica-- y sí son algo que no puede dejar de funcionar
+    #: porque alguien olvidó una variable en un despliegue. El día que cambien, queda en
+    #: `git log`. El `.env` los puede pisar.
+    whatsapp_doctores: tuple[str, ...] = WHATSAPP_DOCTORES
+
+    #: El nombre EXACTO de la plantilla de Meta que avisa de una cita nueva. Vacía --su
+    #: default-- apaga el envío sin apagar nada más: la cita se crea igual y queda el log de
+    #: lo que se habría mandado. Mismo patrón que `plantilla_recordatorio`, y por la misma
+    #: razón: poder comprobar en producción que decide bien antes de que mande un solo
+    #: mensaje. PENDIENTE hasta que Meta la apruebe.
+    plantilla_cita_nueva: str = ""
+
+    #: El código de idioma EXACTO con el que la traducción quedó registrada. Si no coincide al
+    #: carácter, Meta rechaza el envío entero con el error 132001. Ver
+    #: `plantilla_recordatorio_idioma`, que ya pagó esta lección.
+    plantilla_cita_nueva_idioma: str = "es"
+
     @classmethod
     def desde_entorno(cls) -> Config:
         return cls(
@@ -499,6 +688,33 @@ class Config:
             daniela_responde=_opcional("MAXICARE_DANIELA_RESPONDE", "1") != "0",
             analizar_sin_resolver=_opcional("MAXICARE_ANALIZAR_SIN_RESOLVER", "1") != "0",
             telefonos_prueba=_lista("MAXICARE_TELEFONOS_PRUEBA"),
+            # El perímetro. Todas con default, y el default es el freno puesto: un `.env`
+            # anterior a esta fase arranca protegido sin tocar nada.
+            cuota_mensajes_hora=_entero("MAXICARE_CUOTA_MENSAJES_HORA", CUOTA_MENSAJES_HORA),
+            cuota_archivos_dia=_entero("MAXICARE_CUOTA_ARCHIVOS_DIA", CUOTA_ARCHIVOS_DIA),
+            lectores_concurrentes=_entero(
+                "MAXICARE_LECTORES_CONCURRENTES", LECTORES_CONCURRENTES
+            ),
+            alerta_gasto_diario_usd=_decimal(
+                "MAXICARE_ALERTA_GASTO_DIARIO_USD", ALERTA_GASTO_DIARIO_USD
+            ),
+            tope_entrada_caracteres=_entero(
+                "MAXICARE_TOPE_ENTRADA_CARACTERES", TOPE_ENTRADA_CARACTERES
+            ),
+            tope_descarga_mb=_entero("MAXICARE_TOPE_DESCARGA_MB", TOPE_DESCARGA_MB),
+            # `== "1"` y no `!= "0"`: aquí el default tiene que ser el lado que PROTEGE, y el
+            # modo observación es el que no protege. Un `.env` con la clave escrita de otra
+            # forma deja las cuotas cortando, que es el fallo seguro.
+            cuota_modo_observacion=_opcional("MAXICARE_CUOTA_MODO_OBSERVACION", "0") == "1",
+            leer_archivos=_opcional("MAXICARE_LEER_ARCHIVOS", "1") != "0",
+            # `or` y no un default en `_lista`: la lista vacía aquí NO tiene significado
+            # propio --a diferencia de `telefonos_prueba`, donde vacía es la política-- así
+            # que un `.env` sin la clave cae a los números del código.
+            whatsapp_doctores=_lista("MAXICARE_WHATSAPP_DOCTORES") or WHATSAPP_DOCTORES,
+            plantilla_cita_nueva=_opcional("MAXICARE_PLANTILLA_CITA_NUEVA"),
+            plantilla_cita_nueva_idioma=_opcional(
+                "MAXICARE_PLANTILLA_CITA_NUEVA_IDIOMA", "es"
+            ),
         )
 
 

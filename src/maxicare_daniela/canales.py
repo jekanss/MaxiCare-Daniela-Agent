@@ -33,6 +33,15 @@ BASE_TELEGRAM = "https://api.telegram.org"
 TIMEOUT_DESCARGA = httpx.Timeout(30.0, connect=10.0)
 TIMEOUT_NORMAL = httpx.Timeout(15.0, connect=10.0)
 
+#: Megabytes por encima de los cuales un media de WhatsApp ni se descarga. El default vive
+#: aquí --y no se importa de `config`-- porque este módulo no importa nada del paquete a
+#: propósito: habla con dos APIs y no sabe nada del resto del sistema. `runtime` le pasa el
+#: valor efectivo, que es el que el `.env` puede mover.
+#:
+#: 55 y no menos: Telegram rechaza por encima de 50 MB, así que este tope no le quita al
+#: doctor ningún archivo que hoy le llegue. Ver el comentario dentro de `descargar_media`.
+TOPE_DESCARGA_MB = 55
+
 
 class ErrorDeCanal(RuntimeError):
     """Falló una llamada a WhatsApp o a Telegram.
@@ -136,9 +145,12 @@ def _nombre_sugerido(media_id: str, mime: str, nombre_original: str | None) -> s
 
 
 class WhatsApp:
-    def __init__(self, token: str, phone_number_id: str) -> None:
+    def __init__(
+        self, token: str, phone_number_id: str, *, tope_descarga_mb: int = TOPE_DESCARGA_MB
+    ) -> None:
         self._token = token
         self._phone_number_id = phone_number_id
+        self._tope_descarga = max(tope_descarga_mb, 1) * 1024 * 1024
 
     @property
     def _cabeceras(self) -> dict[str, str]:
@@ -164,6 +176,28 @@ class WhatsApp:
             url = datos.get("url")
             if not url:
                 raise ErrorDeCanal(f"la respuesta del media {media_id} no trae 'url': {datos}")
+
+            # El tope va AQUÍ, entre las dos llamadas, y por eso no cuesta nada: Meta ya
+            # declaró `file_size` en la metadata, así que un archivo enorme se rechaza SIN
+            # haber bajado un solo byte.
+            #
+            # Sin esto, el archivo se cargaba entero en memoria (`archivo.content`) y después
+            # se re-serializaba en el multipart hacia Telegram: DOS copias simultáneas por
+            # archivo, más una tercera del base64 si además iba al modelo. Y `runtime` encola
+            # cada mensaje sin límite de concurrencia, en un contenedor de un solo worker. Era
+            # el vector de agotamiento más barato del sistema: no hacía falta vulnerar nada,
+            # solo mandar archivos grandes a la vez.
+            #
+            # El número está elegido para NO perder nada que hoy funcione: Telegram rechaza
+            # por encima de 50 MB, así que un archivo que cruce este tope ya estaba fallando
+            # --más tarde, y después de haber ocupado la RAM--. Lo que cambia es dónde falla,
+            # no si falla.
+            tamano = datos.get("file_size")
+            if tamano and int(tamano) > self._tope_descarga:
+                raise ErrorDeCanal(
+                    f"el media {media_id} pesa {int(tamano)} bytes y el tope son "
+                    f"{self._tope_descarga}: no se descarga"
+                )
 
             # La descarga también va con el Bearer: la URL sola no autoriza nada.
             archivo = await cliente.get(url, headers=self._cabeceras)

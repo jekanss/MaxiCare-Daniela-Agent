@@ -64,6 +64,25 @@ class ConexionFalsa:
         return False
 
 
+@pytest.fixture(autouse=True)
+def sin_intentos_arrastrados():
+    """El contador de intentos fallidos vive en un dict de módulo, así que se arrastra.
+
+    `runtime._intentos_de_ingreso` no es estado de una petición: es estado del PROCESO, y la
+    ventana dura cinco minutos -- mucho más que una suite entera. Varias pruebas de este
+    archivo fallan el ingreso a propósito y todas comparten la misma clave (`TestClient` se
+    presenta siempre como el mismo cliente), así que sin esto la número nueve empezaría a
+    recibir 429 y la prueba que se rompiera no sería la que metió los intentos.
+
+    Es el mismo problema que el `limpiar_estado()` de `test_atencion.py` y la misma regla de
+    `.claude/rules/pruebas.md`: una prueba no le cambia el entorno a las demás. Se limpia
+    antes Y después, para que tampoco se escape hacia otro archivo.
+    """
+    runtime._intentos_de_ingreso.clear()
+    yield
+    runtime._intentos_de_ingreso.clear()
+
+
 @pytest.fixture
 def cliente(monkeypatch):
     monkeypatch.setattr(runtime, "_secreto_sesion", SECRETO)
@@ -183,6 +202,171 @@ def test_los_tres_fallos_de_ingreso_dicen_lo_mismo(cliente, monkeypatch):
         )
 
     assert len({str(r) for r in respuestas}) == 1, f"se distinguen entre sí: {respuestas}"
+
+
+# ==========================================================================================
+# Que probar contraseñas cueste algo
+#
+# `/api/entrar` era el único endpoint público con efecto real y no tenía ningún freno: ni
+# contador, ni bloqueo, ni retardo. Contra un panel con datos clínicos eso son intentos
+# ilimitados a la velocidad de la red -- y además un amplificador, porque cada intento con
+# usuario existente cuesta un scrypt de 16 MiB en el único worker que también atiende los
+# webhooks de WhatsApp: bastante concurrencia aquí deja a los pacientes sin respuesta sin
+# haber adivinado ninguna clave.
+#
+# Las tres pruebas de abajo sustituyen `verificar_contrasena` por una comparación directa. No
+# es pereza: lo que miden es el CONTADOR, y pagar ocho scrypt de verdad (~60 ms cada uno) por
+# una cuenta de enteros es la clase de lentitud que hace que alguien acabe saltándose la
+# suite. Que el scrypt sea de verdad lo sostiene la última prueba del bloque, que es la única
+# a la que eso le importa.
+# ==========================================================================================
+
+
+def _verificacion_barata(monkeypatch) -> list[tuple[str, str]]:
+    """Sustituye el scrypt por una comparación, y anota cada llamada con sus argumentos."""
+    llamadas: list[tuple[str, str]] = []
+
+    def verificar(contrasena: str, hash_guardado: str) -> bool:
+        llamadas.append((contrasena, hash_guardado))
+        return contrasena == CLAVE
+
+    monkeypatch.setattr(autenticacion, "verificar_contrasena", verificar)
+    return llamadas
+
+
+def test_pasados_los_intentos_la_puerta_responde_429_y_no_401(cliente, monkeypatch):
+    """429 y no 401, y la diferencia es deliberada.
+
+    Quien se pasó de intentos tiene que poder distinguir «me estás frenando» de «la
+    contraseña está mal», o seguirá probando contra un muro creyendo que el muro es la
+    contraseña. A quien ataca no le revela nada que no sepa ya --lo está midiendo con el
+    reloj-- y a un doctor que olvidó su clave le ahorra media hora de intentos inútiles.
+    """
+    _verificacion_barata(monkeypatch)
+
+    for numero in range(runtime.MAX_INTENTOS_LOGIN):
+        r = cliente.post("/api/entrar", json={"usuario": "ana.rodriguez", "contrasena": "mal"})
+        assert r.status_code == 401, f"el intento {numero + 1} ya frenaba: el contador cuenta de más"
+
+    r = cliente.post("/api/entrar", json={"usuario": "ana.rodriguez", "contrasena": "mal"})
+
+    assert r.status_code == 429
+    assert "intentos" in r.json()["detalle"].lower()
+
+
+def test_la_puerta_cerrada_tampoco_se_abre_con_la_contrasena_BUENA(cliente, monkeypatch):
+    """El freno va ANTES de mirar la base, así que ni siquiera la clave correcta pasa.
+
+    Es lo que lo convierte en un freno de verdad y no en un adorno: si acertar lo levantara,
+    un ataque por diccionario seguiría llegando a su objetivo -- solo que sin recibir la
+    confirmación hasta el final. Y de paso es lo que impide que el intento número nueve pague
+    el scrypt, que era la otra mitad del problema.
+    """
+    _verificacion_barata(monkeypatch)
+    for _ in range(runtime.MAX_INTENTOS_LOGIN):
+        cliente.post("/api/entrar", json={"usuario": "ana.rodriguez", "contrasena": "mal"})
+
+    r = cliente.post("/api/entrar", json={"usuario": "ana.rodriguez", "contrasena": CLAVE})
+
+    assert r.status_code == 429
+    assert runtime.COOKIE not in r.cookies
+
+
+def test_un_ingreso_correcto_borra_la_cuenta_de_intentos(cliente, monkeypatch):
+    """Quien acertó no arrastra sus equivocaciones.
+
+    Un doctor que tecleó mal tres veces y entró a la cuarta se quedaría a tres intentos del
+    bloqueo durante los cinco minutos siguientes -- y el bloqueo le llegaría el día siguiente,
+    sin relación visible con nada. Cinco minutos fuera del panel en mitad de una consulta es
+    un coste real, y cero beneficio: el que acertó ya demostró que sabe la clave.
+
+    No basta con mirar el diccionario: se comprueba que después del acierto vuelve a caber la
+    tanda ENTERA, que es lo que significa que la cuenta se puso a cero y no que se restó uno.
+    """
+    _verificacion_barata(monkeypatch)
+    for _ in range(3):
+        cliente.post("/api/entrar", json={"usuario": "ana.rodriguez", "contrasena": "mal"})
+    assert runtime._intentos_de_ingreso, "la prueba no prueba nada: no se anotó ni un intento"
+
+    assert cliente.post(
+        "/api/entrar", json={"usuario": "ana.rodriguez", "contrasena": CLAVE}
+    ).status_code == 200
+
+    assert runtime._intentos_de_ingreso == {}
+    for numero in range(runtime.MAX_INTENTOS_LOGIN):
+        r = cliente.post("/api/entrar", json={"usuario": "ana.rodriguez", "contrasena": "mal"})
+        assert r.status_code == 401, f"quedaban intentos arrastrados: frenó en el {numero + 1}"
+
+
+def test_un_usuario_INEXISTENTE_paga_el_mismo_scrypt_que_uno_real(cliente, monkeypatch):
+    """El canal lateral que anulaba la defensa del mensaje genérico.
+
+    Los tres fallos de ingreso dicen exactamente lo mismo --hay una prueba justo arriba que lo
+    sostiene-- pero eso era cierto en el CUERPO de la respuesta y falso en el RELOJ: con el
+    `and` cortocircuitando, un usuario inexistente no llegaba a `verificar_contrasena` y
+    respondía en ~1 ms, mientras uno real pagaba los ~60 ms del scrypt. Tres órdenes de
+    magnitud, medibles con cualquier cliente HTTP. Quien probara nombres sabría cuáles existen
+    en la clínica sin acertar una sola contraseña.
+
+    **No se miden tiempos de reloj**: una prueba que compara milisegundos en una máquina
+    compartida es una prueba que falla sola un martes cualquiera, y entonces alguien la borra.
+    Lo que se comprueba es la causa -- que la verificación SE LLAMA en los dos caminos-- y
+    contra qué hash se llama, que es lo que demuestra que el señuelo se usó de verdad y no que
+    la llamada vino de otra parte.
+    """
+    llamadas = _verificacion_barata(monkeypatch)
+    monkeypatch.setattr(runtime, "_senuelo", "scrypt$el-senuelo")
+
+    cliente.post("/api/entrar", json={"usuario": "ana.rodriguez", "contrasena": "mal"})
+    con_usuario = list(llamadas)
+
+    monkeypatch.setattr(persistencia, "buscar_usuario", lambda conn, usuario: None)
+    llamadas.clear()
+    cliente.post("/api/entrar", json={"usuario": "no.existe", "contrasena": "mal"})
+
+    assert len(con_usuario) == 1, "el usuario existente no llegó a verificar: la prueba no compara nada"
+    assert len(llamadas) == 1, (
+        "el usuario inexistente no pagó el scrypt: el `and` volvió a cortocircuitar y el "
+        "reloj vuelve a delatar qué usuarios existen"
+    )
+    assert llamadas[0][1] == "scrypt$el-senuelo", "se verificó contra otra cosa, no el señuelo"
+
+
+def test_el_senuelo_es_un_scrypt_de_VERDAD_con_los_mismos_parametros():
+    """Y aquí sí se paga el scrypt entero, porque es lo único que esta prueba comprueba.
+
+    Un señuelo que fuera una cadena cualquiera haría que `verificar_contrasena` se rindiera al
+    parsear el formato, o que corriera con otros parámetros: en los dos casos el tiempo no
+    coincidiría y el canal lateral seguiría abierto. La defensa no es «llamar a la función»,
+    es «pagar exactamente lo mismo». Se paga el mismo coste para no decir nada.
+    """
+    senuelo = runtime._scrypt_senuelo()
+
+    assert autenticacion.verificar_contrasena("cualquier cosa", senuelo) is False, (
+        "no es un hash verificable: `verificar_contrasena` ni siquiera lo procesa"
+    )
+    # `scrypt$n$r$p$sal$hash`: los cuatro primeros campos son el coste, y tienen que ser los
+    # mismos que los de un usuario de la tabla o el tiempo no coincide.
+    assert senuelo.split("$")[:4] == USUARIO["hash_contrasena"].split("$")[:4]
+
+
+def test_el_senuelo_se_calcula_una_sola_vez(monkeypatch):
+    """Perezoso y cacheado. Recalcularlo en cada intento regalaría al atacante justo lo que
+    este freno le quita: un scrypt de 16 MiB por petición, gratis y sin contador, en el mismo
+    worker que atiende los webhooks de WhatsApp. Y pagarlo al importar el módulo retrasaría el
+    arranque del servidor por una defensa que quizá no se use nunca."""
+    monkeypatch.setattr(runtime, "_senuelo", None)
+    veces = []
+    original = autenticacion.hash_contrasena
+    monkeypatch.setattr(
+        autenticacion, "hash_contrasena", lambda c: (veces.append(c), original(c))[1]
+    )
+
+    primero = runtime._scrypt_senuelo()
+    segundo = runtime._scrypt_senuelo()
+
+    assert primero == segundo
+    assert len(veces) == 1
 
 
 def test_una_sesion_valida_se_reconoce(cliente):
@@ -573,3 +757,136 @@ def test_salud_cuenta_los_mensajes_sin_responder(monkeypatch):
         "la cuenta nueva corrió con la conexión cerrada: mira su indentación"
     )
     assert cuerpo["sin_responder"] == 3
+
+
+# ==========================================================================================
+# `/salud` es PÚBLICO, y eso decide qué puede decir
+#
+# Lo consultan el `HEALTHCHECK` del contenedor y Traefik, así que no puede pedir sesión --hay
+# una prueba arriba que lo fija-- y de ahí sale todo lo demás: cualquier cosa que este
+# endpoint imprima la puede leer quien sepa la URL, que es una cadena adivinable.
+#
+# La señal que la clínica necesita se conserva entera: que la base falla y que falta algo por
+# configurar se siguen viendo desde fuera. Lo que se va es el DETALLE, que no le sirve a quien
+# mira desde fuera y sí a quien está probando la puerta. Quien puede arreglarlo entra al
+# contenedor y lee el log, que es donde está.
+# ==========================================================================================
+
+
+SECRETOS_DEL_ENTORNO = (
+    "MAXICARE_WHATSAPP_TOKEN",
+    "MAXICARE_WHATSAPP_PHONE_NUMBER_ID",
+    "MAXICARE_WHATSAPP_VERIFY_TOKEN",
+    "WHATSAPP_APP_SECRET",
+    "MAXICARE_TELEGRAM_BOT_TOKEN",
+    "MAXICARE_TELEGRAM_CHAT_DOCTORES",
+)
+
+
+def _config_con(**cambios):
+    """El `Config` real del proceso con unos campos cambiados. Frozen, así que `replace`."""
+    return dataclasses.replace(runtime.config, **cambios)
+
+
+def test_salud_no_dice_QUE_secreto_le_falta(cliente, monkeypatch):
+    """Un `{"faltan": ["WHATSAPP_APP_SECRET", ...]}` público es un mapa de reconocimiento
+    gratuito.
+
+    Le dice a un desconocido exactamente qué credencial no está puesta y, con ella, qué
+    defensa está apagada: sin `WHATSAPP_APP_SECRET` el webhook no verifica la firma de Meta,
+    y sin `MAXICARE_TELEGRAM_BOT_TOKEN` el relevo no existe. Es decirle a quien está probando
+    las puertas cuál está sin llave, y en el momento exacto en que lo está.
+
+    La señal que la clínica necesita --«falta algo por configurar»-- no se pierde: se queda en
+    una palabra. Qué falta lo ve quien entra al contenedor, que es quien puede ponerlo.
+    """
+    monkeypatch.setattr(
+        runtime,
+        "config",
+        _config_con(
+            whatsapp_token="",
+            whatsapp_phone_number_id="",
+            whatsapp_verify_token="",
+            whatsapp_app_secret="",
+            telegram_bot_token="",
+            telegram_chat_doctores="",
+        ),
+    )
+
+    r = cliente.get("/salud")
+
+    assert r.json()["configuracion"] == "incompleta"
+    assert isinstance(r.json()["configuracion"], str), "volvió a ser un dict con la lista"
+    for variable in SECRETOS_DEL_ENTORNO:
+        assert variable not in r.text, f"`/salud` publica que falta {variable}"
+
+
+def test_salud_con_todo_puesto_dice_ok(cliente, monkeypatch):
+    """La otra mitad, y hace falta: una prueba que solo mire el caso incompleto pasaría igual
+    con un `configuracion` cableado a `"incompleta"`, y la clínica no se enteraría nunca de
+    que ya está todo configurado."""
+    monkeypatch.setattr(
+        runtime,
+        "config",
+        _config_con(
+            whatsapp_token="t",
+            whatsapp_phone_number_id="1",
+            whatsapp_verify_token="v",
+            whatsapp_app_secret="s",
+            telegram_bot_token="tg",
+            telegram_chat_doctores="-100",
+        ),
+    )
+
+    assert cliente.get("/salud").json()["configuracion"] == "ok"
+
+
+def test_salud_no_publica_el_host_de_neon_cuando_la_base_falla(cliente, monkeypatch):
+    """`FALLA` a secas, sin el texto de la excepción. Es la mitad de un par de credenciales.
+
+    psycopg mete en el mensaje el host, el puerto y el usuario: «connection to server at
+    "ep-….aws.neon.tech", port 5432 failed: FATAL: password authentication failed for user
+    "…"». Eso, servido a cualquiera que pida la URL, y encima justo cuando el sistema está
+    caído y nadie lo está mirando.
+
+    Se comprueba contra el TEXTO CRUDO de la respuesta y no contra el campo: el día que
+    alguien añada un `detalle` o un `error` al lado, el campo seguiría diciendo `FALLA` y la
+    fuga estaría igual de abierta un renglón más abajo.
+    """
+    def explotar(_url):
+        raise RuntimeError(
+            'connection to server at "ep-secreto-12345.us-east-2.aws.neon.tech", port 5432 '
+            'failed: FATAL: password authentication failed for user "maxicare_admin"'
+        )
+
+    monkeypatch.setattr(persistencia, "conectar", explotar)
+
+    r = cliente.get("/salud")
+
+    assert r.status_code == 200, "un healthcheck que devuelve 500 mata el contenedor"
+    assert r.json()["base_de_datos"] == "FALLA"
+    for filtrado in ("neon.tech", "maxicare_admin", "5432", "password"):
+        assert filtrado not in r.text, f"`/salud` publica «{filtrado}» cuando la base falla"
+
+
+def test_el_tema_general_sale_como_booleano_y_no_como_su_id(cliente, monkeypatch):
+    """El id de un tema de Telegram no abre nada por sí solo --hace falta el token del bot--
+    pero es una pieza más del mismo mapa, y aquí no la necesita nadie.
+
+    Lo que se mira desde fuera es si el General quedó resuelto o no; quien necesita el número
+    lo tiene en la configuración de la clínica.
+    """
+    monkeypatch.setattr(runtime, "_tema_general", 4242)
+
+    r = cliente.get("/salud")
+
+    assert r.json()["tema_general"] is True
+    assert "4242" not in r.text, "`/salud` publica el id del tema General"
+
+
+def test_sin_tema_general_se_ve_desde_fuera(cliente, monkeypatch):
+    """Y el caso contrario, que es el que de verdad se consulta: un `tema_general` en falso
+    significa que el relevo y los avisos no tienen dónde caer."""
+    monkeypatch.setattr(runtime, "_tema_general", None)
+
+    assert cliente.get("/salud").json()["tema_general"] is False

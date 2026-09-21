@@ -76,23 +76,32 @@ uv run uvicorn maxicare_daniela.runtime:app --port 8080
     `motivo_sin_calendario` es `null` si y solo si `calendario_disponible` es `true`; un
     motivo que la pantalla no conozca sale por la franja roja, que es el lado barato de
     equivocarse.
-  - **Y ese GET que escribe NO tiene candado, así que dos peticiones del mismo día pueden
-    dejar DOS recordatorios vivos para la misma cita.** Es el daño del no negociable 21
-    entrando por una puerta nueva: hasta esta rama, la reconciliación solo corría desde
-    `atencion.py`, serializada por el candado por teléfono. El mecanismo, para que nadie
-    tenga que volver a deducirlo:
-    - La clave de idempotencia del recordatorio lleva `ahora.isoformat()` dentro
-      (`herramientas.py`, en `_mover_porque_la_movieron`), y **cada petición calcula el suyo
-      con precisión de microsegundos**, así que las dos claves son distintas y el
-      `ON CONFLICT (clave_idempotencia)` no las junta. Bajo READ COMMITTED los dos INSERT
-      ocurren antes de que ninguno de los dos `anular_seguimientos_de_cita(excepto_clave=…)`
-      corra, ninguna transacción ve la fila sin confirmar de la otra, y al commit quedan dos
-      filas vivas para el mismo `cita_id` —el único UNIQUE de `seguimientos` es
-      `clave_idempotencia`, no `cita_id`—. Las siete guardas del despachador dicen que sí a
-      las dos, y el paciente recibe el mismo WhatsApp dos veces.
-    - **El cupo NO se duplica**, y conviene saberlo para no arreglar lo que no está roto: su
-      clave es `calendar:{cita_id}:{inicio}`, determinista, y el UNIQUE de `reservas` lo
-      resuelve en Postgres.
+  - **Ese GET que escribe sigue sin candado, y ya NO deja dos recordatorios vivos para la
+    misma cita** (arreglado el 21/09/2026). El candado no hizo falta: lo que se quitó fue la
+    dependencia del reloj. Era el daño del no negociable 21 entrando por una puerta nueva
+    —hasta la fase 8, la reconciliación solo corría desde `atencion.py`, serializada por el
+    candado por teléfono—, y el mecanismo entero se conserva aquí porque es lo que hay que
+    volver a mirar el día que alguien toque esa clave:
+    - **Lo que fallaba:** la clave de idempotencia del recordatorio llevaba
+      `ahora.isoformat()` dentro (`herramientas.py`, en `_mover_porque_la_movieron`), y **cada
+      petición calcula el suyo con precisión de microsegundos**, así que las dos claves eran
+      distintas y el `ON CONFLICT (clave_idempotencia)` no las juntaba. Bajo READ COMMITTED
+      los dos INSERT ocurren antes de que ninguno de los dos
+      `anular_seguimientos_de_cita(excepto_clave=…)` corra, ninguna transacción ve la fila sin
+      confirmar de la otra, y al commit quedaban dos filas vivas para el mismo `cita_id` —el
+      único UNIQUE de `seguimientos` es `clave_idempotencia`, no `cita_id`—. Las siete guardas
+      del despachador decían que sí a las dos, y el paciente recibía el mismo WhatsApp dos
+      veces.
+    - **El cupo NO se duplicaba**, y ESO es justo lo que lo arregla: su clave es
+      `calendar:{cita_id}:{inicio}`, determinista, y el UNIQUE de `reservas` lo resuelve en
+      Postgres. El tercer componente de la clave del recordatorio es ahora **la `reserva_id`**,
+      así que dos peticiones simultáneas recuperan la misma fila de `reservas` —`tomar_cupo`
+      la busca por clave ANTES de intentar insertar— y escriben la misma clave: la unicidad
+      pasa a decidirla Postgres y no el orden de llegada. Y un movimiento de verdad sigue
+      teniendo su recordatorio, que es lo que `ahora` protegía: en un A → B → A → B hecho a
+      mano, `liberar_cupo` borra la reserva de B al salir, así que volver a B toma una nueva
+      con id nuevo. Sin cupo —destino lleno, la cita se mueve igual— se cae al reloj truncado
+      al minuto.
     - **`web/src/main.tsx` monta con `<React.StrictMode>`**, así que en `npm run dev` React
       invoca el efecto de montaje dos veces y salen **dos peticiones del mismo día en
       paralelo en cada apertura de la Agenda**. El `ref pedido` de `Agenda.tsx` descarta la
@@ -101,14 +110,23 @@ uv run uvicorn maxicare_daniela.runtime:app --port 8080
       o dos personas en el mismo día dentro de la ventana de una transacción (~50-100 ms) y
       sobre una cita que el doctor acabe de mover: sigue siendo cierto, y raro. Pero «bajo en
       producción, sistemático en desarrollo» no es lo mismo que «bajo».
-    - **Por qué NO está arreglado:** el arreglo toca la maquinaria del no negociable 21 y
-      merece su propia tarea con sus propias pruebas, no una ronda de corrección ajena. El
-      daño entretanto es un recordatorio repetido: inocuo para el paciente y recuperable.
-    - **Cuál sería el arreglo:** un `pg_advisory_xact_lock` sobre el id de la cita más una
-      relectura del `inicio` dentro de `_mover_porque_la_movieron` —que convierte el segundo
-      paso en un no-op—, o sacar `ahora` de esa clave para que las dos peticiones generen la
-      misma y el `ON CONFLICT` haga su trabajo. Lo primero es más seguro; lo segundo, más
-      barato. Reproducirlo contra Neon exige la conexión DIRECTA, no el pooler.
+    - **Lo que se descartó, y por qué:** el `pg_advisory_xact_lock` sobre el id de la cita.
+      No basta solo —el segundo paso ya trae su clave calculada desde fuera de la
+      transacción, así que insertaría igual— y exige además una relectura del `inicio` dentro
+      de `_mover_porque_la_movieron` que lo convierta en un no-op. Es un lock nuevo, sostenido
+      sobre I/O de red, en una escritura cuyo orden (cupo → mover → cascada) ya está
+      documentado como delicado. Sacar `ahora` de la clave **a secas** tampoco valía: cambiaba
+      un fallo ruidoso —recordatorio repetido, inocuo— por uno silencioso —cita sin ningún
+      recordatorio—, porque un A → B → A → B acertaría una clave ya anulada y el
+      `ON CONFLICT DO NOTHING` no escribiría nada. Colgar de la reserva es lo que da las dos
+      mitades a la vez.
+    - **Qué lo sostiene:** `test_dos_peticiones_de_la_agenda_no_dejan_DOS_recordatorios` y
+      `test_un_movimiento_NUEVO_al_mismo_destino_si_recupera_su_recordatorio`, en
+      `tests/test_herramientas.py`. El primero cuenta **filas y no vivos**, a propósito: en
+      secuencia la cascada del segundo paso anula la fila del primero y dejaría un solo vivo
+      con el fallo dentro, así que una prueba que mire los vivos da verde sobre el bug. Con
+      una sola clave el entrelazado deja de importar. Reproducirlo contra Neon de verdad
+      exige la conexión DIRECTA, no el pooler.
 - **En la rejilla de la Agenda, la fila de cada hora lleva `minHeight` y NUNCA `height`, y el
   rótulo de la hora va DENTRO de la fila.** Las dos cosas sostienen lo mismo, y se pagaron
   caras: con filas de 96 px fijos, la tarjeta de una cita de 60 minutos —la duración por

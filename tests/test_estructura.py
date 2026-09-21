@@ -65,6 +65,19 @@ MODULOS_SIN_TRANSPORTE = (
     # un `database_url` y un límite, y devuelve cuántos informes escribió. Eso es lo que
     # permite probar `analizar_pendientes` sin levantar `runtime.py` ni su bucle.
     "analista.py",
+    # Los tres del perímetro (21/09/2026). `consumo.py` y `cuotas.py` responden preguntas que
+    # no dependen del canal --«cuánto costó esta corrida», «puede este número seguir
+    # gastando»-- y la prueba de que es cierto es que el chat web del panel podría usarlos sin
+    # cambiar una línea. Si alguno necesitara saber que el mensaje llegó por un POST de Meta,
+    # dejaría de ser un límite del sistema para ser una regla de un canal, y entonces habría
+    # dos: la del canal vigilado y la del canal olvidado.
+    "consumo.py",
+    "cuotas.py",
+    # `aviso_citas.py` manda un WhatsApp, pero eso es un SISTEMA de salida --como Google
+    # Calendar o Telegram--, no el transporte por el que entró la petición. Da igual si la
+    # cita se creó desde WhatsApp, desde el chat web o desde un relevo: el doctor se entera
+    # igual, y esa indiferencia es justo lo que esta lista protege.
+    "aviso_citas.py",
 )
 
 #: Solo `runtime.py` importa el framework web. Si FastAPI aparece en cualquier otro módulo,
