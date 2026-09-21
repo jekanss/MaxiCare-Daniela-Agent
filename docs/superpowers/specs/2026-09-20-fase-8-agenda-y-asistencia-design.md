@@ -120,6 +120,13 @@ Reglas que lo acotan:
 - **Se reconcilia cualquier día que se abra**, pasado o futuro. Para una cita ya pasada,
   `seguimientos.momento_del_recordatorio` devuelve `None` y no se programa nada: eso se fija
   con una prueba propia, porque hoy es una propiedad que nadie ha escrito.
+  > **SUPERADO el 20/09/2026, en la revisión final de la rama.** «Cualquier día» abría un
+  > camino que este spec no vio: si la clínica limpia de Google Calendar los eventos de una
+  > semana vieja, mirar ese día en la Agenda daba esas citas por canceladas en Neon y las
+  > dejaba **inmarcables para siempre** —con ellas, la métrica de asistencia, que es el
+  > entregable de esta fase—. La reconciliación del panel queda acotada a
+  > `herramientas.DIAS_HACIA_ATRAS_AL_SINCRONIZAR` hacia atrás, en `runtime._fuera_de_la_ventana`
+  > (el núcleo no cambia), y el día más viejo se pinta con `calendario_disponible: false`.
 - **Sin calendario, la agenda sigue funcionando.** Si `ctx.calendario` no se puede construir o
   Google falla, se pinta Neon tal cual y la respuesta lleva `calendario_disponible: false`,
   que la pantalla muestra como aviso. Una pantalla de operación no puede caerse porque Google
