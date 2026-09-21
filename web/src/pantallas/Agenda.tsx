@@ -184,12 +184,15 @@ function TarjetaCita({
   marcar: (id: string, v: boolean | null) => void
 }) {
   const sinMarcar = pasada && cita.asistio === null
-  /* Lo que cabe en la fila de su hora: los 96 px menos los 20 de `pt-3 pb-2`. La maqueta
-     ponía `duracion * 1.6` sin tope y no se le notaba porque todas sus citas de ejemplo
-     duraban 45 minutos; con datos reales la duración por defecto de la clínica son 60, que a
-     1.6 dan los 96 px enteros y la tarjeta se derramaba sobre la hora siguiente --encima de
-     las tarjetas de esa hora--. Lo que la altura deja de contar lo dice el rango horario que
-     ahora se pinta arriba a la derecha, que además es un dato y no una proporción. */
+  /* Un MÍNIMO, no una altura: lo que de verdad mide la tarjeta lo decide su contenido, y con
+     los dos botones de marcar son 137 px. Por eso el desborde no lo arregla este número --se
+     intentó, acotándolo a lo que cabe en una fila de 96 px, y la tarjeta siguió midiendo 137--
+     sino la rejilla, que ahora deja crecer la fila de cada hora. El detalle está abajo, donde
+     se pintan las horas.
+
+     Lo que este número sí hace es que una cita corta no quede raquítica y que una larga se vea
+     más alta que una de media hora. Lo que la altura deja de contar --que ya no es una
+     proporción exacta-- lo dice el rango horario de la esquina, que es un dato. */
   const alto = Math.min(Math.max(cita.duracion_minutos * 1.6, 72), ALTO_HORA - 20)
 
   return (
@@ -593,58 +596,79 @@ export default function Agenda({ alCaducarSesion }: { alCaducarSesion: () => voi
           </p>
         )}
 
-        <div className="flex">
-          <div className="shrink-0 w-16 relative" style={{ paddingTop: 8 }}>
-            {horas.map((h) => (
-              <div key={h} className="flex items-start justify-end pr-3" style={{ height: ALTO_HORA }}>
-                <span className="text-xs font-medium" style={{ color: minutoAhora >= 0 && h < minutoAhora ? '#D1D5DB' : '#9CA3AF', marginTop: -8 }}>
-                  {String(Math.floor(h / 60)).padStart(2, '0')}:{String(h % 60).padStart(2, '0')}
-                </span>
-              </div>
-            ))}
-          </div>
+        {/* La hora y sus tarjetas van en la MISMA fila, no en dos columnas paralelas, y la fila
+            crece si lo que lleva dentro no cabe (`minHeight`, nunca `height`).
 
-          <div className="flex-1 pr-8 py-2 relative">
-            {minutoAhora >= desde && minutoAhora <= hasta && (
+            Las dos cosas son la misma corrección, verificada en pantalla el 20/09/2026 y no
+            deducida del código. Con dos columnas de altura fija de 96 px, una tarjeta de una
+            cita de 60 minutos --la duración POR DEFECTO de esta clínica-- mide 137 px con sus
+            dos botones, se sale de su hora y **la tarjeta de la hora siguiente se pinta
+            encima**. No es un defecto cosmético: los botones «Asistió» y «No asistió» de toda
+            cita seguida de otra quedan FÍSICAMENTE tapados y no se pueden pulsar. Se midió con
+            un navegador de verdad: el clic se reintentó treinta segundos contra
+            «subtree intercepts pointer events» y nunca llegó. Con citas consecutivas --la
+            agenda normal de una clínica-- solo la última de la tanda era marcable, que es
+            justo la acción que esta fase entera existe para permitir.
+
+            Encogerlos no era opción: el tamaño de esos dos botones es deliberado (lo pulsa
+            alguien de pie, con prisa), así que lo que cede es la rejilla. Lo que se pierde es
+            la proporcionalidad de la columna del tiempo, que esta pantalla ya había renunciado
+            a tener --lo dice el rango horario de cada tarjeta, que es un dato y no una
+            proporción--. Lo que se gana es que la fila y su rótulo no se puedan desalinear:
+            ahora son el mismo elemento. */}
+        <div className="py-2">
+          {horas.map((h) => {
+            const citasDeLaHora = citas.filter((c) => {
+              const m = minutosDelDia(c.inicio)
+              return m >= h && m < h + 60
+            })
+            const bloqueosDeLaHora = bloqueos.filter((b) => {
+              const m = minutosDelDia(b.inicio)
+              return m >= h && m < h + 60
+            })
+            const vacia = citasDeLaHora.length === 0 && bloqueosDeLaHora.length === 0
+            const horaPasada = minutoAhora >= 0 && h + 60 <= minutoAhora
+            const esLaHoraDeAhora = minutoAhora >= h && minutoAhora < h + 60
+
+            return (
               <div
-                className="absolute left-0 right-8 flex items-center gap-2 z-10 pointer-events-none"
-                style={{ top: 8 + ((minutoAhora - desde) / 60) * ALTO_HORA - 1 }}
+                key={h}
+                className="relative flex"
+                style={{ minHeight: ALTO_HORA, borderTop: '1px solid #F3F4F6', backgroundColor: horaPasada ? 'rgba(0,0,0,0.01)' : 'transparent' }}
               >
-                <div className="w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: '#7C3AED', marginLeft: -5 }} />
-                <div className="flex-1 h-0.5 rounded-full" style={{ backgroundColor: '#7C3AED', opacity: 0.5 }} />
-                <span className="text-[10px] font-bold shrink-0 px-1.5 py-0.5 rounded" style={{ backgroundColor: '#F5F3FF', color: '#7C3AED' }}>
-                  {String(Math.floor(minutoAhora / 60)).padStart(2, '0')}:{String(minutoAhora % 60).padStart(2, '0')}
-                </span>
-              </div>
-            )}
+                {/* La línea del ahora vive DENTRO de su hora y se sitúa en un porcentaje de
+                    ella. Antes se calculaba desde arriba de la rejilla multiplicando por
+                    ALTO_HORA, lo que daba por hecho que todas las filas miden lo mismo: en
+                    cuanto una crece, esa cuenta apunta a la hora equivocada. */}
+                {esLaHoraDeAhora && (
+                  <div
+                    className="absolute left-16 right-8 flex items-center gap-2 z-10 pointer-events-none"
+                    style={{ top: `${((minutoAhora - h) / 60) * 100}%` }}
+                  >
+                    <div className="w-2.5 h-2.5 rounded-full shrink-0" style={{ backgroundColor: '#7C3AED', marginLeft: -5 }} />
+                    <div className="flex-1 h-0.5 rounded-full" style={{ backgroundColor: '#7C3AED', opacity: 0.5 }} />
+                    <span className="text-[10px] font-bold shrink-0 px-1.5 py-0.5 rounded" style={{ backgroundColor: '#F5F3FF', color: '#7C3AED' }}>
+                      {String(Math.floor(minutoAhora / 60)).padStart(2, '0')}:{String(minutoAhora % 60).padStart(2, '0')}
+                    </span>
+                  </div>
+                )}
 
-            {horas.map((h) => {
-              const citasDeLaHora = citas.filter((c) => {
-                const m = minutosDelDia(c.inicio)
-                return m >= h && m < h + 60
-              })
-              const bloqueosDeLaHora = bloqueos.filter((b) => {
-                const m = minutosDelDia(b.inicio)
-                return m >= h && m < h + 60
-              })
-              const vacia = citasDeLaHora.length === 0 && bloqueosDeLaHora.length === 0
-              const horaPasada = minutoAhora >= 0 && h + 60 <= minutoAhora
+                <div className="shrink-0 w-16 flex items-start justify-end pr-3">
+                  <span className="text-xs font-medium" style={{ color: minutoAhora >= 0 && h < minutoAhora ? '#D1D5DB' : '#9CA3AF', marginTop: -8 }}>
+                    {String(Math.floor(h / 60)).padStart(2, '0')}:{String(h % 60).padStart(2, '0')}
+                  </span>
+                </div>
 
-              return (
-                <div
-                  key={h}
-                  className="relative flex gap-3 pl-3"
-                  style={{ height: ALTO_HORA, borderTop: '1px solid #F3F4F6', backgroundColor: horaPasada ? 'rgba(0,0,0,0.01)' : 'transparent' }}
-                >
+                <div className="flex-1 min-w-0 pl-3 pr-8">
                   {!vacia && (
                     <div className="flex gap-3 w-full pt-3 pb-2">
                       {bloqueosDeLaHora.map((b) => (
-                        <div key={`b-${b.inicio}-${b.titulo}`} className="flex-1">
+                        <div key={`b-${b.inicio}-${b.titulo}`} className="flex-1 min-w-0">
                           <TarjetaBloqueo bloqueo={b} />
                         </div>
                       ))}
                       {citasDeLaHora.map((c) => (
-                        <div key={c.id} className="flex-1">
+                        <div key={c.id} className="flex-1 min-w-0">
                           <TarjetaCita
                             cita={c}
                             pasada={pasada(c.inicio)}
@@ -656,9 +680,9 @@ export default function Agenda({ alCaducarSesion }: { alCaducarSesion: () => voi
                     </div>
                   )}
                 </div>
-              )
-            })}
-          </div>
+              </div>
+            )
+          })}
         </div>
       </div>
     </div>
