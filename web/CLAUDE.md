@@ -34,7 +34,7 @@ uv run uvicorn maxicare_daniela.runtime:app --port 8080
   de `citas`, **cancelarla**, **soltar su cupo en `reservas` y tomar otro**, y reprogramar su
   recordatorio. Abrir la pantalla de Agenda es hoy el mejor disparador que esa reconciliación
   tiene —el otro es que un paciente pregunte por su cita, y no hay ningún barrido—, así que
-  se quiso así. Tres consecuencias que hay que tener presentes antes de tocar esta pantalla:
+  se quiso así. Cuatro consecuencias que hay que tener presentes antes de tocar esta pantalla:
   - **Nada de recargar en bucle.** Un `setInterval` o un `useEffect` mal atado no es una
     pantalla lenta: son escrituras en Neon y llamadas a la API de Google por cada tic.
   - **Lo que corrija se PINTA.** Vuelve en `correcciones`, con la hora vieja dentro. Corregir
