@@ -116,16 +116,42 @@ indefinidamente, y mientras tanto el barrido sigue enseñando a quién habría e
 existe en `main`, así que el botón negativo solo se puede probar **después** de ③ y **antes**
 de ④. Si se salta esta ventana, el primer «Ya no, gracias» real lo pulsará un paciente.
 
-### ④ Poner los nombres en el `.env`
+### ④ Poner los nombres en el `.env` — 🟡 HECHO A MEDIAS el 21/09/2026: **solo `sin_agendar`**
 
-Y ese día, las tres cosas del arranque lento:
+Las tres cosas del arranque lento, comprobadas ese día antes de encender:
 
-- **Verificar la calidad del número contra Meta** antes de nada (`quality_rating`).
-- **`tope_diario_reactivacion` por debajo de 20.** El número está en `TIER_250` —puede iniciar
-  250 conversaciones nuevas cada 24 h— y conviene quedarse muy por debajo: el tier sube solo
-  si la calidad se mantiene, y llenarlo es la forma más rápida de que deje de subir.
+- **Calidad del número contra Meta:** `GREEN` · `TIER_250` · `CONNECTED`. ✅
+- **`tope_diario_reactivacion` bajado de 20 a 5** en la tabla `configuracion`, con su fila de
+  bitácora. El número puede iniciar 250 conversaciones cada 24 h y conviene quedarse muy por
+  debajo: el tier sube solo si la calidad se mantiene, y llenarlo es la forma más rápida de que
+  deje de subir. ✅
 - **Un solo worker.** `barrido.encolar` no tiene candado: dos réplicas leerían el mismo
-  `comprometidos` y cada una encolaría el tope entero.
+  `comprometidos` y cada una encolaría el tope entero. Sigue siendo uno. ✅
+
+**Por qué solo una de las tres, y qué falta para las otras dos:**
+
+`reactivacion_sin_agendar` es la única con el texto correcto, es el grueso del volumen —quien
+preguntó y nunca agendó— y es la única probada de punta a punta contra WhatsApp real, con el
+botón del «no» incluido.
+
+**`reactivacion_cancelada` y `reactivacion_no_asistio` mezclan tuteo y usted**, y hay que
+corregirlas antes de encenderlas:
+
+| Plantilla | Header | Cuerpo |
+|---|---|---|
+| `reactivacion_cancelada` | «**Su** cita en MaxiCare» | tuteo, correcto |
+| `reactivacion_no_asistio` | «**Su** cita en MaxiCare» | «no pudiste asistir a **su** cita» |
+
+Es el mismo defecto que el paso a tuteo del 20/09 existía para arreglar —el paciente lee un
+encabezado formal y un segundo después le contesta una Daniela que lo tutea— y que se quedó a
+medias porque alcanzó los cuerpos y no los encabezados. **Lo encontró un mensaje real, no una
+revisión**: octavo caso del mismo patrón en esta rama.
+
+**Meta rechaza corregirlas hoy:** `error_subcode 2388124`, «solo puedes editar una plantilla
+activa una vez cada 24 horas», y se editaron el 20/09. El script de usar y tirar que las
+arregla está listo; hay que volver a correrlo pasadas las 24 h, esperar a que Meta las vuelva a
+aprobar, probarlas con un mensaje real y entonces descomentar sus dos líneas en el `.env`
+(quedaron ahí, comentadas, justo para eso).
 
 ---
 
