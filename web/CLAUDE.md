@@ -41,7 +41,10 @@ uv run uvicorn maxicare_daniela.runtime:app --port 8080
     en silencio deja a quien mira viendo una cita saltar de sitio sin explicación — el mismo
     fallo que hizo escalar a Daniela el 14/09/2026, por la otra puerta.
   - **Pero solo hasta `herramientas.DIAS_HACIA_ATRAS_AL_SINCRONIZAR` hacia atrás**
-    (`runtime._fuera_de_la_ventana`), y esa cota no es una optimización. Sin ella, abrir en la
+    (`runtime._fuera_de_la_ventana`), y esa cota no es una optimización. Es la misma
+    **constante** que usa Daniela pero no exactamente la misma ventana: el núcleo corta por
+    INSTANTE y el panel por DÍA, así que en el día frontera el panel es hasta 24 h más ancho
+    — siempre del lado permisivo, nunca del restrictivo. Sin ella, abrir en la
     Agenda un día cuyos eventos el doctor ya limpió de su Calendar —orden, no cancelaciones—
     daba esas citas por canceladas en Neon, soltaba sus cupos y dejaba el PATCH respondiendo
     400: **inmarcables para siempre**, las ya marcadas con `asistio = true` sobre una fila
@@ -49,10 +52,21 @@ uv run uvicorn maxicare_daniela.runtime:app --port 8080
     que lo disparaba era MIRAR, y el botón «Ver ese día» de la lista de pendientes lleva
     justo ahí. No contradice el no negociable 20: el camino de Daniela nunca miró más atrás
     de esa misma constante, y el panel lo había ampliado a infinito sin decirlo. El día viejo
-    se pinta con lo que dice Neon y `calendario_disponible: false` — y **el aviso que la
-    pantalla enseña para ese caso hoy dice «No se pudo consultar Google Calendar», que para
-    un día viejo no es cierto**: no falló nada, es que no se contrasta. Queda como deuda
-    declarada, no como descuido.
+    se pinta con lo que dice Neon y `calendario_disponible: false`.
+  - **Y `calendario_disponible: false` tiene DOS motivos que no se parecen, así que viaja
+    `motivo_sin_calendario` al lado.** `fuera_de_ventana` es rutina —el día es viejo— y la
+    pantalla pinta una franja NEUTRA; `no_disponible` es avería —Google no contestó— y pinta
+    la ROJA. Antes las dos daban la roja, y como `DIAS_SIN_MARCAR` (7) es más ancho que la
+    ventana (2), **cinco de los siete días a los que lleva «Ver ese día» disparaban la alarma
+    por un motivo inocuo**: esa franja es la única señal de que se está mirando Neon sin
+    contrastar —una fila desfasada pone a un paciente en la hora equivocada—, y una alarma
+    diaria por nada deja de leerse el día que significa algo. **Los dos literales los decide
+    `runtime.py`** (`MOTIVO_FUERA_DE_VENTANA` / `MOTIVO_CALENDARIO_NO_DISPONIBLE`), el único
+    sitio de TypeScript donde se escriben es `web/src/api.ts`, y que las dos copias no se
+    separen en silencio lo ata `tests/test_agenda_pantalla.py`. La invariante:
+    `motivo_sin_calendario` es `null` si y solo si `calendario_disponible` es `true`; un
+    motivo que la pantalla no conozca sale por la franja roja, que es el lado barato de
+    equivocarse.
   - **Y ese GET que escribe NO tiene candado, así que dos peticiones del mismo día pueden
     dejar DOS recordatorios vivos para la misma cita.** Es el daño del no negociable 21
     entrando por una puerta nueva: hasta esta rama, la reconciliación solo corría desde
