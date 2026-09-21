@@ -1348,7 +1348,16 @@ async def salud() -> dict:
     # Booleano y no el id: el número de un tema de Telegram no abre nada por sí solo --hace
     # falta el token del bot-- pero es una pieza más del mapa, y aquí no la necesita nadie.
     # Lo que se mira desde fuera es si el tema General está resuelto o no.
-    estado["tema_general"] = bool(_tema_general)
+    #
+    # `is not None` y NUNCA `bool(...)`, que es como nació esta línea y estuvo mintiendo en
+    # producción: **el valor normal de `_tema_general` es `0`** --el General se escribe
+    # OMITIENDO el `message_thread_id`, que es lo que fijó la migración 005-- así que `bool`
+    # lo volvía `False` y `/salud` declaraba ausente lo que estaba bien configurado. Peor que
+    # el susto: daba la MISMA respuesta que el `None` de «no se pudo leer la configuración»,
+    # y `None` es justo el caso que esta línea existe para delatar --sin tema General, ni el
+    # relevo ni los escalamientos tienen dónde caer--. Las dos pruebas que la cubrían usaban
+    # `4242` y `None`, nunca el `0`, así que el fallo vivía en verde.
+    estado["tema_general"] = _tema_general is not None
 
     # QUÉ calendario acabó en `_calendario`, no si la variable está puesta. Sin esta línea, el
     # único rastro de un calendario que no arrancó es un `log.error` del arranque que nadie

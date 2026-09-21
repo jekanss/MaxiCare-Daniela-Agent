@@ -890,3 +890,23 @@ def test_sin_tema_general_se_ve_desde_fuera(cliente, monkeypatch):
     monkeypatch.setattr(runtime, "_tema_general", None)
 
     assert cliente.get("/salud").json()["tema_general"] is False
+
+
+def test_el_tema_general_CERO_es_el_valor_normal_y_sale_como_verdadero(cliente, monkeypatch):
+    """Esta prueba nació roja, en producción y no aquí.
+
+    `0` no es «no hay tema»: es EL General. La migración 005 lo fijó así porque `sendMessage`
+    con `message_thread_id=1` responde `message thread not found`, y al General se escribe
+    omitiendo el campo --`canales.py` usa `if tema_id:` justamente para que el 0 lo omita--.
+
+    O sea que `0` es el valor que tiene una clínica bien configurada, y las dos pruebas de
+    arriba lo dejaban pasar: una usa `4242` y la otra `None`, así que un `bool(_tema_general)`
+    quedaba verde en la suite mientras `/salud` decía `tema_general: false` sobre el
+    despliegue sano del 21/09/2026. Y el daño no era el susto, sino que esa misma respuesta
+    es la del `None`: el único caso que esta señal existe para delatar.
+    """
+    monkeypatch.setattr(runtime, "_tema_general", 0)
+
+    r = cliente.get("/salud")
+
+    assert r.json()["tema_general"] is True
