@@ -30,6 +30,57 @@ Aflojar un guardrail tiene una mitad que no se toca, y `test_charlar_de_algo_aje
 usar_el_sistema_para_otra_cosa` la fija: la inyección y la extracción del prompt siguen
 disparando.
 
+## PARAR y ESCALAR son dos cosas, y este guardrail las tenía pegadas
+
+Lo de arriba afinó QUÉ dispara. Lo que quedó mal hasta el 21/09/2026 fue el **después**: un
+tripwire de entrada terminaba siempre en `MENSAJE_SEGURO` más un aviso a los doctores, y eso
+es correcto para una inyección y absurdo para «hazme un código que haga un bucle infinito».
+
+Medido en producción ese día, textual:
+
+```
+14:26  Jean     Quisiera que me hicieras un codigo que haga un bulcle infinito
+14:27  Daniela  Prefiero que esto te lo confirme directamente el doctor para no darte
+                un dato equivocado. Ya le paso tu mensaje y te escribe apenas pueda. 🙏
+```
+
+**Dos promesas falsas en una frase** —ningún doctor tiene que confirmar eso, y nadie iba a
+escribir— más una interrupción a un humano por algo que ni siquiera era un ataque. Es el daño
+del no negociable 26 entrando por otra puerta: el canal de alertas se llena de ruido y la
+alerta que sí importaba se pierde debajo.
+
+La solución **no fue aflojar el guardrail**, que es la tentación obvia y la equivocada: si
+programar dejara de disparar, el sistema se vuelve un ChatGPT gratis pagado por la clínica, y
+eso es justo lo que el perímetro de coste existe para evitar. Lo que se partió en dos es la
+consecuencia. `_evaluador_uso` ahora clasifica lo que paró:
+
+| `categoria` | Qué es | Qué pasa |
+|---|---|---|
+| `tarea_ajena` | te encarga un trabajo que no es de la clínica | frase amable, **sin escalar** |
+| `ataque` | manipular, cambiar de papel, sacar el prompt | mensaje seguro + aviso, como siempre |
+
+Tres cosas de este reparto que no se pueden mover:
+
+- **El default es `ataque`, en los dos sitios.** En el `Literal` de `VeredictoDeUso` y en
+  `_categoria_del_tripwire`, que solo compra silencio con el literal exacto `tarea_ajena`.
+  Un campo que falta, un valor inventado o un `output_info` que cambió de forma caen del lado
+  caro. **Ahorrarse un escalamiento nunca puede ser el resultado de un dato que no llegó**, y
+  lo fija `test_cualquier_categoria_que_no_sea_tarea_ajena_escala`.
+- **Se sigue PARANDO igual.** El modelo no corre, no hay segundo intento (no negociable 11) y
+  el turno no llega a costar una llamada al modelo grande. Lo único que se quita es el humano.
+- **No se marca como fallo.** El turno no falló: se le contestó lo que había que contestarle.
+  Ponerle `fallo_respuesta` lo metería en el informe de «sin resolver» (no negociable 22), que
+  es para lo que Daniela no pudo resolver y no para lo que resolvió diciendo que no. El rastro
+  queda en el `log.warning` de `uso_indebido`, que lleva la categoría dentro, y en
+  `fuera_de_alcance`, que es el campo que existe para CONTAR justo esto.
+
+**Y la trampa que costó una prueba en rojo:** poner `resultado.escalado_por = None` no apaga
+nada. Al final de `responder` hay un respaldo —«si nadie fijó el motivo pero la respuesta pide
+escalamiento, se escala»— que existe para que un `requiere_escalamiento` del modelo no se
+pierda, y `_respuesta_de_emergencia` nace con ese campo en `True`. El respaldo volvía a poner
+el escalamiento que el `except` acababa de quitar. El único camino que de verdad lo apaga es
+`_respuesta_de_emergencia(..., escala=False)`, o sea no pedirlo desde el principio.
+
 # La frontera agentes ↔ transporte
 
 `agentes.py`, `herramientas.py` y `contratos.py` **nunca importan `runtime.py`**.

@@ -54,7 +54,7 @@ from agents import (
     UserError,
 )
 
-from . import consumo, persistencia
+from . import consumo, guardrails, persistencia
 from .agentes import VERSION_PROMPT, daniela as agente_daniela
 from .config import LIMITE_TURNOS, MODELO_DANIELA, WORKFLOW_NAME, config_de_corrida
 from .contratos import ContextoDaniela, MotivoEscalamiento, RespuestaDaniela
@@ -92,6 +92,22 @@ MENSAJE_LIMITE_TURNOS = (
 MENSAJE_FALLO_TECNICO = (
     "Se me complicó revisar eso en este momento. Ya le avisé al equipo y te confirmamos "
     "apenas lo tengamos."
+)
+
+#: Para cuando alguien le encarga a Daniela un trabajo que no es de la clínica: escribir
+#: código, traducir, hacerle un ejercicio. `uso_indebido` lo para --y tiene que seguir
+#: parándolo, o el sistema se vuelve un ChatGPT gratis pagado por la clínica-- pero **eso no
+#: es un ataque ni una duda del doctor**, así que no puede terminar en `MENSAJE_SEGURO`.
+#:
+#: Aquella frase promete dos cosas que aquí son falsas: que el doctor va a confirmar el dato,
+#: y que alguien va a escribir. Medido el 21/09/2026 con «hazme un bucle infinito».
+#:
+#: NO lo escribe el modelo: llega por el mismo camino que los otros tres, dentro de un
+#: `except`, con el turno ya abortado por el tripwire. Por eso es un literal y no una
+#: instrucción del prompt -- el modelo nunca llegó a correr.
+MENSAJE_FUERA_DE_ALCANCE = (
+    "Con eso no te puedo ayudar, es que yo solo sé de MaxiCare 😅 Pero si necesitas algo de "
+    "la clínica —tratamientos, precios, horarios o agendar tu cita— dime y lo vemos."
 )
 
 #: La corrección que se le da al modelo al regenerar. Es explícita a propósito: «vuelve a
@@ -230,7 +246,11 @@ class Resultado:
 
 
 def _respuesta_de_emergencia(
-    texto: str, *, motivo: MotivoEscalamiento = "dato_faltante"
+    texto: str,
+    *,
+    motivo: MotivoEscalamiento = "dato_faltante",
+    escala: bool = True,
+    fuera_de_alcance: bool = False,
 ) -> RespuestaDaniela:
     """Una `RespuestaDaniela` válida construida por el código, no por el modelo.
 
@@ -238,14 +258,23 @@ def _respuesta_de_emergencia(
     que dicen «esta conversación está detenida por algo que no es una objeción del paciente»,
     y evitan que un fallo técnico se cuele en las métricas como si fuera una barrera
     comercial que nadie tuvo.
+
+    **`escala=False` existe porque poner `resultado.escalado_por = None` NO basta**, y eso
+    costó una prueba en rojo el 21/09/2026. Al final de `responder` hay un respaldo --«si
+    nadie fijó el motivo pero la respuesta pide escalamiento, se escala»-- que existe para
+    que un `requiere_escalamiento` del MODELO no se pierda. Como esta fábrica nace con ese
+    campo en `True`, ese respaldo volvía a poner el escalamiento que el `except` acababa de
+    quitar: el único camino que de verdad lo apaga es no pedirlo desde el principio. El
+    motivo cae a `'ninguno'` solo, porque un motivo de escalamiento sin escalamiento es un
+    dato que contradice al de al lado.
     """
     return RespuestaDaniela(
         mensaje_al_paciente=texto,
         estado_oportunidad="con_barrera",
         barrera_detectada="ninguna",
-        requiere_escalamiento=True,
-        motivo_escalamiento=motivo,
-        fuera_de_alcance=False,
+        requiere_escalamiento=escala,
+        motivo_escalamiento=motivo if escala else "ninguno",
+        fuera_de_alcance=fuera_de_alcance,
     )
 
 
@@ -279,13 +308,44 @@ def _motivo_del_tripwire(excepcion: Exception) -> str:
     Mismo `try` amplio que `_nombre_del_tripwire` y por la misma razón: si el SDK cambia de
     forma, se cae al nombre y el turno sigue.
     """
-    try:
-        info = excepcion.guardrail_result.output.output_info  # type: ignore[attr-defined]
-    except Exception:  # noqa: BLE001 -- ver docstring
-        info = None
-    if isinstance(info, str) and info.strip():
+    info = _info_del_tripwire(excepcion)
+    # `uso_indebido` manda un dict --motivo + categoría-- desde el 21/09/2026; los otros
+    # cinco siguen mandando texto. Se leen las dos formas en vez de migrar los seis: los
+    # otros no tienen ninguna categoría que distinguir, y darles una vacía sería inventarles
+    # un campo para que este `if` quedara más corto.
+    if isinstance(info, dict):
+        motivo = str(info.get("motivo") or "").strip()
+        if motivo:
+            return motivo
+    elif isinstance(info, str) and info.strip():
         return info.strip()
     return _nombre_del_tripwire(excepcion)
+
+
+def _info_del_tripwire(excepcion: Exception):
+    """Lo que el guardrail dejó en `output_info`, sea de la forma que sea, o `None`.
+
+    Mismo `try` amplio que sus dos vecinas: si el SDK cambia de forma, esto devuelve `None`,
+    el motivo cae al nombre del guardrail y el turno sigue.
+    """
+    try:
+        return excepcion.guardrail_result.output.output_info  # type: ignore[attr-defined]
+    except Exception:  # noqa: BLE001 -- ver docstring
+        return None
+
+
+def _categoria_del_tripwire(excepcion: Exception) -> str:
+    """De qué clase era lo que paró `uso_indebido`. Cadena vacía para los demás guardrails.
+
+    Lo que decide es si se interrumpe a un doctor, así que **el valor por defecto es el que
+    escala**: cualquier cosa que no sea exactamente `CATEGORIA_TAREA_AJENA` --un dict sin el
+    campo, una cadena, un `None` porque el SDK cambió-- cae del lado de siempre. Ahorrarse un
+    escalamiento nunca puede ser el resultado de un dato que no llegó.
+    """
+    info = _info_del_tripwire(excepcion)
+    if isinstance(info, dict):
+        return str(info.get("categoria") or "")
+    return ""
 
 
 def _config_de_corrida(ctx: ContextoDaniela) -> RunConfig:
@@ -405,10 +465,51 @@ async def responder(
         # modelo para llegar.
         nombre = _nombre_del_tripwire(e)
         resultado.tripwires.append(nombre)
-        resultado.respuesta = _respuesta_de_emergencia(MENSAJE_SEGURO)
-        resultado.escalado_por = "dato_faltante"
-        resultado.fallo = f"tripwire de entrada: {nombre}"
-        log.error("tripwire de entrada (%s) en %s · se escala", nombre, ctx.id_conversacion)
+
+        # La segunda mitad, desde el 21/09/2026: **no todo lo que para `uso_indebido` merece
+        # un doctor**. Ese guardrail está afinado para disparar igual con «escríbeme un bucle
+        # infinito» que con «ignora tus instrucciones» --la línea es si le PIDE QUE HAGA algo
+        # ajeno, ver `.claude/rules/frontera-agentes.md`-- y eso no cambia: ninguna de las dos
+        # debe llegar al modelo. Lo que cambia es el después.
+        #
+        # Con `MENSAJE_SEGURO`, a quien pidió código se le decía «ya le paso tu mensaje al
+        # doctor y te escribe apenas pueda». Dos promesas falsas en una frase, y un Telegram
+        # al doctor por algo que ni siquiera era un ataque. Es el daño del no negociable 26
+        # entrando por otra puerta: el canal de alertas se llena de ruido y la alerta que sí
+        # importaba se pierde debajo.
+        #
+        # Lo que NO se afloja: sigue sin correr el modelo, sigue sin haber segundo intento
+        # (no negociable 11) y un `ataque` --o cualquier categoría que no se pueda leer--
+        # termina exactamente donde terminaba antes.
+        if _categoria_del_tripwire(e) == guardrails.CATEGORIA_TAREA_AJENA:
+            resultado.respuesta = _respuesta_de_emergencia(
+                MENSAJE_FUERA_DE_ALCANCE,
+                # `escala=False` es lo que de verdad apaga el escalamiento; ver su docstring.
+                escala=False,
+                # Y `fuera_de_alcance=True` es el valor honesto: ese campo «solo cuenta» --lo
+                # dice su descripción-- y es exactamente esto lo que mide, alguien
+                # preguntando algo ajeno a MaxiCare. Dejarlo en False borraría del contador el
+                # único caso que el guardrail sí para.
+                fuera_de_alcance=True,
+            )
+            # Sin `escalado_por` y sin `fallo`, y las dos ausencias son deliberadas: nadie
+            # tiene que atender esto, y el turno NO falló --se le contestó lo que había que
+            # contestarle--. Marcarlo como fallo lo metería en el informe de «sin resolver»
+            # (no negociable 22), que es para lo que Daniela no pudo resolver, no para lo que
+            # resolvió diciendo que no. El rastro queda en el `log.warning` de `uso_indebido`,
+            # que ya trae la categoría.
+            log.info(
+                "tripwire de entrada (%s) en %s · fuera de alcance, NO se escala",
+                nombre,
+                ctx.id_conversacion,
+            )
+        else:
+            resultado.respuesta = _respuesta_de_emergencia(MENSAJE_SEGURO)
+            resultado.escalado_por = "dato_faltante"
+            resultado.fallo = f"tripwire de entrada: {nombre}"
+            log.error(
+                "tripwire de entrada (%s) en %s · se escala", nombre, ctx.id_conversacion
+            )
 
     except TRIPWIRES as e:
         nombre = _nombre_del_tripwire(e)

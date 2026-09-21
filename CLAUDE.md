@@ -99,6 +99,14 @@ una —qué se midió, qué costó— está en la regla que cubre ese archivo.
 11. **La regeneración corre SIN los guardrails de ENTRADA, y un tripwire de entrada no se
    regenera nunca.** Va sobre `agente.clone(input_guardrails=[])` y conserva los tres de
    SALIDA. El `{motivo}` que viaja en `CORRECCION` es el TEXTO del guardrail, jamás su nombre.
+   **Y PARAR no es ESCALAR: `uso_indebido` clasifica lo que paró.** `tarea_ajena` --«hazme un
+   código»-- se corta igual pero **no interrumpe a nadie**: frase amable, sin `escalado_por` y
+   sin `fallo`. `ataque` termina donde siempre. Hasta el 21/09/2026 quien pedía código recibía
+   «ya le paso tu mensaje al doctor»: dos promesas falsas y un Telegram por algo que no era un
+   ataque. **El default es `ataque` en los DOS sitios** y solo el literal exacto `tarea_ajena`
+   compra el silencio: ahorrarse un escalamiento no puede salir de un dato que no llegó. Y
+   `escalado_por = None` NO apaga nada --hay un respaldo al final de `responder`--: el
+   interruptor es `_respuesta_de_emergencia(..., escala=False)`.
 12. **Un teléfono SIN ficha en `pacientes` puede crear su primera cita; mover o cancelar,
    nunca.** El permiso lo da `ctx.telefono_sin_paciente`, que sale de la base y **nunca del
    modelo**, y la excepción es una lista blanca de UNA tool (`_ESCRITURAS_PARA_DESCONOCIDO`).
