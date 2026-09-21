@@ -560,9 +560,11 @@ def test_el_seguimiento_mira_el_reloj_DEL_TURNO_y_no_el_de_la_maquina(monkeypatc
 
     monkeypatch.setattr(h, "_con_base", base_falsa)
 
-    # Futuro para el reloj de la máquina, pasado para el turno.
+    # Futuro para el reloj de la máquina, pasado para el turno. `reactivacion_sin_agendar` y
+    # no `recordatorio_cita`: desde la tarea 2, ese tipo ya no es encolable por esta vía --lo
+    # emite el código al crear o mover la cita-- y esta prueba no es sobre el vocabulario.
     texto = asyncio.run(
-        h._programar_seguimiento(ctx, "recordatorio_cita", "2026-12-01T09:00")
+        h._programar_seguimiento(ctx, "reactivacion_sin_agendar", "2026-12-01T09:00")
     )
 
     assert "ya pasó" in texto
@@ -888,6 +890,9 @@ def test_agendar_registra_al_paciente_y_lo_deja_verificado(monkeypatch):
     # Lo mismo que en `_descripcion_del_evento`: esta prueba mira la ficha del paciente, no
     # la cola, pero `guardar` corre entero contra los dobles.
     monkeypatch.setattr(h.persistencia, "insertar_seguimiento", lambda conn, **kw: True)
+    monkeypatch.setattr(
+        h.persistencia, "reiniciar_seguimientos_fallidos", lambda conn, telefono, **kw: None
+    )
 
     texto = asyncio.run(
         h._crear_cita(
@@ -1142,6 +1147,10 @@ def _descripcion_del_evento(monkeypatch, ctx, solicitud) -> str:
     # pruebas no miran la cola, pero sí corren `guardar` de verdad: sin el doble, la
     # inserción llegaría a `BaseFalsa` buscando un cursor.
     monkeypatch.setattr(h.persistencia, "insertar_seguimiento", lambda conn, **kw: True)
+    # Lo mismo desde la tarea 5: el reset del contador corre dentro de la misma transacción.
+    monkeypatch.setattr(
+        h.persistencia, "reiniciar_seguimientos_fallidos", lambda conn, telefono, **kw: None
+    )
 
     asyncio.run(h._crear_cita(ctx, solicitud))
     (descripcion,) = ctx.calendario.descripciones.values()
@@ -2289,9 +2298,25 @@ def test_crear_cita_programa_el_recordatorio_sin_que_el_modelo_lo_pida(monkeypat
     Hasta hoy el recordatorio dependía de que el modelo llamara a `programar_seguimiento`, y ni
     el prompt de `agentes.py` ni `crear_cita` la mencionaban. En la práctica la cola estaba
     vacía: la tool existía desde la fase 3 y nadie la llamaba.
+
+    `pidio_no_contacto=True`: es la única prueba del nivel `herramientas` que combina la baja
+    con la emisión de un recordatorio, y por eso es la que sostiene la mitad no-comercial del
+    no negociable 25 en esta capa. `crear_cita` llama a `persistencia.insertar_seguimiento`
+    directo, sin pasar por `ctx.pidio_no_contacto` en ningún punto del camino -- si alguien le
+    sumara un `if ctx.pidio_no_contacto: cuando_recordar = None` creyendo que respeta la baja,
+    esta prueba es la que lo cazaría.
+
+    I1 (ronda de revisión sobre la parada D): el doble de `reiniciar_seguimientos_fallidos`
+    ahora REGISTRA la llamada, y esta prueba comprueba con QUÉ teléfono se hizo -- no solo que
+    `crear_cita` no reventó. Con un doble que solo silenciaba el `AttributeError`
+    (`lambda conn, telefono, **kw: None`), borrar la línea del reset en `_crear_cita` dejaba
+    la suite entera en verde: la ausencia de la llamada era indistinguible de su presencia.
     """
     programados: list[dict] = []
-    ctx = contexto(ahora=datetime(2026, 9, 14, 9, 0, tzinfo=h.ZONA_BOGOTA))
+    reinicios: list[str] = []
+    ctx = contexto(
+        ahora=datetime(2026, 9, 14, 9, 0, tzinfo=h.ZONA_BOGOTA), pidio_no_contacto=True
+    )
 
     async def base_falsa(_ctx, trabajo):
         return trabajo(BaseFalsa())
@@ -2308,6 +2333,11 @@ def test_crear_cita_programa_el_recordatorio_sin_que_el_modelo_lo_pida(monkeypat
         return True
 
     monkeypatch.setattr(persistencia, "insertar_seguimiento", _insertar)
+
+    def _reiniciar(conn, telefono, **kw):
+        reinicios.append(telefono)
+
+    monkeypatch.setattr(persistencia, "reiniciar_seguimientos_fallidos", _reiniciar)
 
     texto = asyncio.run(
         h._crear_cita(
@@ -2333,6 +2363,10 @@ def test_crear_cita_programa_el_recordatorio_sin_que_el_modelo_lo_pida(monkeypat
     # La clave la arma `ctx.clave`, nunca el modelo: lleva el id de la conversación delante.
     assert programados[0]["clave_idempotencia"].startswith("conv-1:")
     assert "da-igual" not in programados[0]["clave_idempotencia"]
+    # I1: agendar SÍ reinicia el contador, y lo hace con el teléfono de quien agendó -- no con
+    # ningún otro. Quitar la línea del reset en `_crear_cita`, o mover el `conn.commit()` por
+    # delante de ella, deja esto en rojo.
+    assert reinicios == [ctx.telefono_completo]
 
 
 def test_una_cita_a_dos_horas_no_deja_recordatorio(monkeypatch):
@@ -2353,6 +2387,9 @@ def test_una_cita_a_dos_horas_no_deja_recordatorio(monkeypatch):
         persistencia,
         "insertar_seguimiento",
         lambda conn, **kw: programados.append(kw) or True,
+    )
+    monkeypatch.setattr(
+        persistencia, "reiniciar_seguimientos_fallidos", lambda conn, telefono, **kw: None
     )
 
     asyncio.run(
@@ -2788,7 +2825,8 @@ def test_no_se_programa_nada_sobre_una_conversacion_que_tiene_un_doctor(monkeypa
     monkeypatch.setattr(h, "_con_base", base_falsa)
 
     futuro = (ctx.ahora + timedelta(days=2)).isoformat()
-    texto = asyncio.run(h._programar_seguimiento(ctx, "recordatorio_cita", futuro))
+    # `reactivacion_sin_agendar`: `recordatorio_cita` ya no es encolable por esta vía (tarea 2).
+    texto = asyncio.run(h._programar_seguimiento(ctx, "reactivacion_sin_agendar", futuro))
 
     assert "No se programó nada" in texto
     assert "Dr. Martínez" in texto
@@ -2798,7 +2836,9 @@ def test_no_se_programa_un_seguimiento_hacia_atras():
     ctx = contexto()
     pasado = (ctx.ahora - timedelta(days=1)).isoformat()
 
-    texto = asyncio.run(h._programar_seguimiento(ctx, "reactivacion", pasado))
+    # `reactivacion_sin_agendar` y no `reactivacion` a secas: ese tipo nunca existió en el
+    # vocabulario cerrado de la tarea 2.
+    texto = asyncio.run(h._programar_seguimiento(ctx, "reactivacion_sin_agendar", pasado))
 
     assert "ya pasó" in texto
 
@@ -2820,33 +2860,51 @@ def test_con_la_baja_puesta_lo_comercial_NO_LLEGA_A_INSERTARSE(monkeypatch):
     monkeypatch.setattr(h, "_con_base", base_prohibida)
 
     futuro = (ctx.ahora + timedelta(days=2)).isoformat()
-    texto = asyncio.run(h._programar_seguimiento(ctx, "reactivacion", futuro))
+    # `reactivacion_sin_agendar` y no `reactivacion` a secas: ese tipo nunca existió en el
+    # vocabulario cerrado de la tarea 2.
+    texto = asyncio.run(h._programar_seguimiento(ctx, "reactivacion_sin_agendar", futuro))
 
     assert "no le escribieran más" in texto
     assert "no se programó nada comercial" in texto
 
 
-def test_con_la_baja_puesta_el_recordatorio_de_una_cita_SI_se_programa(monkeypatch):
-    """La otra mitad, y la que importa: pedir que no te manden publicidad no es renunciar a
-    que te avisen de tu propia cita. Las dos van juntas porque el fallo que interesa es que
-    alguien las una (no negociable 25)."""
-    ctx = contexto(pidio_no_contacto=True)
+def test_recordatorio_de_cita_no_se_encola_por_esta_via_ni_siquiera_sin_baja(monkeypatch):
+    """La tarea 2 sacó `recordatorio_cita` de lo que el modelo puede pedir por esta tool: lo
+    emite el CÓDIGO al crear o mover la cita (`crear_cita`/`reprogramar_cita`, con
+    `persistencia.insertar_seguimiento` directo), nunca `_programar_seguimiento`. Esta prueba
+    reemplaza a la que existía --que esperaba justo lo contrario, que la baja no le aplicaba a
+    `recordatorio_cita` PORQUE se podía programar por aquí-- porque esa premisa ya no es
+    cierta: ahora se rechaza con baja o sin ella, antes de tocar la base.
+    """
+    ctx = contexto()
 
-    async def base_falsa(_ctx, trabajo):
-        return (None, True)
+    async def base_prohibida(_ctx, trabajo):
+        raise AssertionError("no se puede tocar la base pidiendo un tipo que no se encola")
 
-    monkeypatch.setattr(h, "_con_base", base_falsa)
+    monkeypatch.setattr(h, "_con_base", base_prohibida)
 
     futuro = (ctx.ahora + timedelta(days=2)).isoformat()
     texto = asyncio.run(h._programar_seguimiento(ctx, "recordatorio_cita", futuro))
 
-    assert "programado" in texto
+    assert "no existe" in texto.lower()
 
 
-def test_la_guarda_de_la_baja_usa_LA_MISMA_lista_blanca_que_el_despachador():
-    """Dos listas para el mismo hecho acaban divergiendo, y divergir aquí significa que la
-    tool programa lo que el despachador anula --o, peor, al revés--."""
-    assert "recordatorio_cita" in seguimientos.TIPOS_NO_COMERCIALES
+def test_la_guarda_de_la_baja_es_incondicional_PORQUE_lo_que_el_modelo_pide_es_siempre_comercial():
+    """Reemplaza a `test_la_guarda_de_la_baja_usa_LA_MISMA_lista_blanca_que_el_despachador`,
+    que comparaba `_programar_seguimiento` contra `TIPOS_NO_COMERCIALES` -- una comparación
+    que dejó de significar nada en cuanto `recordatorio_cita` salió por completo de
+    `TIPOS_QUE_EL_MODELO_PUEDE_PEDIR`: desde entonces la comprobación de la baja en la tool
+    ya no mira el tipo, es un `if ctx.pidio_no_contacto:` a secas.
+
+    Lo que hace que esa incondicionalidad sea segura -- y lo que esta prueba sostiene -- es
+    que las dos constantes no se solapen: si algún día alguien mete en
+    `TIPOS_QUE_EL_MODELO_PUEDE_PEDIR` un tipo que también esté en `TIPOS_NO_COMERCIALES`, la
+    baja empezaría a bloquear una excepción real (o, al revés, un tipo comercial se colaría
+    como exento) sin que ninguna otra prueba lo note.
+    """
+    assert seguimientos.TIPOS_QUE_EL_MODELO_PUEDE_PEDIR.isdisjoint(
+        seguimientos.TIPOS_NO_COMERCIALES
+    )
 
 
 # ==========================================================================================

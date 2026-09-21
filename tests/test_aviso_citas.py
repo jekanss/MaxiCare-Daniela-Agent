@@ -306,6 +306,15 @@ def crear_cita(monkeypatch, ctx) -> str:
     monkeypatch.setattr(persistencia, "asegurar_paciente", lambda conn, **kw: 7)
     monkeypatch.setattr(persistencia, "registrar_cita", lambda conn, **kw: "cita-nueva")
     monkeypatch.setattr(persistencia, "insertar_seguimiento", lambda conn, **kw: True)
+    # La trajo la reactivación de leads: `crear_cita` pone a cero el contador de
+    # seguimientos ignorados, porque quien ignoró dos veces y al final vino demostró lo
+    # contrario de lo que ese contador supone. Se dobla como todo lo demás de `persistencia`
+    # en este ayudante --y NO ampliando `BaseFalsa` con un `cursor` de mentira-- porque el
+    # doble de una conexión que acepta cualquier SQL deja pasar la consulta rota: es
+    # exactamente el «verde por el motivo equivocado» de `.claude/rules/pruebas.md`.
+    monkeypatch.setattr(
+        persistencia, "reiniciar_seguimientos_fallidos", lambda conn, telefono, **kw: None
+    )
 
     async def _todo() -> str:
         texto = await h._crear_cita(

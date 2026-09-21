@@ -189,7 +189,7 @@ def cuatro_cancelar_anula_el_recordatorio(conn, ctx, id_cita: str) -> None:
 
 
 def cinco_el_despachador_decide_sin_enviar(conn, url: str, ctx) -> None:
-    """Con `plantilla=""` el despachador corre entero y no manda nada. Es el modo con el que
+    """Con `plantillas={}` el despachador corre entero y no manda nada. Es el modo con el que
     se cuelga en producción para ver que decide bien antes de arriesgar un WhatsApp.
 
     El RECUENTO por sí solo no demuestra nada: cuando `despachar` decide "enviar" y la
@@ -254,7 +254,7 @@ def cinco_el_despachador_decide_sin_enviar(conn, url: str, ctx) -> None:
             database_url=url,
             whatsapp=None,
             jornada=ctx.jornada,
-            plantilla="",
+            plantillas={},
             ahora=fecha_objetivo,
         )
     )
@@ -267,7 +267,7 @@ def cinco_el_despachador_decide_sin_enviar(conn, url: str, ctx) -> None:
         enviado_en, anulado_en = cur.fetchone()
 
     # Los cuatro contadores en cero es justo lo que deja el camino real: `decidir()` dice
-    # "enviar" (las siete guardas pasaron) y el propio `if not plantilla: ... continue` de
+    # "enviar" (todas sus guardas pasaron) y el propio `if not plantilla: ... continue` de
     # `despachar` no toca ninguno -- ver su docstring, "SIGUE pendiente -no se marca-". Un
     # `aplazados` o un `anulados` aquí significaría que la fila NUNCA llegó a esa rama, y
     # esta comprobación estaría demostrando otra cosa sin decirlo.

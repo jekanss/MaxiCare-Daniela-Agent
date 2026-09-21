@@ -122,17 +122,29 @@ argument 'group_id'`). **Quien cambie una de esas firmas corre los seis que no g
   veces, y hasta este script ninguna prueba lo había ejercitado contra la base de verdad.
 - `probar_plantilla.py` **no toca la base en ningún momento** y es el paso que va entre «Meta
   aprobó la plantilla» y `desplegar.sh`. `--estado` no gasta; con un teléfono manda UN mensaje
-  de plantilla de verdad. **Los cuatro huecos salen de
-  `seguimientos._parametros_del_recordatorio`, no de literales escritos a mano**, y esa es la
-  única razón por la que la prueba vale: con literales comprobaría que Meta acepta *una*
-  plantilla, no la que manda el despachador —un orden de huecos cambiado o la conversión de
-  zona rota se verían en el WhatsApp que llega al teléfono—. Dobla la FILA que el despachador
-  lee de la base (`cita_inicio`, `nombre_completo`, `tratamiento`): si esa consulta cambia de
-  nombres de columna, aquí no se entera nadie. Su trampa: **el WABA no se puede derivar del
-  token**, así que `--estado` no llega a leer la plantilla en Meta y lo dice en vez de callarse
-  —el token es de usuario de sistema con acceso total, y por eso sus `granular_scopes` vienen
-  SIN `target_ids`—. El envío real es la comprobación definitiva, y un rechazo de Meta no se
-  cobra.
+  de plantilla de verdad. **Los huecos salen de `seguimientos.parametros_de`
+  (renombrada de `_parametros_del_recordatorio` en la tarea 4; ya no es privada), no de
+  literales escritos a mano**, y esa es la única razón por la que la prueba vale: con
+  literales comprobaría que Meta acepta *una* plantilla, no la que manda el despachador —un
+  orden de huecos cambiado o la conversión de zona rota se verían en el WhatsApp que llega al
+  teléfono—. Dobla la FILA que el despachador lee de la base (`cita_inicio`, `nombre_completo`,
+  `tratamiento` para el recordatorio; `tipo`, `nombre_ficha`, `nombre_perfil` para las
+  reactivaciones): si esa consulta cambia de nombres de columna, aquí no se entera nadie. Su
+  trampa: **el WABA no se puede derivar del token**, así que `--estado` no llega a leer la
+  plantilla en Meta y lo dice en vez de callarse —el token es de usuario de sistema con
+  acceso total, y por eso sus `granular_scopes` vienen SIN `target_ids`—. El envío real es la
+  comprobación definitiva, y un rechazo de Meta no se cobra.
+  **Cubre LAS CUATRO desde el 20/09/2026, no solo la de recordatorio** (`--tipo
+  recordatorio|sin_agendar|cancelada|no_asistio`, default `recordatorio`; `--estado` las
+  recorre todas y una vacía no es un fallo sino el modo de comprobación). Antes estaba
+  cableado a `config.plantilla_recordatorio` y las tres de reactivación no tenían forma de
+  probarse: habrían llegado al día del encendido sin que nadie hubiera visto una en un
+  teléfono. **La fila de ejemplo de una reactivación NO lleva `nombre_completo`** —toda fila
+  de reactivación tiene `cita_id` NULL, así que el `LEFT JOIN` a `citas` no produce ese
+  campo; ponerlo aquí haría pasar la prueba por un eslabón que en producción está vacío el
+  100% de las veces, que es exactamente lo que escondió el «Hola paciente»—. Y **`--plantilla
+  NOMBRE` manda sobre el `.env` solo en esa corrida**: existe porque escribir el nombre en el
+  `.env` de un servidor con este código ES el encendido, y probar no puede exigir encender.
 - `probar_sin_resolver.py` escribe en `pruebas_sin_resolver`, propio y no compartido con
   `probar_tools.py` ni con `probar_recordatorios.py` — a propósito: los tres montan con
   `DROP SCHEMA ... CASCADE`, y correr dos de ellos a la vez sobre el mismo nombre hace que
@@ -149,6 +161,44 @@ argument 'group_id'`). **Quien cambie una de esas firmas corre los seis que no g
   `reseteo.ETIQUETAS_DE_TABLA` sin guion bajo: sin esa etiqueta el paciente recibe «1 en
   casos_sin_resolver» por WhatsApp, el nombre interno de una tabla de la clínica que no es
   suya.
+
+- `probar_reactivacion.py` escribe en `pruebas_reactivacion_script`, propio y no compartido
+  con ninguno de los otros esquemas de esta lista -- mismo motivo que `probar_sin_resolver.py`
+  (dos `DROP SCHEMA ... CASCADE` sobre el mismo nombre a la vez se borran el uno al otro a
+  mitad de corrida). No gasta un token y **no manda nada**: las tres plantillas de
+  reactivación de leads no están aprobadas por Meta, así que corre `seguimientos.despachar`
+  con `plantillas={}` en todo el camino y su WhatsApp doblado (`WhatsAppQueRevienta`) revienta
+  si alguien llega a llamar `enviar_plantilla` de verdad, en vez de devolver un éxito
+  silencioso -- con `plantillas={}` esa llamada nunca debería ocurrir, y que `.llamadas` siga
+  vacío al final es una de las comprobaciones. Siembra los dos casos del diseño (Marcela,
+  que preguntó y no agendó; Andrés, que canceló y no volvió a agendar), corre `barrido.
+  encolar` y `seguimientos.despachar` sobre ellos e imprime la decisión de cada fila, y
+  después comprueba las once reglas anti-reporte de la spec una por una -- diez con
+  `OK`/`FALLA` y la 11 (que el barrido se apague solo si la calidad del número baja) con
+  `POR VERIFICAR`, porque el mecanismo se prueba en frío contra `barrido.se_puede_encolar`
+  pero la consulta REAL a `graph.facebook.com` es de `scripts/probar_plantilla.py --estado` o
+  de una comprobación manual, nunca de un script que no gasta ni toca la red. Dobla a mano
+  las firmas de `barrido.encolar`, `seguimientos.despachar`, `seguimientos.decidir` y
+  `persistencia.contar_comprometidos_hoy`; quien les cambie la firma rompe este script en
+  silencio, igual que a los demás de esta lista. **Desde la revisión final dobla también
+  `persistencia.registrar_negativa_de_reactivacion` y `marcar_seguimiento_enviado`**: la regla
+  3 recorre ahora la SECUENCIA REAL -encolar, marcar ENVIADO, y solo entonces el «no» del
+  paciente-, porque la versión anterior sembraba a mano una fila PENDIENTE justo antes de
+  anular y ese estado en producción no existe (el botón «Ya no, gracias» solo aparece DESPUÉS
+  de que el mensaje salió). Con el estado fabricado la comprobación pasaba en verde sobre un
+  bloqueo que no se escribía nunca. **Es la única red que hoy existe para
+  `contar_comprometidos_hoy`**: no hay ni una prueba offline de esa función (toda su
+  protección vivía solo en `-m neon`), así que la regla 9 (arranque lento) siembra a mano los
+  tres casos de la Ruling E9 -enviado hoy, pendiente de hoy, aplazado lejos- y los dos que NO
+  deben contar -lejos y nunca aplazado, y un recordatorio de cita- y exige el número exacto
+  antes de tocar `barrido.encolar`. Las reglas 10 y 11 comprueban con un DSN que no resuelve
+  que `encolar` de verdad NO ABRE NINGUNA CONEXIÓN cuando el interruptor está apagado o la
+  calidad frena -- si lo intentara, reventaría ahí mismo en vez de devolver ceros en silencio.
+  Al final imprime, sin que se puedan pasar por alto, las tres cosas que este entregable no
+  garantiza: que el ensayo en seco (sin plantilla) muestra más DECISIONES que mensajes reales
+  porque anular libera cupo; que ninguna prueba garantiza que la gente no reporte el número,
+  solo que las reglas comprobables no se puedan saltar; y que nada sale hasta que Meta
+  apruebe las tres plantillas.
 
 ## `medir_historial.py`
 

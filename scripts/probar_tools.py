@@ -1,4 +1,4 @@
-"""Corre las doce tools contra Neon y un calendario de pruebas, y lo cuenta en claro.
+"""Corre las trece tools contra Neon y un calendario de pruebas, y lo cuenta en claro.
 
     uv run python scripts/probar_tools.py
 
@@ -363,9 +363,22 @@ def corridas(url: str) -> int:
     )
     print(f"   estado guardado       -> {marca('guardado' in estado)} {estado}")
 
-    objetivo = hora(72)
-    primero = asyncio.run(h._programar_seguimiento(ctx, "recordatorio_cita", objetivo.isoformat()))
-    repetido = asyncio.run(h._programar_seguimiento(ctx, "recordatorio_cita", objetivo.isoformat()))
+    # A SIETE DIAS, y NO con `hora(...)` (revision final). `hora()` cuenta bloques habiles
+    # desde dentro de 45 dias -- ese colchon existe para no chocar con el calendario REAL al
+    # reservar cupos--, y desde esta ronda `programar_seguimiento` acota `fecha_objetivo` a
+    # `persistencia.DIAS_DE_VENTANA_DE_CARTERA` (30), que es la ventana de las dos consultas
+    # de cartera. Con `hora(72)` las dos llamadas de abajo devolvian "esa fecha esta demasiado
+    # lejos" antes de tocar la base, y es correcto que lo hicieran: el problema era el valor
+    # del script, no la cota. Un seguimiento no reserva ningun cupo ni mira la jornada, asi
+    # que no necesita ni el colchon de 45 dias ni un bloque habil -- solo una fecha futura
+    # dentro de la ventana.
+    objetivo = ctx.ahora + timedelta(days=7)
+    # `reactivacion_sin_agendar`, no `recordatorio_cita`: desde la tarea 2 de la reactivación
+    # de leads, ese tipo salió de lo que se puede pedir por esta tool -- lo emite el código al
+    # crear o mover la cita-- y con el viejo las dos llamadas de abajo devolvían "Ese tipo de
+    # seguimiento no existe..." antes de tocar la base.
+    primero = asyncio.run(h._programar_seguimiento(ctx, "reactivacion_sin_agendar", objetivo.isoformat()))
+    repetido = asyncio.run(h._programar_seguimiento(ctx, "reactivacion_sin_agendar", objetivo.isoformat()))
     print(f"   seguimiento           -> {marca('programado' in primero)} {primero[:55]}")
     print(f"   el mismo otra vez     -> {marca('ya estaba' in repetido)} no se duplica")
 
@@ -496,11 +509,81 @@ def corridas(url: str) -> int:
           f"{marca('vuelve a recibir mensajes' not in sin_cambio)} no confirma un cambio "
           f"que no ocurrio")
 
+    # -- 12. cerrar_seguimiento (tarea 6) -------------------------------------------------
+    # La tool 13, y la unica escritura de esta tarea contra Neon de verdad: `probar_tools.py`
+    # es el unico script que ejercita `guardar()`/las tools de escritura contra la base real,
+    # y es justo donde el hallazgo I1 de la ronda de revision senalo que un reset borrado en
+    # `_crear_cita` no lo cazaba ni la suite offline ni -hasta ahora- este script.
+    print("\n12. cerrar_seguimiento")
+
+    def contacto_de_neon(telefono: str) -> dict:
+        with persistencia.conectar(url) as conn:
+            return persistencia.asegurar_contacto(conn, telefono)
+
+    def seguimiento_anulado_en_neon(clave: str) -> bool:
+        with persistencia.conectar(url) as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT anulado_en FROM seguimientos WHERE clave_idempotencia = %s", (clave,)
+            )
+            fila = cur.fetchone()
+            return bool(fila and fila[0] is not None)
+
+    ctx7 = contexto(url, "573009995005", "Deja De Insistir")
+    clave_reactivacion = "probar-tools-cerrar-seguimiento"
+    with persistencia.conectar(url) as conn:
+        persistencia.insertar_seguimiento(
+            conn,
+            id_conversacion=ctx7.id_conversacion,
+            tipo="reactivacion_sin_agendar",
+            fecha_objetivo=ctx7.ahora + timedelta(days=7),
+            clave_idempotencia=clave_reactivacion,
+        )
+    # I3: `leer_contacto`, no `asegurar_contacto`, para el "antes". `contexto()` de arriba solo
+    # toca `pacientes`, así que este número TODAVIA no tiene fila en `contactos` -- exactamente
+    # el hueco que I3 señaló para el chat web del panel, que tampoco la asegura antes de
+    # llamar. Con `asegurar_contacto` aquí se crearía la fila de antemano y la comprobación
+    # dejaría de poder distinguir "sumar_seguimiento_fallido la aseguró" de "ya existía".
+    with persistencia.conectar(url) as conn:
+        sin_fila_previa = persistencia.leer_contacto(conn, ctx7.telefono_completo) is None
+    print(f"   sin fila previa       -> {marca(sin_fila_previa)} "
+          f"el numero aun no tiene fila en contactos")
+
+    asyncio.run(h._cerrar_seguimiento(ctx7, "ya no me interesa"))
+
+    despues = contacto_de_neon(ctx7.telefono_completo)
+    print(f"   anula el seguimiento -> {marca(seguimiento_anulado_en_neon(clave_reactivacion))} "
+          f"queda con anulado_en puesto")
+    # La LAPIDA (revision final, H1): lo unico duradero que el «no» dejaba antes era el +1 del
+    # contador, y ese contador lo resetea `crear_cita` y lo gobierna una perilla editable. Lo
+    # que de verdad sostiene la promesa «no se le vuelve a escribir sobre esta consulta» es una
+    # fila que nace anulada con el motivo permanente, del tipo correspondiente, y que la
+    # condicion 7 de las dos consultas de cartera busca para siempre. Contra Neon de verdad.
+    with persistencia.conectar(url) as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT s.tipo FROM seguimientos s JOIN conversaciones cv ON cv.id = "
+            "s.conversacion_id WHERE cv.telefono = %s AND s.motivo_anulacion = %s "
+            "AND s.enviado_en IS NULL AND s.clave_idempotencia LIKE %s",
+            (ctx7.telefono_completo, persistencia.MOTIVO_NEGATIVA_DEL_PACIENTE, "%:negativa:%"),
+        )
+        lapidas = sorted(f[0] for f in cur.fetchall())
+    print(f"   deja la lapida       -> "
+          f"{marca(lapidas == ['reactivacion_sin_agendar'])} constancia permanente sobre "
+          f"{lapidas or 'NINGUN tipo'} -- el «no» ya no vive solo en el contador")
+    # I3: parte de `sin_fila_previa`, no de un contador leido de antemano -- si
+    # `sumar_seguimiento_fallido` no asegurara la fila, esta llamada la habria perdido en
+    # silencio (el UPDATE no encuentra a quien tocar) y `despues` seguiria en 0, no en 1.
+    print(f"   sube el contador     -> "
+          f"{marca(sin_fila_previa and despues['seguimientos_fallidos'] == 1)} "
+          f"seguimientos_fallidos quedo en {despues['seguimientos_fallidos']} pese a no tener "
+          f"fila previa en contactos")
+    print(f"   NO marca la baja     -> {marca(despues['no_contactar'] is False)} "
+          f"contactos.no_contactar sigue en FALSE")
+
     print()
     if fallos:
         print(f"{fallos} comprobacion(es) fallaron.")
         return 1
-    print("Las doce tools funcionan. Tres llamadas simultaneas -> exactamente 2 citas.")
+    print("Las trece tools funcionan. Tres llamadas simultaneas -> exactamente 2 citas.")
     return 0
 
 

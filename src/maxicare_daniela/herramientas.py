@@ -473,6 +473,23 @@ def _fallo_privacidad(ctx: RunContextWrapper[ContextoDaniela], error: Exception)
     )
 
 
+def _fallo_cerrar_seguimiento(ctx: RunContextWrapper[Any], error: Exception) -> str:
+    """5 pequeña (ronda de revisión sobre la parada D): `_fallo_seguimiento` está escrito para
+    `programar_seguimiento` («no se pudo programar el seguimiento») y esa frase es falsa por
+    partida doble en un fallo de `cerrar_seguimiento`, que no programa nada -- anula lo
+    pendiente y sube el contador. Es la vecina de `_fallo_privacidad`, no la de
+    `programar_seguimiento`: el «no» de un paciente que se pierde por un fallo de base es la
+    misma situación que una baja que se pierde -- alguien tiene que ir a anotarlo a mano-- y
+    por eso usa `log.exception`, no `log.error` como sus hermanas de arriba.
+    """
+    log.exception("cerrar_seguimiento falló: %s", error)
+    return (
+        "No se pudo registrar todavía que no siga esta consulta. NO le digas al paciente que "
+        "quedó anotado: no es cierto. Dile que lo estás resolviendo y escala a los doctores "
+        "para que alguien lo anote a mano: esto NO se deja pasar en silencio."
+    )
+
+
 # ==========================================================================================
 # 1. consultar_base_conocimiento
 # ==========================================================================================
@@ -1024,6 +1041,10 @@ async def _crear_cita(ctx: ContextoDaniela, solicitud: SolicitudCita) -> str:
                     "no se duplica",
                     id_cita,
                 )
+        # El contador vuelve a cero: agendar es justo la prueba de que el seguimiento SÍ
+        # servía. Va con `commit=False` para que viaje en la misma transacción que la cita:
+        # si la cita se deshace, esto se deshace con ella.
+        persistencia.reiniciar_seguimientos_fallidos(conn, ctx.telefono_completo, commit=False)
         conn.commit()
         return (id_cita, paciente_id)
 
@@ -1514,6 +1535,22 @@ async def registrar_estado_oportunidad(
 async def _programar_seguimiento(
     ctx: ContextoDaniela, tipo: str, fecha_objetivo: str
 ) -> str:
+    # El vocabulario cerrado, con la puerta del MODELO y no la del barrido: son dos listas a
+    # propósito (`seguimientos.TIPOS_QUE_EL_MODELO_PUEDE_PEDIR`), y esta es la única que
+    # `recordatorio_cita` no atraviesa jamás. Va ANTES de la baja y antes de la fecha porque es
+    # lo primero que hay que decidir: con `recordatorio_cita` fuera de esta lista, ya no hace
+    # falta comprobar la baja para ese tipo --no hay tipo disfrazado que colar-- y lo que
+    # sostiene la mitad no-comercial de la 25 (que un recordatorio SÍ sale con la baja puesta)
+    # es el otro camino, el que nunca pasa por aquí: `crear_cita`/`reprogramar_cita` llaman a
+    # `persistencia.insertar_seguimiento(tipo="recordatorio_cita", ...)` directo, sin consultar
+    # `ctx.pidio_no_contacto`, más G0 (`seguimientos.decidir`) al despachar.
+    if tipo not in seguimientos.TIPOS_QUE_EL_MODELO_PUEDE_PEDIR:
+        permitidos = ", ".join(sorted(seguimientos.TIPOS_QUE_EL_MODELO_PUEDE_PEDIR))
+        return (
+            f"Ese tipo de seguimiento no existe. Los que puedes programar son: {permitidos}. "
+            "Los recordatorios de una cita los programa el sistema solo."
+        )
+
     # La baja comercial, EN CÓDIGO y no solo en el prompt. `seguimientos.decidir` ya la
     # recoge con G0 al despachar, así que sin esto no sale nada -- pero entonces lo único
     # que impide INSERTAR la fila es que el modelo obedezca una instrucción, y en este
@@ -1521,10 +1558,11 @@ async def _programar_seguimiento(
     # Se devuelve texto en vez de lanzar: el modelo tiene que saber por qué no se programó,
     # o lo intentará otra vez con otra fecha.
     #
-    # `ctx.pidio_no_contacto` sale de `contactos`, nunca del modelo, y el tipo se mira contra
-    # la MISMA lista blanca del despachador: un recordatorio de cita se programa igual, que
-    # es justo lo que la baja no puede apagar (no negociable 25).
-    if ctx.pidio_no_contacto and tipo not in seguimientos.TIPOS_NO_COMERCIALES:
+    # `ctx.pidio_no_contacto` sale de `contactos`, nunca del modelo. Ya no hace falta mirar el
+    # tipo contra `TIPOS_NO_COMERCIALES` aquí: todo lo que llega a esta línea viene de
+    # `TIPOS_QUE_EL_MODELO_PUEDE_PEDIR`, que es puramente comercial -- `recordatorio_cita` ya
+    # se rechazó arriba, con baja o sin ella --, así que la condición es incondicional.
+    if ctx.pidio_no_contacto:
         return (
             "Este paciente pidió que no le escribieran más, así que no se programó nada "
             "comercial. No se lo ofrezcas ni se lo menciones. El recordatorio de una cita "
@@ -1538,6 +1576,27 @@ async def _programar_seguimiento(
     # comportamiento deja de depender del reloj de la máquina, y por tanto se puede probar.
     if objetivo <= ctx.ahora:
         return "Esa fecha ya pasó. Programa el seguimiento para un momento futuro."
+
+    # La cota SUPERIOR (revisión final). Antes no había ninguna: `_a_fecha` solo exigía que la
+    # fecha fuera futura, así que el modelo podía programar un seguimiento a seis meses. Dos
+    # cosas van mal con eso, y ninguna deja rastro en un log:
+    #
+    # - Lo que sale a los seis meses dice «hace unos días nos escribió» sobre algo que la
+    #   cartera ya no considera reciente -- la misma razón por la que las dos consultas de
+    #   `persistencia` cierran su ventana a `DIAS_DE_VENTANA_DE_CARTERA`. Por eso el número no
+    #   se elige aquí: se toma de ahí, y el día que la ventana cambie esta cota la sigue.
+    # - `contar_comprometidos_hoy` no cuenta una fila a semanas vista (no es "de hoy" y nunca
+    #   se aplazó), así que no consume cupo hoy y luego aparece fuera de todo ritmo.
+    #
+    # Va en el CÓDIGO y no en el prompt por la doctrina de los no negociables 2 y 12: lo que
+    # el modelo escribe se acota donde no depende de que obedezca.
+    limite = ctx.ahora + timedelta(days=persistencia.DIAS_DE_VENTANA_DE_CARTERA)
+    if objetivo > limite:
+        return (
+            f"Esa fecha está demasiado lejos: un seguimiento se programa como mucho a "
+            f"{persistencia.DIAS_DE_VENTANA_DE_CARTERA} días. Elige una fecha más cercana o "
+            "dile al paciente que vuelva a escribir cuando lo necesite."
+        )
 
     clave = ctx.clave("seguimiento", tipo, objetivo.isoformat())
 
@@ -1571,7 +1630,9 @@ async def _programar_seguimiento(
 
 @function_tool(failure_error_function=_fallo_seguimiento)
 async def programar_seguimiento(
-    wrapper: RunContextWrapper[ContextoDaniela], tipo: str, fecha_objetivo: str
+    wrapper: RunContextWrapper[ContextoDaniela],
+    tipo: Literal["reactivacion_sin_agendar", "reactivacion_cancelada"],
+    fecha_objetivo: str,
 ) -> str:
     """Deja programado un seguimiento comercial para más adelante.
 
@@ -1580,7 +1641,8 @@ async def programar_seguimiento(
     aquí — los programa el sistema solo al crear o mover la cita.
 
     Args:
-        tipo: qué clase de seguimiento, por ejemplo 'reactivacion'.
+        tipo: 'reactivacion_sin_agendar' si preguntó y no agendó, 'reactivacion_cancelada'
+            si canceló y no volvió a pedir fecha.
         fecha_objetivo: cuándo debe salir, en ISO y hora de Bogotá.
     """
     return await _programar_seguimiento(wrapper.context, tipo, fecha_objetivo)
@@ -2310,6 +2372,66 @@ async def _revocar_no_contactar(ctx: ContextoDaniela, nota: str | None) -> str:
     return "Anotado: vuelve a recibir mensajes nuestros. Confírmaselo en una línea."
 
 
+async def _cerrar_seguimiento(ctx: ContextoDaniela, nota: str | None) -> str:
+    """El núcleo. Deja constancia del «no», anula lo pendiente y sube el contador.
+
+    **Nunca marca la baja**: ver D2 -- «ya no me interesa esta consulta» no es «no me escriban
+    nunca más», y de las dos es la única que no se deshace sin que la persona vuelva a
+    pedirlo. Marcar la baja aquí quemaría a un paciente por una frase que no dijo.
+
+    **Lo duradero lo escribe `registrar_negativa_de_reactivacion`, no el contador** (hallazgo
+    crítico de la revisión final). La versión anterior llamaba a `anular_reactivaciones_vivas`
+    sola, cuyo WHERE exige `enviado_en IS NULL`: cuando el paciente PUEDE decir que no, la
+    fila que originó ese mensaje ya está enviada, así que `anulados` valía 0 siempre y el
+    motivo permanente no llegaba nunca a la tabla. Lo único que quedaba era el `+1` del
+    contador, y el contador NO es un sitio donde pueda vivir un «no»: su tope es una perilla
+    editable y `crear_cita` lo devuelve a 0. Medido: el paciente volvía a recibir mensaje 25 h
+    después de que Daniela le dijera «no se le vuelve a escribir sobre esta consulta».
+
+    El contador se sigue subiendo, y no es redundante: mide otra cosa (a este número no le
+    sirve que lo persigamos) y es lo que R1 lee al despachar.
+    """
+
+    def trabajo(conn):
+        resultado = persistencia.registrar_negativa_de_reactivacion(
+            conn,
+            ctx.telefono_completo,
+            id_conversacion=ctx.id_conversacion,
+            tipos=sorted(seguimientos.TIPOS_QUE_EL_BARRIDO_ENCOLA),
+        )
+        persistencia.sumar_seguimiento_fallido(conn, ctx.telefono_completo)
+        return resultado
+
+    resultado = await _con_base(ctx, trabajo)
+    log.info(
+        "cerrar_seguimiento: %d fila(s) anulada(s), lápida permanente sobre %s",
+        resultado["anulados"],
+        ", ".join(resultado["lapidas"]) or "ningún tipo nuevo (ya estaba escrita)",
+    )
+    return (
+        "Anotado: no se le vuelve a escribir sobre esta consulta. Si tiene una cita agendada, "
+        "su recordatorio le sigue llegando. Si lo que quiere es no recibir NINGÚN mensaje "
+        "comercial nunca más, esa es otra cosa y se registra aparte."
+    )
+
+
+@function_tool(failure_error_function=_fallo_cerrar_seguimiento)
+async def cerrar_seguimiento(
+    wrapper: RunContextWrapper[ContextoDaniela], nota: str
+) -> str:
+    """Cierra el seguimiento de esta consulta porque el paciente dijo que ya no le interesa.
+
+    Úsala cuando responda que no a un mensaje de seguimiento nuestro, incluido el botón
+    'Ya no, gracias' -- ver `docs/plantillas-meta-reactivacion.md`, el rótulo exacto de los
+    tres botones negativos aprobados por Meta. NO la uses si lo que pide es no recibir ningún
+    mensaje más: eso es la baja y tiene su propia herramienta.
+
+    Args:
+        nota: lo que dijo el paciente, en sus palabras.
+    """
+    return await _cerrar_seguimiento(wrapper.context, nota)
+
+
 @function_tool(failure_error_function=_fallo_privacidad)
 async def revocar_no_contactar(
     wrapper: RunContextWrapper[ContextoDaniela],
@@ -2330,9 +2452,9 @@ async def revocar_no_contactar(
 # El conjunto -- lo que `agentes.py` importará en la fase 4
 # ==========================================================================================
 
-#: Las nueve del plan, en el orden de `herramientas[]`, más `consultar_citas`, y las dos de
-#: la baja comercial al final: ninguna de las tres está en el plan y por eso no se cuelan
-#: entre las nueve.
+#: Las nueve del plan, en el orden de `herramientas[]`, más `consultar_citas`, y las tres de
+#: la baja comercial y la reactivación al final: ninguna de las cuatro está en el plan y por
+#: eso no se cuelan entre las nueve.
 TODAS = (
     consultar_base_conocimiento,
     consultar_disponibilidad,
@@ -2346,6 +2468,7 @@ TODAS = (
     consultar_citas,
     registrar_no_contactar,
     revocar_no_contactar,
+    cerrar_seguimiento,
 )
 
 __all__ = [
@@ -2354,6 +2477,7 @@ __all__ = [
     "MAX_INTENTOS_IDENTIFICACION",
     "ZONA_BOGOTA",
     "cancelar_cita",
+    "cerrar_seguimiento",
     "consultar_base_conocimiento",
     "consultar_citas",
     "consultar_disponibilidad",

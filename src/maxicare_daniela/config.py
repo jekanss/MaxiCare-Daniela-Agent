@@ -558,13 +558,49 @@ class Config:
     plantilla_recordatorio: str = ""
 
     #: El código de idioma EXACTO con el que la traducción está registrada en el Business
-    #: Manager. No es cosmético y no admite un valor aproximado: si no coincide al carácter,
-    #: Meta rechaza el envío entero con el error 132001 («template name does not exist in the
-    #: translation») y una plantilla creada como `es_CO` no acepta `es`. Cableado en el código
-    #: eso sería el 100 % de los recordatorios fallando, con rastro solo en el log y en una
-    #: columna que nadie mira. PENDIENTE: el código real, que sale de la aprobación de Meta;
-    #: `es` es el default más probable y por eso mismo no es una comprobación.
-    plantilla_recordatorio_idioma: str = "es"
+    #: Manager, **para las CUATRO plantillas** (I2, ronda 1 de revisión: el campo se llamaba
+    #: `plantilla_recordatorio_idioma` y `runtime.py` ya lo pasaba a las cuatro, así que el
+    #: nombre mentía sobre su propio alcance). No es cosmético y no admite un valor
+    #: aproximado: si no coincide al carácter, Meta rechaza el envío entero con el error
+    #: 132001 («template name does not exist in the translation») y una plantilla creada como
+    #: `es_CO` no acepta `es`. **Las cuatro plantillas tienen que estar registradas en Meta con
+    #: este MISMO código.** Si alguna quedara con otro, esa plantilla fallaría al 100% de sus
+    #: envíos -y como la fila se marca ANTES de enviar (no negociable 21), cada una se pierde
+    #: para siempre y el doctor recibe un aviso de fallo por cada una-, con rastro solo en el
+    #: log y en una columna que nadie mira. Hoy no es un fallo vivo: el documento de plantillas
+    #: (`docs/plantillas-meta-reactivacion.md`) fija `es` (Spanish) para las tres de
+    #: reactivación, igual que la de recordatorio. PENDIENTE: el código real, que sale de la
+    #: aprobación de Meta; `es` es el default más probable y por eso mismo no es una
+    #: comprobación. La variable de entorno conserva su nombre viejo
+    #: (`MAXICARE_PLANTILLA_RECORDATORIO_IDIOMA`) a propósito: ya está en el `.env` del VPS, y
+    #: renombrarla la habría dejado sin efecto en el primer despliegue sin que nadie lo notara.
+    plantillas_idioma: str = "es"
+
+    #: Las tres de reactivación. Vacías --su default-- dejan su tipo SIN enviar: el despachador
+    #: decide igual y la fila se queda pendiente. Es el mismo modo de comprobación que
+    #: `plantilla_recordatorio`, y aquí es además el estado normal hasta que Meta apruebe.
+    #: Los nombres exactos que hay que pedir están en `docs/plantillas-meta-reactivacion.md`.
+    plantilla_sin_agendar: str = ""
+    plantilla_cancelada: str = ""
+    plantilla_no_asistio: str = ""
+
+    #: El interruptor de pánico de la reactivación (regla 10). **Apaga de verdad, y apaga las
+    #: DOS mitades** (el AVISO que decía lo contrario era cierto en la tarea 4 y dejó de serlo
+    #: en `5eb1352`, cuando se construyó el barrido; corregido en la revisión final, H4):
+    #:
+    #: - `barrido.encolar` no encola a nadie nuevo, y con `0` ni siquiera abre una conexión.
+    #:   La tarea de fondo tampoco arranca.
+    #: - `seguimientos.despachar` APLAZA todo lo comercial que ya estuviera encolado, vía
+    #:   `runtime._freno_de_reactivacion` y la guarda FRENO de `seguimientos.decidir`. No lo
+    #:   anula ni lo marca: esas filas salen cuando se vuelva a encender.
+    #:
+    #: Lo que sigue igual con esto en `0`: los recordatorios de cita, la atención y el relevo.
+    #: Esa es la frontera del no negociable 25.
+    #:
+    #: Cambiarlo exige redesplegar (es una variable de entorno, no una perilla de
+    #: `configuracion`). `!= "0"` y no `== "1"` porque el default es encendido, como
+    #: `daniela_responde`.
+    reactivacion_encendida: bool = True
 
     #: La dirección donde vive la política de tratamiento de datos que el paciente ve en su
     #: primer mensaje. El literal `PENDIENTE` APAGA el aviso: sale el mensaje limpio y no se
@@ -663,9 +699,16 @@ class Config:
             telegram_chat_doctores=_opcional("MAXICARE_TELEGRAM_CHAT_DOCTORES"),
             telegram_webhook_secret=_opcional("MAXICARE_TELEGRAM_WEBHOOK_SECRET"),
             plantilla_recordatorio=_opcional("MAXICARE_PLANTILLA_RECORDATORIO"),
-            plantilla_recordatorio_idioma=_opcional(
+            # El nombre de la variable de entorno NO cambia (I2): ya está en el `.env` del
+            # VPS con este nombre, y gobierna las cuatro plantillas desde antes de este
+            # rename -- ver el comentario del campo.
+            plantillas_idioma=_opcional(
                 "MAXICARE_PLANTILLA_RECORDATORIO_IDIOMA", "es"
             ),
+            plantilla_sin_agendar=_opcional("MAXICARE_PLANTILLA_SIN_AGENDAR"),
+            plantilla_cancelada=_opcional("MAXICARE_PLANTILLA_CANCELADA"),
+            plantilla_no_asistio=_opcional("MAXICARE_PLANTILLA_NO_ASISTIO"),
+            reactivacion_encendida=_opcional("MAXICARE_REACTIVACION", "1") != "0",
             politica_datos_url=_opcional("MAXICARE_POLITICA_DATOS_URL", POLITICA_DATOS_URL),
             politica_datos_version=_opcional(
                 "MAXICARE_POLITICA_DATOS_VERSION", POLITICA_DATOS_VERSION

@@ -292,7 +292,13 @@ def test_la_cascada_anula_el_recordatorio_de_una_cita_que_se_movio(conexion_prue
     pendientes = persistencia.seguimientos_por_despachar(
         conexion_pruebas, ahora=objetivo + timedelta(hours=1)
     )
-    assert [p for p in pendientes if p["cita_id"] == id_cita] == []
+    # `str(p["cita_id"])`, y NO `p["cita_id"] == id_cita` a secas (hallazgo de la ronda 2 de
+    # revisión, de la misma familia que el `UUID == str` que ya cazamos en las pruebas nuevas
+    # de la cascada de nombre): `citas.id` es `UUID` y psycopg lo devuelve como `uuid.UUID`,
+    # mientras `registrar_cita` -de donde sale `id_cita`- devuelve un `str`. Sin el `str()`,
+    # la comparación es SIEMPRE `False`, la lista filtrada SIEMPRE `[]`, y esta prueba pasaría
+    # en verde aunque `anular_seguimientos_de_cita` no anulara nada.
+    assert [p for p in pendientes if str(p["cita_id"]) == id_cita] == []
 
 
 def test_un_seguimiento_anulado_no_vuelve_a_la_cola(conexion_pruebas, cita_de_prueba):
@@ -318,6 +324,61 @@ def test_un_seguimiento_anulado_no_vuelve_a_la_cola(conexion_pruebas, cita_de_pr
     assert pendiente["id"] not in {r["id"] for r in restantes}
 
 
+def test_aplazar_fija_aplazado_desde_una_sola_vez(conexion_pruebas, cita_de_prueba):
+    """El SQL de `aplazar_seguimiento` (migración 022) contra Postgres de verdad -- ninguna
+    prueba offline lo ejercita, porque las que tocan `despachar` doblan esta función con un
+    diccionario (`tests/test_seguimientos.py`).
+
+    Las dos mitades que R3bis necesita para no repetir el error de la ronda 1: el PRIMER
+    aplazamiento pasa `aplazado_desde` de `NULL` a un instante real, y un SEGUNDO
+    aplazamiento -simulando otra vuelta de G4 o G5- mueve `fecha_objetivo` otra vez pero deja
+    `aplazado_desde` INTACTO. Si el `COALESCE` se cambiara por `now()` a secas, esta prueba
+    fallaría en la segunda mitad y R3bis volvería a quedar tan ciega como R3.
+    """
+    id_cita, id_conversacion = cita_de_prueba
+    objetivo = datetime(2026, 9, 16, 18, 0, tzinfo=ZONA_BOGOTA)
+    persistencia.insertar_seguimiento(
+        conexion_pruebas,
+        id_conversacion=id_conversacion,
+        tipo="reactivacion_sin_agendar",
+        fecha_objetivo=objetivo,
+        clave_idempotencia=f"{id_conversacion}:aplazar:1",
+    )
+    pendiente = persistencia.seguimientos_por_despachar(
+        conexion_pruebas, ahora=objetivo + timedelta(hours=1)
+    )[0]
+    assert pendiente["aplazado_desde"] is None, "una fila recien creada no se ha aplazado nunca"
+
+    primer_aplazamiento = objetivo + timedelta(minutes=30)
+    persistencia.aplazar_seguimiento(conexion_pruebas, pendiente["id"], hasta=primer_aplazamiento)
+
+    tras_el_primero = next(
+        f
+        for f in persistencia.seguimientos_por_despachar(
+            conexion_pruebas, ahora=primer_aplazamiento + timedelta(hours=1)
+        )
+        if f["id"] == pendiente["id"]
+    )
+    assert tras_el_primero["fecha_objetivo"] == primer_aplazamiento
+    assert tras_el_primero["aplazado_desde"] is not None
+    primera_marca = tras_el_primero["aplazado_desde"]
+
+    segundo_aplazamiento = primer_aplazamiento + timedelta(hours=2)
+    persistencia.aplazar_seguimiento(conexion_pruebas, pendiente["id"], hasta=segundo_aplazamiento)
+
+    tras_el_segundo = next(
+        f
+        for f in persistencia.seguimientos_por_despachar(
+            conexion_pruebas, ahora=segundo_aplazamiento + timedelta(hours=1)
+        )
+        if f["id"] == pendiente["id"]
+    )
+    assert tras_el_segundo["fecha_objetivo"] == segundo_aplazamiento
+    assert tras_el_segundo["aplazado_desde"] == primera_marca, (
+        "el segundo aplazamiento no puede reescribir `aplazado_desde`"
+    )
+
+
 def test_la_cola_trae_lo_que_el_despachador_necesita_para_decidir(conexion_pruebas, cita_de_prueba):
     id_cita, id_conversacion = cita_de_prueba
     objetivo = datetime(2026, 9, 16, 18, 0, tzinfo=ZONA_BOGOTA)
@@ -335,11 +396,181 @@ def test_la_cola_trae_lo_que_el_despachador_necesita_para_decidir(conexion_prueb
     )[0]
 
     # Sin estas claves el despachador tendría que hacer una consulta por guarda.
+    #
+    # `seguimientos_fallidos` y `reactivaciones_ultimo_ano` se sumaron en la ronda 1 de
+    # revisión de la tarea 3 (hallazgo 2); `aplazado_desde` llegó en la ronda 2 (R3bis cambió
+    # de ancla: `creado_en` medía la edad total de la fila y no cuánto llevaba atascada, y
+    # anulaba en silencio una reactivación programada a semanas vista que llegaba puntual).
+    # Antes de esos dos hallazgos, borrar cualquiera de estas columnas del SELECT dejaba esta
+    # prueba en verde -- las guardas R1/R2/R3bis siguen leyendo `.get(...)` o revientan de
+    # otra forma, así que la ausencia no se nota aquí, solo en producción, en silencio.
     assert set(fila) >= {
         "id", "conversacion_id", "cita_id", "tipo", "fecha_objetivo", "intentos",
         "telefono", "nombre_completo", "tratamiento", "cita_inicio", "cita_estado",
-        "tomada_por",
+        "tomada_por", "seguimientos_fallidos", "reactivaciones_ultimo_ano", "aplazado_desde",
+        # `nombre_ficha` y `nombre_perfil`: hallazgo CRÍTICO de la ronda 1 de revisión de la
+        # tarea 4. Sin ellas, una reactivación (`cita_id` NULL) no tenía de dónde sacar un
+        # nombre real -`nombre_completo` sale de `citas`, y con `cita_id` NULL siempre es
+        # NULL- y `seguimientos.parametros_de` caía a su respaldo "paciente" siempre.
+        "nombre_ficha", "nombre_perfil",
     }
+
+
+def test_la_cascada_de_nombre_trae_la_ficha_y_el_perfil_cuando_existen(conexion_pruebas):
+    """El corazón del hallazgo CRÍTICO, contra Postgres de verdad: ninguna prueba offline
+    ejercita el `LEFT JOIN` a `pacientes` ni la subconsulta a `mensajes_entrantes` -van
+    dobladas con un diccionario en `tests/test_reactivacion.py`-, así que un error de SQL, un
+    nombre de columna que cambie, o un JOIN que multiplique filas solo revienta o miente aquí.
+
+    Una reactivación (`cita_id` NULL) para un teléfono que SÍ tiene ficha -ya agendó alguna
+    vez, el caso de `TIPO_CANCELADA`/`TIPO_NO_ASISTIO`- y que además dejó un nombre de perfil
+    distinto en su último mensaje de WhatsApp. La prioridad entre los dos (`_nombre_de_
+    reactivacion` prefiere la ficha) es Python y ya está probada offline; esto prueba que el
+    SQL le entrega las DOS columnas con el valor correcto, sin que el `LEFT JOIN` a
+    `pacientes` -sobre una columna `UNIQUE`- multiplique la fila.
+    """
+    telefono = "573000000199"
+    id_paciente = persistencia.asegurar_paciente(
+        conexion_pruebas, nombre_completo="Ana Perez", telefono=telefono
+    )
+    id_conversacion = persistencia.asegurar_conversacion(
+        conexion_pruebas, telefono=telefono, paciente_id=id_paciente
+    )
+    with conexion_pruebas.cursor() as cur:
+        cur.execute(
+            "INSERT INTO mensajes_entrantes (wamid, telefono, nombre_perfil, tipo) "
+            "VALUES (%s, %s, %s, 'text')",
+            ("wamid-cascada-ficha", telefono, "Anita <3"),
+        )
+    conexion_pruebas.commit()
+
+    objetivo = datetime(2026, 9, 16, 18, 0, tzinfo=ZONA_BOGOTA)
+    persistencia.insertar_seguimiento(
+        conexion_pruebas,
+        id_conversacion=id_conversacion,
+        tipo="reactivacion_no_asistio",
+        fecha_objetivo=objetivo,
+        clave_idempotencia=f"{id_conversacion}:cascada:1",
+    )
+
+    filas = persistencia.seguimientos_por_despachar(
+        conexion_pruebas, ahora=objetivo + timedelta(hours=1)
+    )
+    coincidencias = [f for f in filas if str(f["conversacion_id"]) == id_conversacion]
+    # El `assert len(...) == 1` es lo que de verdad prueba "sin que el LEFT JOIN multiplique
+    # la fila" (ronda 2 de revisión): el `next(...)` que había antes tomaba la primera
+    # coincidencia y descartaba el resto en silencio, así que un JOIN que devolviera DOS filas
+    # para esta misma conversación -el bug que este comentario existe para descartar- habría
+    # pasado en verde igual.
+    assert len(coincidencias) == 1
+    fila = coincidencias[0]
+
+    assert fila["nombre_completo"] is None       # cita_id NULL: el LEFT JOIN a citas no da nada
+    assert fila["nombre_ficha"] == "Ana Perez"
+    assert fila["nombre_perfil"] == "Anita <3"
+
+
+def test_la_cascada_de_nombre_usa_el_perfil_MAS_RECIENTE_y_no_ficha_si_no_hay(conexion_pruebas):
+    """Dos mitades del mismo hallazgo, en un solo montaje:
+
+    1. Un lead que NUNCA agendó -el caso normal de `TIPO_SIN_AGENDAR`- no tiene fila en
+       `pacientes`: `nombre_ficha` viene NULL, tal como lee `_nombre_de_reactivacion` para
+       caer al siguiente eslabón.
+    2. Con DOS mensajes del mismo teléfono en momentos distintos, la subconsulta tiene que
+       traer el `nombre_perfil` del MÁS RECIENTE (`ORDER BY recibido_en DESC LIMIT 1`), no
+       cualquiera de los dos ni el primero que encuentre. Sin el `ORDER BY`, esto pasaría en
+       verde la mitad de las veces según el orden físico en que Postgres devuelva las filas.
+    """
+    telefono = "573000000198"
+    id_conversacion = persistencia.asegurar_conversacion(conexion_pruebas, telefono=telefono)
+    with conexion_pruebas.cursor() as cur:
+        cur.execute(
+            "INSERT INTO mensajes_entrantes (wamid, telefono, nombre_perfil, tipo, recibido_en) "
+            "VALUES (%s, %s, %s, 'text', %s)",
+            ("wamid-cascada-viejo", telefono, "Nombre Viejo", datetime(2026, 9, 1, 9, 0, tzinfo=ZONA_BOGOTA)),
+        )
+        cur.execute(
+            "INSERT INTO mensajes_entrantes (wamid, telefono, nombre_perfil, tipo, recibido_en) "
+            "VALUES (%s, %s, %s, 'text', %s)",
+            ("wamid-cascada-nuevo", telefono, "Nombre Nuevo", datetime(2026, 9, 15, 9, 0, tzinfo=ZONA_BOGOTA)),
+        )
+    conexion_pruebas.commit()
+
+    objetivo = datetime(2026, 9, 16, 18, 0, tzinfo=ZONA_BOGOTA)
+    persistencia.insertar_seguimiento(
+        conexion_pruebas,
+        id_conversacion=id_conversacion,
+        tipo="reactivacion_sin_agendar",
+        fecha_objetivo=objetivo,
+        clave_idempotencia=f"{id_conversacion}:cascada:2",
+    )
+
+    filas = persistencia.seguimientos_por_despachar(
+        conexion_pruebas, ahora=objetivo + timedelta(hours=1)
+    )
+    fila = next(f for f in filas if str(f["conversacion_id"]) == id_conversacion)
+
+    assert fila["nombre_completo"] is None
+    assert fila["nombre_ficha"] is None
+    assert fila["nombre_perfil"] == "Nombre Nuevo"
+
+
+TEL_TOPE_ANUAL = "573001112295"
+
+
+def test_el_tope_anual_cuenta_reactivaciones_enviadas_y_excluye_el_recordatorio(
+    conexion_pruebas,
+):
+    """La subconsulta de `reactivaciones_ultimo_ano` (hallazgo 2 de la ronda 1 de revisión):
+    ninguna prueba offline la ejercita, así que un error de SQL -o una exclusión que se
+    caiga- solo revienta o miente aquí. `-m neon` pasando no demuestra que cuenta bien; esta
+    prueba sí, porque siembra un caso donde contar mal es observable.
+
+    Dos reactivaciones y UN recordatorio de cita, los tres YA ENVIADOS para el MISMO
+    teléfono: si la exclusión de `recordatorio_cita` se cae, R2 (el tope anual) empezaría a
+    contar recordatorios como si fueran publicidad, y a alguien con muchas citas legítimas se
+    le apagaría la reactivación sin que hubiera recibido ni una.
+    """
+    id_conv = persistencia.asegurar_conversacion(
+        conexion_pruebas, telefono=TEL_TOPE_ANUAL, paciente_id=None, canal="whatsapp"
+    )
+    hace_un_mes = datetime.now(ZONA_BOGOTA) - timedelta(days=30)
+
+    tipos_enviados = ["reactivacion_sin_agendar", "reactivacion_cancelada", "recordatorio_cita"]
+    for i, tipo in enumerate(tipos_enviados):
+        persistencia.insertar_seguimiento(
+            conexion_pruebas,
+            id_conversacion=id_conv,
+            tipo=tipo,
+            fecha_objetivo=hace_un_mes,
+            clave_idempotencia=f"tope-anual-{i}",
+        )
+
+    # Hay que marcarlos ENVIADOS de verdad: la subconsulta cuenta sobre `enviado_en IS NOT
+    # NULL`, y `seguimientos_por_despachar` es también cómo se consiguen los ids sin duplicar
+    # el SQL de insertar_seguimiento a mano.
+    pendientes = persistencia.seguimientos_por_despachar(conexion_pruebas, ahora=hace_un_mes)
+    ids_sembrados = [f["id"] for f in pendientes if str(f["conversacion_id"]) == id_conv]
+    assert len(ids_sembrados) == 3
+    for id_seguimiento in ids_sembrados:
+        assert persistencia.marcar_seguimiento_enviado(conexion_pruebas, id_seguimiento)
+
+    # Una cuarta fila, PENDIENTE: las tres de arriba ya tienen `enviado_en` y no volverían en
+    # el SELECT, así que hace falta una viva para poder leer la cuenta desde aquí.
+    persistencia.insertar_seguimiento(
+        conexion_pruebas,
+        id_conversacion=id_conv,
+        tipo="reactivacion_sin_agendar",
+        fecha_objetivo=datetime.now(ZONA_BOGOTA),
+        clave_idempotencia="tope-anual-pendiente",
+    )
+
+    filas = persistencia.seguimientos_por_despachar(
+        conexion_pruebas, ahora=datetime.now(ZONA_BOGOTA)
+    )
+    fila = next(f for f in filas if str(f["conversacion_id"]) == id_conv)
+
+    assert fila["reactivaciones_ultimo_ano"] == 2
 
 
 def test_la_consulta_trae_la_baja_del_contacto(conexion_pruebas):
@@ -352,7 +583,11 @@ def test_la_consulta_trae_la_baja_del_contacto(conexion_pruebas):
     persistencia.insertar_seguimiento(
         conexion_pruebas,
         id_conversacion=id_conv,
-        tipo="reactivacion",
+        # `reactivacion_sin_agendar` y no `reactivacion` a secas: el CHECK
+        # `ck_seguimientos_tipo` de la migración 021 cierra el vocabulario de `tipo`, y un
+        # valor fuera de la lista revienta el INSERT. Esta prueba no ejercita el tipo --lo que
+        # comprueba es la columna `no_contactar`--, así que cualquier tipo válido sirve.
+        tipo="reactivacion_sin_agendar",
         fecha_objetivo=ayer,
         clave_idempotencia="baja-1",
     )
@@ -380,7 +615,8 @@ def test_un_telefono_sin_fila_de_contacto_no_cuenta_como_baja(conexion_pruebas):
     persistencia.insertar_seguimiento(
         conexion_pruebas,
         id_conversacion=id_conv,
-        tipo="reactivacion",
+        # Mismo motivo que arriba: el CHECK de la 021 exige un tipo del vocabulario cerrado.
+        tipo="reactivacion_sin_agendar",
         fecha_objetivo=ayer,
         clave_idempotencia="sin-contacto-1",
     )

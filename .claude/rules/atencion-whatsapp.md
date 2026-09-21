@@ -101,7 +101,10 @@ cambia es qué se pierde al fallar.
 - **El aviso se marca DESPUÉS de que `enviar_texto` vuelva bien. Un recordatorio se marca
   ANTES (no negociable 21).** En el recordatorio el riesgo es mandar el mismo mensaje dos
   veces: marcar después significa que un fallo entre el envío y el marcado lo repite sesenta
-  segundos más tarde, y ninguna de las siete guardas lo detecta. En el aviso el riesgo es el
+  segundos más tarde, y ninguna de las NUEVE guardas por las que pasa un recordatorio de cita
+  lo detecta -- todas siguen diciendo que sí. (Eran siete cuando se escribió esto; el número
+  vive en el docstring de `seguimientos.decidir`, que además cuenta las trece de una
+  reactivación.) En el aviso el riesgo es el
   contrario: marcar antes deja en `consentimientos` la constancia de un aviso que un
   `ReadTimeout` impidió que saliera, y **esa constancia es precisamente la prueba legal**.
   Repetir un aviso es inocuo; falsificar una prueba, no. Si el marcado falla, el turno sigue

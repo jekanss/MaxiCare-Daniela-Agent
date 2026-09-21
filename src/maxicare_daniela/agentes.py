@@ -36,7 +36,7 @@ from __future__ import annotations
 from agents import Agent, ModelSettings
 from openai.types.shared import Reasoning
 
-from . import contratos
+from . import contratos, seguimientos
 from .config import (
     CORREO_PRIVACIDAD,
     MODELO_DANIELA,
@@ -81,6 +81,11 @@ from .herramientas import TODAS
 #: `config.TELEFONO_PRIVACIDAD`, la misma constante de la que `guardrails` deriva los dígitos
 #: que borra antes de contar cifras. Con el número escrito a mano en los dos sitios, cambiar
 #: solo este devolvía el tripwire intermitente que la excepción del guardrail vino a cerrar.
+#:
+#: El rótulo «Ya no, gracias» que aparece más abajo no es un ejemplo inventado: es el texto
+#: EXACTO del botón negativo de las tres plantillas de reactivación, especificado en
+#: `docs/plantillas-meta-reactivacion.md`. Si Meta obliga a cambiarlo, este prompt y ese
+#: documento se mueven juntos.
 INSTRUCCIONES_DANIELA = f"""\
 Eres Daniela, de MaxiCare (clínica dental en Puente Largo, Bogotá). Hablas español \
 colombiano, tuteas siempre —nunca «usted»— y das las horas en formato am/pm. Tu meta no es \
@@ -98,6 +103,14 @@ quiere volver a recibir mensajes, llamas `revocar_no_contactar`. Si además pide
 datos, revocar una autorización o poner una queja sobre ellos, lo mandas a \
 {CORREO_PRIVACIDAD} o al {TELEFONO_PRIVACIDAD}, que es donde eso se atiende. Nunca pides \
 cédula ni documentos de identidad.
+
+Si el paciente responde que no a un seguimiento nuestro --el botón «Ya no, gracias» o \
+cualquier forma de decirlo--, usa `cerrar_seguimiento`. Si pide no recibir NINGÚN mensaje \
+más, usa `registrar_no_contactar`.
+
+Ante la duda entre las dos, usa `cerrar_seguimiento`. Un «no gracias» a secas casi siempre \
+significa esta consulta, no todas; y la baja es lo único de los dos que no se deshace sin que \
+la persona vuelva a pedirlo.
 
 Cuando el contexto dice que este paciente pidió no ser contactado, el seguimiento deja de \
 existir para ti: no lo ofreces, no lo insinúas y no lo mencionas. Le atiendes igual de bien \
@@ -290,18 +303,75 @@ _MESES = (
 #: cita ya ocurrió, y un «sí» del paciente no puede estar contestándole.
 HORAS_QUE_UN_RECORDATORIO_SIGUE_SIENDO_ANTECEDENTE = 48
 
+#: Lo mismo para una REACTIVACIÓN, y es OTRA cota porque mide otra cosa.
+#:
+#: Las 48 h de arriba salen de que la cita ya ocurrió: pasado ese plazo el «sí» del paciente
+#: no puede estar contestándole a nada. Una reactivación no tiene cita detrás, así que nada
+#: la vence por dentro -- lo único que caduca es la memoria de la persona.
+#:
+#: 14 días porque la serie entera dura siete (el primer intento a las 24 h, el segundo a los
+#: siete días) y a un lead que contesta el fin de semana siguiente hay que seguir sabiendo
+#: por qué le escribimos. Con las 48 h de la otra cota, quien contestara al tercer día
+#: entraba como un desconocido y Daniela le preguntaba otra vez lo que ya había dicho: el
+#: fallo que este bloque existe para cerrar, reaparecido por el reloj.
+#:
+#: Sigue habiendo tope, y por la misma razón que allí: la columna no la borra nadie, así que
+#: sin él un lead reactivado en marzo arrastraría el antecedente en septiembre.
+DIAS_QUE_UNA_REACTIVACION_SIGUE_SIENDO_ANTECEDENTE = 14
 
-def _recordatorio_caducado(cuando, ahora) -> bool:
+#: Qué decía el mensaje que le salió, por tipo, y qué NO puede dar por hecho Daniela.
+#:
+#: Las tres frases están pegadas a los textos reales de `docs/plantillas-meta-reactivacion.md`
+#: y se mueven con ellos. La diferencia que importa no es de tono sino de hechos: en
+#: `sin_agendar` NO hay ninguna cita --es justo la gente que nunca agendó--, en `cancelada`
+#: la hubo y ya no existe, y en `no_asistio` la hubo y se perdió. Decirle «consulta sus
+#: citas» a la primera manda a Daniela a buscar algo que no está, y hablarle al paciente de
+#: «su cita» cuando nunca tuvo una es el error que nadie le perdona a un sistema automático.
+_LO_QUE_DECIA_LA_REACTIVACION = {
+    seguimientos.TIPO_SIN_AGENDAR: (
+        "Le preguntaba si seguía interesado en la consulta que nos hizo y que quedó sin "
+        "agendar. NO hay ninguna cita de por medio: no le hables de «su cita» como si "
+        "existiera, porque nunca llegó a tener una."
+    ),
+    seguimientos.TIPO_CANCELADA: (
+        "Le decía que canceló su cita y no ha vuelto a agendar. Esa cita ya no existe: si "
+        "quiere otra, es una cita NUEVA. Consulta sus citas antes de dar nada por hecho."
+    ),
+    seguimientos.TIPO_NO_ASISTIO: (
+        "Le decía que no pudo asistir a su cita y le ofrecía reprogramarla. Consulta sus "
+        "citas antes de dar nada por hecho."
+    ),
+}
+
+#: El rótulo del botón AFIRMATIVO de cada plantilla. El negativo es «Ya no, gracias» en las
+#: tres, y por eso ese sí va escrito en el prompt estático.
+#:
+#: Son tres y no uno porque en Meta son tres: «Sí, me interesa», «Sí, reagendar» y «Sí,
+#: reprogramar». Decirle a Daniela que el paciente pulsó un botón que no existe es una
+#: mentira pequeña y gratuita, y el prompt no es sitio para ninguna de las dos -- este bloque
+#: entero nació de corregir exactamente eso sobre la cita.
+_BOTON_AFIRMATIVO = {
+    seguimientos.TIPO_SIN_AGENDAR: "Sí, me interesa",
+    seguimientos.TIPO_CANCELADA: "Sí, reagendar",
+    seguimientos.TIPO_NO_ASISTIO: "Sí, reprogramar",
+}
+
+
+def _recordatorio_caducado(cuando, ahora, *, horas: int | None = None) -> bool:
     """`True` solo si la distancia se puede MEDIR y supera el tope.
 
     Lo que no se puede fechar no se declara caducado: sin fecha o sin `ahora` el bloque se
     emite igual, sin fecha dentro, que es lo que hacía antes de existir este tope. Declararlo
     caducado sería tirar un antecedente cierto por no poder situarlo.
+
+    `horas` lleva default para que quien llamaba antes siga midiendo contra las 48 h del
+    recordatorio de cita; el camino de la reactivación pasa su propia cota.
     """
     if cuando is None or ahora is None or not cuando.tzinfo or not ahora.tzinfo:
         return False
+    tope = HORAS_QUE_UN_RECORDATORIO_SIGUE_SIENDO_ANTECEDENTE if horas is None else horas
     transcurrido = (ahora - cuando).total_seconds()
-    return transcurrido > HORAS_QUE_UN_RECORDATORIO_SIGUE_SIENDO_ANTECEDENTE * 3600
+    return transcurrido > tope * 3600
 
 
 def fecha_en_palabras(momento) -> str:
@@ -429,9 +499,58 @@ def instrucciones_daniela(ctx, agente) -> str:
     # se dijo. Con la línea, el «sí» tiene antecedente.
     recordatorio = getattr(contexto, "ultimo_recordatorio_tipo", None)
     cuando = getattr(contexto, "ultimo_recordatorio_en", None)
+
+    # Una REACTIVACIÓN no es un recordatorio de cita, y hasta el 20/09/2026 este bloque las
+    # trataba igual porque solo existía el segundo.
+    #
+    # El texto de abajo le dice al modelo que un «sí» del paciente «se refiere a la cita de
+    # la que hablaba ese mensaje» y que «consulte sus citas antes de prometer nada». Para un
+    # `reactivacion_sin_agendar` --el grueso del volumen-- ESA CITA NO EXISTE: es justo la
+    # gente que preguntó y nunca agendó. Daniela recibía como antecedente cierto una cita
+    # inventada, sobre la persona menos indicada para oír hablar de «su cita».
+    #
+    # Se vio mandando la primera plantilla aprobada a un teléfono de verdad. No lo cazaba
+    # ninguna prueba, y no podía: las de este bloque se escribieron cuando `recordatorio_cita`
+    # era el único tipo que existía, así que todas pasan el tipo correcto para el texto que
+    # afirman. El séptimo fallo de esta rama con la misma forma -- el código decía una cosa
+    # y hacía otra, en silencio.
+    if recordatorio in seguimientos.TIPOS_DE_REACTIVACION:
+        if cuando is not None and cuando.tzinfo and ahora is not None and ahora.tzinfo:
+            cuando = cuando.astimezone(ahora.tzinfo)
+        if not _recordatorio_caducado(
+            cuando, ahora, horas=DIAS_QUE_UNA_REACTIVACION_SIGUE_SIENDO_ANTECEDENTE * 24
+        ):
+            tratamiento = getattr(contexto, "tratamiento_pendiente", None)
+            texto = (
+                f"{texto}\n\n"
+                "YA LE ESCRIBIMOS NOSOTROS\n"
+                "A este paciente le salió un mensaje automático de seguimiento"
+                + (f", el {fecha_en_palabras(cuando)}" if cuando is not None else "")
+                + f". {_LO_QUE_DECIA_LA_REACTIVACION[recordatorio]}\n"
+                f"Traía dos botones: «{_BOTON_AFIRMATIVO[recordatorio]}» y «Ya no, "
+                "gracias». No lo escribiste "
+                "tú en esta conversación y por eso no lo ves en el historial, pero él sí lo "
+                "leyó: si te contesta que sí --con el botón o con sus palabras--, está "
+                "contestando a eso.\n"
+                "Retómalo desde ahí. NO le preguntes lo que ya te había contado: le "
+                "escribimos nosotros precisamente porque nos lo dijo, y pedirle que lo "
+                "repita es lo que hace que un mensaje nuestro parezca publicidad masiva."
+                + (
+                    f"\nLa última vez preguntó por: {tratamiento}."
+                    if tratamiento
+                    else "\nNo quedó anotado sobre qué preguntó, así que eso sí puedes "
+                    "preguntárselo -- reconociendo que le escribimos nosotros primero."
+                )
+            )
+
+    # `elif` y no un `return` dentro de la rama de arriba: con un `return` ahí, el bloque
+    # «ESTE PACIENTE PIDIÓ NO SER CONTACTADO» que viene después dejaba de emitirse para quien
+    # está contestando una reactivación -- que es EXACTAMENTE la persona que acaba de darse
+    # de baja por una de ellas, y la que no puede volver a oír hablar de seguimiento.
+    #
     # El tope de las 48 horas no es cosmética: nada borra nunca esas dos columnas, así que sin
     # él el bloque no caducaría jamás. Ver `HORAS_QUE_UN_RECORDATORIO_SIGUE_SIENDO_ANTECEDENTE`.
-    if recordatorio and not _recordatorio_caducado(cuando, ahora):
+    elif recordatorio and not _recordatorio_caducado(cuando, ahora):
         # La columna es `TIMESTAMPTZ` y vuelve de Postgres en UTC: sin pasarla a la zona de
         # `ahora` --que siempre es la de Bogotá-- el prompt diría cinco horas de más, y «le
         # salió hacia las 23:00» sobre un recordatorio de las 18:00 es peor que no decir nada.

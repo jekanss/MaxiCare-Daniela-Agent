@@ -468,15 +468,21 @@ Cada paso deja la suite en verde. El 1 y el 2 no cambian ni un mensaje que vea u
   `seguimientos.tipo` con `Literal` y CHECK, que aquí se esquiva con la lista blanca de §4.1.
 - **El primer toque a las ~20 h dentro de ventana.** Es del sub-proyecto D. Se menciona aquí
   solo porque es la razón de que la plantilla de Meta haya dejado de ser urgente.
-- **Que la nota del paciente en la bitácora no se pueda retirar por ninguna ruta.**
-  `consentimientos.detalle` guarda la frase del paciente tal cual, escrita por el modelo,
-  truncada a 500 caracteres, protegida por `ON DELETE RESTRICT` y por un `/clearstate` que por
-  diseño no toca la bitácora: **ninguna ruta de borrado puede retirarla**. En un sistema cuyo
-  propósito es el tratamiento de datos, y que dirige las solicitudes de habeas data a un
-  correo, eso es una decisión de política de datos que esta spec no examinó y que le
-  corresponde a MaxiCare: o se acota la nota a un motivo cerrado, o se permite redactar
-  (`detalle = NULL`) en `rastro_borrado` dejando intactos evento, fecha, origen y versión, que
-  es lo que la ley pide acreditar. **Pendiente de decisión.**
+- ~~**Que la nota del paciente en la bitácora no se pueda retirar por ninguna ruta.**~~
+  **RESUELTO el 17/09/2026 (`1ee143d`), por la segunda de las dos salidas que este punto
+  planteaba.** `borrar_rastro` redacta la frase --`UPDATE consentimientos SET detalle = NULL
+  WHERE telefono = ...`-- y **conserva la fila**: evento, fecha, origen y `politica_version`
+  siguen ahí, que es lo que la Ley 1581 pide poder acreditar. Lo que lo forzó fue la política
+  publicada: su §13 reconoce el derecho a «solicitar la supresión de datos» y el esquema lo
+  impedía, así que el documento prometía algo que el sistema no podía cumplir. El `WHERE` por
+  teléfono no es un detalle: sin él un `/clearstate` redactaba la frase de TODOS, y no hay de
+  dónde recuperarla --lo vigila `test_la_redaccion_no_alcanza_a_otro_telefono`--. La
+  redacción **no** entra en `Borrado.filas`: no se borró ninguna fila, y contarla diría que se
+  retiró algo que sigue ahí.
+  **Lo que queda abierto de esto es la RUTA, no el mecanismo:** `borrar_rastro` solo se alcanza
+  desde `/clearstate`, y por WhatsApp eso exige que el número esté en
+  `MAXICARE_TELEFONOS_PRUEBA` --vacía por defecto--. Un paciente real que ejerza el §13 sigue
+  sin ruta propia: hoy alguien de MaxiCare tiene que atender el correo de habeas data a mano.
 
 ## 11. El párrafo para marketing
 

@@ -6,6 +6,10 @@ septiembre de 2026). 16 de septiembre de 2026.
 Esto no pide una decisión técnica. Pide que alguien confirme una lectura de la política antes
 de que la reactivación salga a producción.
 
+> **Estado al 20/09/2026: sin enviar, a propósito.** Decisión de MaxiCare: este memo se manda
+> justo antes de salir a producción, no antes. El resto de lo que falta para encender está en
+> [`../antes-de-produccion-reactivacion.md`](../antes-de-produccion-reactivacion.md).
+
 ## Qué quedó construido
 
 Daniela ya distingue tres cosas que antes eran una sola:

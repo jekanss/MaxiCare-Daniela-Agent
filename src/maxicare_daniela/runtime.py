@@ -41,6 +41,7 @@ import hmac
 import html
 import logging
 import time
+from datetime import datetime
 
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -57,6 +58,7 @@ from . import (
     analista,
     atencion,
     autenticacion,
+    barrido,
     consumo,
     contratos,
     conversacion,
@@ -2632,6 +2634,54 @@ async def _avisar_de_recordatorios_fallidos(fallidos: int) -> None:
         log.exception("no se pudo avisar a los doctores de los recordatorios fallidos")
 
 
+#: Lo último que Meta dijo de la calidad del número, guardado por el barrido de reactivación.
+#: `None` significa «todavía no se ha preguntado», y eso FRENA -- ver `_freno_de_reactivacion`.
+_ultima_calidad_del_numero: dict[str, str] | None = None
+
+
+def _freno_de_reactivacion() -> str | None:
+    """Por qué NO debe salir ninguna reactivación ahora mismo, o `None` si puede salir.
+
+    **El agujero que cierra** (revisión final, H2 y H3): las tres señales se consultaban solo
+    en `barrido.encolar`, que corre una vez por hora y decide quién ENTRA en la cola. El
+    despachador corre cada sesenta segundos, es quien de verdad MANDA, y no miraba ninguna.
+
+    - Interruptor de pánico (`MAXICARE_REACTIVACION=0`, regla 10) y freno por calidad (regla
+      11): quien accionaba el freno de emergencia veía salir en el minuto siguiente todo lo
+      que ya estaba encolado -- hasta el tope diario del día, más lo aplazado de días
+      anteriores. El aviso al General decía «el barrido no encola a nadie nuevo», que era
+      literalmente cierto y por eso mismo engañoso.
+    - `MAXICARE_DANIELA_RESPONDE=0`: peor que un mensaje de más. Salía un «¿sigue interesada?»
+      y quien pulsaba «Sí, me interesa» no recibía NADA, porque `atencion.procesar_mensaje`
+      corta en esa misma bandera. Pedir respuesta y callarse es el disparador de reporte más
+      limpio que existe, y si quien vuelve escribe «me duele», cruza la frontera clínica.
+
+    **La calidad se lee de una caché y no de la red**, y es deliberado: este bucle corre cada
+    sesenta segundos y atiende además los recordatorios de citas reales. Meterle una llamada a
+    `graph.facebook.com` por ciclo sería 1.440 al día y, sobre todo, ataría el aviso de una
+    cita a que la API de Meta responda. La caché la refresca `_barrer_reactivacion_sin_parar`
+    con su propio reloj horario.
+
+    **`None` frena**, igual que en `barrido.se_puede_encolar` y por la misma razón: ante la
+    duda, no se manda. La consecuencia práctica es que tras un reinicio no sale ninguna
+    reactivación hasta que el barrido confirme la calidad del número -- como mucho una hora, y
+    durante esa hora tampoco se ha encolado a nadie nuevo. El invariante que deja es bueno:
+    una reactivación solo sale si alguien comprobó la calidad del número en la última hora.
+
+    Los `recordatorio_cita` NO pasan por aquí: `seguimientos.decidir` solo aplica el freno a lo
+    comercial (guarda FRENO). Ahí está la frontera del no negociable 25.
+    """
+    if not config.reactivacion_encendida:
+        return "interruptor_de_panico"
+    if not config.daniela_responde:
+        return "daniela_apagada"
+    if not barrido.se_puede_encolar(
+        (_ultima_calidad_del_numero or {}).get("quality_rating")
+    ):
+        return "calidad_del_numero"
+    return None
+
+
 async def _despachar_recordatorios_sin_parar() -> None:
     """El reloj de la cola de recordatorios.
 
@@ -2657,8 +2707,14 @@ async def _despachar_recordatorios_sin_parar() -> None:
                     cierre_sabado=operativa.get("hora_cierre_sabado", 15),
                     atiende_domingo=bool(operativa.get("atiende_domingo", 0)),
                 ),
-                plantilla=config.plantilla_recordatorio,
-                idioma=config.plantilla_recordatorio_idioma,
+                plantillas={
+                    seguimientos.TIPO_RECORDATORIO: config.plantilla_recordatorio,
+                    seguimientos.TIPO_SIN_AGENDAR: config.plantilla_sin_agendar,
+                    seguimientos.TIPO_CANCELADA: config.plantilla_cancelada,
+                    seguimientos.TIPO_NO_ASISTIO: config.plantilla_no_asistio,
+                },
+                idioma=config.plantillas_idioma,
+                freno_de_reactivacion=_freno_de_reactivacion(),
             )
             if any(recuento.values()):
                 log.info("recordatorios: %s", recuento)
@@ -2676,10 +2732,21 @@ async def _arrancar_despacho_de_recordatorios() -> None:
     if not config.database_url:
         log.info("sin base configurada: no arranca el despacho de recordatorios")
         return
-    if not config.plantilla_recordatorio:
+    # `MAXICARE_PLANTILLA_NO_ASISTIO` no entra en este aviso: `TIPO_NO_ASISTIO` no lo encola el
+    # barrido todavia (sin `citas.asistio` no hay como saber quien no vino, ver seguimientos.py),
+    # asi que avisar de su plantilla ausente hoy seria ruido sobre un tipo que nunca se genera.
+    faltantes = [
+        nombre for nombre, valor in (
+            ("MAXICARE_PLANTILLA_RECORDATORIO", config.plantilla_recordatorio),
+            ("MAXICARE_PLANTILLA_SIN_AGENDAR", config.plantilla_sin_agendar),
+            ("MAXICARE_PLANTILLA_CANCELADA", config.plantilla_cancelada),
+        ) if not valor
+    ]
+    if faltantes:
         log.warning(
-            "MAXICARE_PLANTILLA_RECORDATORIO vacía: el despachador decidirá y NO enviará. "
-            "Es el modo de comprobación; para enviar de verdad hace falta la plantilla de Meta."
+            "sin plantilla para %s: el despachador decidirá y NO enviará esos tipos. "
+            "Es el modo de comprobación; para enviar hace falta la aprobación de Meta.",
+            ", ".join(faltantes),
         )
     _tarea_de_recordatorios = asyncio.create_task(_despachar_recordatorios_sin_parar())
 
@@ -2783,6 +2850,163 @@ async def _parar_vigilancia_del_gasto() -> None:
     _tarea_de_vigilancia.cancel()
     try:
         await _tarea_de_vigilancia
+    except (asyncio.CancelledError, Exception):  # noqa: BLE001
+        pass
+
+
+# ==========================================================================================
+# El barrido de reactivación (tarea 8): la tarea de fondo, con su interruptor
+#
+# `barrido.encolar` decide QUIÉN entra en la cola; esto es el reloj que lo llama. Copia el
+# patrón exacto de `_despachar_recordatorios_sin_parar`, dos bloques más arriba: constante de
+# intervalo, referencia global de módulo (sin ella el recolector de basura se lleva la tarea
+# y el barrido deja de correr sin un solo error en el log), `while True` con el `sleep` AL
+# PRINCIPIO, `except asyncio.CancelledError: raise` y `except Exception: log.exception(...)`,
+# más su propio `@app.on_event("shutdown")` con `cancel()` + `await`.
+# ==========================================================================================
+
+#: Una vez por hora. El barrido consulta la cartera entera y lo que busca cambia despacio: un
+#: lead que califica a las 10:00 sigue calificando a las 11:00. Cada minuto -como el
+#: despachador de recordatorios- serían 60 consultas pesadas por cada una útil.
+SEGUNDOS_ENTRE_BARRIDOS_DE_REACTIVACION = 3600.0
+
+#: Cuánto se espera entre dos avisos al General de que la calidad del número frenó el
+#: barrido. Con el barrido corriendo cada hora, avisar en CADA ciclo sería un Telegram por
+#: hora sobre el mismo hecho -- el mismo patrón de ruido que ahogó al General el 16/09/2026
+#: (no negociable 26): un aviso que se repite demasiado se acaba ignorando.
+SEGUNDOS_ENTRE_AVISOS_DE_CALIDAD = 86400.0
+
+#: El instante (`time.time()`) del último aviso de calidad frenada, en memoria y no en la
+#: base -- mismo criterio que `relevo._avisados`: perderlo en un reinicio como mucho repite
+#: un aviso antes de tiempo, que es inocuo comparado con dejar de avisar nunca más.
+_ultimo_aviso_de_calidad_en: float | None = None
+
+#: La referencia viva de la tarea del barrido. Igual que `_tarea_de_recordatorios` y
+#: `_tarea_de_barrido` (relevos): sin guardarla, el recolector de basura se puede llevar una
+#: tarea que nadie mira y la reactivación dejaría de correr sin un solo error en el log.
+_tarea_de_barrido_de_reactivacion: asyncio.Task | None = None
+
+
+async def _avisar_de_calidad_del_numero(calidad: dict[str, str] | None) -> None:
+    """El barrido decidió no encolar nada por la calidad del número ante Meta. Avisa al
+    General, como mucho una vez cada `SEGUNDOS_ENTRE_AVISOS_DE_CALIDAD`.
+
+    Nunca propaga: un fallo avisando de que algo se frenó no puede tumbar el ciclo siguiente
+    -- mismo criterio que `_avisar_de_recordatorios_fallidos`.
+
+    **Ronda 1 de revisión: el cooldown se sella ANTES de intentar nada, no solo tras un envío
+    que salió bien.** La versión anterior solo sellaba `_ultimo_aviso_de_calidad_en` dentro
+    del `try` de Telegram, así que si no había Telegram configurado (`log.error` y `return`
+    tempranos) el sello nunca se ponía: un `ERROR` en el log CADA HORA, para siempre, sin que
+    nada lo silenciara. El cooldown es sobre CUÁNTO SE INTENTA avisar, no sobre cuántas veces
+    salió bien -- repetir el intento con la misma frecuencia que el barrido (cada hora) sería
+    exactamente el ruido que esta guarda existe para evitar.
+    """
+    global _ultimo_aviso_de_calidad_en
+    ahora_reloj = time.time()
+    if (
+        _ultimo_aviso_de_calidad_en is not None
+        and ahora_reloj - _ultimo_aviso_de_calidad_en < SEGUNDOS_ENTRE_AVISOS_DE_CALIDAD
+    ):
+        return
+    _ultimo_aviso_de_calidad_en = ahora_reloj
+
+    calificacion = (calidad or {}).get("quality_rating", "desconocida")
+    nivel = (calidad or {}).get("messaging_limit_tier", "desconocido")
+
+    if not config.telegram_bot_token or not config.telegram_chat_doctores:
+        log.error(
+            "la calidad del número (%s) frena la reactivación y no hay Telegram para avisarlo",
+            calificacion,
+        )
+        return
+    try:
+        await _telegram.enviar_mensaje(
+            "⚠️ <b>La reactivación de leads está en pausa</b>\n\n"
+            f"Calidad del número ante Meta: <code>{html.escape(calificacion)}</code>. "
+            f"Nivel de mensajería: <code>{html.escape(nivel)}</code>.\n\n"
+            "Mientras siga así, el barrido no encola a nadie nuevo <b>y el despachador "
+            "tampoco manda lo que ya estaba encolado</b>: esas filas se aplazan, no se "
+            "pierden, y saldrán cuando la calidad vuelva a subir. Los recordatorios de "
+            "cita, los escalamientos y la atención normal NO se ven afectados.",
+            tema_id=_tema_general or 0,
+        )
+    except Exception:  # noqa: BLE001 -- ver docstring
+        log.exception("no se pudo avisar a los doctores de la calidad del número")
+
+
+async def _barrer_reactivacion_sin_parar() -> None:
+    """El reloj del barrido de reactivación.
+
+    `calidad_del_numero()` se consulta AQUÍ, antes de llamar a `barrido.encolar`, porque esa
+    función es síncrona y no habla con la red -- igual que `seguimientos.decidir` no habla
+    con la base. Va con `to_thread` como todo lo que abre una conexión a Neon desde este
+    bucle: `psycopg.connect` contra Neon es un handshake TLS completo, bloqueante, en el
+    mismo bucle de eventos que atiende a los pacientes.
+
+    **Asume un solo worker**, igual que el despacho de recordatorios y el barrido de
+    relevos.
+    """
+    global _ultima_calidad_del_numero
+    while True:
+        await asyncio.sleep(SEGUNDOS_ENTRE_BARRIDOS_DE_REACTIVACION)
+        try:
+            calidad = await _whatsapp.calidad_del_numero()
+            # La caché que lee `_freno_de_reactivacion` desde el otro bucle, el que de verdad
+            # manda. Se escribe SIEMPRE, incluido el `None` de una consulta que falló: dejar el
+            # valor viejo puesto sería seguir mandando con una calidad que ya nadie confirmó.
+            _ultima_calidad_del_numero = calidad
+            operativa = await asyncio.to_thread(_leer_configuracion_operativa)
+            recuento = await asyncio.to_thread(
+                barrido.encolar,
+                database_url=config.database_url,
+                ahora=datetime.now(ZONA_BOGOTA),
+                tope_diario=operativa.get("tope_diario_reactivacion", 20),
+                encendido=config.reactivacion_encendida,
+                calidad=calidad,
+                max_seguimientos_fallidos=operativa.get("max_seguimientos_fallidos", 2),
+            )
+            if any(recuento.values()):
+                log.info("reactivación: %s", recuento)
+            if recuento.get("frenado_por_calidad"):
+                await _avisar_de_calidad_del_numero(calidad)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 -- tiene que seguir vivo la hora siguiente
+            log.exception("el barrido de reactivación falló; se reintenta en el ciclo siguiente")
+
+
+@app.on_event("startup")
+async def _arrancar_barrido_de_reactivacion() -> None:
+    """Tres guardas, en orden: sin base no arranca; apagado no arranca -y lo dice en el log-;
+    sin plantillas arranca IGUAL, porque encolar sin enviar es el modo de comprobación que
+    hace falta mientras Meta no aprueba las tres plantillas de reactivación."""
+    global _tarea_de_barrido_de_reactivacion
+    if not config.database_url:
+        log.info("sin base configurada: no arranca el barrido de reactivación")
+        return
+    if not config.reactivacion_encendida:
+        log.info(
+            "MAXICARE_REACTIVACION apagado (regla 10): no arranca el barrido de reactivación"
+        )
+        return
+    if not any((config.plantilla_sin_agendar, config.plantilla_cancelada,
+                config.plantilla_no_asistio)):
+        log.warning(
+            "sin ninguna plantilla de reactivación configurada: el barrido decidirá y "
+            "encolará igual, pero `seguimientos.despachar` no enviará nada. Es el modo de "
+            "comprobación; para enviar hace falta la aprobación de Meta."
+        )
+    _tarea_de_barrido_de_reactivacion = asyncio.create_task(_barrer_reactivacion_sin_parar())
+
+
+@app.on_event("shutdown")
+async def _parar_barrido_de_reactivacion() -> None:
+    if _tarea_de_barrido_de_reactivacion is None:
+        return
+    _tarea_de_barrido_de_reactivacion.cancel()
+    try:
+        await _tarea_de_barrido_de_reactivacion
     except (asyncio.CancelledError, Exception):  # noqa: BLE001
         pass
 

@@ -87,7 +87,8 @@ def test_daniela_tiene_las_nueve_tools_del_plan_la_decima_y_la_baja_comercial():
     puede salir de ninguna otra.
 
     `registrar_no_contactar` y `revocar_no_contactar` tampoco están en el plan: son la baja
-    comercial, añadida el 16/09/2026.
+    comercial, añadida el 16/09/2026. `cerrar_seguimiento` tampoco: es el cierre de una serie
+    de reactivación, añadido el 17/09/2026 (tarea 6).
     """
     nombres = {t.name for t in agentes.daniela.tools}
 
@@ -104,6 +105,7 @@ def test_daniela_tiene_las_nueve_tools_del_plan_la_decima_y_la_baja_comercial():
         "consultar_citas",
         "registrar_no_contactar",
         "revocar_no_contactar",
+        "cerrar_seguimiento",
     }
 
 
@@ -603,6 +605,187 @@ def test_sin_recordatorio_el_bloque_no_aparece():
     assert "YA LE ESCRIBIMOS NOSOTROS" not in texto
 
 
+#: La frase con la que el bloque del recordatorio de CITA le dice al modelo a qué contesta el
+#: paciente. Es exactamente lo que no puede aparecer sobre una reactivación `sin_agendar`:
+#: esa cita no existe. Se escribe una vez aquí para que las pruebas de abajo maten al mutante
+#: que devuelva las reactivaciones al camino del recordatorio.
+_FRASE_DE_LA_CITA = "se refiere a la cita de la que hablaba ese mensaje"
+
+
+def test_una_reactivacion_NO_le_dice_a_daniela_que_hay_una_cita():
+    """El fallo que se vio mandando la primera plantilla aprobada a un teléfono de verdad.
+
+    Hasta el 20/09/2026 este bloque trataba los cuatro tipos igual, porque cuando se escribió
+    solo existía `recordatorio_cita`. Su texto afirma que un «sí» del paciente «se refiere a
+    la cita de la que hablaba ese mensaje» y manda «consultar sus citas». Para un
+    `reactivacion_sin_agendar` --el grueso del volumen-- ESA CITA NO EXISTE: es justo la
+    gente que preguntó y nunca agendó. Daniela recibía una cita inventada como antecedente
+    cierto, sobre la única persona que no puede oír hablar de «su cita».
+
+    Ninguna prueba lo cazaba y ninguna podía: todas las de este bloque pasan
+    `recordatorio_cita`, que es el tipo para el que ese texto sí es verdad.
+    """
+    ctx = contexto(
+        ahora=datetime(2026, 9, 21, 9, 0, tzinfo=ZONA_BOGOTA),
+        ultimo_recordatorio_tipo="reactivacion_sin_agendar",
+        ultimo_recordatorio_en=datetime(2026, 9, 20, 15, 0, tzinfo=ZONA_BOGOTA),
+    )
+
+    texto = asyncio.run(agentes.daniela.get_system_prompt(RunContextWrapper(context=ctx)))
+
+    assert "YA LE ESCRIBIMOS NOSOTROS" in texto, (
+        "el antecedente tiene que salir igual: la persona SÍ leyó un mensaje nuestro"
+    )
+    assert _FRASE_DE_LA_CITA not in texto, (
+        "le está diciendo al modelo que existe una cita sobre alguien que nunca agendó"
+    )
+    assert "NO hay ninguna cita de por medio" in texto
+    # Y los dos rótulos, que son lo único que el paciente puede pulsar.
+    assert "Ya no, gracias" in texto
+    assert "Sí, me interesa" in texto
+
+
+def test_las_otras_dos_reactivaciones_SI_mandan_consultar_las_citas():
+    """La frontera del cambio de arriba, y la razón de que sean tres frases y no una.
+
+    `cancelada` y `no_asistio` sí tienen una cita detrás --cancelada la primera, perdida la
+    segunda--, así que ahí «consulta sus citas» es el consejo correcto. Un arreglo que
+    quitara la cita de los TRES tipos dejaría a Daniela reagendando a ciegas a quien ya
+    tiene historia de citas.
+    """
+    for tipo in ("reactivacion_cancelada", "reactivacion_no_asistio"):
+        ctx = contexto(
+            ahora=datetime(2026, 9, 21, 9, 0, tzinfo=ZONA_BOGOTA),
+            ultimo_recordatorio_tipo=tipo,
+            ultimo_recordatorio_en=datetime(2026, 9, 20, 15, 0, tzinfo=ZONA_BOGOTA),
+        )
+
+        texto = asyncio.run(
+            agentes.daniela.get_system_prompt(RunContextWrapper(context=ctx))
+        )
+
+        assert "Consulta sus citas antes de dar nada por hecho." in texto, tipo
+        assert "NO hay ninguna cita de por medio" not in texto, tipo
+        # El rótulo del botón afirmativo es distinto en cada plantilla, y decirle a Daniela
+        # que pulsó uno que no existe es la misma clase de mentira que la cita inventada.
+        assert agentes._BOTON_AFIRMATIVO[tipo] in texto, tipo
+        assert "Sí, me interesa" not in texto, tipo
+
+
+def test_el_tratamiento_de_la_consulta_previa_viaja_hasta_el_prompt():
+    """Lo que impide que Daniela le pregunte el tratamiento a quien ya se lo dijo.
+
+    Una reactivación sale siempre fuera de la ventana de 24 h de `conversacion_viva`, así que
+    quien contesta abre una conversación NUEVA, con sesión nueva y sin una línea de historial.
+    Sin este dato, lo primero que hacía Daniela era preguntar «¿sobre qué tratamiento?» a
+    alguien a quien le escribimos precisamente porque ya lo había contado -- la firma exacta
+    de un mensaje masivo. Medido en el primer envío real, el 20/09/2026.
+    """
+    ctx = contexto(
+        ahora=datetime(2026, 9, 21, 9, 0, tzinfo=ZONA_BOGOTA),
+        ultimo_recordatorio_tipo="reactivacion_sin_agendar",
+        ultimo_recordatorio_en=datetime(2026, 9, 20, 15, 0, tzinfo=ZONA_BOGOTA),
+        tratamiento_pendiente="ortodoncia",
+    )
+
+    texto = asyncio.run(agentes.daniela.get_system_prompt(RunContextWrapper(context=ctx)))
+
+    assert "La última vez preguntó por: ortodoncia." in texto
+    assert "NO le preguntes lo que ya te había contado" in texto
+
+
+def test_sin_tratamiento_anotado_daniela_puede_preguntar():
+    """El otro lado, y no es simétrico: cuando NO se sabe, callar sería peor.
+
+    `tratamiento_pendiente` es `None` siempre que la conversación vieja no llegó a anotar
+    nada -- o anotó `no_identificado`, que es el literal con el que el sistema dice que no
+    sabe (regla dura 12). Ahí Daniela tiene que poder preguntar; lo que no puede es
+    preguntar como si fuera un primer contacto.
+    """
+    ctx = contexto(
+        ahora=datetime(2026, 9, 21, 9, 0, tzinfo=ZONA_BOGOTA),
+        ultimo_recordatorio_tipo="reactivacion_sin_agendar",
+        ultimo_recordatorio_en=datetime(2026, 9, 20, 15, 0, tzinfo=ZONA_BOGOTA),
+    )
+
+    texto = asyncio.run(agentes.daniela.get_system_prompt(RunContextWrapper(context=ctx)))
+
+    assert "No quedó anotado sobre qué preguntó" in texto
+    assert "La última vez preguntó por:" not in texto
+
+
+def test_una_reactivacion_sigue_siendo_antecedente_a_los_tres_dias():
+    """Las 48 h del recordatorio de cita son la cota EQUIVOCADA para una reactivación.
+
+    Las 48 h salen de que la cita ya ocurrió. Una reactivación no tiene cita detrás: lo único
+    que vence es la memoria de la persona, y la serie entera dura siete días. Con la cota
+    vieja, quien contestaba al tercer día volvía a entrar como un desconocido y Daniela le
+    preguntaba otra vez lo que ya había dicho -- el mismo fallo, reaparecido por el reloj.
+
+    Las dos direcciones de la frontera, que es lo que mata al mutante que cambie el número.
+    """
+    salio = datetime(2026, 9, 20, 15, 0, tzinfo=ZONA_BOGOTA)
+    tope = agentes.DIAS_QUE_UNA_REACTIVACION_SIGUE_SIENDO_ANTECEDENTE
+
+    def prompt(dias: int) -> str:
+        ctx = contexto(
+            ahora=salio + timedelta(days=dias),
+            ultimo_recordatorio_tipo="reactivacion_sin_agendar",
+            ultimo_recordatorio_en=salio,
+        )
+        return asyncio.run(
+            agentes.daniela.get_system_prompt(RunContextWrapper(context=ctx))
+        )
+
+    # Tres días: con la cota de 48 h esto salía vacío.
+    assert "YA LE ESCRIBIMOS NOSOTROS" in prompt(3)
+    assert "YA LE ESCRIBIMOS NOSOTROS" in prompt(tope - 1)
+    # Y sigue habiendo tope: la columna no la borra nadie.
+    assert "YA LE ESCRIBIMOS NOSOTROS" not in prompt(tope + 1)
+
+
+def test_la_baja_sale_AUNQUE_este_contestando_una_reactivacion():
+    """Los dos bloques a la vez, que es el caso que de verdad ocurre.
+
+    Es la combinación normal, no la rara: a quien se da de baja se la escribe una
+    reactivación, y en el turno siguiente `ultimo_recordatorio_tipo` sigue puesto porque nada
+    borra esa columna. Un `return` dentro de la rama de la reactivación --que es como quedó
+    escrita la primera versión de este arreglo-- dejaba a Daniela sin el bloque de la baja
+    justo para la persona que acababa de pedir que no le escribieran más, y el no negociable
+    25 dejaba de sostenerse por la puerta de atrás.
+    """
+    ctx = contexto(
+        ahora=datetime(2026, 9, 21, 9, 0, tzinfo=ZONA_BOGOTA),
+        ultimo_recordatorio_tipo="reactivacion_sin_agendar",
+        ultimo_recordatorio_en=datetime(2026, 9, 20, 15, 0, tzinfo=ZONA_BOGOTA),
+        pidio_no_contacto=True,
+    )
+
+    texto = asyncio.run(agentes.daniela.get_system_prompt(RunContextWrapper(context=ctx)))
+
+    assert "YA LE ESCRIBIMOS NOSOTROS" in texto
+    assert "ESTE PACIENTE PIDIÓ NO SER CONTACTADO" in texto
+
+
+def test_un_recordatorio_de_cita_NO_pasa_por_el_camino_de_la_reactivacion():
+    """La frontera por el otro lado: el tipo no comercial conserva su texto y su cota de 48 h.
+
+    Sin esta prueba, un arreglo que mandara los CUATRO tipos por la rama nueva se llevaría
+    por delante el antecedente del «sí, confirmo» de una cita real, que es el que de verdad
+    afecta a que alguien llegue a la clínica.
+    """
+    ctx = contexto(
+        ahora=datetime(2026, 9, 17, 9, 0, tzinfo=ZONA_BOGOTA),
+        ultimo_recordatorio_tipo="recordatorio_cita",
+        ultimo_recordatorio_en=datetime(2026, 9, 16, 18, 0, tzinfo=ZONA_BOGOTA),
+    )
+
+    texto = asyncio.run(agentes.daniela.get_system_prompt(RunContextWrapper(context=ctx)))
+
+    assert _FRASE_DE_LA_CITA in texto
+    assert "mensaje automático de seguimiento" not in texto
+
+
 def test_pidio_no_contacto_apaga_el_seguimiento_en_lo_que_el_modelo_realmente_lee():
     """El párrafo estático de la política de datos dice "cuando el contexto dice que este
     paciente pidió no ser contactado" -- y sin este bloque esa frase era inerte: `ctx` nunca
@@ -739,7 +922,7 @@ def test_el_modelo_recibe_las_tools_y_las_instrucciones():
     correr(agentes.daniela, "hola", ctx, guion)
 
     recibido = guion.recibido[0]
-    assert len(recibido["tools"]) == 12
+    assert len(recibido["tools"]) == 13
     assert "MaxiCare" in recibido["instrucciones"]
 
 
@@ -931,6 +1114,17 @@ def test_el_prompt_nombra_las_dos_tools_de_la_baja_comercial():
 
 def test_el_prompt_manda_callar_el_seguimiento_a_quien_lo_nego():
     assert "no lo ofreces, no lo insinúas y no lo mencionas" in agentes.INSTRUCCIONES_DANIELA
+
+
+def test_el_prompt_manda_el_no_ambiguo_al_lado_barato():
+    """Tarea 6: el «no» a un seguimiento nuestro es `cerrar_seguimiento`, no la baja.
+
+    Sin esto, el prompt seguía sin mencionar la tool nueva y el modelo no tenía ninguna
+    instrucción para decidir entre las dos cuando el paciente solo dice «no gracias».
+    """
+    texto = agentes.INSTRUCCIONES_DANIELA
+    assert "cerrar_seguimiento" in texto
+    assert "Ya no, gracias" in texto
 
 
 def test_el_telefono_de_privacidad_del_prompt_es_el_que_perdona_el_guardrail():

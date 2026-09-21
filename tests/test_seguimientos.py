@@ -1,7 +1,7 @@
 """El despachador de recordatorios, sin base y sin red.
 
-Las siete guardas y las bandas horarias viven aquí porque son decisiones del código, no de
-la base: se prueban en milisegundos y corren siempre. Lo que toca Neon está en
+Las guardas y las bandas horarias viven aquí porque son decisiones del código, no de la
+base: se prueban en milisegundos y corren siempre. Lo que toca Neon está en
 `test_seguimientos_neon.py`, marcado `neon`.
 
 Ningún momento sale del reloj de la máquina: todos entran como parámetro.
@@ -119,6 +119,10 @@ def fila(**cambios) -> dict:
         cita_id="cita-1",
         tipo="recordatorio_cita",
         fecha_objetivo=momento(16, 18),
+        # `aplazado_desde` en `None`: así nace una fila real que nunca se ha aplazado. R3bis
+        # lee esta clave, y desde la revisión final (H6 bis) R0 exige que ESTÉ -- distinta cosa
+        # que estar en `None`, que es su estado normal.
+        aplazado_desde=None,
         intentos=0,
         telefono="573001112233",
         nombre_completo="Ana Gómez",
@@ -126,6 +130,13 @@ def fila(**cambios) -> dict:
         cita_estado="confirmada",
         tomada_por=None,
         no_contactar=False,
+        # Las otras dos columnas que R0 exige en una fila de reactivación. El SELECT real
+        # (`persistencia.seguimientos_por_despachar`) las devuelve SIEMPRE, con `COALESCE` a 0
+        # para un teléfono sin fila en `contactos`, así que una fila de prueba que no las traiga
+        # es una fila que la base no puede producir -- y eso es justo lo que R0 caza. Un
+        # `recordatorio_cita` no las mira, pero esta fábrica también fabrica reactivaciones.
+        seguimientos_fallidos=0,
+        reactivaciones_ultimo_ano=0,
     )
     base.update(cambios)
     return base
@@ -275,9 +286,22 @@ def test_un_recordatorio_limpio_sale():
 
 
 def test_un_seguimiento_sin_cita_se_salta_las_tres_primeras_guardas():
-    # «Llámenme el lunes»: no cuelga de ninguna cita, así que G1, G2 y G3 no aplican.
+    """«Llámenme el lunes»: no cuelga de ninguna cita, así que G1, G2 y G3 no aplican.
+
+    El `tipo` es del vocabulario cerrado (`TIPO_SIN_AGENDAR`), a propósito y no por
+    casualidad: antes de la ronda 1 de revisión esta prueba usaba `tipo="reactivacion"`
+    -fuera del vocabulario- y pasaba por el motivo EQUIVOCADO. `es_reactivacion` tenía la
+    polaridad al revés (`tipo in TIPOS_DE_REACTIVACION`, falla ABIERTO), así que un tipo
+    inventado hacía que `es_reactivacion` diera `False` y las cinco guardas de reactivación
+    (R1-R5) ni se evaluaran: el "enviar" salía de saltarse TODO, no solo G1-G3. Con la
+    polaridad corregida (`not in TIPOS_NO_COMERCIALES`) esta fila SÍ pasa por R1-R5 -y sigue
+    dando "enviar", porque no tiene nada malo: sin fallidos, sin tope, a tiempo, en horario,
+    sin contacto reciente-. El caso adversario que SÍ debe frenar está en
+    `tests/test_reactivacion.py::test_un_tipo_fuera_del_vocabulario_no_esquiva_las_guardas_
+    de_reactivacion`.
+    """
     d = s.decidir(
-        fila(cita_id=None, cita_inicio=None, cita_estado=None, tipo="reactivacion"),
+        fila(cita_id=None, cita_inicio=None, cita_estado=None, tipo=s.TIPO_SIN_AGENDAR),
         ahora=momento(16, 18),
         jornada=JORNADA,
         ultimo_mensaje=None,
@@ -287,7 +311,7 @@ def test_un_seguimiento_sin_cita_se_salta_las_tres_primeras_guardas():
 
 def test_g0_anula_una_reactivacion_a_quien_pidio_la_baja():
     decision = s.decidir(
-        fila(tipo="reactivacion", cita_id=None, cita_inicio=None, no_contactar=True),
+        fila(tipo=s.TIPO_SIN_AGENDAR, cita_id=None, cita_inicio=None, no_contactar=True),
         ahora=momento(16, 18),
         jornada=JORNADA,
         ultimo_mensaje=None,
@@ -312,9 +336,14 @@ def test_g0_NO_toca_el_recordatorio_de_una_cita():
 
 
 def test_un_tipo_inventado_se_trata_como_comercial():
-    """`seguimientos.tipo` es texto libre que escribe el modelo. La lista blanca falla hacia
-    el lado seguro: lo que no está en ella se comprueba contra la baja. Una lista negra
-    dejaría pasar cualquier invento directo al envío."""
+    """La 021 ya cerró el vocabulario que el MODELO puede pedir (`Literal` +
+    `TIPOS_QUE_EL_MODELO_PUEDE_PEDIR`), así que esto ya no puede pasar por esa vía. Pero el
+    CHECK de esa migración es NOT VALID -no revisa lo que ya estaba en `public` de cuando
+    `tipo` era texto libre-, así que una fila VIEJA con un tipo que nadie reconoce sigue
+    siendo alcanzable, y por eso este caso se deja con un tipo fuera de vocabulario A
+    PROPÓSITO. La lista blanca falla hacia el lado seguro: lo que no está en ella se
+    comprueba contra la baja. Una lista negra dejaría pasar cualquier invento directo al
+    envío."""
     decision = s.decidir(
         fila(tipo="promo_de_diciembre", cita_id=None, cita_inicio=None, no_contactar=True),
         ahora=momento(16, 18),
@@ -328,7 +357,7 @@ def test_un_tipo_inventado_se_trata_como_comercial():
 
 def test_sin_baja_g0_no_hace_nada():
     decision = s.decidir(
-        fila(tipo="reactivacion", cita_id=None, cita_inicio=None, no_contactar=False),
+        fila(tipo=s.TIPO_SIN_AGENDAR, cita_id=None, cita_inicio=None, no_contactar=False),
         ahora=momento(16, 18),
         jornada=JORNADA,
         ultimo_mensaje=None,
@@ -355,7 +384,7 @@ def test_los_cuatro_huecos_de_la_plantilla_salen_en_hora_de_bogota(monkeypatch):
 
     # Jueves 17/9/2026, 9:00 en Bogotá == 14:00 UTC.
     utc = datetime(2026, 9, 17, 14, 0, tzinfo=timezone.utc)
-    huecos = s._parametros_del_recordatorio(
+    huecos = s.parametros_de(
         {
             "cita_inicio": utc,
             "nombre_completo": "Ana Gómez",
@@ -367,9 +396,11 @@ def test_los_cuatro_huecos_de_la_plantilla_salen_en_hora_de_bogota(monkeypatch):
 
 def test_sin_cita_los_dos_huecos_de_fecha_quedan_en_pendiente():
     """La regla dura 3 es para el código, no un permiso para mandarle el marcador a un
-    paciente: `despachar` anula la fila antes de llegar al canal. Esto solo fija que la
-    función no se inventa una fecha plausible si la recibe vacía."""
-    huecos = s._parametros_del_recordatorio(
+    paciente: `despachar` anula la fila (recordatorio) o la deja pendiente (reactivación)
+    antes de llegar al canal. Esto solo fija que la función no se inventa una fecha plausible
+    si la recibe vacía -- y que un `tipo` ausente (como aquí) cae en la rama de RECORDATORIO,
+    la única que tiene fecha y hora que rellenar."""
+    huecos = s.parametros_de(
         {"cita_inicio": None, "nombre_completo": None, "tratamiento": None}
     )
     assert huecos == ["paciente", "PENDIENTE", "PENDIENTE", "su cita"]
@@ -471,7 +502,7 @@ def test_abrir_y_cerrar_la_conexion_no_corren_en_el_bucle_de_eventos(monkeypatch
                 database_url="postgresql://no-se-usa",
                 whatsapp=None,
                 jornada=JORNADA,
-                plantilla="",
+                plantillas={},
                 ahora=momento(16, 18),
             )
 
@@ -521,7 +552,7 @@ def test_el_idioma_de_la_plantilla_llega_hasta_meta(monkeypatch):
             database_url="postgresql://no-se-usa",
             whatsapp=_WhatsAppFalso(),
             jornada=JORNADA,
-            plantilla="recordatorio_cita",
+            plantillas={s.TIPO_RECORDATORIO: "recordatorio_cita"},
             idioma="es_CO",
             ahora=momento(16, 18),
         )
@@ -572,7 +603,7 @@ def test_el_despachador_marca_antes_de_enviar(monkeypatch):
             database_url="postgresql://no-se-usa",
             whatsapp=_WhatsAppFalso(),
             jornada=JORNADA,
-            plantilla="recordatorio_cita",
+            plantillas={s.TIPO_RECORDATORIO: "recordatorio_cita"},
             ahora=momento(16, 18),
         )
     )
@@ -623,7 +654,7 @@ def test_sin_plantilla_configurada_decide_pero_no_manda(monkeypatch):
             database_url="postgresql://no-se-usa",
             whatsapp=_WhatsAppFalso(),
             jornada=JORNADA,
-            plantilla="",
+            plantillas={},
             ahora=momento(16, 18),
         )
     )
@@ -675,7 +706,7 @@ def test_el_despachador_lee_la_hora_de_vispera_de_la_configuracion(monkeypatch):
             database_url="postgresql://no-se-usa",
             whatsapp=_WhatsAppFalso(),
             jornada=JORNADA,
-            plantilla="recordatorio_cita",
+            plantillas={s.TIPO_RECORDATORIO: "recordatorio_cita"},
             ahora=momento(16, 19),
         )
     )
@@ -683,13 +714,12 @@ def test_el_despachador_lee_la_hora_de_vispera_de_la_configuracion(monkeypatch):
     assert recuento == {"enviados": 1, "anulados": 0, "aplazados": 0, "fallidos": 0}
 
 
-def test_un_seguimiento_sin_cita_se_anula_por_falta_de_plantilla_y_no_se_manda(monkeypatch):
-    """Un seguimiento sin cita (p. ej. una reactivación) llega a "enviar" -G1-G3 se saltan sin
-    cita que mirar, ver `test_un_seguimiento_sin_cita_se_salta_las_tres_primeras_guardas`- pero
-    la plantilla que manda `despachar` es LA DE RECORDATORIO DE CITA. Sin `cita_inicio`,
-    mandarla dejaría al paciente leyendo el literal "PENDIENTE" por WhatsApp: no es una regla
-    de negocio, es que hoy no existe una plantilla para este tipo. Se anula con un motivo
-    propio, no se manda, y el canal ni se toca.
+def test_un_recordatorio_de_cita_sin_cita_inicio_se_anula_por_fila_rota(monkeypatch):
+    """Un `TIPO_RECORDATORIO` que llega a "enviar" sin `cita_inicio` es una fila ROTA, no una
+    que espera plantilla: sin la hora no hay con qué rellenar los huecos 2 y 3 de la plantilla
+    de cuatro huecos, y mandarla dejaría al paciente leyendo el literal "PENDIENTE" por
+    WhatsApp. Esto sigue anulándose con motivo propio (`sin_cita`) aunque la plantilla SÍ esté
+    configurada -- es la mitad de la vieja puerta `sin_plantilla` que la tarea 4 conservó.
     """
     import asyncio
 
@@ -703,9 +733,7 @@ def test_un_seguimiento_sin_cita_se_anula_por_falta_de_plantilla_y_no_se_manda(m
     monkeypatch.setattr(
         persistencia,
         "seguimientos_por_despachar",
-        lambda conn, **k: [
-            fila(cita_id=None, cita_inicio=None, cita_estado=None, tipo="reactivacion")
-        ],
+        lambda conn, **k: [fila(cita_inicio=None)],
     )
     monkeypatch.setattr(
         persistencia, "ultimo_mensaje_del_paciente", lambda conn, telefono: None
@@ -726,14 +754,75 @@ def test_un_seguimiento_sin_cita_se_anula_por_falta_de_plantilla_y_no_se_manda(m
             database_url="postgresql://no-se-usa",
             whatsapp=_WhatsAppFalso(),
             jornada=JORNADA,
-            plantilla="recordatorio_cita",
+            plantillas={s.TIPO_RECORDATORIO: "recordatorio_cita"},
             ahora=momento(16, 18),
         )
     )
 
-    assert anuladas == [(1, "sin_plantilla")]
+    assert anuladas == [(1, "sin_cita")]
     assert mandados == []
     assert recuento == {"enviados": 0, "anulados": 1, "aplazados": 0, "fallidos": 0}
+
+
+def test_una_reactivacion_sin_plantilla_configurada_queda_pendiente_y_no_se_anula(monkeypatch):
+    """La otra mitad de la vieja puerta `sin_plantilla`: una reactivación (sin cita, así que
+    G1-G3 se saltan -ver `test_un_seguimiento_sin_cita_se_salta_las_tres_primeras_guardas`-)
+    que llega a "enviar" sin que su tipo tenga plantilla configurada NO se anula ni se marca:
+    se queda pendiente hasta que Meta la apruebe. Anularla obligaría al barrido a volver a
+    decidir sobre alguien que ya calificó; marcarla la perdería para siempre.
+    """
+    import asyncio
+
+    from maxicare_daniela import persistencia, seguimientos as s
+
+    anuladas: list[tuple[int, str]] = []
+    marcadas: list[int] = []
+    mandados: list[str] = []
+
+    monkeypatch.setattr(persistencia, "conectar", lambda url: _ConexionFalsa())
+    monkeypatch.setattr(persistencia, "leer_configuracion", lambda conn: {})
+    monkeypatch.setattr(
+        persistencia,
+        "seguimientos_por_despachar",
+        lambda conn, **k: [
+            fila(cita_id=None, cita_inicio=None, cita_estado=None, tipo=s.TIPO_SIN_AGENDAR)
+        ],
+    )
+    monkeypatch.setattr(
+        persistencia, "ultimo_mensaje_del_paciente", lambda conn, telefono: None
+    )
+    monkeypatch.setattr(
+        persistencia,
+        "anular_seguimiento",
+        lambda conn, id_seguimiento, *, motivo: anuladas.append((id_seguimiento, motivo)),
+    )
+    monkeypatch.setattr(
+        persistencia,
+        "marcar_seguimiento_enviado",
+        lambda conn, id_seguimiento: marcadas.append(id_seguimiento) or True,
+    )
+
+    class _WhatsAppFalso:
+        async def enviar_plantilla(self, telefono, **k):
+            mandados.append(telefono)
+            return "wamid.X"
+
+    recuento = asyncio.run(
+        s.despachar(
+            database_url="postgresql://no-se-usa",
+            whatsapp=_WhatsAppFalso(),
+            jornada=JORNADA,
+            # Falta justo la de TIPO_SIN_AGENDAR: hoy, con las tres de reactivación sin
+            # aprobar por Meta, este diccionario es el que arma `runtime.py` de verdad.
+            plantillas={s.TIPO_RECORDATORIO: "recordatorio_cita"},
+            ahora=momento(16, 18),
+        )
+    )
+
+    assert anuladas == []
+    assert marcadas == []
+    assert mandados == []
+    assert recuento == {"enviados": 0, "anulados": 0, "aplazados": 0, "fallidos": 0}
 
 
 def test_una_fila_que_decidir_anula_no_toca_el_canal(monkeypatch):
@@ -772,7 +861,7 @@ def test_una_fila_que_decidir_anula_no_toca_el_canal(monkeypatch):
             database_url="postgresql://no-se-usa",
             whatsapp=_WhatsAppFalso(),
             jornada=JORNADA,
-            plantilla="recordatorio_cita",
+            plantillas={s.TIPO_RECORDATORIO: "recordatorio_cita"},
             ahora=momento(16, 18),
         )
     )
@@ -818,7 +907,7 @@ def test_una_fila_que_decidir_aplaza_no_toca_el_canal(monkeypatch):
             database_url="postgresql://no-se-usa",
             whatsapp=_WhatsAppFalso(),
             jornada=JORNADA,
-            plantilla="recordatorio_cita",
+            plantillas={s.TIPO_RECORDATORIO: "recordatorio_cita"},
             ahora=momento(16, 18),
         )
     )
@@ -875,7 +964,7 @@ def test_los_intentos_agotados_marcan_fallido_y_no_se_pierden(monkeypatch):
             database_url="postgresql://no-se-usa",
             whatsapp=_WhatsAppQueSiempreFalla(),
             jornada=JORNADA,
-            plantilla="recordatorio_cita",
+            plantillas={s.TIPO_RECORDATORIO: "recordatorio_cita"},
             ahora=momento(16, 18),
         )
     )

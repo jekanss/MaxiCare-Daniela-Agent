@@ -41,7 +41,7 @@ Entregables por fase. **Los marcados gastan tokens**; los demás, ni uno:
 
 | Comando | Qué prueba | ¿Gasta? |
 |---|---|---|
-| `scripts/probar_tools.py` | las doce tools contra Neon (fase 3) | no |
+| `scripts/probar_tools.py` | las trece tools contra Neon (fase 3) | no |
 | `scripts/probar_agentes.py` | los dos agentes contra la API real (fase 4) | **sí** |
 | `scripts/probar_web.py` | el cascarón web (fase 5) | solo con `--chat` |
 | `scripts/probar_atencion.py` | el turno de WhatsApp de punta a punta (fase 6A) | solo con `--chat` |
@@ -51,6 +51,7 @@ Entregables por fase. **Los marcados gastan tokens**; los demás, ni uno:
 | `scripts/probar_panel.py` | el panel de tratamientos y la agenda (fase 8) | solo con `--chat` |
 | `scripts/probar_recordatorios.py` | la cola de recordatorios y su despachador | no |
 | `scripts/probar_sin_resolver.py` | el informe de lo que Daniela no pudo (fase PENDIENTE) | no |
+| `scripts/probar_reactivacion.py` | el barrido de reactivación de leads y las once reglas anti-reporte | no |
 | `scripts/probar_plantilla.py` | la plantilla de Meta, y manda UNA de verdad | **sí** (`--estado` no) |
 | `scripts/probar_calendario.py` | `CalendarioGoogle` contra el calendario real | no |
 | `scripts/probar_webhook.py <url>` | el webhook en producción | **sí** (despierta a Daniela) |

@@ -4,7 +4,7 @@
 escribía en ninguna línea del repositorio. Este módulo es quien la lee.
 
 Deliberadamente NO abre conexiones ni habla con Meta por su cuenta: recibe la conexión y los
-canales. Es lo que permite probar las siete guardas en milisegundos y sin señal.
+canales. Es lo que permite probar todas sus guardas en milisegundos y sin señal.
 """
 
 from __future__ import annotations
@@ -125,6 +125,15 @@ def momento_del_recordatorio(
 #: Cuánto se aplaza un recordatorio que pilló al doctor hablando con el paciente.
 MINUTOS_DE_ESPERA_POR_RELEVO = 30
 
+#: Cuánto se aplaza una reactivación mientras algo la tiene FRENADA -- el interruptor de
+#: pánico, la calidad del número, o Daniela apagada. Ver la guarda `freno` en `decidir`.
+#:
+#: Una hora y no un minuto: las tres señales que pueden levantar el freno se refrescan con el
+#: reloj del BARRIDO (`runtime.SEGUNDOS_ENTRE_BARRIDOS_DE_REACTIVACION`, horario), así que
+#: volver a preguntar a los sesenta segundos no puede dar una respuesta distinta y lo único
+#: que consigue es reescribir `fecha_objetivo` mil veces al día.
+MINUTOS_DE_ESPERA_POR_FRENO_DE_REACTIVACION = 60
+
 #: A partir de cuánto retraso un recordatorio deja de servir y pasa a estorbar.
 HORAS_DE_RETRASO_QUE_LO_INVALIDAN = 2
 
@@ -147,27 +156,120 @@ MINUTOS_MINIMOS_ANTES_DE_LA_CITA = 75
 #: Si el paciente escribió hace menos de esto, ya está hablando con Daniela.
 MINUTOS_DE_CONTACTO_RECIENTE = 60
 
+#: La ventana de contacto reciente para una REACTIVACION. Mucho mas ancha que los 60 min del
+#: recordatorio a proposito: un recordatorio de cita le sirve a quien escribio hace tres horas,
+#: y un «hace unos dias nos escribio» a esa misma persona es lo que hace que conteste «??».
+HORAS_DE_CONTACTO_RECIENTE_COMERCIAL = 24
+
+#: Horario propio de la reactivacion, y NO la jornada de la clinica. Si MaxiCare abriera los
+#: domingos, colgar de la jornada dejaria salir publicidad en domingo. Un recordatorio de cita
+#: en domingo esta bien --la cita es real--; un «sigue interesada?» no.
+HORA_APERTURA_COMERCIAL = 9
+HORA_CIERRE_COMERCIAL = 19
+
+#: Defaults de las perillas de la 021. Los vivos salen de `configuracion`.
+MAX_REACTIVACIONES_12M = 6
+MAX_SEGUIMIENTOS_FALLIDOS = 2
+
+#: Techo de espera de una reactivacion que YA se aplazo al menos una vez, medido desde
+#: `aplazado_desde` -- la primera vez que no pudo salir, no desde que se creo. Es el mismo
+#: problema que motiva G3 bis, dos secciones más abajo, aplicado a lo que no tiene cita: ver
+#: R3bis para el caso medido.
+#:
+#: **Lo que este umbral cubre: el relevo sostenido.** G4 aplaza 30 min cada vez que
+#: `tomada_por` sigue puesto, así que un relevo que no se cierra encadena aplazamientos
+#: indefinidamente y `aplazado_desde` -fijo desde el primero- es lo único que mide cuánto
+#: lleva la fila sin poder salir de verdad. Un relevo sostenido dos días es una operación
+#: real de la clínica y no debe anularse; uno sostenido varios días ya no es un caso que
+#: convenga dejar vivo indefinidamente. 96 h (4 dias) da margen de sobra al primero sin abrir
+#: la puerta al segundo.
+#:
+#: **Lo que este umbral NO cubre, y no tiene por qué:** una fila que nunca se aplazó -incluida
+#: una programada a dos semanas vista, o la de 7 días de la tarea 6- tiene `aplazado_desde` en
+#: NULL y ni siquiera entra en esta guarda (ver el `is not None` de más abajo). Esa fila puede
+#: ser tan "vieja" como se quiera contra el calendario: lo que importa aquí es si ALGUNA VEZ
+#: quedó atascada, no cuánto falta o cuánto pasó desde que se creó. La primera versión de esta
+#: guarda medía contra `creado_en` -edad total de la fila- y por eso anulaba en silencio una
+#: reactivación de dos semanas que llegaba puntual, con un motivo que decía justo lo
+#: contrario de lo que había pasado.
+HORAS_DE_ESPERA_QUE_INVALIDAN_UN_APLAZAMIENTO_SOSTENIDO = 96
+
 #: Los tipos de seguimiento que NO son comerciales, y que por tanto una baja NO apaga.
 #:
-#: Es una lista BLANCA a propósito. `seguimientos.tipo` es texto libre que escribe el modelo
-#: (`programar_seguimiento`), así que con una lista negra de tipos comerciales, cualquier tipo
-#: inventado se colaría directo al envío. Con esta, lo que no está aquí se comprueba contra la
-#: baja: falla hacia el lado seguro.
+#: Es una lista BLANCA a propósito, y del conjunto EXENTO, no del protegido: falla hacia el
+#: lado seguro. La 021 ya cerró el vocabulario que el MODELO puede pedir (`Literal` +
+#: `TIPOS_QUE_EL_MODELO_PUEDE_PEDIR`), pero su CHECK es NOT VALID -- no revisa lo que ya
+#: estaba en `public` cuando `tipo` todavía era texto libre-- así que una fila vieja con un
+#: `tipo` que nadie reconoce sigue siendo alcanzable. Con una lista negra de tipos comerciales,
+#: esa fila se colaría directo al envío. Con esta, lo que no está aquí se comprueba contra la
+#: baja: un tipo desconocido se trata como comercial, no al revés.
 #:
-#: Acotar `tipo` con un `Literal` y un CHECK es trabajo del sub-proyecto D, y entonces esto se
-#: podrá derivar de esa lista en vez de mantenerse a mano.
+#: `es_reactivacion`, en `decidir`, usa la MISMA polaridad y por la MISMA razón: la primera
+#: version usaba `tipo in TIPOS_DE_REACTIVACION` -lista blanca del conjunto GUARDADO, falla
+#: ABIERTO- y una fila con un tipo fuera de las tres constantes conocidas atravesaba las cinco
+#: guardas de reactivación sin que ninguna se evaluara. Medido por el revisor contra el codigo:
+#: `tipo='reactivacion'` (invalido), dos días tarde, freno y tope ya disparados, domingo con la
+#: clínica abierta -> `Decision(accion='enviar')`, con las cinco guardas sin evaluar.
 #:
-#: **El portillo que esta lista tiene abierto, dicho y no escondido:** el tipo lo escribe el
-#: modelo, así que un `tipo='recordatorio_cita'` salido de `programar_seguimiento` atraviesa
-#: G0 sin mirarla aunque el paciente esté de baja. Hoy no sale nada por ahí --esa tool nunca
-#: pone `cita_id`, y el despachador anula con `sin_plantilla` todo lo que llegue sin
-#: `cita_inicio`--, así que el portillo está abierto pero no da a ninguna parte. Lo que lo
-#: abriría de par en par es el sub-proyecto D, que añade plantillas para los tipos sin cita:
-#: ese día, cerrar `tipo` deja de ser una mejora y pasa a ser la condición para que esta
-#: guarda siga siendo cierta. Mientras tanto lo estrecha `herramientas._programar_seguimiento`,
-#: que comprueba `ctx.pidio_no_contacto` contra esta misma lista antes de insertar, y el
-#: docstring de la tool, que ya no le ofrece al modelo `'recordatorio_cita'` como ejemplo.
+#: **El portillo que esta lista tiene abierto, dicho y no escondido:** un `tipo='recordatorio_
+#: cita'` salido de `programar_seguimiento` atraviesa G0 sin mirarla aunque el paciente esté de
+#: baja. Hoy no sale nada por ahí --esa tool nunca pone `cita_id`, y el despachador anula con
+#: `sin_cita` (antes `sin_plantilla`) todo `TIPO_RECORDATORIO` que llegue sin `cita_inicio`--,
+#: así que el portillo está abierto pero no da a ninguna parte. Lo estrecha
+#: `herramientas._programar_seguimiento`, que comprueba
+#: `ctx.pidio_no_contacto` contra esta misma lista antes de insertar, y el docstring de la
+#: tool, que no le ofrece al modelo `'recordatorio_cita'` como ejemplo.
 TIPOS_NO_COMERCIALES = frozenset({"recordatorio_cita"})
+
+#: Los cuatro tipos que existen. El CHECK `ck_seguimientos_tipo` de la migracion 021 tiene la
+#: MISMA lista: son dos caras de un vocabulario, y `test_el_vocabulario_del_codigo_y_el_de_la_
+#: migracion_no_se_separan` las mantiene juntas. Sin el cierre, `tipo` es TEXT que escribe el
+#: modelo, y un `recordatorio_cita` inventado atraviesa G0 con el paciente de baja.
+TIPO_RECORDATORIO = "recordatorio_cita"
+TIPO_SIN_AGENDAR = "reactivacion_sin_agendar"
+TIPO_CANCELADA = "reactivacion_cancelada"
+
+#: Declarado y SIN disparador: nadie escribe `citas.asistio` hasta que cierre la fase 8. Existe
+#: aqui para que encenderlo sea cambiar una constante y no volver a tocar la base.
+TIPO_NO_ASISTIO = "reactivacion_no_asistio"
+
+TIPOS_DE_REACTIVACION = frozenset({TIPO_SIN_AGENDAR, TIPO_CANCELADA, TIPO_NO_ASISTIO})
+TIPOS_DE_SEGUIMIENTO = TIPOS_DE_REACTIVACION | {TIPO_RECORDATORIO}
+
+#: Los que el BARRIDO puede encolar hoy. `TIPO_NO_ASISTIO` no esta: sin `citas.asistio` no hay
+#: forma de saber quien no vino, y encolarlo mandaria «no pudo asistir» a quien si fue.
+TIPOS_QUE_EL_BARRIDO_ENCOLA = frozenset({TIPO_SIN_AGENDAR, TIPO_CANCELADA})
+
+#: Los que el MODELO puede pedir por `programar_seguimiento`. Hoy tiene los MISMOS dos valores
+#: que `TIPOS_QUE_EL_BARRIDO_ENCOLA`, y es a propósito que sean dos constantes y no una: son
+#: dos actores distintos -- el barrido de la fase 8 y la tool que llama el modelo en medio de
+#: una conversación -- y coincidir hoy no significa que tengan que moverse juntos mañana. El
+#: día que la fase 8 escriba `citas.asistio` y alguien añada `TIPO_NO_ASISTIO` al barrido para
+#: encenderlo, tocar solo esa lista no le abre al modelo la puerta de pedir «no pudo asistir»
+#: sobre alguien que sí fue -- que es exactamente un reporte. Con una sola constante para los
+#: dos, esa apertura pasaría en silencio y ninguna prueba lo notaría.
+TIPOS_QUE_EL_MODELO_PUEDE_PEDIR = frozenset({TIPO_SIN_AGENDAR, TIPO_CANCELADA})
+
+#: Las columnas que R1, R2 y R3bis leen de la fila, y sin las cuales esas tres guardas se
+#: apagan SOLAS (revisión final, H6 bis).
+#:
+#: Las tres se leían con `.get()` y respaldo permisivo -- `0`, `0` y `None`--, así que perder
+#: una columna del SELECT de `persistencia.seguimientos_por_despachar` no era un error: era
+#: una guarda menos, en silencio y con `pytest -q` entero en verde. Ejecutado contra el código
+#: de la rama: la MISMA fila, con el contador reventado (5 sobre un tope de 2), el tope anual
+#: reventado (99) y 500 horas atascada, pasaba de `anular/seguimiento_apagado` a `enviar/ok`
+#: por no traer estas tres claves. Es, casi palabra por palabra, el primero de los cuatro
+#: fallos graves de esta rama -- una guarda que falla ABIERTO-- alcanzable otra vez por una
+#: puerta más corta.
+#:
+#: **`in` y no `is not None`**: `aplazado_desde` en NULL es el estado normal de una fila que
+#: nunca se aplazó, así que lo que hay que distinguir es «la columna no vino» de «la columna
+#: vino vacía». Un `dict` sabe esa diferencia; un `.get()` no.
+COLUMNAS_DE_LAS_GUARDAS_DE_REACTIVACION = (
+    "seguimientos_fallidos",
+    "reactivaciones_ultimo_ano",
+    "aplazado_desde",
+)
 
 
 @dataclass(frozen=True)
@@ -187,18 +289,39 @@ def decidir(
     ultimo_mensaje: datetime | None,
     ya_salio_a_ese_numero: bool = False,
     hora_vispera: int = HORA_VISPERA_POR_DEFECTO,
+    max_reactivaciones_12m: int = MAX_REACTIVACIONES_12M,
+    max_seguimientos_fallidos: int = MAX_SEGUIMIENTOS_FALLIDOS,
+    freno_de_reactivacion: str | None = None,
 ) -> Decision:
-    """Las siete guardas, en orden. Es lo que separa un recordatorio de un buzón de spam.
+    """Las guardas del despachador, en orden. Es lo que separa un recordatorio de un buzón
+    de spam.
 
-    G0 va antes que las siete, y decide sobre la baja comercial: un tipo que no está en
+    G0 va antes que las demás, y decide sobre la baja comercial: un tipo que no está en
     `TIPOS_NO_COMERCIALES` se anula si el contacto pidió no ser contactado. Es el orden que
     pidió MaxiCare por escrito: privacidad -> canal -> criterio -> contacto.
 
-    El orden importa: las tres primeras son sobre la cita y se saltan si el seguimiento no
-    cuelga de ninguna; las dos siguientes aplazan en vez de anular, porque su motivo deja de
-    ser cierto más tarde; la sexta anula y la séptima aplaza al día siguiente.
+    Las guardas de reactivación (R1-R5, con R3bis colgando de R3 y el FRENO entre R3bis y R4)
+    van justo después de G0 y antes del bloque de la cita: todas son exclusivas de un
+    seguimiento SIN cita (`es_reactivacion`), y un recordatorio de cita las atraviesa sin
+    evaluarlas -- por diseño, no por descuido: el apagado y el tope son frenos COMERCIALES y
+    una cita real no es publicidad.
+
+    `freno_de_reactivacion` entra como parámetro y NO se lee de `config`: este módulo no
+    importa configuración ni habla con la red, igual que no habla con la base. Quien lo calcula
+    es `runtime`, que es quien conoce las tres señales (el interruptor de pánico, la calidad
+    del número ante Meta y el interruptor de Daniela). Ver la guarda FRENO.
+
+    Cuentas, para quien lea una paráfrasis de esto en otro sitio: un `recordatorio_cita` pasa
+    por NUEVE guardas (G0, G1, G2, G3, G3bis, G4, G5, G6, G7) y una reactivación por TRECE
+    (G0, R0, R1, R2, R3, R3bis, FRENO, R4, R5, G4, G5, G6, G7 -- las cuatro del bloque de la
+    cita se saltan porque no tiene `cita_id`).
+
+    El orden del resto importa: las tres primeras del bloque de cita son sobre la cita y se
+    saltan si el seguimiento no cuelga de ninguna; las dos siguientes aplazan en vez de
+    anular, porque su motivo deja de ser cierto más tarde; la sexta anula y la séptima
+    aplaza al día siguiente.
     """
-    # G0. La baja comercial, antes que las siete. Es el orden que pidió MaxiCare por escrito:
+    # G0. La baja comercial, antes que las demás. Es el orden que pidió MaxiCare por escrito:
     # privacidad -> canal -> criterio -> contacto.
     #
     # El tipo se mira DENTRO de la condición, y no en un `if` anterior que anule por baja sin
@@ -207,6 +330,140 @@ def decidir(
     # el que pierde es el paciente que SÍ iba a ir.
     if fila.get("tipo") not in TIPOS_NO_COMERCIALES and fila.get("no_contactar"):
         return Decision("anular", "baja_solicitada")
+
+    # `not in TIPOS_NO_COMERCIALES`, y NO `tipo in TIPOS_DE_REACTIVACION`. Es la MISMA
+    # polaridad que G0, dos líneas arriba, y por la misma razón (ver el docstring de
+    # `TIPOS_NO_COMERCIALES`): lista blanca del conjunto EXENTO, que falla hacia el lado
+    # seguro. La primera versión hacía lista blanca del conjunto GUARDADO -falla ABIERTO- y
+    # una fila con un `tipo` fuera de las tres constantes conocidas (alcanzable: el CHECK de
+    # la 021 es NOT VALID y no revisa lo que ya estaba en `public`) atravesaba las cinco
+    # guardas de reactivación sin que ninguna se evaluara.
+    es_reactivacion = fila.get("tipo") not in TIPOS_NO_COMERCIALES
+
+    # R0. La fila trae con qué evaluar R1, R2 y R3bis, o no se manda (revisión final, H6 bis).
+    #
+    # Va ANTES de las tres guardas que dependen de esas columnas, porque si no la primera que
+    # se evalúa ya lo hace a ciegas. Anula en vez de aplazar: una columna que falta no aparece
+    # sola con el paso del tiempo -- es un SELECT que cambió-- y aplazar dejaría la fila dando
+    # vueltas cada sesenta segundos sin dejar rastro de por qué. Anulada queda el motivo
+    # escrito en la tabla, que es la primera pregunta que hace la clínica, y el barrido puede
+    # volver a encolar a esa persona cuando el SELECT esté arreglado.
+    #
+    # Solo para reactivaciones: un `recordatorio_cita` no evalúa R1-R5 y no necesita ninguna
+    # de estas columnas. Es la misma frontera de siempre.
+    if es_reactivacion:
+        faltan = [c for c in COLUMNAS_DE_LAS_GUARDAS_DE_REACTIVACION if c not in fila]
+        if faltan:
+            return Decision("anular", f"fila_incompleta:{','.join(faltan)}")
+
+    # R1. El freno por persona. Antes que nada de lo demas: si esta apagado, no importa la hora
+    # ni el retraso. El apagado es del SISTEMA --«a este numero no le sirve que lo
+    # persigamos»-- y no es la baja, que es de la persona y ya la mira G0.
+    if es_reactivacion and fila.get("seguimientos_fallidos", 0) >= max_seguimientos_fallidos:
+        return Decision("anular", "seguimiento_apagado")
+
+    # R2. El tope por persona y ano (regla 8). No es redundante con R1: el contador vuelve a 0
+    # al agendar, asi que quien agenda cada vez lo esquiva siempre. Este es el techo.
+    if es_reactivacion and fila.get("reactivaciones_ultimo_ano", 0) >= max_reactivaciones_12m:
+        return Decision("anular", "tope_anual")
+
+    # R3. El gemelo de G3 para lo que no tiene cita. G3 vive dentro de `if cita_id is not None`
+    # y la reactivacion la atraviesa sin evaluarse: un proceso caido el viernes soltaria el
+    # lunes todos los mensajes atrasados de golpe, «hace unos dias» sobre algo de hace una
+    # semana. Un pico de mensajes viejos es lo que Meta castiga y lo que hace que la gente
+    # reporte. Se anula y no se aplaza: el momento oportuno ya paso, y el barrido lo volvera a
+    # encolar si la persona sigue calificando.
+    if es_reactivacion and ahora - fila["fecha_objetivo"] > timedelta(
+        hours=HORAS_DE_RETRASO_QUE_LO_INVALIDAN
+    ):
+        return Decision("anular", "llego_tarde")
+
+    # R3bis. El gemelo de G3 bis (más abajo), para lo que no tiene cita. `aplazar_seguimiento`
+    # reescribe `fecha_objetivo` en CADA aplazamiento (G4, G5, R4), así que R3 se pone a cero
+    # cada vez -- la reactivación no tenía el ancla equivalente a G3 bis porque no tiene
+    # `cita_inicio`. Medido a mano: creada el viernes a las 18:30 con el relevo puesto,
+    # encadena aplazar (`relevo_activo`, 30 min) -> aplazar (`fuera_de_horario_comercial`) y
+    # sale el sábado a las 09:00 con 14,5 h de deriva real que R3 lee como CERO. Con un relevo
+    # sostenido varios días la cuenta de R3 sigue en cero indefinidamente: la garantía de R3
+    # («el barrido lleva horas caído, no hay avalancha») solo vale para la caída dura.
+    #
+    # El ancla es `aplazado_desde` (migración 022), NO `creado_en`. La primera versión de esta
+    # guarda usaba `creado_en` y medía la EDAD TOTAL de la fila, no cuánto lleva atascada: una
+    # reactivación programada a dos semanas vista (`programar_seguimiento` no le pone cota
+    # superior a `fecha_objetivo`) es "vieja" desde que se crea y llegaba puntual, y esa
+    # versión la anulaba en silencio con un motivo que decía justo lo contrario de lo que
+    # había pasado -ejecutado y cazado en la ronda 2 de revisión-. `aplazado_desde` es NULL
+    # mientras la fila nunca se ha aplazado -exactamente esos dos casos- y solo se fija la
+    # PRIMERA vez que algo la frena (`aplazar_seguimiento`, con `COALESCE`), así que mide lo
+    # que la guarda necesita: cuánto lleva sin poder salir, no cuánto lleva existiendo.
+    #
+    # Motivo propio y no `llego_tarde`: la clínica tiene que poder distinguir «llegó tarde una
+    # vez» de «lleva días dando vueltas», igual que `llego_tarde` y `cita_inminente` van
+    # separados para el recordatorio de cita.
+    aplazado_desde = fila.get("aplazado_desde")
+    if (
+        es_reactivacion
+        and aplazado_desde is not None
+        and ahora - aplazado_desde
+        > timedelta(hours=HORAS_DE_ESPERA_QUE_INVALIDAN_UN_APLAZAMIENTO_SOSTENIDO)
+    ):
+        return Decision("anular", "reactivacion_estancada")
+
+    # FRENO. El interruptor de pánico (regla 10), el freno por calidad (regla 11) y el
+    # interruptor de Daniela, aplicados donde de verdad se manda y no solo donde se encola.
+    #
+    # **El agujero que cierra** (revisión final, H2 y H3): los tres frenos vivían SOLO en
+    # `barrido.encolar`, que corre una vez por hora. `despachar` corre cada sesenta segundos y
+    # no miraba ninguno, así que quien accionaba el freno de emergencia veía salir en el minuto
+    # siguiente todo lo que ya estaba en la cola -- hasta el tope diario, más lo aplazado de
+    # días anteriores. Y con `MAXICARE_DANIELA_RESPONDE=0` era peor que un mensaje de más:
+    # salía un «¿sigue interesada?» que pedía respuesta y quien pulsaba «Sí, me interesa» no
+    # recibía NADA, porque `atencion.procesar_mensaje` corta en esa misma bandera. Pedir
+    # respuesta y callarse es el disparador de reporte más limpio que existe, y si quien vuelve
+    # escribe «me duele», cruza la frontera clínica.
+    #
+    # **APLAZA, nunca anula y nunca marca.** El freno es transitorio por definición -- la
+    # calidad sube, el operador vuelve a encender-- y anular perdería filas que sí calificaban
+    # por un motivo que dejará de ser cierto. Marcar sería peor todavía: `marcar_seguimiento_
+    # enviado` va ANTES del envío (no negociable 21), así que marcar sin mandar pierde la fila
+    # para siempre.
+    #
+    # **Va DESPUÉS de R1-R3bis y no antes**, y es deliberado: esas cuatro anulan por razones
+    # que siguen siendo ciertas con el freno puesto (el contador, el tope anual, el retraso, el
+    # atasco), y dejarlas correr es lo que impide que un freno largo acumule un backlog que
+    # salga de golpe el día que se levante -- que es justo el pico que R3 existe para evitar.
+    # Con R3bis viva, un freno de más de 96 h va matando las filas en vez de apilarlas.
+    #
+    # **`es_reactivacion` y no `tipo in TIPOS_DE_REACTIVACION`**: misma polaridad que G0 y
+    # R1-R5, y por la misma razón -- un `tipo` desconocido cuenta como comercial y se frena.
+    # `recordatorio_cita` es lo único que sigue saliendo con el freno puesto, por los tres
+    # caminos: ahí está exactamente la frontera del no negociable 25 (la baja es comercial y
+    # no apaga el recordatorio de una cita).
+    if es_reactivacion and freno_de_reactivacion:
+        return Decision(
+            "aplazar",
+            f"frenada:{freno_de_reactivacion}",
+            ahora + timedelta(minutes=MINUTOS_DE_ESPERA_POR_FRENO_DE_REACTIVACION),
+        )
+
+    # R4. Horario propio (regla 6). NO cuelga de `jornada`: ver el comentario de
+    # HORA_APERTURA_COMERCIAL. Aplaza a la proxima apertura comercial, no a la de la clinica.
+    if es_reactivacion:
+        fuera_de_hora = (
+            ahora.hour < HORA_APERTURA_COMERCIAL or ahora.hour >= HORA_CIERRE_COMERCIAL
+        )
+        if ahora.weekday() == 6 or fuera_de_hora:
+            return Decision(
+                "aplazar", "fuera_de_horario_comercial", _proxima_apertura_comercial(ahora)
+            )
+
+    # R5. No pisarle la conversacion (regla 7). 24 h en vez de los 60 min de G6.
+    if (
+        es_reactivacion
+        and ultimo_mensaje is not None
+        and ahora - ultimo_mensaje < timedelta(hours=HORAS_DE_CONTACTO_RECIENTE_COMERCIAL)
+    ):
+        return Decision("anular", "hablo_hace_poco")
 
     cita_estado = fila.get("cita_estado")
     cita_inicio = fila.get("cita_inicio")
@@ -323,6 +580,29 @@ def _proxima_apertura(ahora: datetime, jornada: Jornada) -> datetime:
     )
 
 
+def _proxima_apertura_comercial(ahora: datetime) -> datetime:
+    """La siguiente franja 9:00-19:00 que no caiga en domingo.
+
+    Deliberadamente NO mira la `Jornada`: el horario comercial es propio (ver
+    HORA_APERTURA_COMERCIAL). Si la clinica cerrara un lunes festivo, un «sigue interesada?»
+    ese lunes es inocuo; lo que no es inocuo es un domingo a las siete de la manana.
+    """
+    candidato = ahora
+    if candidato.hour >= HORA_CIERRE_COMERCIAL:
+        candidato = (candidato + timedelta(days=1)).replace(
+            hour=HORA_APERTURA_COMERCIAL, minute=0, second=0, microsecond=0
+        )
+    elif candidato.hour < HORA_APERTURA_COMERCIAL:
+        candidato = candidato.replace(
+            hour=HORA_APERTURA_COMERCIAL, minute=0, second=0, microsecond=0
+        )
+    while candidato.weekday() == 6:
+        candidato = (candidato + timedelta(days=1)).replace(
+            hour=HORA_APERTURA_COMERCIAL, minute=0, second=0, microsecond=0
+        )
+    return candidato
+
+
 def jornada_zona():
     """La zona de Bogotá, importada tarde para no crear un ciclo con `herramientas`."""
     from .herramientas import ZONA_BOGOTA
@@ -345,8 +625,137 @@ SEGUNDOS_ENTRE_INTENTOS = 2.0
 _DIAS = ("lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo")
 
 
-def _parametros_del_recordatorio(fila: dict[str, Any]) -> list[str]:
-    """Los cuatro huecos de la plantilla, en el orden en que Meta los aprobó.
+def _primer_nombre_usable(texto: str | None) -> str | None:
+    """El primer token de `texto` que sirve para un saludo, o `None` si no hay ninguno.
+
+    **Parte ANTES de validar, y no al revés** (defecto de la ronda 2 de revisión: la versión
+    anterior validaba la cadena ENTERA -"¿tiene alguna letra en algún lado?"- y solo DESPUÉS
+    tomaba el primer token para mandarlo. Con `"🌸 Ana"` la cadena completa tiene una letra -la
+    de "Ana"- y pasaba la guarda, pero el token que de verdad viajaba a Meta era `"🌸"`, el
+    emoji solo: "Hola 🌸" es peor que "Hola paciente" a ojos del paciente -parece un bot roto-,
+    que es exactamente lo que esta guarda existe para impedir. Medido por el revisor: el emoji
+    delante del nombre (`💖 Andrea`, `✨ Ana`) es una de las formas más comunes de nombre de
+    perfil en WhatsApp, así que no era un caso de esquina. Aquí el token que se valida es el
+    MISMO que se manda.
+
+    `.split()` **sin argumento**, y no `.split(" ")`: corta por CUALQUIER espacio en blanco
+    -incluidos saltos de línea y tabulaciones- y nunca deja un token vacío. Cierra dos residuos
+    más del mismo hallazgo, medidos por el revisor:
+
+    - Un nombre con un salto de línea interno (`"Ana\\nPerez"`) sobrevivía entero, `\\n`
+      incluido, porque `.split(" ")` solo corta por el carácter espacio. Meta RECHAZA un
+      parámetro de plantilla con saltos de línea, y como la fila se marca ANTES de enviar (no
+      negociable 21), se perdería para siempre tras los tres intentos, con aviso de fallo al
+      doctor por algo que nunca tuvo que fallar.
+    - Un nombre que empieza con un espacio (`" Ana Perez"`, alcanzable porque ni
+      `asegurar_paciente` ni `registrar_cita` recortan lo que llega) dejaba `.split(" ")[0]`
+      en una cadena VACÍA, y el respaldo `or "paciente"` volvía a colar el literal que este
+      hallazgo entero existe para sacar de las reactivaciones -ver `parametros_de`, que ya no
+      tiene ese respaldo en su rama de reactivación.
+
+    El criterio de "usable" sigue siendo el mismo, deliberadamente conservador: al menos una
+    letra (`str.isalpha()`, que sí reconoce acentos y eñes). No busca la regla perfecta -no
+    intenta rescatar "Ana" de "🌸 Ana" probando el segundo token-, solo que el token que se
+    manda no sea un emoji, un signo suelto, o vacío.
+    """
+    if not texto:
+        return None
+    tokens = texto.split()
+    if not tokens:
+        return None
+    primero = tokens[0]
+    return primero if any(caracter.isalpha() for caracter in primero) else None
+
+
+def _nombre_de_reactivacion(fila: dict[str, Any]) -> str | None:
+    """El nombre de pila para el ÚNICO hueco de una reactivación, en cascada de tres fuentes.
+
+    `citas.nombre_completo` -> la ficha de `pacientes` -> el nombre de perfil de WhatsApp
+    (`mensajes_entrantes.nombre_perfil`), en ese orden -- el mismo que arma el SELECT de
+    `persistencia.seguimientos_por_despachar`. Hallazgo crítico de la ronda 1 de revisión:
+    **toda fila de reactivación tiene `cita_id` NULL** (`programar_seguimiento` nunca lo pone,
+    y una fila CON `cita_id` la anularía G1), así que el primer eslabón (`nombre_completo`,
+    que sale del `LEFT JOIN` a `citas`) siempre estaba en NULL para estas filas y
+    `parametros_de` caía a su respaldo `"paciente"` el 100% de las veces -- la firma exacta de
+    un mensaje masivo, medida por el revisor contra el SELECT real.
+
+    Un lead que preguntó y no agendó normalmente NO tiene ficha (`crear_cita` es quien la
+    registra), así que el segundo eslabón solo resuelve algo para quien ya agendó alguna vez
+    (`TIPO_CANCELADA`, `TIPO_NO_ASISTIO`). Para el resto, el único dato que existe es el
+    nombre de perfil que la persona misma escribió en WhatsApp -- texto libre, sin garantía
+    de forma.
+
+    Cada candidato pasa por `_primer_nombre_usable` -- ronda 2 de revisión: antes esta función
+    devolvía la cadena CRUDA de la fuente y `parametros_de` la partía después, validando la
+    cadena entera en vez del token que de verdad se manda (ver el docstring de esa función).
+    Devuelve `None` si NINGÚN candidato produce un nombre usable: **ante la duda, no se manda.**
+    """
+    ficha = fila.get("nombre_ficha")
+    # El marcador de la regla dura 12: una ficha con ese nombre no cuenta como nombre, cae al
+    # siguiente eslabón. `NOMBRE_PENDIENTE` es el literal ASCII "PENDIENTE" -- si se colara
+    # aquí, la reactivación saldría diciendo "Hola PENDIENTE", peor que "Hola paciente".
+    if ficha == persistencia.NOMBRE_PENDIENTE:
+        ficha = None
+
+    for candidato in (fila.get("nombre_completo"), ficha, fila.get("nombre_perfil")):
+        nombre = _primer_nombre_usable(candidato)
+        if nombre is not None:
+            return nombre
+
+    return None
+
+
+def parametros_de(fila: dict[str, Any]) -> list[str] | None:
+    """Los huecos de la plantilla de ESA fila, en el orden en que Meta los aprobó.
+
+    Dos plantillas con distinto número de huecos: el recordatorio de cita lleva cuatro y las
+    tres de reactivación llevan UNO. Mandar cuatro a una plantilla de uno no es un detalle
+    cosmético --Meta rechaza el envío-- y mandar el tratamiento a una de reactivación sería
+    además una filtración: es un dato de salud y una notificación de WhatsApp se lee en la
+    pantalla de bloqueo. Marketing lo quitó a propósito el 15/09/2026.
+
+    Devuelve `None` cuando una reactivación no tiene NINGÚN nombre usable (ver
+    `_nombre_de_reactivacion`): `despachar` lo trata como una fila rota, igual que un
+    recordatorio sin `cita_inicio`, y la anula en vez de mandar "Hola paciente".
+
+    Pública (antes `_parametros_del_recordatorio`, privada): la dobla `scripts/probar_
+    plantilla.py`, y quien le cambie la firma rompe ese script en silencio -- `pytest -q` no
+    lo corre.
+    """
+    tipo = fila.get("tipo")
+    # I1 (ronda 1 de revisión): la polaridad estaba al revés. La versión anterior mandaba al
+    # lado de CUATRO huecos con el tratamiento dentro todo lo que NO fuera una de las tres
+    # reactivaciones conocidas -fail OPEN-, así que un `tipo` inválido o uno futuro que el
+    # CHECK NOT VALID de la 021 no alcanza a rechazar se filtraba un dato de salud a una
+    # notificación de WhatsApp. Ahora el lado por defecto es el ESTRECHO (un hueco, sin
+    # tratamiento) y solo el recordatorio de cita -- o un `tipo` ausente, que es como llegan
+    # las filas de prueba que no fijan esa clave, p. ej. `scripts/probar_plantilla.py`
+    # `_fila_de_ejemplo()` -- usan los cuatro huecos.
+    if tipo in TIPOS_NO_COMERCIALES or tipo is None:
+        # `.split()` sin argumento y no `.split(" ")` (revisión final, H7). El razonamiento
+        # está entero en `_primer_nombre_usable`, y aplica palabra por palabra a esta rama:
+        # Meta RECHAZA un parámetro de plantilla con saltos de línea (132007), y como la fila
+        # se marca ANTES de enviar (no negociable 21) el rechazo la pierde para siempre tras
+        # los tres intentos. `citas.nombre_completo` lo escribe `registrar_cita` con lo que el
+        # modelo capturó y SIN recortar, así que `"Ana\nPérez"` es alcanzable -- y lo que se
+        # pierde aquí no es un mensaje comercial, es el aviso de una cita real.
+        #
+        # Aquí SÍ se conserva el respaldo `"paciente"`, al revés que en la rama de
+        # reactivación: un recordatorio de cita tiene que salir aunque el nombre sea raro,
+        # porque el paciente tiene hora de verdad. Lo que no puede es salir MAL formado.
+        primero = ((fila.get("nombre_completo") or "").split() or [""])[0]
+        return _parametros_del_recordatorio(fila, primero or "paciente")
+
+    # `_nombre_de_reactivacion` ya devuelve el PRIMER TOKEN validado -no la cadena cruda-, así
+    # que aquí no se vuelve a partir ni queda un respaldo `"paciente"`: ese literal no puede
+    # aparecer en una reactivación (ronda 2 de revisión). Si no hay nombre usable, la fila es
+    # una fila rota y `despachar` la anula -- ver `_nombre_de_reactivacion`.
+    nombre = _nombre_de_reactivacion(fila)
+    return None if nombre is None else [nombre]
+
+
+def _parametros_del_recordatorio(fila: dict[str, Any], nombre: str) -> list[str]:
+    """Los cuatro huecos de la plantilla de recordatorio, en el orden en que Meta los aprobó.
 
     Cambiar este orden no cambia la plantilla: manda otro dato en otro hueco, y el paciente lee
     una hora donde esperaba su nombre.
@@ -363,9 +772,11 @@ def _parametros_del_recordatorio(fila: dict[str, Any]) -> list[str]:
     - **Los huecos 2 y 3 son datos distintos**: el 2 es la fecha y el 3 la hora. Un formateador
       que devuelva las dos juntas deja la plantilla diciendo «su cita el jueves 17/9 a las
       09:00 a las 09:00 para Limpieza».
+
+    El nombre entra ya calculado (desde `parametros_de`) para que el `split` del nombre
+    completo viva en un solo sitio.
     """
     inicio = fila["cita_inicio"]
-    nombre = (fila.get("nombre_completo") or "").split(" ")[0] or "paciente"
     local = inicio.astimezone(jornada_zona()) if inicio else None
     return [
         nombre,
@@ -380,20 +791,29 @@ async def despachar(
     database_url: str,
     whatsapp: Any | None,
     jornada: Jornada,
-    plantilla: str,
+    plantillas: dict[str, str],
     idioma: str = "es",
     ahora: datetime | None = None,
     limite: int = 50,
+    freno_de_reactivacion: str | None = None,
 ) -> dict[str, int]:
     """Un ciclo del despachador. Devuelve el recuento por acción.
+
+    `freno_de_reactivacion` viaja tal cual a `decidir` y no se consulta aquí: ver la guarda
+    FRENO de esa función. Con el freno puesto, toda reactivación se APLAZA y los
+    `recordatorio_cita` siguen saliendo -- esa es la frontera.
 
     `ahora` entra como parámetro para que una prueba pueda fijarlo: es la misma regla que
     `ctx.ahora` en las tools, y la razón por la que esto se puede probar sin esperar a las seis
     de la tarde.
 
-    `plantilla` vacía apaga el ENVÍO sin apagar la decisión: las guardas corren, las anulaciones
-    y los aplazamientos se escriben, y no sale un solo mensaje. Es lo que permite comprobar en
-    producción que decide bien antes de arriesgar un WhatsApp.
+    `plantillas` es UNA por tipo (`TIPOS_DE_SEGUIMIENTO`), no una sola: el recordatorio de cita
+    lleva cuatro huecos y las tres de reactivación llevan uno, así que no hay una plantilla
+    única que sirva para todas. Una entrada vacía o ausente apaga el ENVÍO de ESE tipo sin
+    apagar la decisión: las guardas corren, las anulaciones y los aplazamientos se escriben, y
+    la fila queda pendiente hasta que exista la plantilla. Es lo que permite comprobar en
+    producción que decide bien antes de arriesgar un WhatsApp -- y hoy, con las tres de
+    reactivación sin aprobar por Meta, es el estado normal para tres de los cuatro tipos.
 
     `idioma` viaja junto a la plantilla y sale de `configuracion`, no de aquí: Meta rechaza el
     envío entero (error 132001) si el código no coincide EXACTAMENTE con el de la traducción
@@ -429,12 +849,25 @@ async def despachar(
         # constante de respaldo en vez de leerla dejaría la ventana calculada contra un valor
         # que ya no es el vigente.
         hora_vispera = configuracion.get("hora_recordatorio_vispera", HORA_VISPERA_POR_DEFECTO)
+        max_12m = configuracion.get("max_reactivaciones_12m", MAX_REACTIVACIONES_12M)
+        max_fallidos = configuracion.get("max_seguimientos_fallidos", MAX_SEGUIMIENTOS_FALLIDOS)
 
         filas = await asyncio.to_thread(
             persistencia.seguimientos_por_despachar, conn, ahora=momento_actual, limite=limite
         )
 
-        for fila in filas:
+        async def _una_fila(fila: dict[str, Any]) -> None:
+            """Todo el trabajo de UNA fila. Sale del bucle para poder tener su propio
+            `try/except` (revisión final, H8).
+
+            Antes esto era el cuerpo del `for` y una excepción a mitad de tanda se llevaba por
+            delante el lote ENTERO -- incluidos los `recordatorio_cita` de las otras 49 filas,
+            que es el lado malo clínico: el paciente no recibe el aviso de una cita real. Y con
+            `ORDER BY s.fecha_objetivo`, una fila que reventara de forma determinista estaría
+            siempre a la cabeza del lote y bloquearía la cola indefinidamente.
+
+            `return` y no `continue` -- es la misma salida, ahora desde una función.
+            """
             telefono = fila.get("telefono") or ""
 
             ultimo = await asyncio.to_thread(
@@ -448,6 +881,9 @@ async def despachar(
                 ultimo_mensaje=ultimo,
                 ya_salio_a_ese_numero=telefono in numeros_de_esta_tanda,
                 hora_vispera=hora_vispera,
+                max_reactivaciones_12m=max_12m,
+                max_seguimientos_fallidos=max_fallidos,
+                freno_de_reactivacion=freno_de_reactivacion,
             )
 
             if decision.accion == "anular":
@@ -455,7 +891,7 @@ async def despachar(
                     persistencia.anular_seguimiento, conn, fila["id"], motivo=decision.motivo
                 )
                 recuento["anulados"] += 1
-                continue
+                return
 
             if decision.accion == "aplazar":
                 await asyncio.to_thread(
@@ -465,42 +901,96 @@ async def despachar(
                     hasta=decision.hasta or momento_actual,
                 )
                 recuento["aplazados"] += 1
-                continue
+                return
 
-            # A partir de aquí `decision.accion == "enviar"`. Un seguimiento sin cita (p. ej.
-            # una reactivación) llega hasta aquí porque G1-G3 se saltan sin cita que mirar (ver
-            # `decidir`), pero la plantilla que manda este despachador es LA DE RECORDATORIO DE
-            # CITA: sin fecha ni hora que meter en sus huecos, mandarla dejaría al paciente
-            # leyendo el literal "PENDIENTE" por WhatsApp -la regla dura 3 es para el código,
-            # nunca fue permiso para mandarle el marcador a un paciente-. No es una regla de
-            # negocio que decida no avisarle: es que HOY no existe una plantilla para este tipo
-            # de seguimiento. Se anula -no se pierde, queda visible en la tabla con su motivo-
-            # hasta que exista una.
-            if fila.get("cita_inicio") is None:
+            # A partir de aquí `decision.accion == "enviar"`. La plantilla de ESTE tipo. Antes
+            # había una sola y todo lo que no tuviera `cita_inicio` se anulaba con
+            # `sin_plantilla`; esa puerta es la que hoy hace inofensivo el portillo de `tipo`,
+            # cerrado ya por la 021 y la tool -- ver `TIPOS_NO_COMERCIALES` y las guardas R1-R5.
+            nombre_plantilla = plantillas.get(fila.get("tipo") or "")
+
+            # Fila ROTA #1: cualquier tipo que NO sea una reactivación conocida -el
+            # recordatorio de cita, un `tipo` ausente en una fila de prueba, o uno inválido o
+            # futuro que se cuele por delante del CHECK NOT VALID de la 021- y que llegue sin
+            # `cita_inicio` no tiene con qué rellenar sus huecos de fecha y hora; mandarla
+            # dejaría al paciente leyendo el literal "PENDIENTE" por WhatsApp -la regla dura 3
+            # es para el código, nunca fue permiso para mandarle el marcador a un paciente-.
+            # M3 (ronda 1 de revisión): antes de acotar esto a `TIPO_RECORDATORIO`, ese caso
+            # se quedaba pendiente PARA SIEMPRE si nadie migraba el `tipo` a mano -el
+            # despachador lo releería cada 60 s sin dejar rastro del motivo-. Ahora cierra
+            # fail-closed contra la lista de reactivaciones CONOCIDAS (`TIPOS_DE_REACTIVACION`).
+            #
+            # Esto NO es la misma polaridad que `es_reactivacion` en `decidir` (ronda 2 de
+            # revisión: un comentario anterior lo decía, y era falso). Las dos son
+            # conservadoras, pero en direcciones OPUESTAS a propósito, y "unificarlas" rompería
+            # una de las dos:
+            #   - `decidir` usa `tipo not in TIPOS_NO_COMERCIALES`: un `tipo` DESCONOCIDO SÍ
+            #     cuenta como reactivación, para que las guardas comerciales (baja, freno,
+            #     tope anual, horario) se le apliquen -- el lado seguro ahí es sospechar de
+            #     más, no de menos.
+            #   - Aquí se usa `tipo not in TIPOS_DE_REACTIVACION`: un `tipo` DESCONOCIDO NO
+            #     cuenta como reactivación reconocida, así que si además le falta `cita_inicio`
+            #     se anula fail-closed en vez de tratarlo como una reactivación legítima que
+            #     solo espera nombre o plantilla -- el lado seguro aquí es exigir más para
+            #     dejarlo vivo, no menos.
+            if fila.get("tipo") not in TIPOS_DE_REACTIVACION and fila.get("cita_inicio") is None:
                 await asyncio.to_thread(
-                    persistencia.anular_seguimiento, conn, fila["id"], motivo="sin_plantilla"
+                    persistencia.anular_seguimiento, conn, fila["id"], motivo="sin_cita"
                 )
                 recuento["anulados"] += 1
-                continue
+                return
 
             if telefono:
                 # G7 se apoya en que este número YA tiene (o está a punto de tener) un
                 # recordatorio en esta tanda. Se anota aquí, antes de mirar si hay plantilla o
-                # canal, para que el modo "decide y no manda" (`plantilla == ""`) agrupe igual
+                # canal, para que el modo "decide y no manda" (plantilla vacía) agrupe igual
                 # que agruparía con el canal encendido: si se anotara solo tras un envío que
                 # salió bien, dos citas del mismo número decidirían las dos "enviar" con la
                 # plantilla apagada, que no es la decisión que se tomaría con la plantilla
                 # puesta.
                 numeros_de_esta_tanda.add(telefono)
 
-            if not plantilla or whatsapp is None or not telefono:
+            # Sin plantilla configurada para ESTE tipo, la fila NO se marca ni se anula: se
+            # queda pendiente hasta que Meta apruebe. Marcarla la perdería para siempre, y
+            # anularla obligaría al barrido a volver a decidir sobre alguien que ya calificó
+            # -- es el estado de comprobación deliberado de las tres plantillas de reactivación
+            # mientras ninguna esté aprobada (Ruling C4).
+            if not nombre_plantilla or whatsapp is None or not telefono:
                 log.info(
-                    "seguimiento %s: decidido ENVIAR y no se manda (plantilla o canal sin "
-                    "configurar). El despachador decide, el canal está apagado, y la fila "
+                    "seguimiento %s (%s): decidido ENVIAR y no se manda (plantilla o canal "
+                    "sin configurar). El despachador decide, el canal está apagado, y la fila "
                     "SIGUE pendiente -no se marca- para cuando exista la plantilla.",
-                    fila["id"],
+                    fila["id"], fila.get("tipo"),
                 )
-                continue
+                return
+
+            # Fila ROTA #2, y el hallazgo CRÍTICO de la ronda 1: una reactivación sin NINGÚN
+            # nombre usable para su único hueco (ver `_nombre_de_reactivacion`). Sin esto,
+            # `parametros_de` caía a su respaldo `"paciente"` y el 100% de las reactivaciones
+            # salían con "Hola paciente" -- la firma de un mensaje masivo, y el desempate de
+            # este proyecto es que nadie reporte el número. Se anula, no se deja pendiente: el
+            # nombre no va a aparecer solo con el paso del tiempo, y dejarla pendiente
+            # acumularía basura que el despachador relee cada 60 s sin ninguna salida posible.
+            # El barrido de la parada siguiente puede volver a encolar a esta misma persona si
+            # alguna vez deja un nombre usable (agenda, o vuelve a escribirle a Daniela con el
+            # perfil puesto).
+            #
+            # VA DESPUÉS del chequeo de plantilla de arriba, y no antes (ronda 2 de revisión):
+            # con la plantilla vacía -el modo de comprobación de hoy- esta fila tiene que
+            # quedarse PENDIENTE igual que sus hermanas, no consumirse sola. Comprobarlo antes
+            # rompía el invariante de esta fase ("decide, registra y NO TOCA nada mientras no
+            # haya plantilla"): una reactivación sin nombre usable se anulaba aunque el canal
+            # entero estuviera apagado, y el ensayo -que existe para ver a quién se le habría
+            # escrito ANTES de escribirle a nadie- mentía sobre esa fila en particular. Con la
+            # plantilla configurada el resultado es el mismo por los dos órdenes: se anula
+            # igual, así que el camino real no pierde nada.
+            parametros = parametros_de(fila)
+            if parametros is None:
+                await asyncio.to_thread(
+                    persistencia.anular_seguimiento, conn, fila["id"], motivo="sin_nombre"
+                )
+                recuento["anulados"] += 1
+                return
 
             # MARCAR PRIMERO. Ver `persistencia.marcar_seguimiento_enviado`: no hay transacción
             # que cubra una llamada a Meta, y mandar dos veces es peor que perder uno. El
@@ -515,15 +1005,15 @@ async def despachar(
                     "este punto; no se manda ni se cuenta aquí.",
                     fila["id"],
                 )
-                continue
+                return
 
             fallo: str | None = None
             for intento in range(INTENTOS_DE_ENVIO):
                 try:
                     await whatsapp.enviar_plantilla(
                         telefono,
-                        plantilla=plantilla,
-                        parametros=_parametros_del_recordatorio(fila),
+                        plantilla=nombre_plantilla,
+                        parametros=parametros,
                         idioma=idioma,
                     )
                     fallo = None
@@ -544,7 +1034,7 @@ async def despachar(
                     INTENTOS_DE_ENVIO,
                     fallo,
                 )
-                continue
+                return
 
             await asyncio.to_thread(
                 persistencia.anotar_recordatorio_en_conversacion,
@@ -554,6 +1044,46 @@ async def despachar(
                 cuando=momento_actual,
             )
             recuento["enviados"] += 1
+
+        for fila in filas:
+            try:
+                await _una_fila(fila)
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 -- H8: una fila no se lleva la tanda entera
+                # Se cuenta como `fallidos` y no en una clave nueva, a propósito: `fallidos`
+                # ya significa «este seguimiento no salió» y es lo que `runtime` usa para
+                # avisar a los doctores. Una fila que revienta es exactamente eso, y si era un
+                # `recordatorio_cita` el doctor tiene que enterarse. Avisar de más es el lado
+                # barato; callar un recordatorio que no salió, no.
+                recuento["fallidos"] += 1
+                log.exception(
+                    "seguimiento %s (%s) reventó y se salta; la tanda sigue con las demás",
+                    fila.get("id"),
+                    fila.get("tipo"),
+                )
+                # Y el `rollback`, que es lo que hace que «la tanda sigue» sea verdad.
+                # Sin él, un error de BASE en una fila deja la transacción COMPARTIDA
+                # envenenada y la siguiente lectura válida muere con
+                # `InFailedSqlTransaction: current transaction is aborted` -- o sea que
+                # todas las filas restantes fallan, **recordatorios de cita incluidos**,
+                # que es justo lo que este `except` existía para impedir. Medido contra
+                # Neon en la re-revisión del arreglo final: el `except` sin `rollback`
+                # solo salvaba el caso de Python puro (un `TypeError` en `decidir`), que
+                # es el improbable, y no el realista.
+                #
+                # El `rollback` va envuelto porque un fallo aquí -conexión ya muerta- no
+                # puede llevarse la tanda por la puerta de atrás: si no se puede limpiar,
+                # las siguientes fallarán una a una y se contarán, que es el estado que
+                # este bloque ya sabe manejar.
+                try:
+                    await asyncio.to_thread(conn.rollback)
+                except Exception:  # noqa: BLE001 -- la conexión ya estaba perdida
+                    log.exception(
+                        "no se pudo limpiar la transacción tras el fallo del seguimiento "
+                        "%s; las filas restantes fallarán una a una y se contarán",
+                        fila.get("id"),
+                    )
     finally:
         await asyncio.to_thread(_cerrar, conn)
 
