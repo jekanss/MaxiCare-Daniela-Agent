@@ -238,6 +238,26 @@ export type CorreccionDeAgenda = {
   nombre_completo: string
 }
 
+/** Por qué el servidor pintó un día SIN contrastarlo contra Google Calendar.
+ *
+ *  Los dos literales los decide Python --`runtime.MOTIVO_FUERA_DE_VENTANA` y
+ *  `runtime.MOTIVO_CALENDARIO_NO_DISPONIBLE`--, y este archivo es el ÚNICO sitio de
+ *  TypeScript donde se escriben: las pantallas comparan contra las constantes de abajo, nunca
+ *  contra la cadena. Que las dos copias no se separen en silencio lo ata una prueba de Python
+ *  (`tests/test_agenda_pantalla.py`), porque cruzar el borde de lenguaje sin nada que ate los
+ *  dos lados es exactamente cómo un aviso vuelve a mentir sin que nadie se entere.
+ *
+ *  Y los dos casos NO son el mismo: `fuera_de_ventana` es rutina --el día es viejo y por eso
+ *  ya no se contrasta-- y `no_disponible` es una avería. Colapsarlos deja la pantalla dando
+ *  la alarma roja a diario por nada, y una alarma que suena por nada deja de leerse el día
+ *  que significa algo. */
+export type MotivoSinCalendario = 'fuera_de_ventana' | 'no_disponible'
+
+/** El día es más viejo que `herramientas.DIAS_HACIA_ATRAS_AL_SINCRONIZAR`. No falló nada. */
+export const MOTIVO_FUERA_DE_VENTANA: MotivoSinCalendario = 'fuera_de_ventana'
+/** Google no contestó, o no hay un calendario en el que se pueda confiar. Eso sí es avería. */
+export const MOTIVO_CALENDARIO_NO_DISPONIBLE: MotivoSinCalendario = 'no_disponible'
+
 export type AgendaDelDia = {
   dia: string
   citas: CitaDeAgenda[]
@@ -245,8 +265,14 @@ export type AgendaDelDia = {
   correcciones: CorreccionDeAgenda[]
   /** Las de días anteriores cuya hora pasó y siguen sin marcar. */
   sin_marcar: CitaDeAgenda[]
-  /** `false` cuando Google no contestó: la agenda se pinta igual, con su aviso. */
+  /** `false` cuando ese día NO se contrastó contra Google Calendar, y eso pasa por dos
+   *  motivos distintos: que Google no contestara, o que el día sea demasiado viejo para que
+   *  se contraste. `motivo_sin_calendario` dice cuál. La agenda se pinta igual, con su aviso,
+   *  y la marca de asistencia funciona en los dos casos. */
   calendario_disponible: boolean
+  /** Por qué no se contrastó, o `null` cuando sí se contrastó. Es `null` si y solo si
+   *  `calendario_disponible` es `true`: el servidor sostiene esa invariante. */
+  motivo_sin_calendario: MotivoSinCalendario | null
 }
 
 /** El día reconciliado. Con `dia` en `null` el servidor decide: hoy en hora de Bogotá.

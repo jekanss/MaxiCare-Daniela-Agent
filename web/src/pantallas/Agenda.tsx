@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   leerAgenda,
   marcarAsistencia,
+  MOTIVO_FUERA_DE_VENTANA,
   SesionCaducada,
   type AgendaDelDia,
   type BloqueoDeAgenda,
@@ -496,17 +497,46 @@ export default function Agenda({ alCaducarSesion }: { alCaducarSesion: () => voi
     <div className="flex-1 flex flex-col min-w-0 overflow-hidden" style={marco}>
       <Cabecera dia={dia} irA={setDia} resumen={resumen} />
 
-      {datos?.calendario_disponible === false && (
-        <div className="shrink-0 flex items-center gap-3 px-8 py-2.5 border-b" style={{ backgroundColor: '#FEF2F2', borderColor: '#FECACA' }}>
-          <span className="text-[10px] font-bold px-2 py-1 rounded uppercase tracking-wide shrink-0" style={{ backgroundColor: '#DC2626', color: '#FFFFFF' }}>
-            Sin calendario
-          </span>
-          <p className="text-xs" style={{ color: '#991B1B' }}>
-            No se pudo consultar Google Calendar. Esto es lo que hay en la base: si el doctor
-            movió algo en su calendario, aquí todavía no se ve. Marcar asistencia sigue
-            funcionando.
-          </p>
-        </div>
+      {/* El día se pintó SIN contrastar contra Google Calendar, y eso pasa por dos motivos
+          que no se parecen en nada. La distinción la hace el servidor (`motivo_sin_calendario`)
+          y no esta pantalla: calcularla aquí comparando `dia` con hoy obligaría a repetir en
+          TypeScript la constante de `herramientas.DIAS_HACIA_ATRAS_AL_SINCRONIZAR`, y el día
+          que alguien la suba a 3 este aviso volvería a mentir sin que nada lo delate.
+
+          - **Viejo: franja NEUTRA.** Es rutina. `DIAS_SIN_MARCAR` (7) es más ancho que la
+            ventana (2), así que CINCO de los siete días a los que lleva «Ver ese día» caen
+            aquí: con la franja roja, la recepcionista veía una alarma diaria por nada.
+          - **Cualquier otra cosa: franja ROJA.** Google no contestó y lo que se ve puede
+            estar desfasado -- una fila vieja pone a un paciente en la hora equivocada. Es la
+            ÚNICA señal de eso que tiene la pantalla, y por eso la rutina no puede gastarla.
+
+          El `else` se queda con lo desconocido a propósito: un motivo que esta versión no
+          conozca (un servidor más nuevo, o uno viejo que no mande el campo) sale por el lado
+          ruidoso, que es el barato de equivocarse. */}
+      {datos && datos.calendario_disponible === false && (
+        datos.motivo_sin_calendario === MOTIVO_FUERA_DE_VENTANA ? (
+          <div className="shrink-0 flex items-center gap-3 px-8 py-2.5 border-b" style={{ backgroundColor: '#F3F4F6', borderColor: '#E5E7EB' }}>
+            <span className="text-[10px] font-bold px-2 py-1 rounded uppercase tracking-wide shrink-0" style={{ backgroundColor: '#6B7280', color: '#FFFFFF' }}>
+              Día antiguo
+            </span>
+            <p className="text-xs" style={{ color: '#4B5563' }}>
+              Este día ya es antiguo y por eso no se contrasta con Google Calendar. No falló
+              nada. Esto es lo que hay en la base: si el doctor movió algo en su calendario,
+              aquí todavía no se ve. Marcar asistencia sigue funcionando.
+            </p>
+          </div>
+        ) : (
+          <div className="shrink-0 flex items-center gap-3 px-8 py-2.5 border-b" style={{ backgroundColor: '#FEF2F2', borderColor: '#FECACA' }}>
+            <span className="text-[10px] font-bold px-2 py-1 rounded uppercase tracking-wide shrink-0" style={{ backgroundColor: '#DC2626', color: '#FFFFFF' }}>
+              Sin calendario
+            </span>
+            <p className="text-xs" style={{ color: '#991B1B' }}>
+              No se pudo consultar Google Calendar. Esto es lo que hay en la base: si el doctor
+              movió algo en su calendario, aquí todavía no se ve. Marcar asistencia sigue
+              funcionando.
+            </p>
+          </div>
+        )
       )}
 
       {aviso && (

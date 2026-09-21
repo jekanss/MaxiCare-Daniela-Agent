@@ -45,13 +45,22 @@ from pathlib import Path
 
 import pytest
 
+from maxicare_daniela import runtime
+
 PANTALLA = Path(__file__).resolve().parents[1] / "web" / "src" / "pantallas" / "Agenda.tsx"
+CLIENTE = Path(__file__).resolve().parents[1] / "web" / "src" / "api.ts"
 
 
 @pytest.fixture(scope="module")
 def fuente() -> str:
     assert PANTALLA.is_file(), f"no está {PANTALLA}"
     return PANTALLA.read_text(encoding="utf-8")
+
+
+@pytest.fixture(scope="module")
+def cliente() -> str:
+    assert CLIENTE.is_file(), f"no está {CLIENTE}"
+    return CLIENTE.read_text(encoding="utf-8")
 
 
 def test_la_fila_de_cada_hora_puede_crecer(fuente: str) -> None:
@@ -157,4 +166,77 @@ def test_la_lista_de_sin_marcar_esta_acotada_y_tiene_scroll(fuente: str) -> None
     assert "max-h-" in clases and "overflow-y-auto" in clases, (
         f"la lista de «sin marcar» quedó sin cota o sin scroll propio (clases: '{clases}'). "
         "Con quince pendientes, las últimas no se pueden ni ver ni marcar."
+    )
+
+
+def _motivos_de_python() -> set[str]:
+    """Los literales de `motivo_sin_calendario` tal como los decide `runtime.py`.
+
+    Se leen del módulo en vez de escribirse aquí a propósito: añadir un `MOTIVO_*` nuevo tiene
+    que hacer fallar la prueba de abajo por sí solo, sin que nadie se acuerde de venir a
+    apuntarlo. El barrido por prefijo es ancho --se llevaría cualquier otra constante que
+    empiece por `MOTIVO_`--, y eso es correcto: en este archivo esa constante existiría para
+    cruzar el borde hacia TypeScript.
+    """
+    return {
+        v for n, v in vars(runtime).items()
+        if n.startswith("MOTIVO_") and isinstance(v, str)
+    }
+
+
+def test_los_motivos_sin_calendario_los_decide_python(cliente: str) -> None:
+    """Lo único que ata las dos copias del contrato a través del borde de lenguaje.
+
+    `motivo_sin_calendario` decide si la pantalla pinta la franja gris («este día ya es
+    antiguo», rutina) o la roja («no se pudo consultar Google Calendar», avería). Los
+    literales los decide `runtime.py` y TypeScript los declara una sola vez, en `api.ts`.
+
+    Sin esta prueba, la pareja se separa en silencio y de la peor forma: el servidor manda un
+    motivo que el front no conoce, el `else` de la pantalla lo manda a la franja ROJA, y el
+    caso rutinario vuelve a dar la alarma diaria que este arreglo existe para quitar. No hay
+    error en ningún log, la suite sigue verde y `npm run build` también --TypeScript no puede
+    saber qué manda un servidor--.
+
+    Es exactamente el motivo por el que el aviso NO se calcula en el front comparando `dia`
+    con hoy: duplicar `DIAS_HACIA_ATRAS_AL_SINCRONIZAR` en TypeScript es otra copia sin nada
+    que la ate, y el día que alguien suba la constante a 3 el aviso vuelve a mentir.
+    """
+    union = re.search(r"export type MotivoSinCalendario\s*=\s*([^\n]+)", cliente)
+    assert union, (
+        "no está `export type MotivoSinCalendario` en web/src/api.ts. Es el único sitio de "
+        "TypeScript donde se pueden escribir esos literales; si se movió, mueve esta prueba."
+    )
+    en_typescript = set(re.findall(r"'([^']+)'", union.group(1)))
+    en_python = _motivos_de_python()
+    assert en_typescript == en_python, (
+        f"los motivos de `motivo_sin_calendario` ya no coinciden: Python dice {sorted(en_python)} "
+        f"y TypeScript dice {sorted(en_typescript)}. Los decide `runtime.py`; `api.ts` los "
+        "copia. Un motivo que el front no conozca cae en la franja ROJA, así que el caso "
+        "rutinario volvería a dar la alarma que este aviso existe para no dar."
+    )
+    # Y cada uno con su constante exportada, que es lo que las pantallas consumen.
+    for motivo in en_python:
+        assert re.search(rf":\s*MotivoSinCalendario\s*=\s*'{re.escape(motivo)}'", cliente), (
+            f"«{motivo}» está en el tipo pero no tiene constante exportada en api.ts. Sin "
+            "ella, la pantalla que lo necesite escribirá la cadena a mano."
+        )
+
+
+def test_la_pantalla_no_escribe_a_mano_ningun_motivo_sin_calendario(fuente: str) -> None:
+    """La otra mitad: `Agenda.tsx` compara contra la constante, nunca contra la cadena.
+
+    Una cadena suelta aquí es una tercera copia, y además una que la prueba de arriba no ve:
+    `api.ts` y `runtime.py` podrían seguir de acuerdo mientras la pantalla compara contra un
+    literal que ya no manda nadie, con lo que el día viejo saldría en rojo otra vez.
+    """
+    for motivo in _motivos_de_python():
+        assert f"'{motivo}'" not in fuente and f'"{motivo}"' not in fuente, (
+            f"Agenda.tsx escribe «{motivo}» a mano. Importa la constante de `@/api` y compara "
+            "contra ella: los literales los decide runtime.py y api.ts es su única copia."
+        )
+    assert "MOTIVO_FUERA_DE_VENTANA" in fuente, (
+        "Agenda.tsx dejó de distinguir el día viejo de la avería. Con un solo aviso vuelve la "
+        "franja roja «No se pudo consultar Google Calendar» sobre un día que no falló: cinco "
+        "de los siete días a los que lleva «Ver ese día» caen fuera de la ventana, así que la "
+        "alarma sonaría a diario por nada y dejaría de leerse el día que significa algo."
     )
