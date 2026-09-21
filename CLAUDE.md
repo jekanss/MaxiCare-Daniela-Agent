@@ -304,6 +304,20 @@ El detalle de cada área se carga solo cuando tocas sus archivos:
 - **El pooler de Neon rechaza `options` como parámetro de arranque** (`unsupported startup
   parameter in options: search_path`). Para fijar un `search_path` —o para una prueba de
   concurrencia de verdad— hay que usar la conexión directa: quitarle el `-pooler.` al host.
+- **Hay UNA sola base de Neon, y es la que atiende pacientes.** Desde el 21/09/2026 no existe
+  `MAXICARE_DATABASE_URL_ALT`: se borró del `.env` y desarrollo y producción comparten base.
+  Eso cambia lo que significan dos comandos de arriba: **`scripts/inicializar_base.py` y las
+  pruebas `-m neon` escriben ahora en producción.** Las segundas solo tocan el esquema
+  `pruebas` y lo borran al terminar, pero el `public` de esa conexión ya es el de verdad, así
+  que lo que se haga sin `-m neon` de por medio cae sobre datos reales. **El que hay que mirar
+  dos veces es `scripts/probar_panel.py`**, que cambia un precio y siembra un día de agenda
+  **en `public` a propósito**: está construido para eso —restaura el precio en un `finally` y
+  las citas van con `evento_calendar_id` NULL y un teléfono imposible, así que no tocan Google
+  ni ocupan cupo— pero hasta hoy caía sobre una base sin pacientes y desde hoy no. La alterna nunca fue
+  un interruptor —ningún archivo de `src/` la leyó jamás—, así que «trabajar contra otra base»
+  siempre fue cambiar a mano el valor de `MAXICARE_DATABASE_URL`, y lo sigue siendo. No se
+  deja un respaldo en `config.py` a propósito: dejaría que producción arrancara contra la base
+  equivocada sin que nadie lo note.
 - **Una variable de entorno vacía no es una variable ausente.** Si TODA llamada al modelo
   muere en `APIConnectionError: Connection error.` mientras `/salud` dice `configuracion:
   ok`, no es la red: es una clave vacía que el `env_file` de Docker sí exporta. Ya pasó en
