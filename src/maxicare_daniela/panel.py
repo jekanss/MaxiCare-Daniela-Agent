@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import re
 import uuid
+from collections.abc import Sequence
 from datetime import datetime
 from typing import Any, get_args
 
@@ -301,7 +302,9 @@ def guardar_ficha(
             "aprobado": aprobado, "nota_pendiente": nota_pendiente}
 
 
-def historial(conn, limite: int = 100) -> list[dict[str, Any]]:
+def historial(
+    conn, limite: int = 100, *, excluir_tablas: Sequence[str] = ()
+) -> list[dict[str, Any]]:
     """Lo más reciente primero. Sin paginación: cien cambios cubren meses de esta clínica.
 
     El desempate por `id` no es adorno. Un solo cambio de la pantalla puede escribir DOS
@@ -310,12 +313,20 @@ def historial(conn, limite: int = 100) -> list[dict[str, Any]]:
     filas llevan exactamente la misma marca de tiempo. Ordenando solo por ella, cuál sale
     arriba lo decide el planificador, y la bitácora contaría la historia al revés de vez en
     cuando.
+
+    **`excluir_tablas` no cambia el significado de esta función: sigue siendo «la bitácora
+    entera, lo más reciente primero».** Es un recorte que pide QUIEN llama, y por eso su
+    default es no recortar nada: el filtro vive en el sitio que sabe para qué pantalla es.
+    Hoy lo usa `runtime.api_historial` y el porqué está allí. Las filas excluidas siguen en
+    la tabla --la bitácora es la pista de auditoría de quién marcó qué y cuándo, y eso no se
+    toca--: lo único que cambia es cuáles se le enseñan a esa pantalla.
     """
     with conn.cursor() as cur:
         cur.execute(
             "SELECT tabla, clave, valor_anterior, valor_nuevo, usuario, cambiado_en "
-            "FROM cambios_configuracion ORDER BY cambiado_en DESC, id DESC LIMIT %s",
-            (max(1, min(limite, 500)),),
+            "FROM cambios_configuracion WHERE NOT (tabla = ANY(%s)) "
+            "ORDER BY cambiado_en DESC, id DESC LIMIT %s",
+            (list(excluir_tablas), max(1, min(limite, 500))),
         )
         return [
             {"tabla": t, "clave": c, "valor_anterior": a, "valor_nuevo": n,

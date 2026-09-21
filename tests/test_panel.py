@@ -631,6 +631,44 @@ def test_marcar_asistencia_escribe_la_columna_y_su_bitacora(conn):
 
 
 @pytest.mark.neon
+def test_las_marcas_de_asistencia_no_inundan_la_bitacora_de_la_otra_pantalla(conn):
+    """La marca escribe en la MISMA tabla que alimenta «Últimos cambios» de Tratamientos.
+
+    Esa pantalla existe --lo dice su propio texto-- para reconstruir qué decía un precio
+    antes y quién lo cambió, y `historial` devuelve las 100 filas más recientes. Con quince
+    citas al día, esas 100 son todas marcas de asistencia en menos de una semana y el cambio
+    de precio deja de verse en la única pantalla desde la que se puede ver. Con ello se cae
+    la renuncia escrita de `web/CLAUDE.md`: una edición pisada es recuperable solo mientras
+    se pueda encontrar.
+
+    Las dos mitades, y las dos importan: la fila SE ESCRIBE --es la pista de auditoría-- y
+    el recorte lo pide quien llama, no la función.
+    """
+    try:
+        panel.guardar_ficha(
+            conn, tratamiento="implantes", concepto="precio",
+            contenido="$1.900.000 la fase quirurgica", aprobado=True,
+            nota_pendiente=None, usuario="dra.prueba",
+        )
+        cita = _sembrar_cita(conn, inicio=AYER_A_LAS_NUEVE)
+        panel.marcar_asistencia(conn, cita_id=cita, valor=True, usuario="recepcion")
+
+        completa = panel.historial(conn, limite=1)
+        assert (completa[0]["tabla"], completa[0]["clave"]) == ("citas", cita), (
+            "la bitácora dejó de guardar quién marcó qué: eso es la pista de auditoría"
+        )
+
+        recortada = panel.historial(
+            conn, limite=100, excluir_tablas=runtime.TABLAS_FUERA_DEL_HISTORIAL
+        )
+        assert all(f["tabla"] != "citas" for f in recortada)
+        # Y el recorte es de UNA tabla, no de la bitácora: el cambio de precio sigue ahí.
+        assert recortada[0]["clave"] == "implantes/precio"
+    finally:
+        _limpiar_citas(conn)
+
+
+@pytest.mark.neon
 def test_corregir_una_marca_deja_el_valor_anterior_en_la_bitacora(conn):
     try:
         cita = _sembrar_cita(conn, inicio=AYER_A_LAS_NUEVE)
@@ -1257,5 +1295,33 @@ def test_una_cita_que_no_existe_da_404_y_una_ya_pasada_da_400(monkeypatch):
         r = c.patch(f"/api/agenda/citas/{_CITA_DE_AGENDA['id']}", json={"asistio": True})
         assert r.status_code == 400
         assert "todavía no" in r.json()["detalle"]
+    finally:
+        runtime.app.dependency_overrides.clear()
+
+
+def test_el_historial_del_panel_no_le_mezcla_las_marcas_de_asistencia(monkeypatch):
+    """El cableado, que es la mitad que la prueba de Neon no puede ver.
+
+    `panel.historial` sabe recortar y sigue sin recortar por su cuenta: quien decide es este
+    endpoint, porque es el que sabe a qué pantalla alimenta. Si alguien le quita el
+    argumento, la bitácora de precios vuelve a llenarse de marcas de asistencia sin que se
+    caiga ninguna prueba de la base.
+    """
+    pedido: dict[str, tuple[str, ...]] = {}
+
+    def falsa(conn, limite=100, *, excluir_tablas=()):
+        pedido["excluir"] = tuple(excluir_tablas)
+        return []
+
+    monkeypatch.setattr(persistencia, "conectar", lambda url: _ConexionFalsaSinResolver())
+    monkeypatch.setattr(panel, "historial", falsa)
+    runtime.app.dependency_overrides[runtime.usuario_actual] = _como("doctor")
+    try:
+        r = TestClient(runtime.app).get("/api/historial")
+        assert r.status_code == 200
+        assert "citas" in pedido["excluir"], (
+            "«Últimos cambios» volvió a pedir la bitácora entera: quince citas al día la "
+            "llenan de marcas de asistencia en menos de una semana"
+        )
     finally:
         runtime.app.dependency_overrides.clear()

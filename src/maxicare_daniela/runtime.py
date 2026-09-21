@@ -1788,10 +1788,31 @@ async def api_guardar_ficha(
     return guardada
 
 
+#: Lo que NO baja al panel «Últimos cambios» de la pantalla de Tratamientos.
+#:
+#: Esa pantalla existe, y lo dice su propio texto, para «reconstruir qué decía un precio antes
+#: y quién lo cambió». `panel.historial` devuelve las 100 filas más recientes, y desde la
+#: fase 8 la marca de asistencia escribe una fila por cita marcada --tres por cada corrección,
+#: porque «Corregir marcación» desmarca primero--. Con quince citas al día, esas 100 filas son
+#: **todas** marcas de asistencia en menos de una semana, y el cambio de precio de la semana
+#: pasada deja de verse en la única pantalla desde la que se puede ver.
+#:
+#: Eso tumbaría además la renuncia escrita de `web/CLAUDE.md`: dos personas editando la misma
+#: ficha se pisan, y lo que lo hace aceptable es que `cambios_configuracion` guarda el valor
+#: anterior. Una edición pisada es recuperable solo mientras se pueda encontrar.
+#:
+#: **Las filas se quedan en la tabla**: son la pista de auditoría de quién marcó qué y cuándo,
+#: y ninguna consulta futura las pierde. Lo único que se recorta es esta ventana. El día que
+#: la agenda quiera su propia bitácora, es otra consulta, no este endpoint.
+TABLAS_FUERA_DEL_HISTORIAL = ("citas",)
+
+
 @app.get("/api/historial")
 async def api_historial(quien: dict = Depends(usuario_actual)) -> dict:
     with persistencia.conectar(config.database_url) as conn:
-        return {"cambios": panel.historial(conn)}
+        return {
+            "cambios": panel.historial(conn, excluir_tablas=TABLAS_FUERA_DEL_HISTORIAL)
+        }
 
 
 @app.get("/api/sin-resolver")
