@@ -367,6 +367,74 @@ def test_una_confirmacion_no_se_queda_en_el_dato_seco():
     assert "distinta cada vez" in texto, "una plantilla fija deja de sonar a persona"
 
 
+def test_la_calidez_se_pide_SIN_emojis():
+    """MaxiCare el 21/09/2026, en dos tiempos: primero «la siento demasiado seria», y al ver
+    la primera versión del ajuste, «quiero que sea más amable, **sin emojis**».
+
+    Las dos peticiones van juntas y no se estorban, pero es fácil confundirlas: un emoji es
+    la forma más barata de fingir calidez y por eso es la primera a la que se echa mano. No
+    es la que se pidió. Lo que ablanda una frase es hacerse cargo de lo que dijo el paciente
+    antes de contestarlo, y eso se nota igual en texto plano.
+
+    Medido contra el modelo real: con el emoji permitido, la respuesta a lo de los unicornios
+    fue «Lo de unicornios y cuentas no es mucho lo mío por acá, pero feliz te ayudo con
+    cualquier tema dental 😊». Quitar el 😊 no le quita nada a esa frase, que es la prueba de
+    que la calidez estaba en las palabras.
+    """
+    texto = agentes.INSTRUCCIONES_DANIELA
+
+    assert "sin emojis" in texto, "MaxiCare los pidió fuera explícitamente"
+    # Y lo que impide que quitarlos devuelva la sequedad que se acaba de arreglar.
+    assert "no como un formulario" in texto
+    assert "La calidez la pones en las palabras y no en un adorno" in texto
+    assert "te haces cargo de lo que te acaban de decir" in texto
+
+
+def test_ablandar_el_tono_no_afloja_lo_que_no_se_contesta():
+    """La mitad que no se toca de este ajuste.
+
+    `test_lo_ajeno_no_se_contesta_ni_a_la_segunda` guarda la sustancia. Esta guarda la
+    COSTURA: el párrafo nuevo, el que pide calidez, es exactamente por donde volvería a
+    entrar lo que ya cedió una vez en producción --«lo reconoces con naturalidad y calidez»
+    se le pareció a «responde a medias», y a la segunda respondió entero--.
+
+    Por eso la frase que se añadió separa las dos cosas de forma explícita en vez de pedir
+    calidez a secas. Si alguien la borra por redundante, el prompt vuelve a tener solo una
+    petición de calidez al lado de una prohibición, que es la forma exacta que ya falló.
+    """
+    texto = agentes.INSTRUCCIONES_DANIELA
+
+    assert "La calidez va en CÓMO lo dices, nunca en QUÉ dices" in texto
+    assert "el dato ajeno sigue sin darse" in texto
+    # La frase que el modelo leyó como permiso para contestar sigue sin estar.
+    assert "lo reconoces con naturalidad" not in texto
+
+
+def test_el_prompt_le_dice_que_no_se_RECITE_a_si_mismo():
+    """Las dos respuestas que MaxiCare marcó como secas el 21/09/2026 eran, palabra por
+    palabra, el prompt:
+
+        instrucción:  «Le dices con amabilidad que con eso no le puedes ayudar, que tú
+                       estás para lo de la clínica, y le preguntas en qué sí.»
+        Daniela:      «Con esos temas no te puedo ayudar. Estoy para lo relacionado con
+                       MaxiCare, ¿qué necesitas saber de la clínica dental?»
+
+    No desobedeció: obedeció copiando. Un prompt es un documento técnico, escrito para
+    alguien que edita código, y un modelo imita el registro de sus propias instrucciones.
+    Es el mismo mecanismo que ya obligó a prohibirle la raya larga explicando que las
+    instrucciones sí la usan y que eso no es un ejemplo: pedir un tono no basta si el único
+    ejemplo de tono que el modelo tiene delante es el del manual.
+    """
+    texto = agentes.INSTRUCCIONES_DANIELA
+
+    assert "Y tampoco las RECITAS" in texto
+    assert "suenas a manual" in texto
+    assert "las palabras son tuyas" in texto.lower()
+    # Y el caso concreto, dentro del bloque de lo ajeno: sin un contraejemplo, «no recites»
+    # es tan abstracto como el «sé cálida» que no funcionó.
+    assert "se lee como un letrero" in texto
+
+
 def test_lo_ajeno_no_se_contesta_ni_a_la_segunda():
     """Conversación real del 13/09/2026, 10:30 p. m., dos turnos seguidos:
 
