@@ -463,7 +463,10 @@ async def uno_y_dos(url: str, cfg: Config, chat: bool) -> None:
 
     revisar("se le respondio al mensaje", at1.respondido is True, at1.motivo or "")
     revisar("se abrio una conversacion", at1.id_conversacion is not None)
-    revisar("se marco leido (el doble check azul)", wa.leidos == [m1.wamid], str(wa.leidos))
+    # Invertida el 21/09/2026: el doble check azul se quito a peticion de MaxiCare. Se deja
+    # la comprobacion al reves en vez de borrarla, porque este script es lo UNICO que mira
+    # este camino contra un webhook armado a mano y `pytest -q` no lo corre.
+    revisar("NO se marca leido (sin doble check azul)", wa.leidos == [], str(wa.leidos))
     revisar("salio exactamente UN envio de WhatsApp", len(wa.enviados) == 1, str(len(wa.enviados)))
     revisar(
         "el envio fue al telefono del paciente",

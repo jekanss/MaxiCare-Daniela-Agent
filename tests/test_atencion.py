@@ -494,7 +494,7 @@ def test_un_mensaje_de_texto_recibe_respuesta(monkeypatch):
     assert resultado.respondido is True
     assert resultado.texto_enviado == "Hola Ana, claro que sí."
     assert resultado.motivo is None
-    assert whatsapp.leidos == ["wamid-entrada-1"], "el doble check azul va al principio"
+    assert whatsapp.leidos == [], "desde el 21/09/2026 no se marca leído: ver el test de abajo"
 
 
 def test_la_conversacion_reciente_se_reutiliza(monkeypatch):
@@ -1424,22 +1424,32 @@ def test_un_calendario_caido_nunca_es_un_calendario_doble(monkeypatch):
         )
 
 
-def test_marcar_leido_no_puede_tumbar_el_turno(monkeypatch):
-    """`canales.marcar_leido` se traga los `httpx.HTTPError` y nada más. Cualquier otra cosa
-    salía de `atender` ANTES de tocar la base: el paciente sin respuesta y sin rastro, por un
-    detalle cosmético que ni siquiera es el mensaje."""
+def test_no_se_marca_leido_nunca(monkeypatch):
+    """El doble check azul se quitó el 21/09/2026 a petición de MaxiCare, y esta prueba
+    existe para que no vuelva solo.
+
+    Sustituye a `test_marcar_leido_no_puede_tumbar_el_turno`, que comprobaba que un fallo
+    marcando leído no se llevara el turno por delante. Esa propiedad ya no se puede probar
+    aquí porque la llamada no existe; lo que sí hay que sostener es la ausencia.
+
+    **Y una aserción sobre una ausencia no distingue «se decidió no hacerlo» de «reventó antes
+    de intentarlo»** --`.claude/rules/pruebas.md`, «verde por el motivo equivocado»--, así que
+    además se comprueba que el turno llegó hasta el final: que el paciente recibió su
+    respuesta. Sin eso, un `atender` que muriera en la primera línea dejaría esto en verde.
+    """
     preparar(monkeypatch)
     whatsapp = WhatsAppFalso()
 
-    async def revienta(wamid):
-        raise RuntimeError("el token de WhatsApp no sirve para marcar leído")
+    async def no_deberia_llamarse(wamid):
+        raise AssertionError(f"alguien volvió a marcar leído {wamid}")
 
-    whatsapp.marcar_leido = revienta
+    whatsapp.marcar_leido = no_deberia_llamarse
 
     resultado = atender(mensaje_texto(), whatsapp=whatsapp)
 
-    assert resultado.respondido is True
-    assert whatsapp.textos
+    assert resultado.respondido is True, "el turno tiene que haber llegado hasta el final"
+    assert whatsapp.textos, "y el paciente tiene que haber recibido su respuesta"
+    assert whatsapp.leidos == []
 
 
 # ==========================================================================================

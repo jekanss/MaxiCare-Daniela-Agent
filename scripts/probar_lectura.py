@@ -459,7 +459,11 @@ async def cuatro(url: str) -> None:
     tg = TelegramCaptura()
     m = mensaje_documento(TEL_ARCHIVO, nombre_archivo="remision-prueba.pdf", texto="Aqui esta mi remision")
 
-    async def lector_doblado(archivo, *, tipo, correr=None, group_id=None) -> LecturaArchivo:
+    # `**kwargs` y no los parametros por su nombre: el perimetro de coste (022) le anadio
+    # `database_url` y `telefono` a `leer_archivo` el 21/09/2026 y este doble se quedo con la
+    # firma vieja. `pytest -q` no corre este script, asi que el fallo vivio en silencio con la
+    # suite entera en verde -- que es exactamente la trampa que el CLAUDE.md documenta.
+    async def lector_doblado(archivo, *, tipo, correr=None, group_id=None, **kwargs) -> LecturaArchivo:
         return _lectura_canonica()
 
     lectura.leer_archivo = lector_doblado
@@ -510,7 +514,11 @@ async def cinco(url: str, cfg: Config) -> None:
     tg = TelegramCaptura()
     m = mensaje_documento(TEL_MURO, nombre_archivo="remision-muro.pdf", texto="Hola, aqui esta mi remision")
 
-    async def lector_doblado(archivo, *, tipo, correr=None, group_id=None) -> LecturaArchivo:
+    # `**kwargs` y no los parametros por su nombre: el perimetro de coste (022) le anadio
+    # `database_url` y `telefono` a `leer_archivo` el 21/09/2026 y este doble se quedo con la
+    # firma vieja. `pytest -q` no corre este script, asi que el fallo vivio en silencio con la
+    # suite entera en verde -- que es exactamente la trampa que el CLAUDE.md documenta.
+    async def lector_doblado(archivo, *, tipo, correr=None, group_id=None, **kwargs) -> LecturaArchivo:
         return _lectura_canonica()
 
     lectura.leer_archivo = lector_doblado
@@ -655,7 +663,11 @@ async def ocho(url: str) -> None:
     tg = TelegramCaptura()
     m = mensaje_documento(TEL_DESCONOCIDO, nombre_archivo="foto-desconocido.pdf")
 
-    async def lector_doblado(archivo, *, tipo, correr=None, group_id=None) -> LecturaArchivo:
+    # `**kwargs` y no los parametros por su nombre: el perimetro de coste (022) le anadio
+    # `database_url` y `telefono` a `leer_archivo` el 21/09/2026 y este doble se quedo con la
+    # firma vieja. `pytest -q` no corre este script, asi que el fallo vivio en silencio con la
+    # suite entera en verde -- que es exactamente la trampa que el CLAUDE.md documenta.
+    async def lector_doblado(archivo, *, tipo, correr=None, group_id=None, **kwargs) -> LecturaArchivo:
         return _lectura_canonica()
 
     lectura.leer_archivo = lector_doblado

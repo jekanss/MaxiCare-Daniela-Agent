@@ -1007,17 +1007,22 @@ async def atender(
         )
 
 
-    # El doble check azul mientras Daniela «escribe» es lo que hace creíble la espera. Después
-    # del retardo no sirve de nada: para entonces ya llegó la respuesta.
+    # AQUÍ IBA EL DOBLE CHECK AZUL, y se quitó el 21/09/2026 a petición de MaxiCare.
     #
-    # `canales.WhatsApp.marcar_leido` se traga los `httpx.HTTPError` y nada más. Un timeout de
-    # lectura los cubre, pero un token vencido que devuelva algo raro, o cualquier otra cosa,
-    # saldría de aquí y tumbaría el turno ANTES de tocar la base: el paciente sin respuesta y
-    # sin rastro, por un detalle cosmético.
-    try:
-        await whatsapp.marcar_leido(mensaje.wamid)
-    except Exception:  # noqa: BLE001 -- ver arriba
-        log.warning("no se pudo marcar leído %s; se sigue igual", mensaje.wamid, exc_info=True)
+    # El argumento de antes era que «el doble check azul mientras Daniela escribe es lo que
+    # hace creíble la espera». Lo que enseñó verlo funcionando es lo contrario: el visto salía
+    # en el mismo segundo en que el paciente pulsaba enviar --lo manda el webhook, no una
+    # persona-- y después venían entre veinte y cuarenta segundos de silencio, porque el búfer
+    # espera y el retardo humano también. Un ser humano no lee al instante y contesta medio
+    # minuto después; eso se lee como «te vi y te estoy ignorando», que es peor que no haber
+    # marcado nada.
+    #
+    # `canales.WhatsApp.marcar_leido` se queda donde está: es una capacidad de la Graph API y
+    # `canales.py` es la capa de transporte. Simplemente ya no la llama nadie. Para devolver
+    # el visto basta con revertir este commit.
+    #
+    # Lo vigila `test_no_se_marca_leido_nunca`, que es una aserción sobre una AUSENCIA: sin
+    # ella, alguien vuelve a añadir la llamada y la suite no dice nada.
 
     # ------------------------------------------------------------------------------------
     # El búfer: juntar lo que el paciente escribió de corrido
