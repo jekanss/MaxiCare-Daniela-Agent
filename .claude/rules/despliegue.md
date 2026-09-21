@@ -16,6 +16,30 @@ antes de levantar** y espera a que el contenedor esté sano. Traefik sigue manda
 webhooks de Meta al contenedor viejo hasta que el nuevo responde `/salud`, así que un
 despliegue fallido no deja a los doctores sin radiografías.
 
+## Las migraciones no son un paso opcional del script, y la 021 es el ejemplo
+
+**El próximo despliegue lleva la migración 021, y sin ella la pantalla de Agenda sale rota.**
+La marca de asistencia escribe `citas.asistio` y su fila de bitácora en la MISMA transacción;
+hasta la 021, el CHECK de `cambios_configuracion.tabla` —cerrado por la 007— no admitía
+`'citas'`, así que el `CheckViolation` del INSERT arrastra también al UPDATE y la columna
+queda **inescribible desde el panel**. Al 20/09/2026 la 021 está aplicada en la base alterna
+de desarrollo y **no en la principal**.
+
+`desplegar.sh` lo cubre: corre `inicializar_base.py` en un contenedor de un solo uso *antes*
+de levantar el servicio, y ese script aplica y luego **verifica** la 021 en `public` y en
+`pruebas_web`, saliendo con código 1 si falta. Lo que no cubre es subir el código por
+cualquier otro camino. Para mirar sin escribir:
+
+```
+uv run python scripts/inicializar_base.py --solo-verificar
+```
+
+Y la lección general, que no es de la 021: **una migración que solo añade tablas se puede
+verificar por nombre; una que AMPLÍA un CHECK, no.** Una base sin la 021 tiene todas sus
+tablas en su sitio y pasaba por sana — el bloque de verificación tuvo que leer la definición
+del constraint. La siguiente migración que cambie una restricción en vez de una tabla necesita
+su propio bloque, o `--solo-verificar` volverá a decir OK sobre una base rota.
+
 ## Un despliegue no puede matar un turno a media frase
 
 **`stop_grace_period: 120s`, `runtime.SEGUNDOS_PARA_DRENAR = 75`, y el orden importa:** el

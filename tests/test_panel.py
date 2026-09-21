@@ -1040,12 +1040,19 @@ def test_el_literal_pendiente_no_llega_nunca_a_la_pantalla(monkeypatch):
 
 
 def test_un_dia_que_no_es_un_dia_no_llega_a_la_base(monkeypatch):
-    """Un `dia` ilegible se rechaza antes de abrir una conexión, no con un 500 de psycopg."""
+    """Un `dia` ilegible se rechaza antes de abrir una conexión, no con un 500 de psycopg.
+
+    Los dos dobles, y ninguno es adorno: el `dia` se valida antes de tocar Neon **y** antes
+    de tocar Google. Esta prueba tenía aquí un doble de `atencion._calendario_por_defecto`,
+    que la agenda dejó de llamar cuando pasó a reutilizar el calendario del proceso: seguía
+    en verde sin vigilar nada. El que de verdad cubre esa mitad hoy es
+    `runtime._calendario_de_la_agenda`, que es lo que el endpoint llama.
+    """
     def revienta(*args, **kw):
         raise AssertionError("no se debía llegar hasta aquí")
 
     monkeypatch.setattr(persistencia, "conectar", revienta)
-    monkeypatch.setattr(atencion, "_calendario_por_defecto", revienta)
+    monkeypatch.setattr(runtime, "_calendario_de_la_agenda", revienta)
     runtime.app.dependency_overrides[runtime.usuario_actual] = _como("doctor")
     try:
         r = TestClient(runtime.app).get("/api/agenda?dia=el-martes")
