@@ -53,6 +53,39 @@ uv run uvicorn maxicare_daniela.runtime:app --port 8080
     pantalla enseña para ese caso hoy dice «No se pudo consultar Google Calendar», que para
     un día viejo no es cierto**: no falló nada, es que no se contrasta. Queda como deuda
     declarada, no como descuido.
+  - **Y ese GET que escribe NO tiene candado, así que dos peticiones del mismo día pueden
+    dejar DOS recordatorios vivos para la misma cita.** Es el daño del no negociable 21
+    entrando por una puerta nueva: hasta esta rama, la reconciliación solo corría desde
+    `atencion.py`, serializada por el candado por teléfono. El mecanismo, para que nadie
+    tenga que volver a deducirlo:
+    - La clave de idempotencia del recordatorio lleva `ahora.isoformat()` dentro
+      (`herramientas.py`, en `_mover_porque_la_movieron`), y **cada petición calcula el suyo
+      con precisión de microsegundos**, así que las dos claves son distintas y el
+      `ON CONFLICT (clave_idempotencia)` no las junta. Bajo READ COMMITTED los dos INSERT
+      ocurren antes de que ninguno de los dos `anular_seguimientos_de_cita(excepto_clave=…)`
+      corra, ninguna transacción ve la fila sin confirmar de la otra, y al commit quedan dos
+      filas vivas para el mismo `cita_id` —el único UNIQUE de `seguimientos` es
+      `clave_idempotencia`, no `cita_id`—. Las siete guardas del despachador dicen que sí a
+      las dos, y el paciente recibe el mismo WhatsApp dos veces.
+    - **El cupo NO se duplica**, y conviene saberlo para no arreglar lo que no está roto: su
+      clave es `calendar:{cita_id}:{inicio}`, determinista, y el UNIQUE de `reservas` lo
+      resuelve en Postgres.
+    - **`web/src/main.tsx` monta con `<React.StrictMode>`**, así que en `npm run dev` React
+      invoca el efecto de montaje dos veces y salen **dos peticiones del mismo día en
+      paralelo en cada apertura de la Agenda**. El `ref pedido` de `Agenda.tsx` descarta la
+      respuesta sobrante, pero no impide que la petición se ENVÍE ni que el servidor escriba.
+      En la build de producción StrictMode no duplica, así que allí hacen falta dos pestañas
+      o dos personas en el mismo día dentro de la ventana de una transacción (~50-100 ms) y
+      sobre una cita que el doctor acabe de mover: sigue siendo cierto, y raro. Pero «bajo en
+      producción, sistemático en desarrollo» no es lo mismo que «bajo».
+    - **Por qué NO está arreglado:** el arreglo toca la maquinaria del no negociable 21 y
+      merece su propia tarea con sus propias pruebas, no una ronda de corrección ajena. El
+      daño entretanto es un recordatorio repetido: inocuo para el paciente y recuperable.
+    - **Cuál sería el arreglo:** un `pg_advisory_xact_lock` sobre el id de la cita más una
+      relectura del `inicio` dentro de `_mover_porque_la_movieron` —que convierte el segundo
+      paso en un no-op—, o sacar `ahora` de esa clave para que las dos peticiones generen la
+      misma y el `ON CONFLICT` haga su trabajo. Lo primero es más seguro; lo segundo, más
+      barato. Reproducirlo contra Neon exige la conexión DIRECTA, no el pooler.
 - **En la rejilla de la Agenda, la fila de cada hora lleva `minHeight` y NUNCA `height`, y el
   rótulo de la hora va DENTRO de la fila.** Las dos cosas sostienen lo mismo, y se pagaron
   caras: con filas de 96 px fijos, la tarjeta de una cita de 60 minutos —la duración por
