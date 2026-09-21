@@ -40,9 +40,19 @@ uv run uvicorn maxicare_daniela.runtime:app --port 8080
   - **Lo que corrija se PINTA.** Vuelve en `correcciones`, con la hora vieja dentro. Corregir
     en silencio deja a quien mira viendo una cita saltar de sitio sin explicación — el mismo
     fallo que hizo escalar a Daniela el 14/09/2026, por la otra puerta.
-  - **Mirar un día pasado también reconcilia.** Si la clínica limpia eventos viejos de
-    Calendar, abrir ese día en la Agenda los da por cancelados en Neon. No cambia lo que ve
-    el paciente —son citas que ya ocurrieron— pero sí lo que dice la base sobre ellas.
+  - **Pero solo hasta `herramientas.DIAS_HACIA_ATRAS_AL_SINCRONIZAR` hacia atrás**
+    (`runtime._fuera_de_la_ventana`), y esa cota no es una optimización. Sin ella, abrir en la
+    Agenda un día cuyos eventos el doctor ya limpió de su Calendar —orden, no cancelaciones—
+    daba esas citas por canceladas en Neon, soltaba sus cupos y dejaba el PATCH respondiendo
+    400: **inmarcables para siempre**, las ya marcadas con `asistio = true` sobre una fila
+    `cancelada`, sin fila en `cambios_configuracion` y sin un error en ningún log. La acción
+    que lo disparaba era MIRAR, y el botón «Ver ese día» de la lista de pendientes lleva
+    justo ahí. No contradice el no negociable 20: el camino de Daniela nunca miró más atrás
+    de esa misma constante, y el panel lo había ampliado a infinito sin decirlo. El día viejo
+    se pinta con lo que dice Neon y `calendario_disponible: false` — y **el aviso que la
+    pantalla enseña para ese caso hoy dice «No se pudo consultar Google Calendar», que para
+    un día viejo no es cierto**: no falló nada, es que no se contrasta. Queda como deuda
+    declarada, no como descuido.
 - **En la rejilla de la Agenda, la fila de cada hora lleva `minHeight` y NUNCA `height`, y el
   rótulo de la hora va DENTRO de la fila.** Las dos cosas sostienen lo mismo, y se pagaron
   caras: con filas de 96 px fijos, la tarjeta de una cita de 60 minutos —la duración por

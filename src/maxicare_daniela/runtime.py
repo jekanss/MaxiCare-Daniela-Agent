@@ -1819,6 +1819,21 @@ async def api_sin_resolver(quien: dict = Depends(usuario_actual)) -> dict:
 #: paciente llegó, y marcar de memoria es peor que no marcar.
 DIAS_SIN_MARCAR = 7
 
+
+def _ahora_en_bogota() -> datetime:
+    """El presente de la agenda, en un solo sitio para poder clavarlo en una prueba.
+
+    No es ceremonia. Desde que la reconciliación del panel tiene cota hacia atrás
+    (`api_agenda`), el endpoint COMPARA el día que le piden contra hoy, así que su
+    comportamiento depende del reloj. Una prueba offline que clave el día pedido y deje el
+    reloj suelto envejece sola: tres días después ese mismo día cae fuera de la ventana y la
+    prueba pasa —o falla— por un motivo que nadie escribió. Ya ha pasado tres veces en este
+    proyecto (`.claude/rules/pruebas.md`), y la regla de allí es la que se aplica aquí: los
+    scripts cuentan hacia delante contra la agenda real, las pruebas offline CLAVAN el
+    presente. Esta función es la costura que se lo permite.
+    """
+    return datetime.now(ZONA_BOGOTA)
+
 #: Lo que se pinta cuando la cita no tiene a quién ponerle nombre.
 #:
 #: `citas.nombre_completo` puede traer el literal `PENDIENTE` (`persistencia.NOMBRE_PENDIENTE`):
@@ -1914,6 +1929,41 @@ def _calendario_de_la_agenda():
     return calendario
 
 
+def _fuera_de_la_ventana(el_dia: date, ahora: datetime) -> bool:
+    """¿El día que piden es demasiado viejo para contrastarlo contra Google Calendar?
+
+    **Esto no contradice el no negociable 20; lo restaura.** El NN20 dice que para una cita
+    que YA existe manda Calendar, y describe el camino de Daniela — que nunca miró más atrás
+    de `herramientas.DIAS_HACIA_ATRAS_AL_SINCRONIZAR` (`herramientas.py`, usada en
+    `_consultar_citas`), con su motivo escrito: cazar la cita que el doctor arrastró de ayer a
+    mañana. «Manda Calendar» nunca significó «mira Calendar hasta 2025». El panel amplió ese
+    alcance a infinito sin decirlo, y esta función lo devuelve a donde estaba. Por eso la cota
+    vive AQUÍ y no en el núcleo: el camino de Daniela no se toca.
+
+    Lo que pasaba sin ella, y es la razón de que exista. La recepcionista ve «14 citas de días
+    anteriores sin marcar», pulsa «Ver ese día» sobre una del martes pasado, y entretanto un
+    doctor había limpiado de su Calendar los eventos de la semana anterior --orden, no
+    cancelaciones--. `obtener_evento` devuelve `None` para cada una, la reconciliación las
+    marca `cancelada` en Neon y suelta sus cupos, y el PATCH pasa a responder 400 «esa cita
+    está cancelada». **Las catorce quedan inmarcables para siempre**, las que ya estaban
+    marcadas quedan con `asistio = true` sobre una fila `cancelada`, no hay fila en
+    `cambios_configuracion` --la reconciliación no anota-- ni error en ningún log. La acción
+    que lo dispara es MIRAR, y lo que destruye es la métrica de asistencia, que es el
+    entregable entero de esta fase.
+
+    Y el desempate cae del lado de no destruir, que es el principio del proyecto. Para una
+    cita FUTURA, cancelarla al ver el evento borrado es el acto seguro: el paciente no puede
+    oír que tiene una cita que no existe. Para una cita YA OCURRIDA no hay a quién proteger
+    --vino o no vino-- y lo único que se gana cancelándola es borrar el dato que dice cuál de
+    las dos cosas pasó.
+
+    El día viejo se pinta con lo que dice Neon y `calendario_disponible: false`, que es cierto
+    --ese día no se contrastó-- y la pantalla ya sabe explicarlo. De paso deja de costar los
+    3-5 s de N llamadas a Google por cada paseo hacia atrás.
+    """
+    return el_dia < ahora.date() - timedelta(days=herramientas.DIAS_HACIA_ATRAS_AL_SINCRONIZAR)
+
+
 @app.get("/api/agenda")
 async def api_agenda(dia: str | None = None, quien: dict = Depends(usuario_actual)) -> dict:
     """El día ya reconciliado contra Google Calendar.
@@ -1926,9 +1976,13 @@ async def api_agenda(dia: str | None = None, quien: dict = Depends(usuario_actua
 
     Una cita que el doctor movió a OTRO día desaparece de `citas` y solo queda en
     `correcciones`: la lista es del día que se pidió, y `hora_nueva` dice a dónde se fue.
+
+    **Y no se reconcilia cualquier día: solo los que caen dentro de la misma ventana que usa
+    Daniela** (`herramientas.DIAS_HACIA_ATRAS_AL_SINCRONIZAR`). Ver `_fuera_de_la_ventana`.
     """
+    ahora = _ahora_en_bogota()
     try:
-        el_dia = date.fromisoformat(dia) if dia else datetime.now(ZONA_BOGOTA).date()
+        el_dia = date.fromisoformat(dia) if dia else ahora.date()
     except ValueError as e:
         raise HTTPException(
             status_code=422, detail="El día de la agenda tiene que venir como AAAA-MM-DD."
@@ -1936,13 +1990,12 @@ async def api_agenda(dia: str | None = None, quien: dict = Depends(usuario_actua
 
     desde = datetime(el_dia.year, el_dia.month, el_dia.day, tzinfo=ZONA_BOGOTA)
     hasta = desde + timedelta(days=1)
-    ahora = datetime.now(ZONA_BOGOTA)
 
     with persistencia.conectar(config.database_url) as conn:
         operativa = persistencia.leer_configuracion(conn)
         citas = panel.citas_del_dia(conn, desde=desde, hasta=hasta)
 
-    calendario = _calendario_de_la_agenda()
+    calendario = None if _fuera_de_la_ventana(el_dia, ahora) else _calendario_de_la_agenda()
     correcciones: list[herramientas.Correccion] = []
     bloqueos: list[Any] = []
 

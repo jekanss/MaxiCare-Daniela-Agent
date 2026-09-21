@@ -755,7 +755,23 @@ def test_sin_marcar_no_devuelve_las_ya_marcadas(conn):
 # ------------------------------------------------------------------------------------------
 
 
-_DIA = "2026-09-20"
+#: El presente clavado de este bloque, y `_DIA` sale de él en vez de al revés. Lo pone
+#: `_sin_base` sobre `runtime._ahora_en_bogota`; el porqué está en su docstring.
+_AHORA = datetime(2026, 9, 20, 12, 0, tzinfo=ZONA_BOGOTA)
+_DIA = _AHORA.date().isoformat()
+
+#: Un día que sigue dentro de la ventana de reconciliación, y otro que ya no. Se derivan de
+#: la constante de `herramientas`, no de un número escrito a mano: el día que alguien la suba
+#: a 3 o la baje a 1, estas dos pruebas siguen midiendo la frontera y no un número viejo.
+_DIA_DENTRO = _AHORA.date() - timedelta(days=herramientas.DIAS_HACIA_ATRAS_AL_SINCRONIZAR)
+_DIA_FUERA = _AHORA.date() - timedelta(days=herramientas.DIAS_HACIA_ATRAS_AL_SINCRONIZAR + 1)
+
+
+def _a_las_nueve(dia) -> datetime:
+    """Las 09:00 de ese día en Bogotá, para que la cita sembrada caiga DENTRO del día que se
+    pide: si cayera fuera, el filtro de `api_agenda` la descartaría y la prueba mediría el
+    filtro en vez de la cota."""
+    return datetime(dia.year, dia.month, dia.day, 9, 0, tzinfo=ZONA_BOGOTA)
 
 _CITA_DE_AGENDA = {
     "id": "11111111-2222-3333-4444-555555555555",
@@ -794,7 +810,16 @@ class _CalendarioDeLaAgenda:
 
 
 def _sin_base(monkeypatch, *, citas=None, sin_marcar=None):
-    """Deja el endpoint de la agenda sin base de datos. El calendario lo pone cada prueba."""
+    """Deja el endpoint de la agenda sin base de datos. El calendario lo pone cada prueba.
+
+    **Y clava el presente**, que desde la cota de `_fuera_de_la_ventana` es tan necesario
+    como los dobles de la base. El endpoint compara `_DIA` contra hoy: con el reloj suelto,
+    tres días después de escribir esto ese mismo `_DIA` cae fuera de la ventana y las pruebas
+    de más abajo dejarían de ejercitar la rama que creen ejercitar --sin fallar, que es lo
+    peor--. Es la trampa de `.claude/rules/pruebas.md`, que ya se cobró tres veces: las
+    pruebas offline clavan el presente, los scripts cuentan hacia delante.
+    """
+    monkeypatch.setattr(runtime, "_ahora_en_bogota", lambda: _AHORA)
     monkeypatch.setattr(persistencia, "conectar", lambda url: _ConexionFalsaSinResolver())
     monkeypatch.setattr(
         persistencia, "leer_configuracion", lambda conn: dict(persistencia.CONFIGURACION_POR_DEFECTO)
@@ -1008,6 +1033,77 @@ def test_una_cita_que_se_fueron_a_otro_dia_sale_de_la_lista_del_dia(monkeypatch)
         assert cuerpo["citas"] == []
         assert len(cuerpo["correcciones"]) == 1
         assert cuerpo["correcciones"][0]["hora_nueva"].startswith("2026-09-21")
+    finally:
+        runtime.app.dependency_overrides.clear()
+
+
+def test_un_dia_dentro_de_la_ventana_si_se_reconcilia(monkeypatch):
+    """La mitad que la cota NO puede romper: el día de anteayer sigue contrastándose.
+
+    Es el borde exacto de `herramientas.DIAS_HACIA_ATRAS_AL_SINCRONIZAR` --el último día que
+    entra-- y está aquí para que nadie cierre la ventana de más. Sin esta prueba, un `<=` por
+    un `<` dejaría a la agenda sin reconciliar el día que Daniela sí reconcilia, y el panel
+    contaría una historia distinta de la que le cuenta al paciente.
+    """
+    cita = dict(_CITA_DE_AGENDA, inicio=_a_las_nueve(_DIA_DENTRO))
+    _sin_base(monkeypatch, citas=[cita])
+    monkeypatch.setattr(runtime, "_calendario", _CalendarioDeLaAgenda())
+
+    reconciliados: list[str] = []
+
+    async def reconciliar(**kw):
+        reconciliados.append(kw["ahora"].isoformat())
+        return kw["citas"], []
+
+    monkeypatch.setattr(herramientas, "reconciliar_con_calendar", reconciliar)
+    runtime.app.dependency_overrides[runtime.usuario_actual] = _como("recepcion")
+    try:
+        r = TestClient(runtime.app).get(f"/api/agenda?dia={_DIA_DENTRO.isoformat()}")
+        assert r.status_code == 200
+        cuerpo = r.json()
+        assert reconciliados, "el día de anteayer dejó de contrastarse contra Calendar"
+        assert cuerpo["calendario_disponible"] is True
+        assert len(cuerpo["citas"]) == 1
+    finally:
+        runtime.app.dependency_overrides.clear()
+
+
+def test_un_dia_mas_viejo_que_la_ventana_no_se_reconcilia_ni_toca_la_base(monkeypatch):
+    """La cota, mirada desde el daño que evita.
+
+    Mirar un día viejo NO puede escribir en Neon. Sin esta cota, abrir en la Agenda un día
+    cuyos eventos el doctor ya limpió de su Calendar cancelaba esas citas, soltaba sus cupos
+    y las dejaba **inmarcables para siempre**: el PATCH responde 400 sobre una cita
+    `cancelada`, y con ella se va la métrica de asistencia, que es el entregable de la fase.
+    No quedaba ni fila en `cambios_configuracion` ni error en ningún log.
+
+    Los tres dobles son la prueba entera, y ninguno es adorno:
+    `reconciliar_con_calendar` revienta --es lo ÚNICO que escribe por este camino--,
+    `_calendario_de_la_agenda` revienta --el día viejo no llega ni a pedir calendario, que es
+    lo que lo vuelve instantáneo-- y `marcar_cita_cancelada` revienta por si algún día
+    apareciera un tercer camino hasta la cancelación.
+    """
+    def revienta(*args, **kw):
+        raise AssertionError("un día fuera de la ventana no puede llegar hasta aquí")
+
+    cita = dict(_CITA_DE_AGENDA, inicio=_a_las_nueve(_DIA_FUERA))
+    _sin_base(monkeypatch, citas=[cita])
+    _nadie_reconcilia(monkeypatch)
+    monkeypatch.setattr(runtime, "_calendario_de_la_agenda", revienta)
+    monkeypatch.setattr(persistencia, "marcar_cita_cancelada", revienta)
+    # Y con un calendario de VERDAD puesto, para que lo que corte sea la cota y no la falta
+    # de calendario: sin esta línea la prueba pasaría igual con la cota borrada.
+    monkeypatch.setattr(runtime, "_calendario", _CalendarioDeLaAgenda())
+    runtime.app.dependency_overrides[runtime.usuario_actual] = _como("recepcion")
+    try:
+        r = TestClient(runtime.app).get(f"/api/agenda?dia={_DIA_FUERA.isoformat()}")
+        assert r.status_code == 200
+        cuerpo = r.json()
+        assert cuerpo["calendario_disponible"] is False
+        assert cuerpo["correcciones"] == [] and cuerpo["bloqueos"] == []
+        # El día se pinta igual: lo que se pierde es el contraste, no la agenda.
+        assert len(cuerpo["citas"]) == 1
+        assert cuerpo["citas"][0]["asistio"] is None
     finally:
         runtime.app.dependency_overrides.clear()
 
