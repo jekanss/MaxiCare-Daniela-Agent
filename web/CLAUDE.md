@@ -24,6 +24,15 @@ uv run uvicorn maxicare_daniela.runtime:app --port 8080
   releyendo Neon en bucle, porque `App.tsx` la pasa como una flecha nueva en cada render. No
   hay `eslint-plugin-react-hooks` ni arnés de pruebas de frontend que lo atrape: se vería
   como una pantalla lenta y una factura rara.
+- **El panel «Últimos cambios» de `Tratamientos.tsx` ya NO enseña las marcas de asistencia**, y
+  es a propósito: `runtime.TABLAS_FUERA_DEL_HISTORIAL` deja `citas` fuera de
+  `/api/historial`. Esa ventana son las 100 filas más recientes y existe para reconstruir qué
+  decía un precio antes y quién lo cambió; con quince citas al día —tres filas por cada
+  corrección, porque «Corregir marcación» desmarca primero— serían **todas** marcas de
+  asistencia en menos de una semana, y el cambio de precio de la semana pasada dejaría de
+  verse en la única pantalla desde la que se puede ver. Las filas siguen en
+  `cambios_configuracion`: lo único que se recorta es esta ventana. El motivo largo está en el
+  docstring de esa constante.
 - **El `Literal` de tratamientos está partido en dos.** `LecturaArchivo` conserva los 14
   escritos a mano —es el muro, y tiene su prueba `test_tratamiento_no_admite_una_frase_clinica`—;
   el vocabulario de negocio vive en la tabla `tratamientos` y lo carga `runtime.py` al
