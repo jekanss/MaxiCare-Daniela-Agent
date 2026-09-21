@@ -1819,6 +1819,28 @@ async def api_sin_resolver(quien: dict = Depends(usuario_actual)) -> dict:
 #: paciente llegó, y marcar de memoria es peor que no marcar.
 DIAS_SIN_MARCAR = 7
 
+#: Lo que se pinta cuando la cita no tiene a quién ponerle nombre.
+#:
+#: `citas.nombre_completo` puede traer el literal `PENDIENTE` (`persistencia.NOMBRE_PENDIENTE`):
+#: lo escribe `relevo.crear_cita_del_relevo` cuando el doctor agenda desde el hilo de Telegram
+#: para un número que todavía no tiene ficha. Es un marcador interno, y la regla de esta fase
+#: es que **`PENDIENTE` no llega a una pantalla de cara al usuario**: la agenda mostraría un
+#: bloque de las 9:00 a nombre de «PENDIENTE», que se lee como el nombre de alguien.
+#:
+#: No se manda una cadena vacía porque el contrato de la pantalla declara `nombre_completo:
+#: string` y el bloque quedaría con el título en blanco, que parece una avería. Esta frase no
+#: se puede confundir con el nombre de una persona y dice la verdad: nadie se lo ha preguntado
+#: todavía. El teléfono viaja igual, así que la clínica sabe a quién llamar.
+SIN_NOMBRE = "Sin nombre registrado"
+
+
+def _nombre_para_la_pantalla(nombre: str | None) -> str:
+    """El nombre del paciente, o la frase que dice que no hay ninguno. Nunca `PENDIENTE`."""
+    limpio = (nombre or "").strip()
+    if not limpio or limpio == persistencia.NOMBRE_PENDIENTE:
+        return SIN_NOMBRE
+    return limpio
+
 
 def _cita_en_json(cita: dict[str, Any]) -> dict[str, Any]:
     """La cita como la lee la pantalla, y solo eso.
@@ -1830,7 +1852,7 @@ def _cita_en_json(cita: dict[str, Any]) -> dict[str, Any]:
         "id": str(cita["id"]),
         "conversacion_id": str(cita["conversacion_id"]),
         "telefono": cita["telefono"],
-        "nombre_completo": cita["nombre_completo"],
+        "nombre_completo": _nombre_para_la_pantalla(cita["nombre_completo"]),
         "tratamiento": cita["tratamiento"],
         "inicio": cita["inicio"].isoformat(),
         "duracion_minutos": cita["duracion_minutos"],
@@ -1845,6 +1867,9 @@ def _correccion_en_json(correccion: herramientas.Correccion) -> dict[str, Any]:
     `hora_nueva` en `null` es lo que distingue «la movieron» de «ya no está». La pantalla lo
     necesita entero: lo que esto cuenta es un cambio que la clínica hizo en Google Calendar y
     que el panel acaba de escribir en Neon delante de quien está mirando.
+
+    El nombre pasa por el mismo filtro que el de una cita: sale de la MISMA columna, así que
+    una corrección sobre una cita del relevo traería el literal `PENDIENTE` por esta puerta.
     """
     return {
         "cita_id": str(correccion.cita_id),
@@ -1852,28 +1877,34 @@ def _correccion_en_json(correccion: herramientas.Correccion) -> dict[str, Any]:
         "hora_vieja": correccion.hora_vieja.isoformat(),
         "hora_nueva": correccion.hora_nueva.isoformat() if correccion.hora_nueva else None,
         "tratamiento": correccion.tratamiento,
-        "nombre_completo": correccion.nombre_completo,
+        "nombre_completo": _nombre_para_la_pantalla(correccion.nombre_completo),
     }
 
 
 def _calendario_de_la_agenda():
-    """El calendario real, o `None` si no hay ninguno en el que se pueda confiar.
+    """El calendario del PROCESO, o `None` si no hay ninguno en el que se pueda confiar.
 
-    Descarta DOS cosas, no una, y la segunda es el no negociable 1 visto desde aquí:
+    No construye nada. `CalendarioGoogle.__init__` firma credenciales y hace una lectura real
+    contra Google --es su comprobación de acceso--, y esto corre dentro de un `async def`: una
+    construcción por petición congelaría el bucle de eventos mientras dura ese viaje, con la
+    respuesta del paciente que esté escribiendo en ese momento, la ventana del búfer de
+    `atencion.py` y el webhook de Telegram esperando detrás. Por eso `_calendario` se
+    construye UNA vez en el arranque, y la agenda lo reutiliza como lo reutiliza el webhook.
 
+    `_construir_el_calendario` ya degrada ahí el `CalendarioDoble` a `CalendarioCaido`, así
+    que lo que llega aquí solo puede ser `CalendarioGoogle`, `CalendarioCaido` o `None`. Las
+    dos clases se comprueban igual, y no es adorno: es lo que impide que un día alguien le
+    pase a esta función el `_CALENDARIO_WEB`, que sí es un doble.
+
+    - `None`: el arranque todavía no corrió (o esto es una prueba). No se reconcilia nada.
     - `CalendarioCaido`: Google no arrancó. Cada llamada lanza `ErrorDeCalendario`.
-    - **`CalendarioDoble`: un calendario VACÍO que dice que sí a todo.** Es lo que devuelve
-      `calendario_desde_config` en una máquina sin credenciales de Google. Pasárselo a la
+    - **`CalendarioDoble`: un calendario VACÍO que dice que sí a todo.** Pasárselo a la
       reconciliación sería afirmar que ninguna cita del día sigue en Calendar: las cancelaría
       TODAS, soltaría sus cupos y la pantalla diría que el calendario está disponible. El
       doble miente igual leyendo que escribiendo.
     """
-    try:
-        calendario = atencion._calendario_por_defecto(config)
-    except Exception:  # noqa: BLE001 -- una agenda que no se pinta es peor que una sin bloqueos
-        log.exception("no se pudo construir el calendario para la agenda del panel")
-        return None
-    if isinstance(calendario, (CalendarioCaido, CalendarioDoble)):
+    calendario = _calendario
+    if calendario is None or isinstance(calendario, (CalendarioCaido, CalendarioDoble)):
         log.warning(
             "la agenda del panel corre sin Google Calendar (%s): no hay bloqueos que pintar "
             "y no se reconcilia nada",

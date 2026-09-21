@@ -15,8 +15,13 @@ import psycopg
 import pytest
 from fastapi.testclient import TestClient
 
-from maxicare_daniela import atencion, contratos, panel, persistencia, runtime
-from maxicare_daniela.calendario import ZONA_BOGOTA, CalendarioCaido, CalendarioDoble
+from maxicare_daniela import atencion, contratos, herramientas, panel, persistencia, runtime
+from maxicare_daniela.calendario import (
+    ZONA_BOGOTA,
+    Bloqueo,
+    CalendarioCaido,
+    CalendarioDoble,
+)
 from maxicare_daniela.config import cargar_dotenv
 
 CORE = ("precio", "duracion", "profesional")
@@ -762,13 +767,34 @@ _CITA_DE_AGENDA = {
     "duracion_minutos": 60,
     "estado": "confirmada",
     "asistio": None,
-    "evento_calendar_id": None,
+    # Con evento de Calendar, y no `None`, a propósito. `reconciliar_con_calendar` descarta
+    # en su primera línea toda cita sin `evento_calendar_id` --no hay contra qué
+    # contrastarla-- así que una cita sin él nunca llega al camino de cancelación: cualquier
+    # prueba que afirme «no se canceló nada» pasaría con y sin la guarda que lo impide, que
+    # es el «verde por el motivo equivocado» de `.claude/rules/pruebas.md`.
+    "evento_calendar_id": "evt_de_prueba_0001",
     "reserva_id": None,
 }
 
 
+class _CalendarioDeLaAgenda:
+    """Un calendario que no es ni `CalendarioCaido` ni `CalendarioDoble`, y por eso SÍ pasa.
+
+    Existe para poder ejercitar la rama «hay calendario de verdad» sin hablar con Google.
+    `_calendario_de_la_agenda` decide por `isinstance`, así que una clase cualquiera basta.
+    """
+
+    def __init__(self, bloqueos=()):
+        self._bloqueos = list(bloqueos)
+        self.preguntaron_por = []
+
+    def bloqueos(self, desde, hasta):
+        self.preguntaron_por.append((desde, hasta))
+        return list(self._bloqueos)
+
+
 def _sin_base(monkeypatch, *, citas=None, sin_marcar=None):
-    """Deja el endpoint de la agenda sin base de datos y sin Google."""
+    """Deja el endpoint de la agenda sin base de datos. El calendario lo pone cada prueba."""
     monkeypatch.setattr(persistencia, "conectar", lambda url: _ConexionFalsaSinResolver())
     monkeypatch.setattr(
         persistencia, "leer_configuracion", lambda conn: dict(persistencia.CONFIGURACION_POR_DEFECTO)
@@ -782,16 +808,30 @@ def _sin_base(monkeypatch, *, citas=None, sin_marcar=None):
     )
 
 
+def _nadie_reconcilia(monkeypatch):
+    """Hace que reconciliar sea un fallo de la prueba, no un no-op silencioso.
+
+    Sin esto, quitar `CalendarioCaido` del `isinstance` de `_calendario_de_la_agenda` no
+    rompía nada: la reconciliación corría contra el calendario caído, se tragaba cada
+    `ErrorDeCalendario`, y el `except` de `bloqueos` acababa poniendo `calendario_disponible`
+    en `False` igual. Mismo cuerpo de respuesta, guarda muerta y suite en verde.
+    """
+    async def jamas(**kw):
+        raise AssertionError("no se puede reconciliar sin un calendario de verdad")
+
+    monkeypatch.setattr(herramientas, "reconciliar_con_calendar", jamas)
+
+
 def test_sin_calendario_la_agenda_responde_igual(monkeypatch):
     """Google caído no deja a la clínica sin ver su día. Lo dice, y sigue.
 
     `calendario_disponible: False` es lo que la pantalla necesita para no pintar una agenda
-    sin bloqueos como si fuera una agenda libre.
+    sin bloqueos como si fuera una agenda libre. Y no se reconcilia NADA: contrastar contra
+    un calendario que lanza en cada llamada solo sirve para tragarse errores.
     """
     _sin_base(monkeypatch)
-    monkeypatch.setattr(
-        atencion, "_calendario_por_defecto", lambda config: CalendarioCaido(motivo="sin credenciales")
-    )
+    _nadie_reconcilia(monkeypatch)
+    monkeypatch.setattr(runtime, "_calendario", CalendarioCaido(motivo="sin credenciales"))
     runtime.app.dependency_overrides[runtime.usuario_actual] = _como("recepcion")
     try:
         r = TestClient(runtime.app).get(f"/api/agenda?dia={_DIA}")
@@ -816,22 +856,185 @@ def test_sin_calendario_la_agenda_responde_igual(monkeypatch):
         runtime.app.dependency_overrides.clear()
 
 
+def test_la_agenda_no_construye_un_calendario_por_peticion(monkeypatch):
+    """Reutiliza el del proceso. `CalendarioGoogle.__init__` habla con Google DE VERDAD.
+
+    Construir uno por petición congela el bucle de eventos durante ese viaje: con un paciente
+    escribiendo a la vez, se retrasan su respuesta, la ventana del búfer de `atencion.py` y
+    el webhook de Telegram. Y encima duplicaría la degradación doble -> caído que
+    `_construir_el_calendario` ya hace una sola vez al arrancar.
+    """
+    _sin_base(monkeypatch)
+    _nadie_reconcilia(monkeypatch)
+
+    def revienta(*args, **kw):
+        raise AssertionError("la agenda no puede construir un calendario en cada petición")
+
+    monkeypatch.setattr(atencion, "_calendario_por_defecto", revienta)
+    monkeypatch.setattr(runtime, "_calendario", None)  # el arranque todavía no corrió
+    runtime.app.dependency_overrides[runtime.usuario_actual] = _como("doctor")
+    try:
+        r = TestClient(runtime.app).get(f"/api/agenda?dia={_DIA}")
+        assert r.status_code == 200
+        assert r.json()["calendario_disponible"] is False
+    finally:
+        runtime.app.dependency_overrides.clear()
+
+
 def test_un_calendario_doble_no_cuenta_como_calendario(monkeypatch):
     """El no negociable 1, mirado desde la agenda.
 
-    En una máquina sin credenciales de Google `calendario_desde_config` devuelve un
-    `CalendarioDoble`, que está VACÍO. Pasárselo a la reconciliación sería decirle que
-    ninguna cita del día existe ya en Calendar: las cancelaría TODAS, en silencio y con la
-    pantalla diciendo que el calendario está disponible.
+    Un `CalendarioDoble` está VACÍO y dice que sí a todo. Pasárselo a la reconciliación es
+    decirle que ninguna cita del día existe ya en Calendar: las cancelaría TODAS, soltaría
+    sus cupos y la pantalla diría que el calendario está disponible.
+
+    La reconciliación corre aquí DE VERDAD --no está doblada-- sobre una cita que sí tiene
+    `evento_calendar_id`, así que sin la guarda el camino llega hasta
+    `persistencia.marcar_cita_cancelada`. Eso es lo que la prueba vigila: no que la cita
+    siga en la lista, sino que nadie haya intentado cancelarla.
     """
     _sin_base(monkeypatch)
-    monkeypatch.setattr(atencion, "_calendario_por_defecto", lambda config: CalendarioDoble())
+    cancelaciones: list[str] = []
+    monkeypatch.setattr(
+        persistencia, "marcar_cita_cancelada",
+        lambda conn, id_cita, motivo=None: cancelaciones.append(str(id_cita)),
+    )
+    monkeypatch.setattr(runtime, "_calendario", CalendarioDoble())
     runtime.app.dependency_overrides[runtime.usuario_actual] = _como("admin")
     try:
         r = TestClient(runtime.app).get(f"/api/agenda?dia={_DIA}")
         assert r.status_code == 200
         assert r.json()["calendario_disponible"] is False
+        assert cancelaciones == [], "el doble vacío estuvo a punto de cancelar el día entero"
         assert len(r.json()["citas"]) == 1, "la cita del día sigue ahí, sin cancelar"
+    finally:
+        runtime.app.dependency_overrides.clear()
+
+
+def test_con_calendario_las_correcciones_y_los_bloqueos_salen_enteros(monkeypatch):
+    """La rama que SÍ tiene calendario, que es la que la pantalla consume de verdad.
+
+    Las dos formas más sensibles del contrato --`Correccion` y `Bloqueo`-- solo se
+    ejercitaban vacías, así que un renombre de campo en cualquiera de las dos salía como un
+    500 en la clínica con la suite entera en verde.
+
+    Van las dos clases de corrección: `movida` lleva `hora_nueva`, `cancelada` la lleva en
+    `null`, y eso es lo ÚNICO que las distingue al pintarlas.
+    """
+    _sin_base(monkeypatch)
+
+    bloqueo = Bloqueo(
+        inicio=datetime(2026, 9, 20, 12, 0, tzinfo=ZONA_BOGOTA),
+        fin=datetime(2026, 9, 20, 13, 0, tzinfo=ZONA_BOGOTA),
+        titulo="Almuerzo",
+    )
+    calendario = _CalendarioDeLaAgenda([bloqueo])
+    monkeypatch.setattr(runtime, "_calendario", calendario)
+
+    movida = herramientas.Correccion(
+        cita_id="aaaaaaaa-0000-0000-0000-000000000001",
+        que_paso="movida",
+        hora_vieja=datetime(2026, 9, 20, 9, 0, tzinfo=ZONA_BOGOTA),
+        hora_nueva=datetime(2026, 9, 20, 16, 0, tzinfo=ZONA_BOGOTA),
+        tratamiento="ortodoncia",
+        nombre_completo="Ana Ruiz",
+    )
+    cancelada = herramientas.Correccion(
+        cita_id="aaaaaaaa-0000-0000-0000-000000000002",
+        que_paso="cancelada",
+        hora_vieja=datetime(2026, 9, 20, 10, 0, tzinfo=ZONA_BOGOTA),
+        hora_nueva=None,
+        tratamiento="valoracion",
+        # Una cita que abrió el relevo para un número sin ficha. Llega hasta aquí.
+        nombre_completo=persistencia.NOMBRE_PENDIENTE,
+    )
+
+    async def reconciliar(**kw):
+        return kw["citas"], [movida, cancelada]
+
+    monkeypatch.setattr(herramientas, "reconciliar_con_calendar", reconciliar)
+    runtime.app.dependency_overrides[runtime.usuario_actual] = _como("doctor")
+    try:
+        cuerpo = TestClient(runtime.app).get(f"/api/agenda?dia={_DIA}").json()
+
+        assert cuerpo["calendario_disponible"] is True
+        assert cuerpo["bloqueos"] == [{
+            "inicio": "2026-09-20T12:00:00-05:00",
+            "fin": "2026-09-20T13:00:00-05:00",
+            "titulo": "Almuerzo",
+        }]
+        # Y se le preguntó por el día que se pidió, no por otro.
+        assert calendario.preguntaron_por[0][0].isoformat() == "2026-09-20T00:00:00-05:00"
+
+        una, dos = cuerpo["correcciones"]
+        assert set(una) == {
+            "cita_id", "que_paso", "hora_vieja", "hora_nueva", "tratamiento", "nombre_completo"
+        }
+        assert una["que_paso"] == "movida"
+        assert una["hora_vieja"] == "2026-09-20T09:00:00-05:00"
+        assert una["hora_nueva"] == "2026-09-20T16:00:00-05:00"
+        assert una["nombre_completo"] == "Ana Ruiz"
+
+        assert dos["que_paso"] == "cancelada"
+        assert dos["hora_nueva"] is None
+        assert dos["nombre_completo"] == runtime.SIN_NOMBRE
+    finally:
+        runtime.app.dependency_overrides.clear()
+
+
+def test_una_cita_que_se_fueron_a_otro_dia_sale_de_la_lista_del_dia(monkeypatch):
+    """Solo queda en `correcciones`, con `hora_nueva` diciendo a dónde se fue.
+
+    Pintarla en un día que ya no es el suyo sería repetir el error que la reconciliación
+    existe para arreglar: enseñar una hora que la clínica ya cambió.
+    """
+    _sin_base(monkeypatch)
+    monkeypatch.setattr(runtime, "_calendario", _CalendarioDeLaAgenda())
+
+    async def reconciliar(**kw):
+        mudada = dict(kw["citas"][0])
+        mudada["inicio"] = datetime(2026, 9, 21, 9, 0, tzinfo=ZONA_BOGOTA)
+        return [mudada], [herramientas.Correccion(
+            cita_id=mudada["id"], que_paso="movida",
+            hora_vieja=datetime(2026, 9, 20, 9, 0, tzinfo=ZONA_BOGOTA),
+            hora_nueva=mudada["inicio"], tratamiento="valoracion",
+            nombre_completo="Paciente De Prueba",
+        )]
+
+    monkeypatch.setattr(herramientas, "reconciliar_con_calendar", reconciliar)
+    runtime.app.dependency_overrides[runtime.usuario_actual] = _como("admin")
+    try:
+        cuerpo = TestClient(runtime.app).get(f"/api/agenda?dia={_DIA}").json()
+        assert cuerpo["citas"] == []
+        assert len(cuerpo["correcciones"]) == 1
+        assert cuerpo["correcciones"][0]["hora_nueva"].startswith("2026-09-21")
+    finally:
+        runtime.app.dependency_overrides.clear()
+
+
+def test_el_literal_pendiente_no_llega_nunca_a_la_pantalla(monkeypatch):
+    """`relevo.crear_cita_del_relevo` escribe `PENDIENTE` en `citas.nombre_completo`.
+
+    Pasa cuando el doctor agenda desde el hilo de Telegram para un número que todavía no
+    tiene ficha. La agenda mostraría, tal cual, un bloque de las 9:00 a nombre de
+    «PENDIENTE» --que se lee como el nombre de una persona-- y la pantalla lo pinta crudo.
+    La regla de esta fase: lo que no se sabe no se pinta. El teléfono sí viaja, así que la
+    clínica sigue sabiendo a quién llamar.
+    """
+    del_relevo = dict(_CITA_DE_AGENDA, nombre_completo=persistencia.NOMBRE_PENDIENTE)
+    sin_nada = dict(_CITA_DE_AGENDA, id="99999999-0000-0000-0000-000000000000",
+                    nombre_completo="   ")
+    _sin_base(monkeypatch, citas=[del_relevo], sin_marcar=[sin_nada])
+    _nadie_reconcilia(monkeypatch)
+    monkeypatch.setattr(runtime, "_calendario", None)
+    runtime.app.dependency_overrides[runtime.usuario_actual] = _como("recepcion")
+    try:
+        cuerpo = TestClient(runtime.app).get(f"/api/agenda?dia={_DIA}").json()
+        assert cuerpo["citas"][0]["nombre_completo"] == runtime.SIN_NOMBRE
+        assert cuerpo["citas"][0]["telefono"] == "573001112233"
+        # Y la misma regla en `sin_marcar`, que es la otra lista de la misma pantalla.
+        assert cuerpo["sin_marcar"][0]["nombre_completo"] == runtime.SIN_NOMBRE
+        assert "PENDIENTE" not in TestClient(runtime.app).get(f"/api/agenda?dia={_DIA}").text
     finally:
         runtime.app.dependency_overrides.clear()
 
