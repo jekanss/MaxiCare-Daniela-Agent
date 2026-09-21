@@ -8,7 +8,7 @@ from __future__ import annotations
 import os
 import re
 import uuid
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import psycopg
@@ -806,10 +806,16 @@ _DIA_DENTRO = _AHORA.date() - timedelta(days=herramientas.DIAS_HACIA_ATRAS_AL_SI
 _DIA_FUERA = _AHORA.date() - timedelta(days=herramientas.DIAS_HACIA_ATRAS_AL_SINCRONIZAR + 1)
 
 
-def _a_las_nueve(dia) -> datetime:
+def _ese_dia_a_las_nueve(dia: date) -> datetime:
     """Las 09:00 de ese día en Bogotá, para que la cita sembrada caiga DENTRO del día que se
     pide: si cayera fuera, el filtro de `api_agenda` la descartaría y la prueba mediría el
-    filtro en vez de la cota."""
+    filtro en vez de la cota.
+
+    El nombre largo es deliberado: `_a_las_nueve` ya existe arriba y recibe un DESPLAZAMIENTO
+    en días contra el reloj de verdad (`:538`), que es lo que necesitan las pruebas de Neon.
+    Llamar igual a las dos las hace intercambiables a la vista y no lo son --y como esas
+    viven bajo `-m neon`, la colisión pasaba entera por `uv run pytest -q`--.
+    """
     return datetime(dia.year, dia.month, dia.day, 9, 0, tzinfo=ZONA_BOGOTA)
 
 _CITA_DE_AGENDA = {
@@ -1105,7 +1111,7 @@ def test_un_dia_dentro_de_la_ventana_si_se_reconcilia(monkeypatch):
     un `<` dejaría a la agenda sin reconciliar el día que Daniela sí reconcilia, y el panel
     contaría una historia distinta de la que le cuenta al paciente.
     """
-    cita = dict(_CITA_DE_AGENDA, inicio=_a_las_nueve(_DIA_DENTRO))
+    cita = dict(_CITA_DE_AGENDA, inicio=_ese_dia_a_las_nueve(_DIA_DENTRO))
     _sin_base(monkeypatch, citas=[cita])
     monkeypatch.setattr(runtime, "_calendario", _CalendarioDeLaAgenda())
 
@@ -1146,7 +1152,7 @@ def test_un_dia_mas_viejo_que_la_ventana_no_se_reconcilia_ni_toca_la_base(monkey
     def revienta(*args, **kw):
         raise AssertionError("un día fuera de la ventana no puede llegar hasta aquí")
 
-    cita = dict(_CITA_DE_AGENDA, inicio=_a_las_nueve(_DIA_FUERA))
+    cita = dict(_CITA_DE_AGENDA, inicio=_ese_dia_a_las_nueve(_DIA_FUERA))
     _sin_base(monkeypatch, citas=[cita])
     _nadie_reconcilia(monkeypatch)
     monkeypatch.setattr(runtime, "_calendario_de_la_agenda", revienta)
