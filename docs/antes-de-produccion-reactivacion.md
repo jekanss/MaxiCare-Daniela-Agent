@@ -11,10 +11,23 @@ Lo que importa para encender está aquí, en git.
 
 | | |
 |---|---|
-| Rama | `reactivacion-leads`, 23 commits desde `1ee143d` |
-| HEAD al escribir esto | `0e8b517` (20/09/2026) |
-| Estado | **sin fundir y sin desplegar** — el VPS corre `main` |
-| Pruebas | 1020 offline · 217 de Neon · los seis entregables que no gastan, en verde |
+| Rama | `reactivacion-leads`, fundida en `main` el **21/09/2026** |
+| Estado | **③ HECHO: fundida y desplegada, CALLADA.** Falta el ④ |
+| Qué manda hoy | **nada** — los tres nombres de plantilla están vacíos en el servidor |
+| Pruebas tras fundir | 1148 offline en verde, cero fallos |
+
+**Lo que cambió el 21/09/2026, y hay que leerlo entero antes de tocar el `.env`:**
+
+El código de reactivación **ya corre en producción**. El barrido decide cada hora a quién se
+le escribiría y **lo encola**, sin enviar: ese es el modo de comprobación, y es lo que permite
+mirar en `seguimientos` a quién habría escrito **antes** de que salga un solo WhatsApp.
+Consecuencia de eso que conviene tener presente al llegar al ④: puede haber cola acumulada,
+así que el `tope_diario_reactivacion` bajo del ④ pasa de ser prudencia a ser necesario.
+
+Hubo que renumerar las tres migraciones —`021`→`023`, `022`→`024`, `023`→`025`— porque `main`
+ya había ocupado el 021 y el 022 con la bitácora de asistencia y el perímetro de coste, las
+dos ya aplicadas en producción. Es seguro porque `aplicar_esquema` no lleva registro de lo
+aplicado: corre todas en cada arranque y todas son idempotentes.
 
 ---
 
@@ -69,9 +82,13 @@ plantillas como *Marketing*, mientras nuestra lectura de la política las trata 
 seguimiento.** No es contradictorio —son dos jurisdicciones etiquetando lo mismo— pero es
 exactamente la ambigüedad sin resolver, ya puesta por escrito en una consola de Meta.
 
-### ③ Fundir y desplegar **con los nombres de plantilla aún vacíos**
+### ③ Fundir y desplegar **con los nombres de plantilla aún vacíos** — ✅ HECHO el 21/09/2026
 
 Esto despliega el código sin que salga nada. Y abre la única ventana para lo de abajo.
+
+**Estamos dentro de esa ventana desde el 21/09/2026.** Es el estado más barato para mirar y
+el único en el que se puede probar el ③bis. No tiene fecha de caducidad: se puede quedar así
+indefinidamente, y mientras tanto el barrido sigue enseñando a quién habría escrito.
 
 ### ③bis · Probar «Ya no, gracias» con un mensaje real
 

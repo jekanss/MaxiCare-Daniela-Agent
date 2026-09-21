@@ -6,8 +6,11 @@ septiembre de 2026). 16 de septiembre de 2026.
 Esto no pide una decisión técnica. Pide que alguien confirme una lectura de la política antes
 de que la reactivación salga a producción.
 
-> **Estado al 20/09/2026: sin enviar, a propósito.** Decisión de MaxiCare: este memo se manda
-> justo antes de salir a producción, no antes. El resto de lo que falta para encender está en
+> **Estado al 21/09/2026: ES AHORA.** El código de reactivación se fundió y se desplegó ese
+> día, **callado**: los tres nombres de plantilla están vacíos en el servidor y con eso no
+> sale ni un mensaje. Ponerlos es una línea, y es lo que esta confirmación bloquea. La
+> decisión de MaxiCare era mandar este memo justo antes de salir a producción, y el momento
+> llegó. El resto de lo que falta para encender está en
 > [`../antes-de-produccion-reactivacion.md`](../antes-de-produccion-reactivacion.md).
 
 ## Qué quedó construido
@@ -63,8 +66,14 @@ Las dos lecturas son defendibles y la diferencia no es de matiz:
 **Quien redactó la política es quien tiene que decidir cuál de las dos es.** No es una decisión
 que pueda tomar quien programa, porque las dos se implementan igual de bien y solo una cumple.
 
-Mientras tanto no hay riesgo: la reactivación todavía no está construida. Lo que sí está
-construido y ya funciona es la baja, que es la mitad que protege al paciente.
+**Ojo, que esta frase cambió el 21/09/2026 y decía lo contrario.** Hasta ese día decía «no hay
+riesgo: la reactivación todavía no está construida». Ya lo está, y está desplegada. Lo que
+impide que salga un solo mensaje no es que falte código: es que los tres nombres de plantilla
+están vacíos en el servidor, y rellenarlos es una línea. Por eso esta confirmación pasó de ser
+un pendiente a ser lo único que falta.
+
+Lo que sí está construido, funcionando y sin depender de esta respuesta es **la baja**, que es
+la mitad que protege al paciente.
 
 ## El enlace de la política
 

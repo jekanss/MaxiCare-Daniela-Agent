@@ -168,8 +168,11 @@ una —qué se midió, qué costó— está en la regla que cubre ese archivo.
    como la vieja al reprogramar (13).
 21. **Un recordatorio se MARCA antes de enviarse, y lo emite el código, no el modelo.** No hay
    transacción que cubra una llamada a Meta: enviar primero y marcar después manda el mismo
-   recordatorio otra vez sesenta segundos más tarde, y **ninguna de las siete guardas lo
-   detecta** —todas siguen diciendo que sí—. La cola cuelga de `cita_id` y no solo de la
+   recordatorio otra vez sesenta segundos más tarde, y **ninguna de las NUEVE guardas lo
+   detecta** —todas siguen diciendo que sí—. (Eran siete hasta el 21/09/2026, cuando la
+   reactivación de leads añadió dos; una reactivación pasa por trece. El número que manda vive
+   en el docstring de `seguimientos.decidir`, no aquí: esta línea ya envejeció una vez.) La
+   cola cuelga de `cita_id` y no solo de la
    conversación: sin eso, reprogramar deja vivo un recordatorio de una cita que ya no existe.
    El despacho vive en su **propia** tarea de `runtime.py`, no en la de relevos, que no arranca
    sin Telegram.
@@ -208,8 +211,12 @@ una —qué se midió, qué costó— está en la regla que cubre ese archivo.
 25. **`/clearstate` resetea el aviso y NUNCA la baja, y la fila de `contactos` no se borra
    jamás.** Ese «no» es del paciente, no del sistema: si la fila se fuera, resetear a alguien
    lo devolvería a la lista de contactables sin que nadie se entere. Mismo precedente que los
-   ejemplos de casos sin resolver (22). La bitácora `consentimientos` no se toca en ningún
-   caso y el `ON DELETE RESTRICT` lo hace imposible aunque alguien lo intente. Y la baja es
+   ejemplos de casos sin resolver (22). De la bitácora `consentimientos` no se BORRA nunca una
+   fila —el `ON DELETE RESTRICT` lo hace imposible aunque alguien lo intente—, que no es lo
+   mismo que «no se toca», como decía esta línea hasta el 21/09/2026: `/clearstate` le pone el
+   `detalle` a NULL (la frase literal del paciente, que §13 deja pedir suprimir) y le AÑADE una
+   fila `rastro_borrado`. Lo que se conserva intacto es lo que acredita: el hecho, la fecha, el
+   origen y la versión. Y la baja es
    **comercial**: no apaga el recordatorio de una cita, y eso lo sostienen la lista blanca
    `TIPOS_NO_COMERCIALES` en G0 **y** la misma guarda dentro de `programar_seguimiento`, que
    es lo que impide que dependa de que el modelo obedezca.
