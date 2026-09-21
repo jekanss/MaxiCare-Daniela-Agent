@@ -105,9 +105,13 @@ MENSAJE_FALLO_TECNICO = (
 #: NO lo escribe el modelo: llega por el mismo camino que los otros tres, dentro de un
 #: `except`, con el turno ya abortado por el tripwire. Por eso es un literal y no una
 #: instrucción del prompt -- el modelo nunca llegó a correr.
+#: **Sin rayas largas (—), y eso vale para los cuatro mensajes de aquí arriba.** Nadie las
+#: escribe en WhatsApp: se teclean con una combinación que no está en el teclado del celular,
+#: así que un mensaje que las lleva se lee como generado. Esta frase nació con dos, el
+#: 21/09/2026, y las cazó el cliente el mismo día.
 MENSAJE_FUERA_DE_ALCANCE = (
     "Con eso no te puedo ayudar, es que yo solo sé de MaxiCare 😅 Pero si necesitas algo de "
-    "la clínica —tratamientos, precios, horarios o agendar tu cita— dime y lo vemos."
+    "la clínica (tratamientos, precios, horarios o agendar tu cita), dime y lo vemos."
 )
 
 #: La corrección que se le da al modelo al regenerar. Es explícita a propósito: «vuelve a

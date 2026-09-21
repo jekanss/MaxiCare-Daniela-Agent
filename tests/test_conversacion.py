@@ -360,6 +360,48 @@ def test_pedirle_una_tarea_ajena_se_corta_igual_pero_NO_se_escala(monkeypatch):
     )
 
 
+def test_ningun_mensaje_al_paciente_lleva_raya_larga():
+    """Nadie escribe «—» en WhatsApp: no está en el teclado de un celular, así que un mensaje
+    que la lleva se lee como generado por una máquina.
+
+    La prueba existe porque el fallo entró por aquí mismo: `MENSAJE_FUERA_DE_ALCANCE` nació
+    con dos rayas el 21/09/2026 y las cazó el cliente el mismo día, no la suite. Estos cuatro
+    literales son lo único que le llega a un paciente sin pasar por el modelo --se arman
+    dentro de un `except`, con el turno ya abortado-- así que son los únicos que una prueba
+    puede vigilar. Lo que escribe el modelo lo gobierna el bloque «CÓMO ESCRIBES» del prompt,
+    y eso lo fija `test_agentes.py`.
+    """
+    for nombre in (
+        "MENSAJE_SEGURO",
+        "MENSAJE_LIMITE_TURNOS",
+        "MENSAJE_FALLO_TECNICO",
+        "MENSAJE_FUERA_DE_ALCANCE",
+    ):
+        texto = getattr(conversacion, nombre)
+        assert "—" not in texto, f"{nombre} lleva una raya larga (—)"
+        assert "–" not in texto, f"{nombre} lleva un guion medio (–)"
+
+
+def test_el_prompt_le_prohibe_la_raya_larga_a_daniela():
+    """La otra mitad: los cuatro literales de arriba son un puñado de frases, y el 99% de lo
+    que lee un paciente lo escribe el modelo.
+
+    Y hay un motivo concreto para que esto esté dicho en el prompt y no se dé por supuesto:
+    **el prompt de Daniela usa rayas largas por todas partes** --es un documento técnico
+    escrito para que lo lea alguien que edita código-- y un modelo imita el registro de sus
+    propias instrucciones. Sin una línea que lo prohíba, ese ejemplo es lo único que hay.
+    """
+    from maxicare_daniela import agentes
+
+    prompt = agentes.INSTRUCCIONES_DANIELA
+
+    assert "—" in prompt, (
+        "si el prompt dejara de usar rayas, esta prueba habría que revisarla: su razón de ser "
+        "es que el propio documento es el contraejemplo"
+    )
+    assert "raya larga" in prompt.lower(), "el prompt tiene que prohibirla explícitamente"
+
+
 def test_el_mensaje_de_fuera_de_alcance_no_promete_que_escriba_nadie():
     """El defecto concreto que se arregló no era el tono: era que `MENSAJE_SEGURO` afirma dos
     cosas que en este caso son falsas --que el doctor va a confirmar el dato y que alguien va
