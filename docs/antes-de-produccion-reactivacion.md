@@ -21,8 +21,13 @@ Lo que importa para encender está aquí, en git.
 El código de reactivación **ya corre en producción**. El barrido decide cada hora a quién se
 le escribiría y **lo encola**, sin enviar: ese es el modo de comprobación, y es lo que permite
 mirar en `seguimientos` a quién habría escrito **antes** de que salga un solo WhatsApp.
-Consecuencia de eso que conviene tener presente al llegar al ④: puede haber cola acumulada,
-así que el `tope_diario_reactivacion` bajo del ④ pasa de ser prudencia a ser necesario.
+
+**Y NO se acumula una cola que vaya a reventar el día del ④**, que es lo primero que uno teme
+al leer lo de arriba. Sin plantilla, una fila decidida `enviar` queda PENDIENTE y **R3 la anula
+a las dos horas —y anular LIBERA CUPO—**, así que el estado de observación se recicla solo. Lo
+dice en voz alta `scripts/probar_reactivacion.py` al terminar, y tiene la otra cara: **en un
+día se ven bastantes más decisiones que `tope_diario_reactivacion`**, sin que salga un mensaje
+de más. No manda de más; engaña a quien dimensione la campaña leyendo esos números tal cual.
 
 Hubo que renumerar las tres migraciones —`021`→`023`, `022`→`024`, `023`→`025`— porque `main`
 ya había ocupado el 021 y el 022 con la bitácora de asistencia y el perímetro de coste, las
@@ -67,20 +72,35 @@ Las tres están aprobadas por Meta (18/09/2026) y se editaron a tuteo el 20/09. 
 plantilla aprobada la devuelve a revisión**: confirmar que las tres volvieron a `Active` antes
 de probar. Los textos vigentes están en [`plantillas-meta-reactivacion.md`](plantillas-meta-reactivacion.md).
 
-### ② Resolver la pregunta legal — es lo único que bloquea de verdad
+### ② Resolver la pregunta legal — ✅ RESUELTO el 21/09/2026: **es SEGUIMIENTO**
 
-El párrafo está escrito en [`politica/para-marketing-2026-09-16.md`](politica/para-marketing-2026-09-16.md)
-y **sigue sin enviarse a Natalia Peñuela**. Decisión del usuario el 20/09/2026: se manda
-**justo antes de salir a producción**, no antes.
+**Natalia Peñuela, que redactó la política, confirmó que la reactivación es seguimiento de una
+solicitud iniciada por el titular (§6 y §12), no comunicación comercial (§5 y §10).**
 
-Lo que hay que confirmar: el PDF v2.0 se contradice consigo mismo. Los §6 y §12 permiten el
-seguimiento de una solicitud iniciada por el titular; los §5 y §10 lo niegan. Nadie del lado
-técnico puede resolver eso.
+Consecuencia directa: **lo construido cumple tal como está y no hay nada que cambiar.** No hace
+falta un «sí» expreso antes del primer mensaje de reactivación; basta el aviso con derecho a
+oponerse, que es como está implementado.
 
-Y un dato que conviene llevar en el mismo correo: **Meta obliga a clasificar las tres
-plantillas como *Marketing*, mientras nuestra lectura de la política las trata como
-seguimiento.** No es contradictorio —son dos jurisdicciones etiquetando lo mismo— pero es
-exactamente la ambigüedad sin resolver, ya puesta por escrito en una consola de Meta.
+**Pero esa respuesta viene con una condición que no es decorativa, y hay que leerla al derecho:**
+lo que convierte la reactivación en «seguimiento» y no en publicidad es que la persona pueda
+oponerse y que esa oposición se respete. O sea que **el botón «Ya no, gracias» es lo que hace
+verdadera la respuesta legal**, no un detalle de acabado. Si ese camino no funciona, la base
+sobre la que Natalia dijo «seguimiento» deja de existir, y el sistema pasa a ser exactamente lo
+que ella descartó. Por eso el ③bis dejó de ser una prueba conveniente y pasó a ser el requisito
+del ④.
+
+El memo que se le mandó está en
+[`politica/para-marketing-2026-09-16.md`](politica/para-marketing-2026-09-16.md) y la nota de
+envío en [`politica/correo-para-natalia-penuela-2026-09-21.md`](politica/correo-para-natalia-penuela-2026-09-21.md).
+
+Lo que queda anotado de la pregunta, para quien tenga que reconstruirla: el PDF v2.0 se
+contradice consigo mismo —§6 y §12 contra §5 y §10— y nadie del lado técnico podía resolverlo,
+porque las dos lecturas se programan igual de bien y solo una cumple.
+
+Y el dato que fue en el mismo correo, que **sigue vigente y sin resolver**: **Meta obliga a
+clasificar las tres plantillas como *Marketing*, mientras la lectura de la política —ahora
+confirmada— las trata como seguimiento.** No es contradictorio, son dos marcos etiquetando lo
+mismo, pero queda por escrito en la consola de un tercero que MaxiCare no controla.
 
 ### ③ Fundir y desplegar **con los nombres de plantilla aún vacíos** — ✅ HECHO el 21/09/2026
 

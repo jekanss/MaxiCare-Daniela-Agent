@@ -34,6 +34,21 @@ Daniela ya distingue tres cosas que antes eran una sola:
    separa por dentro, no por criterio de nadie: la baja apaga lo comercial y no puede apagar
    un recordatorio.
 
+## ✅ RESPONDIDA el 21/09/2026: es SEGUIMIENTO
+
+**Natalia Peñuela confirmó la primera lectura: la reactivación es seguimiento de una solicitud
+iniciada por el titular (§6 y §12), no comunicación comercial (§5 y §10).** Lo construido
+cumple tal como está; no hace falta un «sí» expreso antes del primer mensaje.
+
+**Lo que esa respuesta exige a cambio, y no es retórica:** un seguimiento se distingue de la
+publicidad en que la persona puede oponerse y esa oposición se respeta. El derecho a oponerse
+es lo que sostiene la respuesta. Por eso el camino de la baja —el botón «Ya no, gracias» y
+todo lo que cuelga de él— dejó de ser una comodidad y pasó a ser **la condición de la que
+depende que esta confirmación siga siendo cierta**.
+
+Lo de abajo se conserva tal como se envió, porque es lo que se preguntó y sobre lo que se
+respondió.
+
 ## La pregunta que hay que confirmar
 
 El permiso para **recontactar** a alguien que preguntó y no agendó quedó implementado como un
