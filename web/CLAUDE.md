@@ -29,6 +29,49 @@ uv run uvicorn maxicare_daniela.runtime:app --port 8080
   el vocabulario de negocio vive en la tabla `tratamientos` y lo carga `runtime.py` al
   arrancar. Crear un tratamiento desde la pantalla **no** lo mete en el muro: una
   radiografía suya se clasifica `no_identificado`. Verificado por `probar_panel.py`.
+- **`GET /api/agenda` ESCRIBE, y no es un descuido del verbo.** Antes de pintar el día
+  reconcilia esas citas contra Google Calendar (no negociable 20): puede **mover** una fila
+  de `citas`, **cancelarla**, **soltar su cupo en `reservas` y tomar otro**, y reprogramar su
+  recordatorio. Abrir la pantalla de Agenda es hoy el mejor disparador que esa reconciliación
+  tiene —el otro es que un paciente pregunte por su cita, y no hay ningún barrido—, así que
+  se quiso así. Tres consecuencias que hay que tener presentes antes de tocar esta pantalla:
+  - **Nada de recargar en bucle.** Un `setInterval` o un `useEffect` mal atado no es una
+    pantalla lenta: son escrituras en Neon y llamadas a la API de Google por cada tic.
+  - **Lo que corrija se PINTA.** Vuelve en `correcciones`, con la hora vieja dentro. Corregir
+    en silencio deja a quien mira viendo una cita saltar de sitio sin explicación — el mismo
+    fallo que hizo escalar a Daniela el 14/09/2026, por la otra puerta.
+  - **Mirar un día pasado también reconcilia.** Si la clínica limpia eventos viejos de
+    Calendar, abrir ese día en la Agenda los da por cancelados en Neon. No cambia lo que ve
+    el paciente —son citas que ya ocurrieron— pero sí lo que dice la base sobre ellas.
+- **En la rejilla de la Agenda, la fila de cada hora lleva `minHeight` y NUNCA `height`, y el
+  rótulo de la hora va DENTRO de la fila.** Las dos cosas sostienen lo mismo, y se pagaron
+  caras: con filas de 96 px fijos, la tarjeta de una cita de 60 minutos —la duración por
+  defecto de esta clínica, o sea el caso normal— mide 137 px con sus dos botones, se sale de su
+  hora y **la tarjeta de la hora siguiente se pinta encima**. Los botones «Asistió» y «No
+  asistió» de toda cita seguida de otra quedaban **físicamente tapados**: en una agenda con
+  citas consecutivas, solo la última de la tanda era marcable. Verificado el 20/09/2026 con un
+  navegador de verdad (`subtree intercepts pointer events`, treinta segundos de reintentos).
+  Tres cosas que no se pueden deshacer sin volver a romperlo:
+  - **Acotar el `minHeight` de la tarjeta no arregla nada.** Se intentó. La altura real la
+    decide el CONTENIDO; ese número solo es un mínimo.
+  - **Encoger los botones tampoco es la salida.** Su tamaño es deliberado y está argumentado
+    en el archivo: lo pulsa alguien de pie, con prisa, entre un paciente y el siguiente.
+  - **La línea del «ahora» se sitúa en un porcentaje de SU fila**, no multiplicando `ALTO_HORA`
+    desde arriba de la rejilla. Esa cuenta vieja daba por hecho que todas las filas miden lo
+    mismo: en cuanto una crece, apunta a la hora equivocada.
+  **Nada de esto lo caza una prueba.** No hay arnés de frontend: el único guardián es abrir la
+  pantalla con dos citas seguidas de 60 minutos y comprobar que los dos botones se pulsan.
+- **La marca de asistencia no funciona sin la migración 021, y falla ENTERA.** La 007 dejó
+  `cambios_configuracion.tabla` cerrado en tres valores y `citas` no estaba; como
+  `panel.marcar_asistencia` mete el `UPDATE` y su fila de bitácora en la MISMA transacción,
+  el `CheckViolation` del INSERT se lleva por delante también el UPDATE: `citas.asistio`
+  queda inescribible desde el panel. **Subir este código a un sitio sin la 021 aplicada deja
+  la pantalla de Agenda rota en producción.** `scripts/desplegar.sh` aplica las migraciones
+  antes de levantar el contenedor, así que el camino normal lo cubre; el que no lo cubre es
+  cualquier otro. Para comprobarlo sin escribir nada:
+  `uv run python scripts/inicializar_base.py --solo-verificar`, que desde la fase 8 tiene un
+  bloque para la 021 y grita `FALLA` en los dos esquemas. Antes decía OK sobre una base en
+  ese estado exacto.
 - **Dos personas editando la misma ficha: la segunda pisa a la primera.** No hay bloqueo
   optimista, es deliberado. Lo que lo hace aceptable no es que sea improbable, sino que
   `cambios_configuracion` guarda el valor anterior: una edición pisada es recuperable, no
