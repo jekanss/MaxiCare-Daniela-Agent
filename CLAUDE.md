@@ -323,7 +323,13 @@ una —qué se midió, qué costó— está en la regla que cubre ese archivo.
    voz alta daba `False` y el prefiltro de `sin_lectura_clinica` quedaba colgando solo de
    `hubo_adjunto`; van las dos cosas, y `adjunto_del_mensaje` sigue en `True`.
    `MAXICARE_TRANSCRIBIR_AUDIO` es el TERCER freno de mano y no cuelga de los otros dos: el
-   de archivos promete no tocar lo del paciente, y esto ES del paciente.
+   de archivos promete no tocar lo del paciente, y esto ES del paciente. **Y una nota de voz
+   ENTENDIDA no timbra en el General**: ese aviso existe para que un humano ABRA el archivo, y
+   una nota que Daniela ya contestó no le pide nada a nadie --el 22/09/2026 MaxiCare leyó ese
+   timbrazo como un escalamiento, y desde fuera es indistinguible de uno: mismo botón, cero
+   filas en `escalamientos`--. Si no se entendió SÍ timbra, con un texto que dice que hay que
+   OÍRLA; y sin transcriptor timbra como siempre. Lo decide `_transcribir_con_grupo`, que es el
+   único sitio donde se sabe si hubo texto.
 
 # Dónde está el resto
 

@@ -292,6 +292,20 @@ procesar_mensaje ─┬─ descarga  ──→ Telegram del doctor       ← INT
 - **Y cuenta como su frase para el informe.** `frase_para_el_informe` leía `m.texto`; sin
   esto, todas las notas de voz se agruparían bajo un caso sin frase y se perdería justo la
   pregunta que Daniela no supo contestar, solo porque el paciente la dijo en vez de escribirla.
+- **Una nota de voz ENTENDIDA no timbra en el General, y eso lo decide el transcriptor.**
+  El aviso «📎 fulano mandó archivos» existe para que un humano ABRA el archivo: una
+  radiografía hay que mirarla. Una nota de voz que Daniela entendió y contestó no le pide
+  nada a nadie, y la regla de la sección de abajo es que al General solo va lo que le pide
+  algo al doctor. MaxiCare lo vio el 22/09/2026: mandó una nota de voz, Daniela la contestó
+  bien —`requiere_escalamiento: false`, cero filas en `escalamientos`— y el General timbró
+  igual, con el botón «Hablar yo con el paciente» debajo. Lo leyó como un escalamiento, y
+  desde fuera es indistinguible de uno.
+  **Si NO se entendió, sí timbra, y el texto dice por qué**: «mandó una nota de voz que no se
+  pudo entender», porque ahí la acción del doctor es OÍRLA, que no es la misma que mirar una
+  radiografía. Y **sin transcriptor —interruptor, cuota, audio enorme— timbra como siempre**:
+  nadie va a entender ese audio si no lo oye una persona. La decisión vive dentro de
+  `_transcribir_con_grupo` porque solo ahí se sabe si hubo texto; `_primer_archivo_de_la_tanda`
+  da lo mismo desde los dos sitios gracias a su `wamid <>`, que está puesto justo para eso.
 - **El barrido de arranque las degrada, y está dicho en el código.** Los bytes del audio viven
   en memoria, así que un proceso que muere se los lleva; el rescate no vuelve a canjear el
   `media_id` contra Meta. El paciente rescatado recibe «no te entendí, ¿me lo escribes?». Es

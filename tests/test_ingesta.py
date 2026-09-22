@@ -1666,3 +1666,145 @@ def test_una_FOTO_no_arranca_el_transcriptor(monkeypatch):
 
     assert resultado.lectura is not None
     assert resultado.transcripcion is None
+
+
+# ==========================================================================================
+# Una nota de voz entendida es un mensaje mas, no un archivo que alguien tenga que abrir
+# ==========================================================================================
+#
+# MaxiCare, 22/09/2026: mando una nota de voz, Daniela la entendio y la contesto bien, y aun
+# asi el General timbro con el boton «Hablar yo con el paciente» debajo. No era un
+# escalamiento -`escalamientos` no tenia ni una fila- sino el aviso «mando archivos» de la
+# fase 2, que salta con CUALQUIER archivo.
+#
+# Ese aviso existe para que un humano ABRA el archivo, porque una radiografia hay que
+# mirarla. Una nota de voz que Daniela entendio y contesto no le pide nada a nadie, y la
+# regla del proyecto es que al General solo va lo que le pide algo al doctor.
+
+
+def _mensajes_al_general(tg, tema_general: int = TEMA_GENERAL) -> list[str]:
+    return [t for t, tema in tg.mensajes if tema == tema_general]
+
+
+def test_una_nota_de_voz_ENTENDIDA_no_timbra_en_el_General(monkeypatch):
+    """La prueba de la que va este cambio."""
+    import asyncio
+
+    from maxicare_daniela import ingesta, lectura, transcripcion
+
+    _sin_base(monkeypatch)
+    monkeypatch.setattr(lectura, "asegurar_tema", _devuelve_async(TEMA_DE_ANA))
+    monkeypatch.setattr(
+        transcripcion, "transcribir_y_repartir", _devuelve_async("cuanto vale la limpieza?")
+    )
+    tg = TelegramConTemas()
+
+    async def corrida():
+        r = await ingesta.procesar_mensaje(
+            _nota_de_voz(),
+            whatsapp=WhatsAppConAudio(),
+            telegram=tg,
+            database_url="postgresql://x",
+            tema_general=TEMA_GENERAL,
+        )
+        # La decision del aviso vive DENTRO de la tarea, asi que hay que dejarla terminar.
+        if r.transcripcion is not None:
+            await r.transcripcion
+        return r
+
+    resultado = asyncio.run(corrida())
+
+    assert resultado.reenviado is True, "el audio tiene que llegar al doctor igual"
+    assert tg.archivos, "el audio no llego a Telegram"
+    assert _mensajes_al_general(tg) == [], (
+        "timbro en el General por una nota de voz que Daniela ya contesto"
+    )
+
+
+def test_una_nota_de_voz_que_NO_se_entendio_SI_timbra_y_dice_por_que(monkeypatch):
+    """La otra mitad, y es la que impide que esto sea «callar los audios».
+
+    Un audio que nadie entendio solo lo resuelve una persona oyendolo, y eso SI es pedirle
+    algo al doctor. El texto se lo dice: «oyela», no «mirala».
+    """
+    import asyncio
+
+    from maxicare_daniela import ingesta, lectura, transcripcion
+
+    _sin_base(monkeypatch)
+    monkeypatch.setattr(lectura, "asegurar_tema", _devuelve_async(TEMA_DE_ANA))
+    monkeypatch.setattr(transcripcion, "transcribir_y_repartir", _devuelve_async(None))
+    tg = TelegramConTemas()
+
+    async def corrida():
+        r = await ingesta.procesar_mensaje(
+            _nota_de_voz(),
+            whatsapp=WhatsAppConAudio(),
+            telegram=tg,
+            database_url="postgresql://x",
+            tema_general=TEMA_GENERAL,
+        )
+        if r.transcripcion is not None:
+            await r.transcripcion
+        return r
+
+    asyncio.run(corrida())
+
+    avisos = _mensajes_al_general(tg)
+    assert len(avisos) == 1, f"se esperaba UN aviso al General, salieron {len(avisos)}"
+    assert "nota de voz" in avisos[0]
+    assert "no se pudo entender" in avisos[0]
+
+
+def test_sin_transcriptor_el_audio_timbra_COMO_SIEMPRE(monkeypatch):
+    """Con el interruptor apagado, la cuota pasada o un audio enorme no hay quien lo
+    entienda, asi que el doctor tiene que enterarse igual que antes de todo esto."""
+    import asyncio
+
+    from maxicare_daniela import ingesta, lectura
+
+    _sin_base(monkeypatch)
+    monkeypatch.setattr(lectura, "asegurar_tema", _devuelve_async(TEMA_DE_ANA))
+    tg = TelegramConTemas()
+
+    resultado = asyncio.run(
+        ingesta.procesar_mensaje(
+            _nota_de_voz(),
+            whatsapp=WhatsAppConAudio(),
+            telegram=tg,
+            database_url="postgresql://x",
+            tema_general=TEMA_GENERAL,
+            transcribir=False,
+        )
+    )
+
+    assert resultado.reenviado is True
+    assert resultado.transcripcion is None
+    avisos = _mensajes_al_general(tg)
+    assert len(avisos) == 1 and "mandó archivos" in avisos[0]
+
+
+def test_una_FOTO_sigue_timbrando_igual(monkeypatch):
+    """Lo de arriba es SOLO para las notas de voz. Una radiografia hay que mirarla, y que el
+    doctor se entere de que entro es la garantia de la fase 2."""
+    import asyncio
+
+    from maxicare_daniela import ingesta, lectura
+
+    _sin_base(monkeypatch)
+    monkeypatch.setattr(lectura, "asegurar_tema", _devuelve_async(TEMA_DE_ANA))
+    monkeypatch.setattr(lectura, "leer_y_repartir", _devuelve_async(None))
+    tg = TelegramConTemas()
+
+    asyncio.run(
+        ingesta.procesar_mensaje(
+            _mensaje_con_foto(),
+            whatsapp=WhatsAppConArchivo(),
+            telegram=tg,
+            database_url="postgresql://x",
+            tema_general=TEMA_GENERAL,
+        )
+    )
+
+    avisos = _mensajes_al_general(tg)
+    assert len(avisos) == 1 and "mandó archivos" in avisos[0]

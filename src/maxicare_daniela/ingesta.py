@@ -502,7 +502,7 @@ async def procesar_mensaje(
                     grupo = await asyncio.to_thread(
                         _conversacion_viva, database_url, m.telefono
                     )
-                    return await transcripcion_mod.transcribir_y_repartir(
+                    texto_dicho = await transcripcion_mod.transcribir_y_repartir(
                         archivo,
                         telegram=telegram,
                         tema_id=destino,
@@ -514,6 +514,30 @@ async def procesar_mensaje(
                         id_conversacion=grupo,
                     )
 
+                    # Aquí es donde una nota de voz deja de ser «un archivo» y pasa a ser un
+                    # mensaje más: **si se entendió, el General no se entera.** Daniela la
+                    # contesta como contestaría un texto, y timbrarle al doctor por algo que
+                    # ya está resuelto es exactamente el ruido que hace que deje de mirar el
+                    # grupo -- y por el que un día se pierde el aviso que sí importaba.
+                    #
+                    # Si NO se entendió, sí: ahí el audio solo lo puede resolver alguien
+                    # oyéndolo, y eso es pedirle algo al doctor.
+                    #
+                    # `_primer_archivo_de_la_tanda` se consulta aquí y no arriba, y da lo
+                    # mismo que `_marcar_reenviado` haya corrido ya o no: su `wamid <>`
+                    # excluye esta fila, que es justo para lo que está puesto.
+                    if texto_dicho is None and tema and not en_relevo:
+                        if await asyncio.to_thread(
+                            _primer_archivo_de_la_tanda, database_url, m.telefono, m.wamid
+                        ):
+                            await _avisar_de_la_tanda(
+                                m,
+                                telegram=telegram,
+                                tema_general=tema_general,
+                                porque_no_se_entendio=True,
+                            )
+                    return texto_dicho
+
                 tarea_voz = asyncio.create_task(_transcribir_con_grupo())
                 # Lo mismo que con el lector, y aquí importa MÁS: si el recolector se lleva
                 # esta tarea a medias, lo que se pierde no es una ficha para el doctor sino
@@ -523,34 +547,19 @@ async def procesar_mensaje(
             # `not en_relevo`: durante un relevo el doctor YA tiene el archivo sonándole en
             # el hilo donde está conversando. El aviso al General sería el mismo timbrazo por
             # segunda vez, en el sitio donde menos falta hace.
-            if tema and not en_relevo and await asyncio.to_thread(
+            #
+            # **Y una nota de voz NO avisa aquí: lo decide el transcriptor.** Este aviso
+            # existe para que un humano ABRA el archivo, porque una radiografía hay que
+            # mirarla. Una nota de voz que Daniela entendió y contestó no le pide nada a
+            # nadie, y la regla del proyecto es que al General solo va lo que le pide algo al
+            # doctor. Pero eso solo se sabe cuando la transcripción vuelve, así que la
+            # decisión viaja con ella -- ver `_transcribir_con_grupo`. Si no se arrancó
+            # transcriptor (interruptor apagado, cuota, audio enorme) esto avisa como siempre:
+            # ahí nadie va a entender ese audio si no lo oye una persona.
+            if tarea_voz is None and tema and not en_relevo and await asyncio.to_thread(
                 _primer_archivo_de_la_tanda, database_url, m.telefono, m.wamid
             ):
-                # El archivo no cae en el General, así que el General tiene que enterarse
-                # igual: es donde los doctores miran. Degradación, no entrega: si esto falla,
-                # el archivo sigue estando donde ya quedó.
-                #
-                # UNA vez por tanda, no una por archivo. Quien manda la radiografía y a los
-                # dos minutos la foto de la encía dispararía dos timbrazos por una sola cosa,
-                # y a base de timbrazos que no piden nada el doctor deja de mirar el grupo --
-                # que es como se pierde el escalamiento que sí importaba. El plural del texto
-                # es deliberado: avisa de la tanda, no del archivo que la abrió.
-                try:
-                    await telegram.enviar_mensaje(
-                        f"📎 {_escapar(m.nombre_perfil or m.telefono)} mandó archivos"
-                        f" — están en su tema.",
-                        tema_id=tema_general,
-                        # El botón va AQUÍ y no solo en el escalamiento. Un escalamiento
-                        # ocurre una vez; los archivos siguen llegando, y el doctor que ve
-                        # entrar la tercera radiografía de alguien tiene que poder tomar la
-                        # conversación sin esperar a que Daniela vuelva a escalar.
-                        teclado=relevo_mod.teclado_tomar(m.telefono),
-                    )
-                except Exception:  # noqa: BLE001
-                    log.exception(
-                        "el archivo de %s ya está entregado; solo falló el aviso al General",
-                        m.wamid,
-                    )
+                await _avisar_de_la_tanda(m, telegram=telegram, tema_general=tema_general)
             tamano = archivo.tamano
         else:
             # Un texto NO va al General. Ver NOTA DEL TEXTO SIN TEMA, abajo.
@@ -708,6 +717,54 @@ def _en_relevo(database_url: str, telefono: str) -> bool:
     except Exception:  # noqa: BLE001 -- ver docstring
         log.warning("no se pudo saber si +%s está en relevo; entra mudo", telefono)
         return False
+
+
+async def _avisar_de_la_tanda(
+    m: MensajeEntrante,
+    *,
+    telegram: Telegram,
+    tema_general: int | None,
+    porque_no_se_entendio: bool = False,
+) -> None:
+    """El timbrazo del General: «fulano mandó archivos, están en su tema».
+
+    El archivo no cae en el General, así que el General tiene que enterarse igual: es donde
+    los doctores miran. Degradación, no entrega: si esto falla, el archivo sigue estando
+    donde ya quedó, y por eso el `try` se lo traga.
+
+    UNA vez por tanda, no una por archivo. Quien manda la radiografía y a los dos minutos la
+    foto de la encía dispararía dos timbrazos por una sola cosa, y a base de timbrazos que no
+    piden nada el doctor deja de mirar el grupo -- que es como se pierde el escalamiento que
+    sí importaba. El plural del texto es deliberado: avisa de la tanda, no del archivo que la
+    abrió.
+
+    `porque_no_se_entendio` cambia el texto y con él lo que el doctor sabe que tiene que
+    hacer. «Mandó archivos» le dice que hay algo que mirar; «mandó una nota de voz que no se
+    pudo entender» le dice que tiene que OÍRLA, que es una acción distinta y la única razón
+    por la que a un audio se le permite timbrar desde que se transcriben.
+    """
+    quien = _escapar(m.nombre_perfil or m.telefono)
+    if porque_no_se_entendio:
+        texto = (
+            f"🎙️ {quien} mandó una nota de voz que no se pudo entender"
+            " — está en su tema. Ya le pedimos que la escriba."
+        )
+    else:
+        texto = f"📎 {quien} mandó archivos — están en su tema."
+    try:
+        await telegram.enviar_mensaje(
+            texto,
+            tema_id=tema_general,
+            # El botón va AQUÍ y no solo en el escalamiento. Un escalamiento ocurre una vez;
+            # los archivos siguen llegando, y el doctor que ve entrar la tercera radiografía
+            # de alguien tiene que poder tomar la conversación sin esperar a que Daniela
+            # vuelva a escalar.
+            teclado=relevo_mod.teclado_tomar(m.telefono),
+        )
+    except Exception:  # noqa: BLE001
+        log.exception(
+            "el archivo de %s ya está entregado; solo falló el aviso al General", m.wamid
+        )
 
 
 def _primer_archivo_de_la_tanda(database_url: str, telefono: str, wamid: str) -> bool:
