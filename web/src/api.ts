@@ -395,3 +395,46 @@ export async function leerConversaciones(): Promise<ListaDeConversaciones> {
 export async function leerHilo(telefono: string): Promise<HiloDeConversacion> {
   return pedir<HiloDeConversacion>(`/api/conversaciones/${encodeURIComponent(telefono)}`)
 }
+
+/** Lo que manda el formulario de cierre. `cuando` va sin zona --«2026-09-23T14:30», tal cual
+ *  lo entrega un `<input type="datetime-local">`-- y el servidor la lee como hora de Bogotá. */
+export type CierreDelRelevo = {
+  hubo_cita: boolean
+  cuando?: string | null
+  tratamiento?: string | null
+  nombre?: string | null
+}
+
+/** «Hablar yo con el paciente», desde el panel. Daniela calla y se abre el hilo de Telegram.
+ *
+ *  Un 409 aquí no es un fallo: es que otro doctor se adelantó, y el mensaje trae su nombre. */
+export async function tomarConversacion(
+  telefono: string,
+): Promise<{ ok: boolean; tomada_por: string }> {
+  return pedir(`/api/conversaciones/${encodeURIComponent(telefono)}/tomar`, { method: 'POST' })
+}
+
+/** Le escribe al paciente por WhatsApp. Un 409 es la ventana de 24 h de Meta, no un error. */
+export async function escribirAlPaciente(
+  telefono: string,
+  texto: string,
+): Promise<{ ok: boolean; wamid: string }> {
+  return pedir(`/api/conversaciones/${encodeURIComponent(telefono)}/mensaje`, {
+    method: 'POST',
+    body: JSON.stringify({ texto }),
+  })
+}
+
+/** Devuelve el control a Daniela. Con cita, la crea de verdad --cupo, Google Calendar y
+ *  fila-- y **si no puede, no cierra nada**: llega un 409 y el formulario se queda puesto
+ *  para escribir otra hora. Una cita prometida que no existe en ninguna agenda es el fallo
+ *  que este proyecto no se permite. */
+export async function cerrarRelevo(
+  telefono: string,
+  cierre: CierreDelRelevo,
+): Promise<{ ok: boolean; cerrado: boolean }> {
+  return pedir(`/api/conversaciones/${encodeURIComponent(telefono)}/cerrar`, {
+    method: 'POST',
+    body: JSON.stringify(cierre),
+  })
+}

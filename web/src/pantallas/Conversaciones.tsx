@@ -1,12 +1,17 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
+  cerrarRelevo,
+  escribirAlPaciente,
   leerConversaciones,
   leerHilo,
+  listarTratamientos,
   SesionCaducada,
+  tomarConversacion,
   type EstadoConversacion,
   type HiloDeConversacion,
   type MensajeDelHilo,
   type ResumenConversacion,
+  type TratamientoFila,
 } from '@/api'
 
 /* La pantalla de Conversaciones: la lista de personas a la izquierda y su hilo completo a la
@@ -343,6 +348,408 @@ function SeparadorDeDia({ iso }: { iso: string }) {
 }
 
 // ==========================================================================================
+// El pie: tomar, escribir y devolver
+// ==========================================================================================
+
+/* La única parte de esta pantalla que ESCRIBE, y por eso está apartada del resto.
+ *
+ * Lo que decide qué se pinta es el estado de la conversación, que viene de la lista: en
+ * relevo hay caja de escribir y puerta de salida; fuera de relevo, solo la puerta de
+ * entrada. Los botones no se le pintan a `recepcion` --por comodidad, no por seguridad: el
+ * control de verdad vive en `exigir_rol`, en el servidor-- y la caja se apaga fuera de la
+ * ventana de 24 h de Meta, que también se comprueba allí. */
+
+type PropsDelPie = {
+  conversacion: ResumenConversacion
+  ventana: HiloDeConversacion['ventana'] | null
+  puedeEscribir: boolean
+  alCambiar: () => void
+  alCaducar: () => void
+}
+
+const BOTON = 'px-4 text-sm font-bold transition-all disabled:opacity-40 disabled:cursor-not-allowed hover:brightness-95'
+const CAMPO = 'w-full px-3 py-2 text-sm outline-none transition-all focus:ring-3 disabled:opacity-60'
+const ESTILO_CAMPO = {
+  fontFamily: SG,
+  backgroundColor: '#FBFAFD',
+  border: '1px solid #DCD8E6',
+  color: '#16111F',
+}
+
+function PieDelHilo({
+  conversacion,
+  ventana,
+  puedeEscribir,
+  alCambiar,
+  alCaducar,
+}: PropsDelPie) {
+  const [texto, setTexto] = useState('')
+  const [ocupado, setOcupado] = useState(false)
+  const [error, setError] = useState('')
+  const [cerrando, setCerrando] = useState(false)
+  const [hubocita, setHuboCita] = useState(false)
+  const [cuando, setCuando] = useState('')
+  const [tratamiento, setTratamiento] = useState('')
+  const [nombre, setNombre] = useState('')
+  const [tratamientos, setTratamientos] = useState<TratamientoFila[]>([])
+
+  const enRelevo = conversacion.estado === 'relevo'
+  const puedeMandar = ventana?.puede === true
+
+  // El formulario se cierra solo cuando el relevo deja de estar vivo: si no, se quedaría
+  // abierto sobre una conversación que Daniela ya retomó.
+  useEffect(() => {
+    if (!enRelevo) setCerrando(false)
+  }, [enRelevo])
+
+  // El catálogo se pide al abrir el formulario y no al montar la pantalla: la inmensa
+  // mayoría de las veces esta pantalla solo se mira.
+  useEffect(() => {
+    if (!cerrando || tratamientos.length > 0) return
+    listarTratamientos()
+      .then((filas) => setTratamientos(filas.filter((t) => t.activo)))
+      .catch(() => setError('No se pudo cargar la lista de tratamientos.'))
+  }, [cerrando, tratamientos.length])
+
+  const hacer = async (accion: () => Promise<unknown>, alTerminar?: () => void) => {
+    setOcupado(true)
+    setError('')
+    try {
+      await accion()
+      alTerminar?.()
+      alCambiar()
+    } catch (e) {
+      // Sin esto, un `void hacer(...)` dejaría la excepción como una promesa rechazada sin
+      // dueño: la sesión caducada se perdería en la consola y el doctor se quedaría mirando
+      // un botón que no hace nada.
+      if (e instanceof SesionCaducada) alCaducar()
+      else setError(e instanceof Error ? e.message : 'No se pudo completar la operación.')
+    } finally {
+      setOcupado(false)
+    }
+  }
+
+  if (!puedeEscribir) {
+    return (
+      <div
+        style={{
+          borderTop: '1px solid #ECE8F4',
+          padding: '12px 20px',
+          fontFamily: MONO,
+          fontSize: '11px',
+          letterSpacing: '0.06em',
+          textTransform: 'uppercase',
+          color: '#9A93AC',
+        }}
+      >
+        Solo lectura
+      </div>
+    )
+  }
+
+  return (
+    <div style={{ borderTop: '1px solid #ECE8F4', backgroundColor: '#FFFFFF' }}>
+      {error ? (
+        <div
+          role="alert"
+          style={{
+            margin: '12px 20px 0',
+            padding: '10px 12px',
+            backgroundColor: '#FEF2F2',
+            border: '1px solid #FECACA',
+            fontFamily: SG,
+            fontSize: '13px',
+            color: '#B91C1C',
+          }}
+        >
+          {error}
+        </div>
+      ) : null}
+
+      {enRelevo ? (
+        <>
+          <form
+            className="flex gap-2"
+            style={{ padding: '14px 20px 10px' }}
+            onSubmit={(e) => {
+              e.preventDefault()
+              const limpio = texto.trim()
+              if (!limpio || ocupado) return
+              void hacer(() => escribirAlPaciente(conversacion.telefono, limpio), () =>
+                setTexto(''),
+              )
+            }}
+          >
+            <input
+              className={CAMPO}
+              style={{ ...ESTILO_CAMPO, flex: 1, minHeight: '44px' }}
+              value={texto}
+              onChange={(e) => setTexto(e.target.value)}
+              maxLength={4000}
+              disabled={!puedeMandar || ocupado}
+              placeholder={
+                ventana === null
+                  ? 'Cargando…'
+                  : puedeMandar
+                    ? 'Escríbele al paciente por WhatsApp…'
+                    : 'WhatsApp no deja escribirle ahora mismo'
+              }
+              aria-label="Mensaje para el paciente"
+            />
+            <button
+              type="submit"
+              className={BOTON}
+              style={{ backgroundColor: '#6D28D9', color: '#FFFFFF', minHeight: '44px' }}
+              disabled={!puedeMandar || ocupado || texto.trim() === ''}
+            >
+              {ocupado ? 'Enviando…' : 'Enviar'}
+            </button>
+          </form>
+
+          {ventana !== null && !puedeMandar ? (
+            /* La regla es de Meta, no nuestra, y por eso se explica en vez de esconder la
+             * caja: un doctor que no sepa por qué no puede escribir da por hecho que el
+             * panel está roto. No se ofrece una plantilla -- eso es otra decisión y otro
+             * coste. */
+            <p
+              style={{
+                padding: '0 20px 12px',
+                fontFamily: SG,
+                fontSize: '12.5px',
+                lineHeight: 1.5,
+                color: '#6E6880',
+              }}
+            >
+              {ventana?.horas == null
+                ? 'Este número nunca ha escrito, así que WhatsApp no deja mandarle un mensaje.'
+                : `Pasaron ${Math.round(ventana.horas)} horas desde su último mensaje. WhatsApp
+                   solo deja escribirle dentro de las 24 h siguientes: hay que esperar a que
+                   él vuelva a escribir.`}
+            </p>
+          ) : null}
+
+          <div
+            className="flex flex-wrap items-center gap-3"
+            style={{ padding: '10px 20px 14px', borderTop: '1px solid #F4F1F9' }}
+          >
+            <span className="min-w-0 flex-1" style={{ fontFamily: SG, fontSize: '12.5px', color: '#6E6880' }}>
+              {conversacion.tomada_por
+                ? `La tiene ${conversacion.tomada_por}. Daniela está callada.`
+                : 'Daniela está callada mientras dure el relevo.'}
+            </span>
+            {!cerrando ? (
+              <button
+                type="button"
+                className={BOTON}
+                style={{ border: '1px solid #DCD8E6', color: '#4A4458', minHeight: '38px' }}
+                onClick={() => setCerrando(true)}
+                disabled={ocupado}
+              >
+                Devolvérsela a Daniela
+              </button>
+            ) : null}
+          </div>
+
+          {cerrando ? (
+            <FormularioDeCierre
+              conversacion={conversacion}
+              tratamientos={tratamientos}
+              hubocita={hubocita}
+              setHuboCita={setHuboCita}
+              cuando={cuando}
+              setCuando={setCuando}
+              tratamiento={tratamiento}
+              setTratamiento={setTratamiento}
+              nombre={nombre}
+              setNombre={setNombre}
+              ocupado={ocupado}
+              alCancelar={() => setCerrando(false)}
+              alDevolver={() =>
+                void hacer(
+                  () =>
+                    cerrarRelevo(conversacion.telefono, {
+                      hubo_cita: hubocita,
+                      cuando: hubocita ? cuando : null,
+                      tratamiento: hubocita ? tratamiento : null,
+                      nombre: hubocita && nombre.trim() ? nombre.trim() : null,
+                    }),
+                  () => {
+                    // Solo si el cierre salió bien. Un 409 --la hora se llenó-- deja el
+                    // formulario tal cual para escribir otra, que es lo mismo que hace el
+                    // diálogo del hilo de Telegram.
+                    setCerrando(false)
+                    setHuboCita(false)
+                    setCuando('')
+                    setTratamiento('')
+                    setNombre('')
+                  },
+                )
+              }
+            />
+          ) : null}
+        </>
+      ) : (
+        <div className="flex flex-wrap items-center gap-3" style={{ padding: '14px 20px' }}>
+          <span className="min-w-0 flex-1" style={{ fontFamily: SG, fontSize: '12.5px', color: '#6E6880' }}>
+            {/* Tomarla fuera de la ventana de 24 h deja el estado peligroso de la regla del
+                relevo: Daniela callada y nadie pudiendo hablarle. No se prohíbe --el
+                paciente puede escribir en cualquier momento y entonces sí se le contesta--
+                pero el doctor tiene que saberlo ANTES de pulsar. */}
+            {ventana !== null && !puedeMandar
+              ? 'Daniela está atendiendo. Ojo: ahora mismo WhatsApp no deja escribirle, así que si la tomas ella dejará de contestarle hasta que el paciente escriba o se la devuelvas.'
+              : 'Daniela está atendiendo esta conversación.'}
+          </span>
+          <button
+            type="button"
+            className={BOTON}
+            style={{ backgroundColor: '#6D28D9', color: '#FFFFFF', minHeight: '38px' }}
+            disabled={ocupado}
+            onClick={() => void hacer(() => tomarConversacion(conversacion.telefono))}
+          >
+            {ocupado ? 'Un momento…' : 'Hablar yo con el paciente'}
+          </button>
+        </div>
+      )}
+    </div>
+  )
+}
+
+type PropsDelCierre = {
+  conversacion: ResumenConversacion
+  tratamientos: TratamientoFila[]
+  hubocita: boolean
+  setHuboCita: (v: boolean) => void
+  cuando: string
+  setCuando: (v: string) => void
+  tratamiento: string
+  setTratamiento: (v: string) => void
+  nombre: string
+  setNombre: (v: string) => void
+  ocupado: boolean
+  alCancelar: () => void
+  alDevolver: () => void
+}
+
+/** Las cuatro preguntas que en Telegram van encadenadas, aquí de una vez.
+ *
+ *  El nombre solo se pide cuando falta, como allí: preguntar de más es como se consigue que
+ *  el doctor deje el formulario a medias, y un formulario a medias es una cita sin registrar.
+ *
+ *  Marcar «sí hubo cita» la CREA de verdad --cupo, Google Calendar y fila--. Si no se puede,
+ *  no se cierra nada y esto sigue puesto. */
+function FormularioDeCierre(p: PropsDelCierre) {
+  const faltaElNombre = !p.conversacion.nombre
+  const listo = !p.hubocita || (p.cuando !== '' && p.tratamiento !== '')
+
+  return (
+    <div style={{ padding: '4px 20px 18px', borderTop: '1px solid #F4F1F9' }}>
+      <Rotulo>Antes de devolverla</Rotulo>
+
+      <div className="mt-2 flex flex-wrap gap-2">
+        {[
+          { valor: false, etiqueta: 'No hubo cita' },
+          { valor: true, etiqueta: 'Sí, quedó agendada' },
+        ].map((o) => (
+          <button
+            key={String(o.valor)}
+            type="button"
+            onClick={() => p.setHuboCita(o.valor)}
+            className="px-3 py-2 text-sm transition-colors"
+            style={{
+              fontFamily: SG,
+              fontWeight: p.hubocita === o.valor ? 700 : 500,
+              backgroundColor: p.hubocita === o.valor ? '#EDE9FE' : '#FFFFFF',
+              border: `1px solid ${p.hubocita === o.valor ? '#6D28D9' : '#DCD8E6'}`,
+              color: p.hubocita === o.valor ? '#4C1D95' : '#4A4458',
+            }}
+          >
+            {o.etiqueta}
+          </button>
+        ))}
+      </div>
+
+      {p.hubocita ? (
+        <div className="mt-3 flex flex-wrap gap-3">
+          {faltaElNombre ? (
+            <label className="flex flex-col gap-1" style={{ flex: '1 1 14rem' }}>
+              <span style={{ fontFamily: SG, fontSize: '12px', fontWeight: 600, color: '#4A4458' }}>
+                Nombre del paciente
+              </span>
+              <input
+                className={CAMPO}
+                style={ESTILO_CAMPO}
+                value={p.nombre}
+                maxLength={80}
+                onChange={(e) => p.setNombre(e.target.value)}
+                placeholder="Para que la agenda no diga «PENDIENTE»"
+              />
+            </label>
+          ) : null}
+
+          <label className="flex flex-col gap-1" style={{ flex: '1 1 12rem' }}>
+            <span style={{ fontFamily: SG, fontSize: '12px', fontWeight: 600, color: '#4A4458' }}>
+              De qué es
+            </span>
+            <select
+              className={CAMPO}
+              style={ESTILO_CAMPO}
+              value={p.tratamiento}
+              onChange={(e) => p.setTratamiento(e.target.value)}
+            >
+              <option value="">Elige uno…</option>
+              {p.tratamientos.map((t) => (
+                <option key={t.clave} value={t.clave}>
+                  {t.etiqueta}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          <label className="flex flex-col gap-1" style={{ flex: '1 1 12rem' }}>
+            <span style={{ fontFamily: SG, fontSize: '12px', fontWeight: 600, color: '#4A4458' }}>
+              Cuándo
+            </span>
+            <input
+              type="datetime-local"
+              className={CAMPO}
+              style={ESTILO_CAMPO}
+              value={p.cuando}
+              onChange={(e) => p.setCuando(e.target.value)}
+            />
+          </label>
+        </div>
+      ) : null}
+
+      <div className="mt-3 flex flex-wrap items-center gap-2">
+        <button
+          type="button"
+          className={BOTON}
+          style={{ backgroundColor: '#6D28D9', color: '#FFFFFF', minHeight: '38px' }}
+          disabled={p.ocupado || !listo}
+          onClick={p.alDevolver}
+        >
+          {p.ocupado ? 'Devolviendo…' : 'Devolver a Daniela'}
+        </button>
+        <button
+          type="button"
+          className={BOTON}
+          style={{ border: '1px solid #DCD8E6', color: '#4A4458', minHeight: '38px' }}
+          disabled={p.ocupado}
+          onClick={p.alCancelar}
+        >
+          Cancelar
+        </button>
+        {p.hubocita ? (
+          <span style={{ fontFamily: SG, fontSize: '12px', color: '#6E6880' }}>
+            La cita se crea de verdad: toma el cupo y entra en el calendario de la clínica.
+          </span>
+        ) : null}
+      </div>
+    </div>
+  )
+}
+
+// ==========================================================================================
 // La pantalla
 // ==========================================================================================
 
@@ -354,6 +761,20 @@ export default function Conversaciones({ alCaducarSesion }: Props) {
   const [filtro, setFiltro] = useState<Filtro>('todas')
   const [cargando, setCargando] = useState(true)
   const [error, setError] = useState('')
+  // El rol, ya resuelto por el servidor. No es el control de acceso --ese vive en
+  // `exigir_rol`-- sino lo que evita pintarle a recepción botones que van a devolver 403.
+  const [puedoEscribir, setPuedoEscribir] = useState(false)
+
+  // Las dos vueltas de refresco, guardadas para poder pedirlas a mano después de escribir.
+  // Por `ref` y no por una dependencia más: meter un contador en las deps de los `useEffect`
+  // de abajo reiniciaría los dos intervalos en cada mensaje enviado.
+  const refrescarLista = useRef<() => void>(() => {})
+  const refrescarHilo = useRef<() => void>(() => {})
+
+  const trasEscribir = useCallback(() => {
+    refrescarLista.current()
+    refrescarHilo.current()
+  }, [])
 
   // Por `ref` y NO en las deps: `App.tsx` pasa una flecha nueva en cada render, y meterla en
   // deps dejaría la pantalla releyendo Neon en bucle. La trampa está en `web/CLAUDE.md`.
@@ -372,6 +793,7 @@ export default function Conversaciones({ alCaducarSesion }: Props) {
         const datos = await leerConversaciones()
         if (!vivo) return
         setLista(datos.conversaciones)
+        setPuedoEscribir(datos.puede_escribir)
         setError('')
       } catch (e) {
         if (e instanceof SesionCaducada) caducar.current()
@@ -381,6 +803,7 @@ export default function Conversaciones({ alCaducarSesion }: Props) {
       }
     }
 
+    refrescarLista.current = () => void tic()
     void tic()
     const reloj = window.setInterval(() => void tic(), REFRESCO_MS)
     // Al volver a la pestaña se pide de inmediato: esperar hasta diez segundos para ver algo
@@ -417,6 +840,7 @@ export default function Conversaciones({ alCaducarSesion }: Props) {
       }
     }
 
+    refrescarHilo.current = () => void tic()
     void tic()
     const reloj = window.setInterval(() => void tic(), REFRESCO_MS)
     const alVolver = () => {
@@ -642,6 +1066,17 @@ export default function Conversaciones({ alCaducarSesion }: Props) {
                   })
                 )}
               </div>
+
+              {/* El pie NO lleva `flex-1`: la caja de arriba se queda con todo el alto que
+                  sobra y esto se ancla abajo, así que el scroll sigue siendo solo del
+                  historial. */}
+              <PieDelHilo
+                conversacion={elegida}
+                ventana={hilo?.ventana ?? null}
+                puedeEscribir={puedoEscribir}
+                alCambiar={trasEscribir}
+                alCaducar={alCaducarSesion}
+              />
             </div>
           )}
         </section>

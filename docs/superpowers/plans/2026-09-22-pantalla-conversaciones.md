@@ -3,21 +3,40 @@
 **Spec:** `docs/superpowers/specs/2026-09-22-pantalla-conversaciones-design.md`
 **Rama:** `pantalla-conversaciones` (sale de `main`, con Inicio ya fundido)
 
-## DÓNDE VA ESTO (22/09/2026)
-
-Pausado a petición de MaxiCare para atender un comportamiento de Daniela. Rama
-`pantalla-conversaciones`, árbol limpio, cuatro commits sobre `main`.
+## DÓNDE VA ESTO (22/09/2026, retomado por la tarde)
 
 | Tarea | Estado |
 |---|---|
 | 1 · Migración 026 y el registro de lo que escribe el doctor | **HECHA** (`84d80e2`) |
 | 2 · `panel.listar_conversaciones` / `hilo` / `puede_escribir` y los dos GET | **HECHA** (`d5f647b`) |
 | 3 · La pantalla, el hilo y el refresco cada 10 s | **HECHA** (`5ebdbe6`) |
-| 4 · Tomar, escribir y cerrar (backend) | pendiente |
-| 5 · Tomar, escribir y cerrar (pantalla) | pendiente |
+| 4 · Tomar, escribir y cerrar (backend) | **HECHA** |
+| 5 · Tomar, escribir y cerrar (pantalla) | **HECHA** |
 
-Verde al pausar: `uv run pytest -q` → 1222 · `-m neon` → 230 (y 29 en `test_panel.py` con
-lo nuevo) · `npm run build` limpio.
+**LO QUE EL PLAN DECÍA MAL, y hay que leerlo antes de tocar la tarea 4.** La tarea 4 escribía
+`relevo.cerrar(..., cita=...)` y con eso daba el cierre por hecho. `cita` es un `datetime` que
+**solo se le cuenta a Daniela** (`_nota_del_relevo`): no crea ninguna cita. El carril de
+Telegram llama antes a `relevo._agendar` --cupo, Calendar, fila-- y **solo cierra si agendó**.
+Tal como estaba escrito, el doctor marcaba «sí hubo cita», el relevo se cerraba y el paciente
+se presentaba en una clínica donde nadie lo esperaba: el no negociable 1 por la puerta de
+atrás. Confirmado con MaxiCare y corregido también en el spec y en
+`.claude/rules/relevo-telegram.md`.
+
+Otros cuatro desajustes con el código real, todos mecánicos:
+
+- `relevo.activar` **devolvía `None` siempre y se tragaba todo**, así que no había con qué
+  hacer el 409. Ahora devuelve `str | None` (el motivo, o `None` si quedó suya), con una
+  bandera `ya_es_suya` para que un fallo adornando el hilo no se cuente como «no la tomaste».
+- `callback_id` era obligatorio y se le pasaba a Telegram: con `None` era una llamada que ya
+  sabíamos que iba a fallar. Ahora se guarda tras un `if`.
+- **`tests/test_runtime.py` no existe**: las pruebas de endpoints viven en `tests/test_panel.py`
+  (`dependency_overrides` + `_como(rol)`) y las del relevo en `tests/test_relevo.py`.
+- La lógica de escribir y cerrar **no cabe en `panel.py`** --que no abre conexiones, no es
+  `async` y no conoce a Meta ni a Telegram-- así que vive en `relevo.py`
+  (`escribir_desde_el_panel`, `cerrar_desde_el_panel`) y `runtime.py` la traduce a HTTP.
+
+Verde al terminar: `uv run pytest -q` → **1247** (22 nuevas) · `npm run build` limpio ·
+`scripts/probar_relevo.py` → 10 comprobaciones OK.
 
 **La migración 026 YA está aplicada en el `public` de producción** (tabla vacía + índice; no
 tocó ninguna fila existente). `public` pasó de 23 a 24 tablas. No hace falta volver a
