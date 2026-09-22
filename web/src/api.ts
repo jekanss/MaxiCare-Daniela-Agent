@@ -335,3 +335,106 @@ export type ResumenInicio = {
 export async function leerInicio(): Promise<ResumenInicio> {
   return pedir<ResumenInicio>('/api/inicio')
 }
+
+// ------------------------------------------------------------------------------------------
+// Conversaciones
+// ------------------------------------------------------------------------------------------
+
+/** Los cuatro estados de la lista, en orden de precedencia. `relevo` gana a `esperando`:
+ *  una conversación tomada en la que entran mensajes cumple las dos, y lo que hay que decir
+ *  es que ya hay alguien encima, no que nadie contesta. */
+export type EstadoConversacion = 'relevo' | 'esperando' | 'activa' | 'cerrada'
+
+export type ResumenConversacion = {
+  telefono: string
+  /** `null` cuando no hay ficha ni nombre de perfil -- o cuando la ficha dice `PENDIENTE`,
+   *  que el servidor ya traduce a `null`. La pantalla cae al teléfono. */
+  nombre: string | null
+  vista_previa: string
+  ultimo_en: string
+  sin_contestar: number
+  tomada_por: string | null
+  estado: EstadoConversacion
+}
+
+export type MensajeDelHilo = {
+  quien: 'paciente' | 'daniela' | 'doctor'
+  /** El nombre de quien escribió. Solo lo llevan los del doctor. */
+  autor: string | null
+  texto: string
+  cuando: string
+  /** Solo los del doctor, y solo si el envío a WhatsApp falló. Lo que hace que el hilo
+   *  distinga «no lo escribió» de «lo escribió y no salió». */
+  fallo: string | null
+}
+
+export type HiloDeConversacion = {
+  telefono: string
+  mensajes: MensajeDelHilo[]
+  /** La ventana de 24 h de Meta. `horas` es `null` si esa persona nunca escribió. */
+  ventana: { puede: boolean; horas: number | null }
+  puede_escribir: boolean
+}
+
+export type ListaDeConversaciones = {
+  conversaciones: ResumenConversacion[]
+  /** Si el ROL puede tomar y escribir. No es el control de acceso --ese vive en el
+   *  servidor-- sino lo que evita pintar botones que van a devolver 403. */
+  puede_escribir: boolean
+  usuario: string
+}
+
+/** La lista. De SOLO LECTURA, y es la ruta que más veces se pide del panel: la pantalla se
+ *  refresca sola cada diez segundos mientras esté a la vista. */
+export async function leerConversaciones(): Promise<ListaDeConversaciones> {
+  return pedir<ListaDeConversaciones>('/api/conversaciones')
+}
+
+/** El hilo de un paciente: las tres voces en orden. No trae el estado de la conversación --
+ *  eso lo trae la lista, en la misma vuelta-- para que las dos rutas no puedan contradecirse. */
+export async function leerHilo(telefono: string): Promise<HiloDeConversacion> {
+  return pedir<HiloDeConversacion>(`/api/conversaciones/${encodeURIComponent(telefono)}`)
+}
+
+/** Lo que manda el formulario de cierre. `cuando` va sin zona --«2026-09-23T14:30», tal cual
+ *  lo entrega un `<input type="datetime-local">`-- y el servidor la lee como hora de Bogotá. */
+export type CierreDelRelevo = {
+  hubo_cita: boolean
+  cuando?: string | null
+  tratamiento?: string | null
+  nombre?: string | null
+}
+
+/** «Hablar yo con el paciente», desde el panel. Daniela calla y se abre el hilo de Telegram.
+ *
+ *  Un 409 aquí no es un fallo: es que otro doctor se adelantó, y el mensaje trae su nombre. */
+export async function tomarConversacion(
+  telefono: string,
+): Promise<{ ok: boolean; tomada_por: string }> {
+  return pedir(`/api/conversaciones/${encodeURIComponent(telefono)}/tomar`, { method: 'POST' })
+}
+
+/** Le escribe al paciente por WhatsApp. Un 409 es la ventana de 24 h de Meta, no un error. */
+export async function escribirAlPaciente(
+  telefono: string,
+  texto: string,
+): Promise<{ ok: boolean; wamid: string }> {
+  return pedir(`/api/conversaciones/${encodeURIComponent(telefono)}/mensaje`, {
+    method: 'POST',
+    body: JSON.stringify({ texto }),
+  })
+}
+
+/** Devuelve el control a Daniela. Con cita, la crea de verdad --cupo, Google Calendar y
+ *  fila-- y **si no puede, no cierra nada**: llega un 409 y el formulario se queda puesto
+ *  para escribir otra hora. Una cita prometida que no existe en ninguna agenda es el fallo
+ *  que este proyecto no se permite. */
+export async function cerrarRelevo(
+  telefono: string,
+  cierre: CierreDelRelevo,
+): Promise<{ ok: boolean; cerrado: boolean }> {
+  return pedir(`/api/conversaciones/${encodeURIComponent(telefono)}/cerrar`, {
+    method: 'POST',
+    body: JSON.stringify(cierre),
+  })
+}

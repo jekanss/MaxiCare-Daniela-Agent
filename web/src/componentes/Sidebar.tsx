@@ -14,6 +14,7 @@ const MONO = "'JetBrains Mono', monospace"
 
 export type SeccionId =
   | 'inicio'
+  | 'conversaciones'
   | 'bandeja'
   | 'agenda'
   | 'leads'
@@ -69,6 +70,17 @@ export const SECCIONES: Seccion[] = [
       <Icono>
         <path d="M4 11 12 4l8 7" />
         <path d="M6.5 10v10h11V10" />
+      </Icono>
+    ),
+    fase: null,
+  },
+  {
+    id: 'conversaciones',
+    etiqueta: 'Conversaciones',
+    icono: (
+      <Icono>
+        <path d="M3 4.5h12v8H8l-5 3.5z" />
+        <path d="M9 15.5h8l4 3v-8" />
       </Icono>
     ),
     fase: null,

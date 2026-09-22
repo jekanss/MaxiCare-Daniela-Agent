@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import Sidebar, { CONFIGURACION, PRUEBAS, SECCIONES, type Seccion, type SeccionId } from '@/componentes/Sidebar'
 import Ingreso from '@/pantallas/Ingreso'
+import Conversaciones from '@/pantallas/Conversaciones'
 import Inicio from '@/pantallas/Inicio'
 import Agenda from '@/pantallas/Agenda'
 import Pruebas from '@/pantallas/Pruebas'
@@ -69,6 +70,9 @@ export default function App() {
         // La portada. De solo lectura, como SinResolver: vuelve al ingreso por el mismo
         // camino si la sesión caduca a mitad de la mañana.
         <Inicio alCaducarSesion={() => setSesion(null)} />
+      ) : activa === 'conversaciones' ? (
+        // Mira y, si el rol lo permite, escribe. El 401 se maneja como en las demas.
+        <Conversaciones alCaducarSesion={() => setSesion(null)} />
       ) : activa === 'agenda' ? (
         // Escribe --marca asistencias--, así que puede toparse con un 401 a mitad de la tarde
         // igual que Tratamientos y SinResolver, y vuelve al ingreso por el mismo camino.

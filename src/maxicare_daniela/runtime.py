@@ -81,7 +81,7 @@ from .calendario import (
     Jornada,
     calendario_desde_config,
 )
-from .canales import Telegram, WhatsApp
+from .canales import ErrorDeCanal, Telegram, WhatsApp
 from .config import Config, cargar_dotenv, descartar_vacias_de_terceros
 from .contratos import ContextoDaniela
 
@@ -2128,6 +2128,224 @@ async def api_inicio(quien: dict = Depends(usuario_actual)) -> dict:
     resumen["atencion"] = casos[:3]
     resumen["usuario"] = quien["nombre"]
     return resumen
+
+
+# ------------------------------------------------------------------------------------------
+# Panel: las conversaciones
+# ------------------------------------------------------------------------------------------
+
+#: Quién puede tomar una conversación y escribirle a un paciente. Vive aquí, en una sola
+#: tupla, porque lo usan DOS sitios: `exigir_rol`, que es el control de verdad, y el booleano
+#: que viaja a la pantalla para esconder los botones. Con dos listas, esconder un botón y
+#: permitir la acción se separan sin que nada falle.
+ROLES_QUE_ESCRIBEN = ("admin", "doctor")
+
+
+def _telefono_valido(telefono: str) -> str:
+    """Un teléfono es dígitos y nada más.
+
+    No es paranoia sobre inyección --las consultas van parametrizadas-- sino sobre lo que
+    acaba en los logs de acceso y en la barra del navegador. Un 404 temprano cuesta menos que
+    una consulta que no iba a encontrar nada.
+    """
+    if not telefono.isdigit():
+        raise HTTPException(status_code=404, detail="no hay ninguna conversación con ese número")
+    return telefono
+
+
+@app.get("/api/conversaciones")
+async def api_conversaciones(quien: dict = Depends(usuario_actual)) -> dict:
+    """La lista de la pantalla de Conversaciones. SOLO LECTURA.
+
+    Esta es la petición que más veces se hace del panel entero: la pantalla se refresca sola
+    cada diez segundos mientras esté a la vista. Por eso no reconcilia nada, no escribe nada
+    y no llama a ningún sistema de fuera -- misma promesa que `/api/inicio` y la diferencia
+    deliberada con `/api/agenda`.
+
+    `puede_escribir` viaja para que la pantalla no pinte botones que el servidor va a
+    rechazar. No ES el control de acceso: ese vive en `exigir_rol`, en los tres POST.
+    """
+    with persistencia.conectar(config.database_url) as conn:
+        conversaciones = panel.listar_conversaciones(conn, ahora=_ahora_en_bogota())
+    return {
+        "conversaciones": conversaciones,
+        "puede_escribir": quien["rol"] in ROLES_QUE_ESCRIBEN,
+        "usuario": quien["nombre"],
+    }
+
+
+@app.get("/api/conversaciones/{telefono}")
+async def api_conversacion(telefono: str, quien: dict = Depends(usuario_actual)) -> dict:
+    """El hilo de un paciente: las tres voces en orden. SOLO LECTURA.
+
+    NO devuelve el estado de la conversación ni quién la tiene tomada, y no es un olvido: eso
+    lo trae la lista, que se refresca en la misma vuelta. Con las dos rutas devolviendo el
+    estado, un desfase entre ellas pintaría una pantalla que se contradice a sí misma.
+
+    Lo que sí devuelve es si se puede escribir, porque depende de ESTE teléfono y de la hora,
+    y la lista no lo sabe.
+    """
+    telefono = _telefono_valido(telefono)
+    ahora = _ahora_en_bogota()
+    with persistencia.conectar(config.database_url) as conn:
+        mensajes = panel.hilo(conn, telefono)
+        ventana = panel.puede_escribir(conn, telefono, ahora=ahora)
+    return {
+        "telefono": telefono,
+        "mensajes": mensajes,
+        "ventana": ventana,
+        "puede_escribir": quien["rol"] in ROLES_QUE_ESCRIBEN,
+    }
+
+
+class MensajeAlPaciente(BaseModel):
+    #: El mismo tope que el chat web (`MensajeDePrueba`), y por el mismo motivo: lo que entra
+    #: por aquí acaba en un mensaje de WhatsApp, que Meta corta en 4096.
+    texto: str = Field(min_length=1, max_length=4000)
+
+
+class CierreDelRelevo(BaseModel):
+    """Lo que en el hilo de Telegram son cuatro preguntas encadenadas, en un solo formulario.
+
+    `cuando` llega sin zona desde un `<input type="datetime-local">` y lo localiza
+    `relevo.cerrar_desde_el_panel`, que es donde está escrito por qué.
+    """
+
+    hubo_cita: bool
+    cuando: datetime | None = None
+    tratamiento: str | None = Field(default=None, max_length=80)
+    nombre: str | None = Field(default=None, max_length=80)
+
+
+@app.post("/api/conversaciones/{telefono}/tomar")
+async def api_tomar_conversacion(
+    telefono: str, quien: dict = Depends(exigir_rol(*ROLES_QUE_ESCRIBEN))
+) -> dict:
+    """«Hablar yo con el paciente», desde el panel. Misma maquinaria que el botón del General.
+
+    No hay una versión de esto para el panel: es `relevo.activar` tal cual, sin `callback_id`
+    --no hay callback que responder-- y sin `mensaje_id` --no cuelga de ningún aviso del
+    General, así que no hay teclado que cambiar ni escalamiento que marcar--. Todo lo demás
+    ocurre igual: el hilo se abre, la bienvenida suena con su botón anclado y la
+    transcripción se vuelca.
+
+    El 409 sale del retorno de `activar` y no de una lectura previa: entre leer «está libre»
+    y escribir cabe el otro doctor.
+    """
+    telefono = _telefono_valido(telefono)
+    id_conversacion = await asyncio.to_thread(
+        relevo._conversacion_de, config.database_url, telefono
+    )
+    motivo = await relevo.activar(
+        id_conversacion=id_conversacion,
+        doctor=quien["nombre"],
+        callback_id=None,
+        mensaje_id=None,
+        telegram=_telegram,
+        database_url=config.database_url,
+        cierre_relevo_minutos=_relevo_minutos["cierre_relevo_minutos"],
+        tema_general=_tema_general or 0,
+    )
+    if motivo is not None:
+        raise HTTPException(status_code=409, detail=motivo)
+    log.info("%s tomó la conversación de +%s desde el panel", quien["usuario"], telefono)
+    return {"ok": True, "tomada_por": quien["nombre"]}
+
+
+@app.post("/api/conversaciones/{telefono}/mensaje")
+async def api_escribir_al_paciente(
+    telefono: str,
+    entrada: MensajeAlPaciente,
+    quien: dict = Depends(exigir_rol(*ROLES_QUE_ESCRIBEN)),
+) -> dict:
+    """Le escribe al paciente por WhatsApp desde el panel.
+
+    La ventana de 24 h se comprueba **aquí**, en el servidor, aunque la pantalla ya apague la
+    caja: la pantalla es comodidad y esto es la regla de Meta. Fuera de esa ventana el envío
+    sería rechazado por Meta con un error que no dice nada, así que se corta antes y se
+    devuelve lo único accionable -- cuántas horas hace que escribió.
+    """
+    telefono = _telefono_valido(telefono)
+    with persistencia.conectar(config.database_url) as conn:
+        ventana = panel.puede_escribir(conn, telefono, ahora=_ahora_en_bogota())
+    if not ventana["puede"]:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Pasaron más de 24 horas desde su último mensaje, así que WhatsApp no deja "
+                "escribirle hasta que él vuelva a escribir."
+                if ventana["horas"] is not None
+                else "Ese número nunca ha escrito, así que WhatsApp no deja escribirle."
+            ),
+        )
+
+    try:
+        wamid = await relevo.escribir_desde_el_panel(
+            telefono=telefono,
+            texto=entrada.texto,
+            autor=quien["nombre"],
+            telegram=_telegram,
+            whatsapp=_whatsapp,
+            database_url=config.database_url,
+        )
+    except ErrorDeCanal as e:
+        # La fila ya quedó escrita con el `fallo` dentro, así que esto no se pierde: queda
+        # en el hilo, en rojo, para quien lo mire después.
+        raise HTTPException(status_code=502, detail=f"WhatsApp no aceptó el envío: {e}") from e
+
+    log.info("%s le escribió a +%s desde el panel", quien["usuario"], telefono)
+    return {"ok": True, "wamid": wamid}
+
+
+@app.post("/api/conversaciones/{telefono}/cerrar")
+async def api_cerrar_relevo(
+    telefono: str,
+    entrada: CierreDelRelevo,
+    quien: dict = Depends(exigir_rol(*ROLES_QUE_ESCRIBEN)),
+) -> dict:
+    """Devuelve el control a Daniela, con o sin cita.
+
+    El tratamiento SÍ se valida contra la lista viva, al revés que en el hilo de Telegram, y
+    no es una incoherencia: allí el doctor teclea a mano en mitad de una conversación y la
+    decisión explícita del cliente fue no estorbarle (`.claude/rules/relevo-telegram.md`);
+    aquí hay un desplegable, así que un valor fuera del catálogo solo puede ser un formulario
+    manipulado o una pantalla desincronizada de la tabla.
+    """
+    telefono = _telefono_valido(telefono)
+    if entrada.hubo_cita and entrada.tratamiento:
+        with persistencia.conectar(config.database_url) as conn:
+            if entrada.tratamiento not in panel.vocabulario_activo(conn):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"«{entrada.tratamiento}» no es un tratamiento activo.",
+                )
+
+    try:
+        cerrado = await relevo.cerrar_desde_el_panel(
+            telefono=telefono,
+            doctor=quien["nombre"],
+            hubo_cita=entrada.hubo_cita,
+            cuando=entrada.cuando,
+            tratamiento=entrada.tratamiento,
+            nombre=entrada.nombre,
+            telegram=_telegram,
+            database_url=config.database_url,
+            calendario=_calendario,
+            tema_general=_tema_general or 0,
+        )
+    except relevo.NoSePudoAgendar as e:
+        # 409 y no 400: lo que manda el doctor está bien formado, es el mundo el que dice que
+        # no --la hora se llenó, Google no contesta--. Y el relevo sigue abierto a propósito,
+        # así que la pantalla deja el formulario puesto para que escriba otra hora.
+        raise HTTPException(status_code=409, detail=str(e)) from e
+
+    log.info(
+        "%s cerró el relevo de +%s desde el panel (cita=%s)",
+        quien["usuario"],
+        telefono,
+        entrada.hubo_cita,
+    )
+    return {"ok": True, "cerrado": cerrado}
 
 
 # ------------------------------------------------------------------------------------------

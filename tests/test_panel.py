@@ -5,6 +5,7 @@ Las que tocan Neon llevan `@pytest.mark.neon` y escriben en el esquema `pruebas`
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import uuid
@@ -1563,9 +1564,17 @@ class _CursorQueDelata:
     """Devuelve filas de ceros con la forma que espera cada consulta y apunta el VERBO de
     cada sentencia. Las respuestas se sirven en el orden en que `resumen_inicio` pregunta."""
 
-    def __init__(self, verbos: list[str]) -> None:
+    def __init__(self, verbos: list[str], respuestas=None, sentencias=None) -> None:
         self._verbos = verbos
-        self._respuestas = [(0,), (0,), (0, 0, 0), (0,), (0, 0)]
+        self._sentencias = sentencias if sentencias is not None else []
+        # El default es la forma que pide `resumen_inicio`. Las rutas de Conversaciones
+        # preguntan otras cosas --y una de ellas, `ultimo_mensaje_del_paciente`, se come el
+        # `(0,)` y revienta al restarle una fecha--, así que pueden traer las suyas.
+        self._respuestas = (
+            list(respuestas)
+            if respuestas is not None
+            else [(0,), (0,), (0, 0, 0), (0,), (0, 0)]
+        )
 
     def __enter__(self):
         return self
@@ -1575,6 +1584,7 @@ class _CursorQueDelata:
 
     def execute(self, sql, params=None):
         self._verbos.append(sql.strip().split()[0].upper())
+        self._sentencias.append(" ".join(sql.split()).upper())
 
     def fetchone(self):
         return self._respuestas.pop(0) if self._respuestas else (0,)
@@ -1587,9 +1597,11 @@ class _ConexionDeSoloLectura:
     """Una conexión que apunta todo lo que se le pide. No dobla `resumen_inicio`: el SQL de
     verdad corre encima de ella, que es lo que hace que esta prueba vigile algo."""
 
-    def __init__(self) -> None:
+    def __init__(self, respuestas=None) -> None:
         self.verbos: list[str] = []
+        self.sentencias: list[str] = []
         self.commits = 0
+        self._respuestas = respuestas
 
     def __enter__(self):
         return self
@@ -1598,7 +1610,7 @@ class _ConexionDeSoloLectura:
         return False
 
     def cursor(self):
-        return _CursorQueDelata(self.verbos)
+        return _CursorQueDelata(self.verbos, self._respuestas, self.sentencias)
 
     def commit(self):
         self.commits += 1
@@ -1679,3 +1691,569 @@ def test_api_inicio_es_de_solo_lectura(monkeypatch):
     )
     assert set(conexion.verbos) == {"SELECT"}, f"la portada escribió: {conexion.verbos}"
     assert conexion.commits == 0
+
+
+# ==========================================================================================
+# La pantalla de Conversaciones
+# ==========================================================================================
+
+#: El presente de estas pruebas. Clavado y pasado por parámetro, nunca `now()`: en este
+#: proyecto una fecha suelta ya amaneció en rojo tres veces.
+_AHORA_CONVERSACIONES = datetime(2026, 9, 22, 15, 0, tzinfo=ZONA_BOGOTA)
+
+
+def _telefono_nuevo() -> str:
+    """Un número que no usa nadie más.
+
+    El esquema `pruebas` NO se borra entre corridas --`CREATE SCHEMA IF NOT EXISTS`-- y otros
+    siete archivos escriben en estas mismas tablas. Un teléfono fijo haría que la segunda
+    corrida viera los mensajes de la primera.
+    """
+    return f"5730{uuid.uuid4().int % 10**8:08d}"
+
+
+def _entra(conn, telefono, *, texto, cuando, respondido=None, fallo=None, tipo="text"):
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO mensajes_entrantes"
+            " (wamid, telefono, tipo, texto, recibido_en, respondido_en, fallo_respuesta)"
+            " VALUES (%s, %s, %s, %s, %s, %s, %s)",
+            (f"wamid-{uuid.uuid4()}", telefono, tipo, texto, cuando, respondido, fallo),
+        )
+    conn.commit()
+
+
+def _conversacion(conn, telefono, *, tomada_por=None, actualizada=None):
+    ident = str(uuid.uuid4())
+    cuando = actualizada or _AHORA_CONVERSACIONES
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO conversaciones"
+            " (id, telefono, canal, tomada_por, tomada_en, creada_en, actualizada_en)"
+            " VALUES (%s, %s, 'whatsapp', %s, %s, %s, %s)",
+            (ident, telefono, tomada_por, cuando if tomada_por else None, cuando, cuando),
+        )
+    conn.commit()
+    return ident
+
+
+@pytest.mark.neon
+def test_la_lista_da_una_fila_por_telefono(conn):
+    """La unidad es el TELÉFONO. Tres mensajes de la misma persona son una fila, no tres.
+
+    Es la misma regla que decidió los cinco números de la portada: la conversación caduca a
+    las 24 h y nace otra, así que listar conversaciones mostraría a la misma persona una vez
+    por día que escribiera.
+    """
+    tel = _telefono_nuevo()
+    ahora = _AHORA_CONVERSACIONES
+    for i, minutos in enumerate((90, 60, 30)):
+        _entra(
+            conn,
+            tel,
+            texto=f"mensaje {i}",
+            cuando=ahora - timedelta(minutes=minutos),
+            respondido=ahora,
+        )
+
+    mias = [
+        c
+        for c in panel.listar_conversaciones(conn, ahora=ahora, limite=500)
+        if c["telefono"] == tel
+    ]
+
+    assert len(mias) == 1, "tres mensajes del mismo número dieron más de una fila"
+    assert mias[0]["vista_previa"] == "mensaje 2", "la vista previa no es el último mensaje"
+    assert mias[0]["estado"] == "activa"
+    assert mias[0]["sin_contestar"] == 0
+
+
+@pytest.mark.neon
+def test_una_conversacion_tomada_no_se_pinta_como_desatendida(conn):
+    """`relevo` gana a `esperando`, y el contador sigue ahí.
+
+    Una conversación que el doctor tiene tomada y en la que entran mensajes cumple las dos
+    condiciones a la vez. Lo que la pantalla tiene que decir es que ya hay alguien encima:
+    pintarla de rojo mandaría a otra persona a atender lo que ya está atendido.
+    """
+    tel = _telefono_nuevo()
+    ahora = _AHORA_CONVERSACIONES
+    _entra(conn, tel, texto="me sigue doliendo", cuando=ahora - timedelta(hours=1))
+
+    def _mia():
+        return next(
+            c
+            for c in panel.listar_conversaciones(conn, ahora=ahora, limite=500)
+            if c["telefono"] == tel
+        )
+
+    antes = _mia()
+    assert antes["estado"] == "esperando", "un mensaje de hace una hora sin responder"
+    assert antes["sin_contestar"] == 1
+
+    _conversacion(conn, tel, tomada_por="Dra. Ruiz", actualizada=ahora)
+
+    despues = _mia()
+    assert despues["estado"] == "relevo", "la conversación tomada se pintó como desatendida"
+    assert despues["tomada_por"] == "Dra. Ruiz"
+    assert despues["sin_contestar"] == 1, "el contador desapareció al tomarla"
+
+
+@pytest.mark.neon
+def test_los_mensajes_de_un_relevo_no_cuentan_como_sin_contestar(conn):
+    """No negociable 15: un mensaje que entra durante un relevo lleva `fallo_respuesta`
+    empezando por `relevo:` SIN ser un fallo. Es el doctor hablando, no Daniela callada.
+
+    Y el que tiene las DOS columnas en NULL --nadie intentó contestarlo porque el proceso se
+    cayó antes de anotar siquiera el fallo-- sí cuenta: es el caso que más duele y el motivo
+    de existir del índice de la migración 009. Con `fallo_respuesta NOT LIKE` a secas, SQL lo
+    descartaría en silencio, porque `NULL NOT LIKE 'x'` no es falso: es NULL.
+    """
+    tel = _telefono_nuevo()
+    ahora = _AHORA_CONVERSACIONES
+    _entra(
+        conn,
+        tel,
+        texto="lo atendió el doctor",
+        cuando=ahora - timedelta(hours=2),
+        fallo="relevo: la tiene Dra. Ruiz",
+    )
+    _entra(conn, tel, texto="este nadie lo miró", cuando=ahora - timedelta(hours=1))
+
+    mia = next(
+        c
+        for c in panel.listar_conversaciones(conn, ahora=ahora, limite=500)
+        if c["telefono"] == tel
+    )
+
+    assert mia["sin_contestar"] == 1, (
+        "o se contó el mensaje del relevo, o se perdió el que tiene las dos columnas en NULL"
+    )
+
+
+@pytest.mark.neon
+def test_el_hilo_junta_las_tres_voces_en_orden(conn):
+    """Paciente, Daniela y doctor, ordenados por hora. La tercera voz existe desde la 026.
+
+    Antes de ella el tramo del relevo salía vacío y parecía que nadie había hablado.
+    """
+    from datetime import timezone
+
+    tel = _telefono_nuevo()
+    ahora = _AHORA_CONVERSACIONES
+    ident = _conversacion(conn, tel, actualizada=ahora)
+
+    _entra(conn, tel, texto="hola, me duele una muela", cuando=ahora - timedelta(minutes=30))
+
+    item = json.dumps(
+        {
+            "role": "assistant",
+            "content": json.dumps({"mensaje_al_paciente": "Lo siento. ¿Desde cuándo?"}),
+        }
+    )
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO agent_sessions (session_id) VALUES (%s)"
+            " ON CONFLICT (session_id) DO NOTHING",
+            (ident,),
+        )
+        cur.execute(
+            "INSERT INTO agent_messages (session_id, message_data, created_at)"
+            " VALUES (%s, %s, %s)",
+            (ident, item, (ahora - timedelta(minutes=29)).astimezone(timezone.utc).replace(tzinfo=None)),
+        )
+    conn.commit()
+
+    persistencia.guardar_mensaje_del_doctor(
+        conn,
+        telefono=tel,
+        conversacion_id=ident,
+        autor="Dra. Ruiz",
+        origen="telegram",
+        texto="Ven mañana a las 8.",
+        wamid="wamid.1",
+    )
+    # `enviado_en` lo pone la base con `now()`. Es lo correcto en producción --la fila se
+    # escribe justo después de enviar-- y un problema aquí: el presente de esta prueba está
+    # CLAVADO, y el reloj de verdad puede ir por delante o por detrás de él. Sin recolocar la
+    # fila, el orden del hilo depende de la hora a la que se corra la suite.
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE mensajes_del_doctor SET enviado_en = %s WHERE telefono = %s",
+            (ahora - timedelta(minutes=28), tel),
+        )
+    conn.commit()
+
+    lineas = panel.hilo(conn, tel)
+
+    assert [l["quien"] for l in lineas] == ["paciente", "daniela", "doctor"], (
+        f"el hilo no junta las tres voces en orden: {[(l['quien'], l['texto']) for l in lineas]}"
+    )
+    assert lineas[1]["texto"] == "Lo siento. ¿Desde cuándo?", (
+        "se volcó el JSON de RespuestaDaniela en vez de la frase"
+    )
+    assert lineas[2]["autor"] == "Dra. Ruiz"
+
+
+@pytest.mark.neon
+def test_fuera_de_la_ventana_de_meta_no_se_puede_escribir(conn):
+    """WhatsApp no acepta texto libre pasadas 24 h desde el último mensaje del paciente.
+
+    Y a un número que nunca escribió NO se le puede escribir: la ventana la abre él, así que
+    «sin mensajes» no es una ventana de cero horas, es ninguna ventana.
+    """
+    ahora = _AHORA_CONVERSACIONES
+
+    mudo = _telefono_nuevo()
+    assert panel.puede_escribir(conn, mudo, ahora=ahora) == {"puede": False, "horas": None}
+
+    reciente = _telefono_nuevo()
+    _entra(conn, reciente, texto="hola", cuando=ahora - timedelta(hours=2))
+    dentro = panel.puede_escribir(conn, reciente, ahora=ahora)
+    assert dentro["puede"] is True
+    assert dentro["horas"] == 2.0
+
+    viejo = _telefono_nuevo()
+    _entra(conn, viejo, texto="hola", cuando=ahora - timedelta(hours=25))
+    fuera = panel.puede_escribir(conn, viejo, ahora=ahora)
+    assert fuera["puede"] is False, "se habría dejado mandar un texto que Meta rechaza"
+    assert fuera["horas"] == 25.0, "sin las horas, la pantalla no puede explicar por qué"
+
+
+def test_las_dos_rutas_de_conversaciones_son_de_solo_lectura(monkeypatch):
+    """Ni un INSERT, ni un UPDATE, ni un `commit`, en la ruta que más se pide del panel.
+
+    La pantalla se refresca sola cada diez segundos mientras esté a la vista: una escritura
+    escondida aquí son miles de escrituras al día contra la base que atiende pacientes.
+
+    `listar_conversaciones` y `hilo` NO se doblan: el SQL de verdad corre contra una conexión
+    que apunta el verbo de cada sentencia, así que esto vigila también las consultas que
+    alguien añada mañana.
+    """
+    conexion = _ConexionDeSoloLectura(respuestas=[(None,)] * 8)
+    monkeypatch.setattr(runtime.persistencia, "conectar", lambda url: conexion)
+
+    runtime.app.dependency_overrides[runtime.usuario_actual] = _como("recepcion")
+    try:
+        cliente = TestClient(runtime.app)
+        lista = cliente.get("/api/conversaciones")
+        assert lista.status_code == 200, lista.text
+        detalle = cliente.get("/api/conversaciones/573001110101")
+        assert detalle.status_code == 200, detalle.text
+    finally:
+        runtime.app.dependency_overrides.clear()
+
+    assert len(conexion.verbos) >= 5, (
+        "el camino no llegó a consultar: una prueba sobre lo que NO pasa tiene que "
+        "comprobar además que el camino corrió"
+    )
+    # `WITH` es la CTE de la lista, y sigue siendo lectura. Pero aceptar el verbo a
+    # ciegas dejaría pasar un `WITH ... INSERT`, que también empieza por WITH: por eso
+    # se mira además la sentencia entera.
+    assert set(conexion.verbos) <= {"SELECT", "WITH"}, f"verbos: {conexion.verbos}"
+    # Con límites de palabra y no subcadenas: `created_at` --una columna que fija el SDK--
+    # contiene "CREATE", y sin `\b` esta prueba fallaría por leer una fecha.
+    escrituras = r"\b(INSERT|UPDATE|DELETE|TRUNCATE|ALTER|DROP|CREATE)\b"
+    culpables = [s for s in conexion.sentencias if re.search(escrituras, s)]
+    assert culpables == [], f"la pantalla escribió: {culpables}"
+    assert conexion.commits == 0
+    assert lista.json()["puede_escribir"] is False, "recepción no toma ni escribe"
+
+
+def test_un_telefono_que_no_es_un_telefono_no_llega_a_la_base(monkeypatch):
+    """Un 404 temprano. Las consultas van parametrizadas, así que esto no es sobre inyección:
+    es sobre lo que acaba en los logs de acceso."""
+    conexion = _ConexionDeSoloLectura(respuestas=[(None,)] * 8)
+    monkeypatch.setattr(runtime.persistencia, "conectar", lambda url: conexion)
+
+    runtime.app.dependency_overrides[runtime.usuario_actual] = _como("admin")
+    try:
+        r = TestClient(runtime.app).get("/api/conversaciones/no-es-un-telefono")
+    finally:
+        runtime.app.dependency_overrides.clear()
+
+    assert r.status_code == 404
+    assert conexion.verbos == [], "se consultó la base con un teléfono que no lo era"
+
+
+# ==========================================================================================
+# Conversaciones: los tres POST
+# ==========================================================================================
+
+
+def _sin_neon(monkeypatch):
+    """Los tres POST abren su `with persistencia.conectar(...)`. Aquí no hay Neon."""
+    monkeypatch.setattr(
+        runtime.persistencia, "conectar", lambda url: _ConexionFalsaSinResolver()
+    )
+
+
+def test_recepcion_no_puede_tomar_ni_escribir_ni_cerrar(monkeypatch):
+    """El control vive en `exigir_rol`, no en el booleano que viaja a la pantalla.
+
+    Con dos listas --una para esconder el botón y otra para permitir la acción-- esconder y
+    permitir se separan sin que nada falle, así que las dos salen de `ROLES_QUE_ESCRIBEN`.
+    """
+    _sin_neon(monkeypatch)
+
+    def _no_llames(*a, **k):
+        pytest.fail("recepción llegó a la maquinaria del relevo")
+
+    monkeypatch.setattr(runtime.relevo, "activar", _no_llames)
+    monkeypatch.setattr(runtime.relevo, "escribir_desde_el_panel", _no_llames)
+    monkeypatch.setattr(runtime.relevo, "cerrar_desde_el_panel", _no_llames)
+
+    runtime.app.dependency_overrides[runtime.usuario_actual] = _como("recepcion")
+    try:
+        c = TestClient(runtime.app)
+        respuestas = [
+            c.post("/api/conversaciones/573001110101/tomar"),
+            c.post("/api/conversaciones/573001110101/mensaje", json={"texto": "hola"}),
+            c.post("/api/conversaciones/573001110101/cerrar", json={"hubo_cita": False}),
+        ]
+    finally:
+        runtime.app.dependency_overrides.clear()
+
+    assert [r.status_code for r in respuestas] == [403, 403, 403]
+    assert all("detalle" in r.json() for r in respuestas)
+
+
+def test_tomar_una_conversacion_QUE_YA_TIENE_OTRO_da_409_con_su_nombre(monkeypatch):
+    _sin_neon(monkeypatch)
+
+    async def _ya_la_tiene(**k):
+        return "Ya la tiene Dr. Pérez."
+
+    monkeypatch.setattr(runtime.relevo, "activar", _ya_la_tiene)
+    monkeypatch.setattr(runtime.relevo, "_conversacion_de", lambda url, tel: "c-1")
+
+    runtime.app.dependency_overrides[runtime.usuario_actual] = _como("doctor")
+    try:
+        r = TestClient(runtime.app).post("/api/conversaciones/573001110101/tomar")
+    finally:
+        runtime.app.dependency_overrides.clear()
+
+    assert r.status_code == 409
+    assert r.json()["detalle"] == "Ya la tiene Dr. Pérez."
+
+
+def test_tomar_pasa_el_nombre_del_usuario_y_NI_callback_NI_mensaje(monkeypatch):
+    """Lo que distingue a esta puerta de la de Telegram, y es todo lo que la distingue."""
+    _sin_neon(monkeypatch)
+    argumentos = {}
+
+    async def _activar(**k):
+        argumentos.update(k)
+        return None
+
+    monkeypatch.setattr(runtime.relevo, "activar", _activar)
+    monkeypatch.setattr(runtime.relevo, "_conversacion_de", lambda url, tel: "c-1")
+
+    runtime.app.dependency_overrides[runtime.usuario_actual] = _como("admin")
+    try:
+        r = TestClient(runtime.app).post("/api/conversaciones/573001110101/tomar")
+    finally:
+        runtime.app.dependency_overrides.clear()
+
+    assert r.status_code == 200 and r.json()["ok"] is True
+    assert argumentos["callback_id"] is None, "no hay ningún botón que acusar"
+    assert argumentos["mensaje_id"] is None, "no cuelga de ningún aviso del General"
+    assert argumentos["doctor"] == "Prueba", "el hilo dice quién habla, y sale de la sesión"
+
+
+def test_fuera_de_las_24_horas_no_se_le_escribe_al_paciente(monkeypatch):
+    """Y la prueba comprueba ADEMÁS que se consultó el último mensaje del paciente.
+
+    Una aserción sobre algo que no pasa también pasa cuando no corrió nada: si el endpoint
+    dejara de mirar la ventana, `enviar_texto` tampoco se llamaría en esta prueba --porque
+    está doblado-- y seguiría en verde mientras Meta rechaza el envío en producción.
+    """
+    _sin_neon(monkeypatch)
+    consultados = []
+
+    def _hace_treinta_horas(conn, telefono):
+        consultados.append(telefono)
+        return _AHORA_CONVERSACIONES - timedelta(hours=30)
+
+    monkeypatch.setattr(
+        panel.persistencia, "ultimo_mensaje_del_paciente", _hace_treinta_horas
+    )
+    monkeypatch.setattr(runtime, "_ahora_en_bogota", lambda: _AHORA_CONVERSACIONES)
+
+    async def _no_escribas(**k):
+        pytest.fail("se intentó escribir fuera de la ventana de 24 h")
+
+    monkeypatch.setattr(runtime.relevo, "escribir_desde_el_panel", _no_escribas)
+
+    runtime.app.dependency_overrides[runtime.usuario_actual] = _como("doctor")
+    try:
+        r = TestClient(runtime.app).post(
+            "/api/conversaciones/573001110101/mensaje", json={"texto": "hola"}
+        )
+    finally:
+        runtime.app.dependency_overrides.clear()
+
+    assert r.status_code == 409
+    assert "24 horas" in r.json()["detalle"]
+    assert consultados == ["573001110101"], "el endpoint no llegó a mirar la ventana"
+
+
+def test_dentro_de_la_ventana_el_mensaje_sale_con_el_nombre_de_quien_lo_escribe(monkeypatch):
+    _sin_neon(monkeypatch)
+    monkeypatch.setattr(
+        panel.persistencia,
+        "ultimo_mensaje_del_paciente",
+        lambda conn, tel: _AHORA_CONVERSACIONES - timedelta(hours=2),
+    )
+    monkeypatch.setattr(runtime, "_ahora_en_bogota", lambda: _AHORA_CONVERSACIONES)
+    enviados = []
+
+    async def _escribir(**k):
+        enviados.append(k)
+        return "wamid.1"
+
+    monkeypatch.setattr(runtime.relevo, "escribir_desde_el_panel", _escribir)
+
+    runtime.app.dependency_overrides[runtime.usuario_actual] = _como("doctor")
+    try:
+        r = TestClient(runtime.app).post(
+            "/api/conversaciones/573001110101/mensaje", json={"texto": "Nos vemos"}
+        )
+    finally:
+        runtime.app.dependency_overrides.clear()
+
+    assert r.status_code == 200 and r.json()["wamid"] == "wamid.1"
+    assert enviados[0]["texto"] == "Nos vemos"
+    assert enviados[0]["autor"] == "Prueba"
+
+
+def test_un_texto_de_mas_de_4000_no_entra(monkeypatch):
+    """El mismo tope que el chat web. El carril que da a internet ya lo tenía; este no era
+    ese carril, pero un mensaje de WhatsApp se corta en 4096 de todos modos."""
+    _sin_neon(monkeypatch)
+
+    async def _no_escribas(**k):
+        pytest.fail("un texto de 5000 llegó a WhatsApp")
+
+    monkeypatch.setattr(runtime.relevo, "escribir_desde_el_panel", _no_escribas)
+
+    runtime.app.dependency_overrides[runtime.usuario_actual] = _como("doctor")
+    try:
+        r = TestClient(runtime.app).post(
+            "/api/conversaciones/573001110101/mensaje", json={"texto": "x" * 5000}
+        )
+    finally:
+        runtime.app.dependency_overrides.clear()
+
+    assert r.status_code == 422
+
+
+def test_si_WhatsApp_rechaza_el_envio_el_panel_lo_dice_y_no_finge_que_salio(monkeypatch):
+    _sin_neon(monkeypatch)
+    monkeypatch.setattr(
+        panel.persistencia,
+        "ultimo_mensaje_del_paciente",
+        lambda conn, tel: _AHORA_CONVERSACIONES - timedelta(hours=2),
+    )
+    monkeypatch.setattr(runtime, "_ahora_en_bogota", lambda: _AHORA_CONVERSACIONES)
+
+    async def _revienta(**k):
+        raise runtime.ErrorDeCanal("WhatsApp rechazó el envío: 400")
+
+    monkeypatch.setattr(runtime.relevo, "escribir_desde_el_panel", _revienta)
+
+    runtime.app.dependency_overrides[runtime.usuario_actual] = _como("doctor")
+    try:
+        r = TestClient(runtime.app).post(
+            "/api/conversaciones/573001110101/mensaje", json={"texto": "hola"}
+        )
+    finally:
+        runtime.app.dependency_overrides.clear()
+
+    assert r.status_code == 502
+    assert "400" in r.json()["detalle"]
+
+
+def test_un_tratamiento_que_no_esta_en_la_lista_viva_no_cierra_nada(monkeypatch):
+    """Aquí SÍ se valida, al revés que en el hilo de Telegram, y no es una incoherencia: allí
+    el doctor teclea a mano en mitad de una conversación --decisión explícita del cliente--;
+    aquí hay un desplegable, así que un valor de fuera es una pantalla desincronizada."""
+    _sin_neon(monkeypatch)
+    monkeypatch.setattr(runtime.panel, "vocabulario_activo", lambda conn: ["ortodoncia"])
+
+    async def _no_cierres(**k):
+        pytest.fail("se cerró el relevo con un tratamiento inventado")
+
+    monkeypatch.setattr(runtime.relevo, "cerrar_desde_el_panel", _no_cierres)
+
+    runtime.app.dependency_overrides[runtime.usuario_actual] = _como("doctor")
+    try:
+        r = TestClient(runtime.app).post(
+            "/api/conversaciones/573001110101/cerrar",
+            json={
+                "hubo_cita": True,
+                "tratamiento": "lo_que_sea",
+                "cuando": "2099-01-05T10:00:00",
+            },
+        )
+    finally:
+        runtime.app.dependency_overrides.clear()
+
+    assert r.status_code == 400
+    assert "lo_que_sea" in r.json()["detalle"]
+
+
+def test_una_cita_que_no_se_pudo_agendar_devuelve_409_y_deja_el_relevo_abierto(monkeypatch):
+    """409 y no 400: lo que manda el doctor está bien formado, es el mundo el que dice que no
+    --la hora se llenó, Google no contesta--. La pantalla deja el formulario puesto."""
+    _sin_neon(monkeypatch)
+    monkeypatch.setattr(runtime.panel, "vocabulario_activo", lambda conn: ["ortodoncia"])
+
+    async def _no_se_pudo(**k):
+        raise runtime.relevo.NoSePudoAgendar("Esa hora ya está llena.")
+
+    monkeypatch.setattr(runtime.relevo, "cerrar_desde_el_panel", _no_se_pudo)
+
+    runtime.app.dependency_overrides[runtime.usuario_actual] = _como("doctor")
+    try:
+        r = TestClient(runtime.app).post(
+            "/api/conversaciones/573001110101/cerrar",
+            json={
+                "hubo_cita": True,
+                "tratamiento": "ortodoncia",
+                "cuando": "2099-01-05T10:00:00",
+            },
+        )
+    finally:
+        runtime.app.dependency_overrides.clear()
+
+    assert r.status_code == 409
+    assert r.json()["detalle"] == "Esa hora ya está llena."
+
+
+def test_cerrar_sin_cita_ni_siquiera_mira_el_catalogo(monkeypatch):
+    _sin_neon(monkeypatch)
+    monkeypatch.setattr(
+        runtime.panel,
+        "vocabulario_activo",
+        lambda conn: pytest.fail("no había tratamiento que validar"),
+    )
+    recibidos = {}
+
+    async def _cerrar(**k):
+        recibidos.update(k)
+        return True
+
+    monkeypatch.setattr(runtime.relevo, "cerrar_desde_el_panel", _cerrar)
+
+    runtime.app.dependency_overrides[runtime.usuario_actual] = _como("doctor")
+    try:
+        r = TestClient(runtime.app).post(
+            "/api/conversaciones/573001110101/cerrar", json={"hubo_cita": False}
+        )
+    finally:
+        runtime.app.dependency_overrides.clear()
+
+    assert r.status_code == 200 and r.json()["cerrado"] is True
+    assert recibidos["hubo_cita"] is False and recibidos["cuando"] is None
+    assert recibidos["doctor"] == "Prueba"

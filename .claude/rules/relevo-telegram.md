@@ -696,6 +696,47 @@ positivo: `test_agendar_NO_le_pisa_el_nombre_a_un_paciente_de_verdad`, que es la
 se puede aflojar —la hija que agenda desde el teléfono de la casa no puede renombrar la ficha
 de su madre—.
 
+## La tercera puerta: el panel (22/09/2026)
+
+Hasta la pantalla de Conversaciones, un relevo solo se abría desde Telegram. Ahora también
+desde el panel, y **es la misma maquinaria**: `relevo.activar`, `relevo.cerrar`, `_agendar`.
+Lo que vive en `relevo.escribir_desde_el_panel` y `relevo.cerrar_desde_el_panel` es el
+cableado, no una segunda implementación. Tres cosas que hay que saber antes de tocarlo:
+
+- **`activar` devuelve `str | None`, y el `None` significa «es tuya».** Un POST tiene que
+  poder contestar 409 con el nombre del que se adelantó, y preguntar antes con una lectura
+  suelta deja en medio la ventana por la que pasan los dos doctores. Quien decide sigue
+  siendo el `UPDATE ... WHERE tomada_por IS NULL`; lo único que cambió es que su respuesta ya
+  no muere dentro de la función. La bandera `ya_es_suya` es lo que impide que un fallo
+  adornando el hilo --anclar, volcar-- se cuente como «no la tomaste»: el panel pintaría un
+  error sobre una conversación que en Neon ya está a su nombre.
+- **`callback_id` acepta `None`.** Pasárselo igual a Telegram es una llamada que ya sabemos
+  que va a fallar, y el acuse que traería es para un botón que nadie pulsó.
+- **El cierre con cita AGENDA, y si no puede no cierra.** Es la trampa que traía el plan de
+  esa pantalla escrita al revés: `cerrar(cita=...)` solo se lo CUENTA a Daniela
+  (`_nota_del_relevo`), no crea nada. Cerrar sin pasar por `_agendar` deja al doctor
+  marcando «sí hubo cita», a Daniela creyendo que existe y al paciente presentándose en una
+  clínica donde nadie lo espera: el no negociable 1 por la puerta de atrás. El panel hace lo
+  mismo que el diálogo del hilo -- cupo, Calendar, fila, y si el cupo dice que no, se lo dice
+  y el relevo **sigue abierto** para que escriba otra hora.
+
+Dos asimetrías deliberadas con el carril de Telegram:
+
+| | Telegram | Panel |
+|---|---|---|
+| Un envío que WhatsApp rechaza | se anota y se sigue | se anota **y propaga** (502) |
+| El `tratamiento` del cierre | texto libre, sin validar | **validado** contra `vocabulario_activo` |
+
+La primera es porque allí el doctor ya ve su mensaje escrito en el hilo y lo único que cabe
+es reaccionar, mientras que aquí está mirando la pantalla y esperando la respuesta. La
+segunda no deshace la decisión del cliente de 14/09/2026: esa era sobre el doctor tecleando
+a mano en mitad de una conversación. En el panel hay un desplegable, así que un valor fuera
+del catálogo solo puede ser una pantalla desincronizada de la tabla.
+
+Y el eco: lo que se escribe desde el panel baja **mudo** al hilo del paciente, para que las
+dos ventanas enseñen lo mismo. **No abre hilo si no hay** (no negociable 14): un texto nunca
+estrena expediente.
+
 ## Qué prueba qué
 
 | | |
