@@ -2131,6 +2131,74 @@ async def api_inicio(quien: dict = Depends(usuario_actual)) -> dict:
 
 
 # ------------------------------------------------------------------------------------------
+# Panel: las conversaciones
+# ------------------------------------------------------------------------------------------
+
+#: Quién puede tomar una conversación y escribirle a un paciente. Vive aquí, en una sola
+#: tupla, porque lo usan DOS sitios: `exigir_rol`, que es el control de verdad, y el booleano
+#: que viaja a la pantalla para esconder los botones. Con dos listas, esconder un botón y
+#: permitir la acción se separan sin que nada falle.
+ROLES_QUE_ESCRIBEN = ("admin", "doctor")
+
+
+def _telefono_valido(telefono: str) -> str:
+    """Un teléfono es dígitos y nada más.
+
+    No es paranoia sobre inyección --las consultas van parametrizadas-- sino sobre lo que
+    acaba en los logs de acceso y en la barra del navegador. Un 404 temprano cuesta menos que
+    una consulta que no iba a encontrar nada.
+    """
+    if not telefono.isdigit():
+        raise HTTPException(status_code=404, detail="no hay ninguna conversación con ese número")
+    return telefono
+
+
+@app.get("/api/conversaciones")
+async def api_conversaciones(quien: dict = Depends(usuario_actual)) -> dict:
+    """La lista de la pantalla de Conversaciones. SOLO LECTURA.
+
+    Esta es la petición que más veces se hace del panel entero: la pantalla se refresca sola
+    cada diez segundos mientras esté a la vista. Por eso no reconcilia nada, no escribe nada
+    y no llama a ningún sistema de fuera -- misma promesa que `/api/inicio` y la diferencia
+    deliberada con `/api/agenda`.
+
+    `puede_escribir` viaja para que la pantalla no pinte botones que el servidor va a
+    rechazar. No ES el control de acceso: ese vive en `exigir_rol`, en los tres POST.
+    """
+    with persistencia.conectar(config.database_url) as conn:
+        conversaciones = panel.listar_conversaciones(conn, ahora=_ahora_en_bogota())
+    return {
+        "conversaciones": conversaciones,
+        "puede_escribir": quien["rol"] in ROLES_QUE_ESCRIBEN,
+        "usuario": quien["nombre"],
+    }
+
+
+@app.get("/api/conversaciones/{telefono}")
+async def api_conversacion(telefono: str, quien: dict = Depends(usuario_actual)) -> dict:
+    """El hilo de un paciente: las tres voces en orden. SOLO LECTURA.
+
+    NO devuelve el estado de la conversación ni quién la tiene tomada, y no es un olvido: eso
+    lo trae la lista, que se refresca en la misma vuelta. Con las dos rutas devolviendo el
+    estado, un desfase entre ellas pintaría una pantalla que se contradice a sí misma.
+
+    Lo que sí devuelve es si se puede escribir, porque depende de ESTE teléfono y de la hora,
+    y la lista no lo sabe.
+    """
+    telefono = _telefono_valido(telefono)
+    ahora = _ahora_en_bogota()
+    with persistencia.conectar(config.database_url) as conn:
+        mensajes = panel.hilo(conn, telefono)
+        ventana = panel.puede_escribir(conn, telefono, ahora=ahora)
+    return {
+        "telefono": telefono,
+        "mensajes": mensajes,
+        "ventana": ventana,
+        "puede_escribir": quien["rol"] in ROLES_QUE_ESCRIBEN,
+    }
+
+
+# ------------------------------------------------------------------------------------------
 # Panel: la agenda del día y la marca de asistencia
 # ------------------------------------------------------------------------------------------
 

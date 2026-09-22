@@ -20,6 +20,7 @@ from collections.abc import Sequence
 from datetime import datetime, timedelta
 from typing import Any, get_args
 
+from . import persistencia
 from .calendario import ZONA_BOGOTA
 from .contratos import Tratamiento
 
@@ -506,6 +507,10 @@ def citas_sin_marcar(
 #: algún día viene de fuera, se pasa como `%s * interval '1 minute'`.
 MINUTOS_SIN_CONTESTAR = 5
 
+#: El marcador que deja el sistema cuando no sabe cómo se llama alguien. Vive en
+#: `persistencia` y se alia aquí para no repetir el literal en dos módulos.
+_NOMBRE_PENDIENTE = persistencia.NOMBRE_PENDIENTE
+
 
 def resumen_inicio(conn, *, ahora: datetime, dias: int = 30) -> dict[str, Any]:
     """Los cinco números de la portada, más el volumen por día y la agenda de hoy.
@@ -626,3 +631,224 @@ def resumen_inicio(conn, *, ahora: datetime, dias: int = 30) -> dict[str, Any]:
             conn, desde=inicio_del_dia, hasta=inicio_del_dia + timedelta(days=1)
         ),
     }
+
+
+# ==========================================================================================
+# La pantalla de Conversaciones
+# ==========================================================================================
+
+#: Cuántas horas deja Meta para responderle a alguien con texto libre, contadas desde SU
+#: último mensaje. Fuera de esa ventana solo entran plantillas aprobadas, y ninguna de las
+#: tres que tiene el proyecto dice «el doctor quiere hablar contigo».
+#:
+#: No se comprueba contra Meta: es una regla de su plataforma, no un estado que se consulte.
+#: Lo que sí se hace es no dejar que el botón «Enviar» falle con un error de la Graph API que
+#: nadie sabe leer.
+VENTANA_RESPUESTA_HORAS = 24
+
+#: Qué se pinta cuando un mensaje del paciente no tiene texto. Un hueco en el hilo se lee
+#: como «no dijo nada», y lo que pasó es que mandó una radiografía.
+_MARCA_POR_TIPO = {
+    "audio": "(nota de voz)",
+    "image": "(imagen)",
+    "video": "(video)",
+    "document": "(documento)",
+    "sticker": "(sticker)",
+    "location": "(ubicación)",
+}
+
+
+def _marca(tipo: str | None) -> str:
+    return _MARCA_POR_TIPO.get(tipo or "", "(archivo)")
+
+
+def _nombre_visible(nombre_ficha: str | None, nombre_perfil: str | None) -> str | None:
+    """El nombre que se pinta, o `None` para que la pantalla caiga al teléfono.
+
+    **Una ficha cuyo nombre es `PENDIENTE` no cuenta como nombre** (no negociable 12): es el
+    marcador que deja el sistema cuando no sabe, y pintarlo donde va un nombre es exactamente
+    el error que esa regla existe para evitar. Se cae al nombre del perfil de WhatsApp, que
+    es lo que la propia persona escribió de sí misma.
+    """
+    if nombre_ficha and nombre_ficha != _NOMBRE_PENDIENTE:
+        return nombre_ficha
+    return nombre_perfil or None
+
+
+def listar_conversaciones(
+    conn, *, ahora: datetime, dias: int = 30, limite: int = 50
+) -> list[dict[str, Any]]:
+    """Una fila por TELÉFONO, la más reciente primero. SOLO LECTURA.
+
+    La unidad es el teléfono y no la conversación, por lo mismo que en `resumen_inicio`: la
+    conversación caduca por inactividad de 24 h, así que una persona que lleva una semana
+    negociando son siete filas en `conversaciones` y una sola fila aquí.
+
+    `dias` acota las dos consultas pesadas y vale 30 igual que la portada, a propósito: los
+    dos números tienen que poder mirarse a la vez sin contradecirse. Un mensaje sin responder
+    de hace tres meses tampoco está «esperando respuesta» -- eso ya es otra cosa.
+
+    `ahora` entra por parámetro, sin default. Un `now()` dentro de la consulta convierte
+    cualquier prueba en una que envejece, y aquí eso ya amaneció en rojo tres veces.
+    """
+    desde = ahora - timedelta(days=dias)
+    parametros = {"desde": desde, "ahora": ahora, "limite": limite}
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "WITH ultimo AS ("
+            "    SELECT DISTINCT ON (telefono)"
+            "           telefono, texto, tipo, nombre_perfil, recibido_en"
+            "      FROM mensajes_entrantes"
+            "     WHERE recibido_en >= %(desde)s"
+            "     ORDER BY telefono, recibido_en DESC"
+            "), esperando AS ("
+            "    SELECT telefono, count(*) AS n"
+            "      FROM mensajes_entrantes"
+            "     WHERE recibido_en >= %(desde)s"
+            f"      AND recibido_en < %(ahora)s - interval '{MINUTOS_SIN_CONTESTAR} minutes'"
+            "       AND respondido_en IS NULL"
+            # Las DOS mitades. `NULL NOT LIKE 'relevo:%%'` no es cierto en SQL: es NULL, y el
+            # filtro lo descarta. Escrito solo con la segunda, esta consulta se comería justo
+            # el caso peor -- el mensaje que nadie intentó contestar porque el proceso se cayó
+            # antes de anotar siquiera el fallo, con las dos columnas en NULL--, que es el
+            # motivo de existir del índice de la migración 009.
+            "       AND (fallo_respuesta IS NULL OR fallo_respuesta NOT LIKE 'relevo:%%')"
+            "     GROUP BY telefono"
+            "), viva AS ("
+            "    SELECT DISTINCT ON (telefono) telefono, tomada_por, actualizada_en"
+            "      FROM conversaciones"
+            "     ORDER BY telefono, actualizada_en DESC"
+            ") "
+            "SELECT u.telefono, p.nombre_completo, u.nombre_perfil, u.texto, u.tipo,"
+            "       u.recibido_en, coalesce(e.n, 0), v.tomada_por, v.actualizada_en"
+            "  FROM ultimo u"
+            "  LEFT JOIN esperando e ON e.telefono = u.telefono"
+            "  LEFT JOIN viva      v ON v.telefono = u.telefono"
+            "  LEFT JOIN pacientes p ON p.telefono = u.telefono"
+            " ORDER BY GREATEST(u.recibido_en, coalesce(v.actualizada_en, u.recibido_en)) DESC"
+            " LIMIT %(limite)s",
+            parametros,
+        )
+        filas = cur.fetchall()
+
+    ventana = ahora - timedelta(hours=VENTANA_RESPUESTA_HORAS)
+    lista: list[dict[str, Any]] = []
+    for tel, ficha, perfil, texto, tipo, recibido, esperando, tomada, tocada in filas:
+        ultimo_en = max(recibido, tocada) if tocada else recibido
+        lista.append(
+            {
+                "telefono": tel,
+                "nombre": _nombre_visible(ficha, perfil),
+                "vista_previa": (texto or "").strip() or _marca(tipo),
+                "ultimo_en": ultimo_en.isoformat(),
+                "sin_contestar": esperando,
+                "tomada_por": tomada,
+                # La precedencia importa: una conversación tomada en la que entran mensajes
+                # cumple `relevo` y `esperando` a la vez, y lo que hay que decir es que ya hay
+                # alguien encima, no que nadie contesta.
+                "estado": (
+                    "relevo"
+                    if tomada
+                    else "esperando"
+                    if esperando
+                    else "activa"
+                    if ultimo_en >= ventana
+                    else "cerrada"
+                ),
+            }
+        )
+    return lista
+
+
+def hilo(conn, telefono: str, *, limite: int = 60) -> list[dict[str, Any]]:
+    """Lo que se dijeron los tres, en orden. SOLO LECTURA.
+
+    Modelado sobre `persistencia.transcripcion` --que hace esto mismo para volcarlo en el
+    hilo de Telegram-- y con una voz más: la del doctor, que desde la migración 026 sí se
+    guarda. Lo frágil, el desempaquetado del formato del SDK, NO se duplica: se llama a
+    `persistencia.texto_de_daniela`, para que el día que suba la versión haya un solo sitio
+    que arreglar.
+
+    El corte va por el FINAL. Lo que hace falta para entender qué está pasando es lo último
+    que se dijeron, no cómo empezó todo hace dos meses.
+    """
+    lineas: list[dict[str, Any]] = []
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT texto, tipo, recibido_en FROM mensajes_entrantes"
+            " WHERE telefono = %s ORDER BY recibido_en DESC LIMIT %s",
+            (telefono, limite),
+        )
+        for texto, tipo, cuando in cur.fetchall():
+            lineas.append(
+                {
+                    "quien": "paciente",
+                    "autor": None,
+                    "texto": (texto or "").strip() or _marca(tipo),
+                    "cuando": cuando,
+                    "fallo": None,
+                }
+            )
+
+        # `created_at` es TIMESTAMP **sin zona** --lo fija el SDK, no nosotros: no negociable
+        # 10--, y todo lo demás del esquema es TIMESTAMPTZ. Sin el `AT TIME ZONE` las dos
+        # mitades no se pueden ordenar juntas y Python revienta con TypeError.
+        #
+        # Se piden CUATRO veces el límite porque un item del historial NO es un mensaje: una
+        # llamada a tool y su resultado son dos filas más que no dicen nada en voz alta. Pedir
+        # `limite` filas devolvería un puñado de frases.
+        cur.execute(
+            "SELECT m.message_data, m.created_at AT TIME ZONE 'UTC'"
+            "  FROM agent_messages m"
+            " WHERE m.session_id IN ("
+            "        SELECT id::text FROM conversaciones WHERE telefono = %s)"
+            " ORDER BY m.created_at DESC LIMIT %s",
+            (telefono, limite * 4),
+        )
+        for crudo, cuando in cur.fetchall():
+            dicho = persistencia.texto_de_daniela(crudo)
+            if dicho:
+                lineas.append(
+                    {
+                        "quien": "daniela",
+                        "autor": None,
+                        "texto": dicho,
+                        "cuando": cuando,
+                        "fallo": None,
+                    }
+                )
+
+    for fila in persistencia.mensajes_del_doctor(conn, telefono, limite=limite):
+        lineas.append(
+            {
+                "quien": "doctor",
+                "autor": fila["autor"],
+                "texto": fila["texto"],
+                "cuando": fila["cuando"],
+                "fallo": fila["fallo"],
+            }
+        )
+
+    lineas.sort(key=lambda l: l["cuando"])
+    return [
+        {**linea, "cuando": linea["cuando"].isoformat()} for linea in lineas[-limite:]
+    ]
+
+
+def puede_escribir(conn, telefono: str, *, ahora: datetime) -> dict[str, Any]:
+    """Si WhatsApp todavía acepta texto libre hacia ese número, y cuántas horas han pasado.
+
+    Sin esto, el botón «Enviar» del panel fallaría con un error de la Graph API (131047) que
+    no le dice nada a quien lo lee, después de haber escrito el mensaje. Es más honesto
+    apagar la caja y decir por qué.
+
+    Sin ningún mensaje del paciente NUNCA se puede escribir: la ventana la abre él, y un
+    número al que nadie escribió jamás no tiene ventana abierta, no una de 0 horas.
+    """
+    ultimo = persistencia.ultimo_mensaje_del_paciente(conn, telefono)
+    if ultimo is None:
+        return {"puede": False, "horas": None}
+    horas = (ahora - ultimo).total_seconds() / 3600
+    return {"puede": horas < VENTANA_RESPUESTA_HORAS, "horas": round(horas, 1)}
