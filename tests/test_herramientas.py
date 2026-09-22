@@ -111,6 +111,158 @@ def test_si_falla_la_disponibilidad_se_prohibe_ofrecer_horarios():
 
 
 # ==========================================================================================
+# Los tres respaldos de la búsqueda: encontrar lo aprobado, sin inventar nada
+# ==========================================================================================
+#
+# El defecto que cierran, medido el 22/09/2026 en producción: «¿qué vale la consulta?» acabó
+# en «lo estoy confirmando con el equipo» y en DOS escalamientos `dato_faltante` al doctor,
+# con el precio de la valoración aprobado y cargado desde siempre en `_general`/`valoracion`.
+# Daniela preguntó `valoracion`/`precio`, que desde la 020 es una clave de tratamiento válida
+# y no tiene ni una ficha.
+#
+# La invariante que estas pruebas protegen NO es «encuentra más cosas»: es que encontrar más
+# no puede significar inventar. Por eso la última de la tanda es la de endodoncia.
+
+
+def _base_falsa_de(fichas: dict[tuple[str, str], str]):
+    """Un doble de `persistencia.consultar_conocimiento` sobre un diccionario de fichas.
+
+    Respeta las dos formas de llamarla --con concepto y sin él-- porque la diferencia entre
+    «esta ficha no está» y «este tratamiento no tiene ninguna» es lo que decide cuál de los
+    respaldos entra.
+    """
+
+    def _consultar(conn, tratamiento, concepto=None):
+        if concepto:
+            filas = [(c, t) for (tr, c), t in fichas.items()
+                     if tr == tratamiento and c == concepto]
+        else:
+            filas = [(c, t) for (tr, c), t in fichas.items() if tr == tratamiento]
+        if not filas:
+            que = f"«{concepto}» de {tratamiento}" if concepto else f"«{tratamiento}»"
+            return persistencia.SIN_DATO.format(que=que)
+        return "\n\n".join(f"[{c.upper()}] {t}" for c, t in sorted(filas))
+
+    return _consultar
+
+
+VALORACION = (
+    "La valoración tiene un valor de $40.000, y ese valor se abona al tratamiento que el "
+    "paciente necesite y se realice después."
+)
+
+
+def _preguntar(monkeypatch, fichas, tratamiento, concepto):
+    ctx = contexto()
+
+    async def _corre(_ctx, trabajo):
+        return trabajo(object())
+
+    monkeypatch.setattr(persistencia, "consultar_conocimiento", _base_falsa_de(fichas))
+    monkeypatch.setattr(h, "_con_base", _corre)
+    return ctx, asyncio.run(h._consultar_base_conocimiento(ctx, tratamiento, concepto))
+
+
+def test_el_precio_de_la_valoracion_se_encuentra_aunque_se_pregunte_por_su_clave(monkeypatch):
+    """`valoracion`/`precio` -> `_general`/`valoracion`. El caso medido, tal cual.
+
+    Antes de esto: SIN DATO DOCUMENTADO, «lo confirmo con el equipo» y un escalamiento por
+    un dato que MaxiCare tenía escrito.
+    """
+    ctx, texto = _preguntar(
+        monkeypatch,
+        {("_general", "valoracion"): VALORACION, ("cordales", "precio"): "Una cordal $300.000."},
+        "valoracion",
+        "precio",
+    )
+
+    assert "$40.000" in texto
+    assert "SIN DATO" not in texto
+    assert "40000" in ctx.turno.cifras_autorizadas, (
+        "sin autorizar la cifra, `sin_cifra_no_documentada` bloquea la respuesta entera y "
+        "el paciente recibe «te escribe el doctor»"
+    )
+
+
+def test_el_respaldo_que_contesta_NO_borra_el_hueco_de_la_medicion(monkeypatch):
+    """Que el doctor deje de ser interrumpido no significa que el hueco no exista.
+
+    La señal sale de la consulta EXACTA y de ninguna otra, así que el informe de «sin
+    resolver» sigue viendo `falta_dato:valoracion:precio` y alguien puede decidir crearle su
+    ficha. Taparlo también para la medición es cómo un hueco se vuelve invisible.
+    """
+    ctx, _ = _preguntar(
+        monkeypatch, {("_general", "valoracion"): VALORACION}, "valoracion", "precio"
+    )
+
+    assert [(s.tratamiento, s.concepto, s.hubo_dato) for s in ctx.turno.senales] == [
+        ("valoracion", "precio", False)
+    ]
+
+
+def test_lo_aprobado_como_general_contesta_la_pregunta_hecha_sobre_un_tratamiento(monkeypatch):
+    """`cordales`/`valoracion` -> `_general`/`valoracion`, y no la ficha de cordales.
+
+    Es la regla que pidió MaxiCare el 22/09/2026: los $40.000 de la valoración aplican a
+    CUALQUIER tratamiento y se abonan a todos. Un hecho general contesta igual de bien la
+    pregunta hecha sobre uno, y por eso gana a volcar la ficha entera del tratamiento --que
+    es mucho texto sin la única frase que se preguntó--.
+    """
+    _, texto = _preguntar(
+        monkeypatch,
+        {
+            ("_general", "valoracion"): VALORACION,
+            ("cordales", "precio"): "Una cordal $300.000.",
+            ("cordales", "duracion"): "45 minutos.",
+        },
+        "cordales",
+        "valoracion",
+    )
+
+    assert "$40.000" in texto
+    assert "$300.000" not in texto
+
+
+def test_la_ficha_entera_sigue_siendo_el_respaldo_cuando_lo_general_no_sabe(monkeypatch):
+    """El respaldo que ya existía no se pierde por añadir los otros dos."""
+    _, texto = _preguntar(
+        monkeypatch,
+        {("ortodoncia", "precio"): "Desde $3.500.000.", ("_general", "sede"): "Transversal 57."},
+        "ortodoncia",
+        "cuota_mensual",
+    )
+
+    assert "$3.500.000" in texto
+    assert "Transversal" not in texto, "el respaldo por concepto no debe colar lo que no se pidió"
+
+
+def test_endodoncia_sigue_MUDA_con_los_tres_respaldos_puestos(monkeypatch):
+    """La invariante que no se puede perder al ampliar la búsqueda.
+
+    La sección 2.12 del documento maestro dice que endodoncia y prótesis no tienen precio
+    documentado y que no debe publicarse ninguna cifra. Buscar en más sitios no puede acabar
+    encontrando algo donde MaxiCare decidió que no hay nada: los tres respaldos devuelven
+    filas aprobadas o no devuelven nada.
+    """
+    _, texto = _preguntar(
+        monkeypatch,
+        {
+            ("_general", "valoracion"): VALORACION,
+            ("_general", "politica_precios"): "Informar únicamente las tarifas del catálogo.",
+            ("cordales", "precio"): "Una cordal $300.000.",
+        },
+        "endodoncia",
+        "precio",
+    )
+
+    assert texto.startswith("SIN DATO DOCUMENTADO")
+    assert "PROHIBIDO estimar" in texto
+    assert not re.search(r"\d", texto.split("PROHIBIDO")[0].replace("MaxiCare", "")), (
+        f"se coló una cifra en la respuesta de un tratamiento sin precio: {texto}"
+    )
+
+
+# ==========================================================================================
 # La rejilla de horarios -- lógica pura
 # ==========================================================================================
 

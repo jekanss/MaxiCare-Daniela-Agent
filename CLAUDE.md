@@ -340,6 +340,25 @@ una —qué se midió, qué costó— está en la regla que cubre ese archivo.
    volcado que recibe el doctor al TOMAR la conversación se las comía enteras** --filtraba
    `texto IS NOT NULL`--, así que entraba a conversar sin saber que el paciente había hablado.
 
+30. **La búsqueda de la base de conocimiento tiene CUATRO pasos, y `_general` contesta por
+   cualquier tratamiento.** Exacto `(tratamiento, concepto)` → `(_general, concepto)` → la
+   ficha ENTERA del tratamiento → `(_general, tratamiento)`. **Ninguno inventa**: los cuatro
+   devuelven filas que MaxiCare aprobó o el `SIN DATO DOCUMENTADO` de siempre, y endodoncia y
+   prótesis siguen mudas con los cuatro puestos —sección 2.12 del documento maestro, y lo fija
+   `test_endodoncia_sigue_MUDA_con_los_tres_respaldos_puestos`—. Los dos nuevos llegaron el
+   22/09/2026 tras medir lo que costaba no tenerlos: «¿qué vale la consulta?» acabó en «lo
+   estoy confirmando con el equipo» y en DOS escalamientos `dato_faltante` al doctor (17:16 y
+   21:04) por un precio aprobado y cargado desde siempre en `_general`/`valoracion`. Daniela
+   preguntó `valoracion`/`precio` cuatro veces: desde la 020 `valoracion` ES clave de
+   tratamiento y **no tiene ni una ficha**, así que el único respaldo que había —la ficha
+   entera— devolvía vacío. **El precio de la valoración vive en UNA sola fila a propósito**:
+   aplica a cualquier tratamiento y se abona a todos, y copiarlo bajo `valoracion` pondría el
+   mismo precio en dos sitios que la clínica edita por separado desde el panel. **Y la señal
+   de «sin resolver» sale de la consulta EXACTA y de ninguna otra**: que un respaldo conteste
+   no borra el hueco de vocabulario, solo evita que le cueste una interrupción al doctor. Una
+   clave sin NADA que decir no se ve --ni error, ni log, ni prueba en rojo--, así que la
+   vigila el bloque 11 de `inicializar_base.py`, que **avisa y no falla**.
+
 # Dónde está el resto
 
 El detalle de cada área se carga solo cuando tocas sus archivos:

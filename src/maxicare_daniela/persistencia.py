@@ -66,6 +66,13 @@ SIN_DATO = (
 #: escalada en vez de agendada.
 NOMBRE_PENDIENTE = "PENDIENTE"
 
+#: El «tratamiento» bajo el que vive lo que NO es de un tratamiento: sede, horario, medios de
+#: pago, financiación, urgencias... y el valor de la valoración. No es un nombre cualquiera:
+#: es el contrato que hace posible el respaldo de `herramientas._consultar_base_conocimiento`
+#: --lo aprobado aquí aplica a todos los tratamientos, así que puede contestar una pregunta
+#: hecha sobre cualquiera de ellos--.
+TRATAMIENTO_GENERAL = "_general"
+
 #: Lo que se antepone a un dato que existe pero que MaxiCare todavía no aprobó (sección 4
 #: del documento maestro).
 PENDIENTE_APROBACION = (

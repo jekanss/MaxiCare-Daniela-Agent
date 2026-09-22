@@ -99,6 +99,18 @@ TABLAS_DEL_PERIMETRO = ("consumo_modelo", "cuotas_avisadas", "alertas_gasto")
 #: su propia comprobación-- por una tercera puerta.
 COLUMNA_DE_LA_027 = ("mensajes_entrantes", "transcripcion")
 
+#: Las claves de `tratamientos` que NO tienen ni una ficha de conocimiento a propósito, y por
+#: las que el bloque 11 no pregunta.
+#:
+#: `endodoncia` y `protesis`: la sección 2.12 del documento maestro dice que no hay precio,
+#: especialista, inclusiones ni garantías documentadas, y que no debe publicarse ninguna
+#: cifra. La forma de cumplirlo NO es una regla en el prompt: es que la fila no exista, para
+#: que salga `SIN DATO DOCUMENTADO`. Ver `.claude/rules/base-conocimiento.md`.
+#:
+#: `no_identificado`: no es un tratamiento. Es lo que usa el SISTEMA cuando no sabe de qué va
+#: un archivo. Que no se pueda hablar de él es lo correcto.
+MUDOS_A_PROPOSITO = ("endodoncia", "protesis", "no_identificado")
+
 
 def _enmascarar(url: str) -> str:
     """Deja ver a qué host se conectó, nunca las credenciales."""
@@ -434,10 +446,66 @@ def main() -> int:
             if not hay_columna:
                 return 1
 
+        # ---------------------------------------------------------------------------
+        # 11. Ninguna clave de tratamiento se queda MUDA.
+        #
+        #     Una clave sobre la que Daniela no puede decir absolutamente nada no rompe
+        #     nada: contesta «lo estoy confirmando con el equipo» y escala. Por eso no
+        #     se ve. El 22/09/2026 le costó DOS interrupciones al doctor en cuatro horas
+        #     --escalamientos `dato_faltante` de las 17:16 y las 21:04-- por el valor de
+        #     la valoración, que MaxiCare tenía escrito y aprobado desde siempre.
+        #
+        #     `valoracion` era clave de tratamiento desde la 020 y no tenía ni una ficha.
+        #     Nadie lo vio en seis días, porque no hay nada que mirar: ni un error, ni un
+        #     log, ni una prueba en rojo. Solo un doctor contestando algo que la clínica
+        #     ya había contestado.
+        #
+        #     ADVERTENCIA y no FALLA, a diferencia de los diez bloques de arriba: aquellos
+        #     vigilan el esquema --si faltan, el sistema está roto-- y esto es contenido
+        #     que la clínica edita desde el panel. Un tratamiento nuevo creado un martes,
+        #     con su ficha pendiente para el miércoles, no puede tumbar un despliegue.
+        # ---------------------------------------------------------------------------
+        print()
+        print("=" * 78)
+        print("VERIFICACIÓN DEL VOCABULARIO (que ninguna clave se quede muda)")
+        print("=" * 78)
+
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT t.clave
+                  FROM tratamientos t
+                 WHERE t.activo
+                   AND NOT EXISTS (SELECT 1 FROM base_conocimiento b
+                                    WHERE b.tratamiento = t.clave)
+                   AND NOT EXISTS (SELECT 1 FROM base_conocimiento g
+                                    WHERE g.tratamiento = %s AND g.concepto = t.clave)
+                 ORDER BY t.clave
+                """,
+                (persistencia.TRATAMIENTO_GENERAL,),
+            )
+            # El respaldo 3 de `herramientas._consultar_base_conocimiento` alcanza
+            # `_general`/<clave>, así que una clave con eso puesto NO está muda: es
+            # exactamente lo que salva hoy a `valoracion`. La consulta pregunta por las dos
+            # puertas porque el código entra por las dos.
+            mudas = [f[0] for f in cur.fetchall() if f[0] not in MUDOS_A_PROPOSITO]
+
+        if mudas:
+            print(f"\n  ADVERTENCIA: {len(mudas)} clave(s) sin una sola ficha de "
+                  "conocimiento, ni propia ni en _general:")
+            for clave in mudas:
+                print(f"    - {clave}: Daniela no puede decir NADA sobre esto. Cada "
+                      "pregunta acaba en «lo confirmo con el equipo» y un escalamiento.")
+            print("  Se arregla en la pantalla de Tratamientos del panel, o en "
+                  "datos/base_conocimiento.json + este script.")
+        else:
+            print("\n  OK   toda clave activa tiene con qué contestar "
+                  f"(salvo {', '.join(MUDOS_A_PROPOSITO)}, mudas a propósito)")
+
     print("\n" + "=" * 78)
     print("FASE 1 — segunda mitad: OK  ·  FASE 7 — el historial: OK  ·  019 — contacto y "
           "consentimiento: OK  ·  021 — la marca de asistencia: OK  ·  022 — el perímetro: "
-          "OK  ·  026/027 — el hilo completo: OK")
+          "OK  ·  026/027 — el hilo completo: OK  ·  vocabulario: revisado arriba")
     print("=" * 78)
     return 0
 

@@ -178,6 +178,11 @@ La valoración se la explicas por la decisión que a ÉL le importa —«ahí el
 si hay alguna alternativa para conservar el diente o si la extracción es lo indicado»—. Eso \
 dice para qué sirve la cita sin prometerle cómo termina.
 
+Y cuando le OFREZCAS la valoración, dile lo que cuesta y que se le abona al tratamiento, sin \
+que te lo pregunte: es la objeción que viene detrás, y dejarla para después hace que parezca \
+un costo escondido. El dato está en `_general` / `valoracion` y lo consultas como cualquier \
+otro. Una vez, cuando ofreces la cita —no en cada mensaje.
+
 Y la AGENDAS. Que todavía no se sepa de qué es el tratamiento no es motivo para no dar \
 cita: es exactamente para lo que existe la valoración, y tienes la clave `valoracion` \
 para reservarla. No hace falta que el paciente nombre un tratamiento de la lista, ni que \

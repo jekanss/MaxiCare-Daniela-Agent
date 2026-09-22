@@ -634,6 +634,48 @@ def test_un_tratamiento_sin_precio_documentado_no_devuelve_una_cifra(esquema, co
         assert "PROHIBIDO estimar" in texto
 
 
+def test_la_valoracion_contesta_aunque_no_tenga_NI_UNA_ficha_propia(esquema, contexto_de):
+    """`valoracion` es clave de tratamiento desde la 020 y no tiene ficha: la respuesta vive
+    en `_general`/`valoracion`, y el respaldo 3 la alcanza.
+
+    Va contra la base sembrada de verdad --tabla real, SQL real, semilla real-- porque el
+    defecto que cierra no estaba en la lógica sino en dónde se buscaba. Offline se puede
+    doblar cualquier cosa; lo que hacía falta comprobar es que el dato ESTÁ donde el código
+    ahora lo busca.
+
+    Sin cifras clavadas a propósito: `datos/base_conocimiento.json` no se versiona y un clon
+    arranca con el ejemplo, cuyo contenido es un marcador. Lo que esta prueba fija es que se
+    encuentra algo aprobado, no cuánto cuesta.
+    """
+    ctx = contexto_de("573001110009")
+
+    with persistencia.conectar(esquema) as conn:
+        persistencia.cargar_base_conocimiento(conn, persistencia.cargar_semilla())
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT count(*) FROM base_conocimiento WHERE tratamiento = 'valoracion'"
+            )
+            assert cur.fetchone()[0] == 0, (
+                "si alguien le creó fichas propias a la valoración, esta prueba dejó de "
+                "probar el respaldo -- pásala a comprobar la ficha nueva"
+            )
+
+    texto = asyncio.run(h._consultar_base_conocimiento(ctx, "valoracion", "precio"))
+
+    assert "SIN DATO DOCUMENTADO" not in texto, (
+        "vuelve el escalamiento `dato_faltante` del 22/09/2026 por un dato aprobado"
+    )
+    assert "[VALORACION]" in texto
+
+    # Y por la otra puerta: preguntando por la valoración desde un tratamiento cualquiera,
+    # que es como llega la pregunta de verdad («¿qué vale la consulta para las cordales?»).
+    desde_cordales = asyncio.run(
+        h._consultar_base_conocimiento(ctx, "cordales", "valoracion")
+    )
+    assert "SIN DATO DOCUMENTADO" not in desde_cordales
+    assert "[VALORACION]" in desde_cordales
+
+
 def test_la_disponibilidad_no_ofrece_un_bloque_lleno(esquema, contexto_de):
     inicio = _hora_libre(6)
     ctx = contexto_de("573001110006")

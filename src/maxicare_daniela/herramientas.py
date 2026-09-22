@@ -504,8 +504,43 @@ async def _consultar_base_conocimiento(
     # conexión-- queda vacía, y la señal cae al criterio de siempre.
     hubo_dato_exacto: list[bool] = []
 
+    def hay_dato(texto: str) -> bool:
+        return not texto.startswith("SIN DATO DOCUMENTADO")
+
     def trabajo(conn) -> str:
+        # ------------------------------------------------------------------------------
+        # La consulta EXACTA, y los tres respaldos.
+        #
+        # Ninguno de los tres inventa nada: los cuatro devuelven filas que MaxiCare aprobó,
+        # y si ninguna existe sale el literal `SIN DATO DOCUMENTADO` de siempre. Lo que
+        # cambian es el ALCANCE de la búsqueda, porque el modelo tiene que acertar el par
+        # (tratamiento, concepto) con el que se guardó el dato, y ese par es texto libre.
+        #
+        # EL DEFECTO QUE CIERRAN LOS DOS NUEVOS, medido el 22/09/2026 en producción:
+        #
+        #   «¿En qué punto se encuentran y qué vale la consulta?»
+        #   -> "El valor de la valoración lo estoy confirmando con el equipo."
+        #   -> escalamiento `dato_faltante` al General, a las 21:04. Y otro a las 17:16.
+        #
+        # El valor de la valoración está aprobado y cargado desde siempre, en
+        # `_general`/`valoracion`: «$40.000, y ese valor se abona al tratamiento». Daniela
+        # preguntó `valoracion`/`precio` --cuatro veces, ahí está la huella
+        # `falta_dato:valoracion:precio`-- porque desde la 020 `valoracion` ES una clave de
+        # tratamiento con la que agendar. Lo que la 020 no le dio fue una ficha con la que
+        # hablar de ella: `base_conocimiento` no tiene NI UNA fila con ese tratamiento, así
+        # que el respaldo de abajo --el único que había-- devolvía vacío, y `SIN DATO
+        # DOCUMENTADO` le ordena por escrito «dile que lo vas a confirmar con los doctores y
+        # escala». Obedeció. Se interrumpió al doctor dos veces por un dato que la clínica
+        # tenía escrito y aprobado.
+        #
+        # Por qué la solución es buscar y no duplicar la fila bajo `valoracion`: el valor de
+        # la valoración aplica a CUALQUIER tratamiento --es abonable a todos--, así que es un
+        # hecho general y no uno de la valoración. Copiarlo a una segunda fila pondría el
+        # mismo precio en dos sitios que la clínica edita por separado desde el panel, y un
+        # precio en dos sitios es un precio que se desincroniza.
+        # ------------------------------------------------------------------------------
         texto = persistencia.consultar_conocimiento(conn, tratamiento, pregunta)
+
         # ESTO, y no el texto de abajo, es lo que alimenta la señal de «sin resolver». El
         # respaldo tapa el hueco para el modelo --a propósito-- pero taparlo también para la
         # medición hacía `FALTA_DATO` inalcanzable: los doce tratamientos de la base tienen
@@ -513,12 +548,48 @@ async def _consultar_base_conocimiento(
         # invisible y lo único que llegaba a producir caso era un tratamiento entero vacío.
         # El ejemplo bandera del informe --«falta el precio de ORTODONCIA, 7 veces, y 5 de
         # los 7 preguntan por la cuota»-- es justo un hueco de concepto.
-        hubo_dato_exacto.append(not texto.startswith("SIN DATO DOCUMENTADO"))
-        if texto.startswith("SIN DATO DOCUMENTADO") and pregunta:
-            # El concepto exacto no existía. Antes de declarar que no hay dato, se mira si
-            # el tratamiento tiene algo documentado: devolver más información aprobada es
-            # seguro; lo que nunca se hace es rellenar el hueco con una estimación.
-            texto = persistencia.consultar_conocimiento(conn, tratamiento)
+        #
+        # Sigue saliendo de la consulta EXACTA y de ninguna otra: que un respaldo conteste no
+        # borra el hueco de vocabulario, solo evita que le cueste un escalamiento al doctor.
+        hubo_dato_exacto.append(hay_dato(texto))
+        if hay_dato(texto):
+            return texto
+
+        general = tratamiento == persistencia.TRATAMIENTO_GENERAL
+
+        # Respaldo 1 -- lo que MaxiCare aprobó como GENERAL sobre ese mismo concepto. Es
+        # seguro por definición: una fila de `_general` es la que aplica a todos los
+        # tratamientos, así que contesta igual de bien la pregunta hecha sobre uno.
+        # Cubre `cordales`/`valoracion` e `implantes`/`financiacion` --«solo para
+        # ortodoncia», que es justo lo que no se puede dejar de decir--.
+        if pregunta and not general:
+            respaldo = persistencia.consultar_conocimiento(
+                conn, persistencia.TRATAMIENTO_GENERAL, pregunta
+            )
+            if hay_dato(respaldo):
+                return respaldo
+
+        # Respaldo 2 -- el que ya existía: la ficha entera del tratamiento. El concepto
+        # exacto no estaba; devolver más información aprobada del mismo tratamiento es
+        # seguro, y lo que nunca se hace es rellenar el hueco con una estimación.
+        if pregunta:
+            entera = persistencia.consultar_conocimiento(conn, tratamiento)
+            if hay_dato(entera):
+                return entera
+
+        # Respaldo 3 -- el tratamiento no tiene NI UNA ficha, y `_general` sí sabe algo de
+        # él por su nombre. Ese es el caso de `valoracion`. La condición «ni una ficha» no
+        # cuesta una consulta extra: es exactamente lo que acaba de decir el respaldo 2 --o
+        # la consulta exacta, cuando el modelo no mandó concepto--.
+        if not general:
+            respaldo = persistencia.consultar_conocimiento(
+                conn, persistencia.TRATAMIENTO_GENERAL, tratamiento
+            )
+            if hay_dato(respaldo):
+                return respaldo
+
+        # Los cuatro vacíos. Vuelve el `SIN DATO DOCUMENTADO` de la consulta exacta, que es
+        # el que nombra lo que el paciente preguntó de verdad.
         return texto
 
     texto = await _con_base(ctx, trabajo)
