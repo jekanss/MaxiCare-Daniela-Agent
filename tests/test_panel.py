@@ -5,6 +5,7 @@ Las que tocan Neon llevan `@pytest.mark.neon` y escriben en el esquema `pruebas`
 
 from __future__ import annotations
 
+import itertools
 import json
 import os
 import re
@@ -39,8 +40,24 @@ def _url_de_pruebas() -> str:
     return f"{directa}{sep}options=-csearch_path%3Dpruebas"
 
 
-@pytest.fixture
-def conn():
+@pytest.fixture(scope="module")
+def esquema() -> str:
+    """Crea el esquema `pruebas` y le aplica las migraciones UNA vez por archivo.
+
+    **Por archivo y no por prueba, y la diferencia se midió**: contra Neon desde Bogotá,
+    `aplicar_esquema` --que reaplica las 28 migraciones-- cuesta 2,6 segundos, y abrir la
+    conexión otros 0,6. Colgado de la fixture de cada prueba eso eran 42 × 2,6 = casi dos
+    minutos de reaplicar migraciones que ya estaban aplicadas, en el único archivo de Neon
+    del proyecto que lo hacía así: los otros nueve ya usaban `scope="module"`.
+
+    Lo que NO se sube a `module` es la conexión, que sigue siendo nueva por prueba (ver
+    `conn`). Ahorra 0,6 s por prueba y cuesta el aislamiento: una prueba que deja la
+    transacción abortada envenenaría a las siguientes, y varias de aquí provocan
+    `CheckViolation` a propósito y se recuperan con `rollback`.
+
+    Devuelve la URL en vez de la conexión para que quede claro que esta fixture no es de
+    donde se lee: es la garantía de que hay algo que leer.
+    """
     # `@pytest.mark.neon` por sí solo no salta nada: en este proyecto el corte real de
     # `uv run pytest -q` lo hace cada fixture, revisando la variable a mano (igual que
     # `test_tools_neon.py::url`). Sin este chequeo, la suite offline intentaría conectarse
@@ -51,11 +68,25 @@ def conn():
     # que hace lo mismo dentro de su propia fixture): se carga aquí, no en el cuerpo del
     # módulo, para no fijarle el entorno a las demás pruebas antes de que corran.
     cargar_dotenv()
-    with psycopg.connect(_url_de_pruebas()) as c:
+    url = _url_de_pruebas()
+    with psycopg.connect(url) as c:
         with c.cursor() as cur:
             cur.execute("CREATE SCHEMA IF NOT EXISTS pruebas")
         c.commit()
         persistencia.aplicar_esquema(c)
+    return url
+
+
+@pytest.fixture
+def conn(esquema: str):
+    """Una conexión NUEVA por prueba, sobre el esquema que ya dejó listo `esquema`.
+
+    El esquema NO se borra al terminar, y eso es deliberado: `test_tools_neon.py` comparte
+    este mismo `pruebas` y lo recrea con su propio `DROP SCHEMA ... CASCADE`. Meter aquí
+    otro sería lento y pelearía con el suyo. Lo que ensucia cada prueba lo limpia cada
+    prueba (ver el `finally` de `test_listar_tratamientos_cuenta_lo_que_falta`).
+    """
+    with psycopg.connect(esquema) as c:
         yield c
 
 
@@ -2371,6 +2402,11 @@ def test_cerrar_sin_cita_ni_siquiera_mira_el_catalogo(monkeypatch):
 # agenda de nadie, y es exactamente lo que el esquema hacía obligatorio antes de la 028.
 
 
+#: Una hora distinta para cada llamada a `_un_hilo_completo` dentro de la misma corrida.
+#: El porqué está en el comentario largo de ahí dentro.
+_HORA_DEL_HILO = itertools.count()
+
+
 def _un_hilo_completo(conn, tel: str) -> tuple[str, str]:
     """Una conversación con las tres voces, una cita futura con cupo, y ficha de paciente.
 
@@ -2388,17 +2424,28 @@ def _un_hilo_completo(conn, tel: str) -> tuple[str, str]:
         texto="yo le respondo",
         wamid=f"w-{uuid.uuid4()}",
     )
-    inicio = _AHORA_CONVERSACIONES + timedelta(days=3)
+    # Una hora PROPIA por llamada, y vaciada antes de pedir el cupo. Las dos cosas hacen
+    # falta, y la de arriba costó una tarde: el esquema `pruebas` NO se borra entre
+    # corridas, así que con una hora fija cada corrida dejaba tres reservas más ahí, y
+    # `reservas.cupo_num` está acotado por la 001 con `CHECK (cupo_num BETWEEN 1 AND 10)`.
+    # A la cuarta corrida, `CheckViolation` en las tres pruebas que usan este helper --y
+    # verde al correr el archivo solo, porque `test_tools_neon.py` entra con un
+    # `DROP SCHEMA pruebas CASCADE` y ponía el contador a cero--. Subir la `capacidad` no
+    # servía de nada: el tope que se alcanzaba era el del CHECK, no el de la configuración.
+    #
+    # El contador da una hora distinta a cada prueba DENTRO de una corrida; el DELETE la
+    # devuelve limpia ENTRE corridas. Con las dos, la capacidad vuelve a ser la de verdad.
+    inicio = _AHORA_CONVERSACIONES + timedelta(days=3, hours=next(_HORA_DEL_HILO))
+    with conn.cursor() as cur:
+        cur.execute("DELETE FROM reservas WHERE inicio = %s", (inicio,))
     cupo = persistencia.tomar_cupo(
         conn,
         inicio=inicio,
-        # Capacidad alta a proposito: el esquema `pruebas` no se borra entre corridas y
-        # con la capacidad real esta hora se llena a la segunda vez. Lo que se prueba
-        # aqui es que el cupo SOBREVIVA al borrado, no el reparto de cupos.
-        capacidad=1000,
+        capacidad=2,
         clave_idempotencia=f"prueba-{uuid.uuid4()}",
         conversacion_id=cid,
     )
+    assert cupo is not None, "la siembra no consiguió cupo: la prueba no probaría nada"
     id_cita = str(uuid.uuid4())
     with conn.cursor() as cur:
         cur.execute(

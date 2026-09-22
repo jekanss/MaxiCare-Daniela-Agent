@@ -8,9 +8,36 @@ paths:
 ## Las dos suites, y por qué están separadas
 
 ```
-uv run pytest -q                                  offline · ~2 s · SIEMPRE verde
-MAXICARE_PRUEBAS_NEON=1 uv run pytest -q -m neon   contra Neon · ~50 s · bajo demanda
+uv run pytest -q                                  offline · ~45 s · SIEMPRE verde
+MAXICARE_PRUEBAS_NEON=1 uv run pytest -q -m neon   contra Neon · ~17 min · bajo demanda
 ```
+
+**Esos 17 minutos son reales y en su mayoría irreducibles**, así que no se corre la suite
+entera «por si acaso»: se corre EL ARCHIVO que cubre lo que tocaste, y la suite completa una
+sola vez, antes de desplegar. Lo medido el 22/09/2026 contra Neon desde Bogotá:
+
+| | |
+|---|---|
+| Abrir una conexión | 627 ms |
+| Una consulta cualquiera | **87 ms** |
+| `aplicar_esquema` (reaplica las 28 migraciones) | 2.609 ms |
+
+Los 87 ms por consulta son la distancia física a `us-east-2`, y una prueba que hace veinte
+consultas se va sola a 1,7 s esperando. No hay truco: 248 pruebas contra una base al otro
+lado del continente son un cuarto de hora. **Lo único que se puede hacer es no pagarlo de
+más**, y de ahí la regla de la sección siguiente.
+
+## El esquema se monta UNA vez por archivo, nunca por prueba
+
+Toda fixture que llame a `aplicar_esquema` va con `scope="module"`. Colgarla de la fixture
+de cada prueba son 2,6 s tirados por prueba reaplicando migraciones que ya estaban
+aplicadas: `tests/test_panel.py` lo hacía así --el único de los diez archivos de Neon-- y
+con sus 42 pruebas eso era **la mitad del tiempo del archivo**. Arreglado el 22/09/2026:
+de 190 s a 106 s, sin quitar ni una prueba.
+
+Lo que NO se sube a `module` es la CONEXIÓN. Ahorraría otros 0,6 s por prueba y cuesta el
+aislamiento: varias pruebas provocan un `CheckViolation` a propósito y se recuperan con
+`rollback`, y una transacción abortada compartida envenenaría a las que vengan detrás.
 
 Una prueba que necesita internet es una prueba que alguien acaba saltándose el día que
 tiene prisa. Por eso **lo que toca la base lleva `@pytest.mark.neon`** y se salta sin la
@@ -31,9 +58,34 @@ madrugada. **Seis pruebas en rojo, ninguna hablando de horarios**, y vivieron as
 horas mientras `uv run pytest -q` seguía verde. El mismo defecto se había arreglado ya en
 `scripts/probar_tools.py::hora` el mismo día; aquí no, porque nadie volvió a correr `-m neon`.
 
-**Quien toque la rejilla, la jornada o el reloj corre también `-m neon`.** Tarda tres
-minutos y medio. Los dos helpers cuentan ahora **bloques hábiles**, no horas de reloj: un
-`_hora_libre(20)` no son veinte horas después.
+**Quien toque la rejilla, la jornada o el reloj corre también `-m neon`.** Los dos helpers
+cuentan ahora **bloques hábiles**, no horas de reloj: un `_hora_libre(20)` no son veinte
+horas después.
+
+## El esquema `pruebas` NO se vacía entre corridas, y eso acumula
+
+La trampa que costó una tarde el 22/09/2026. Tres pruebas de `test_panel.py` sembraban su
+cita pidiendo cupo **a la misma hora fija**, y como el esquema sobrevive a la corrida, cada
+pasada dejaba tres reservas más ahí. `reservas.cupo_num` está acotado por la 001 con
+`CHECK (cupo_num BETWEEN 1 AND 10)`, así que a la cuarta pasada: `CheckViolation`.
+
+Lo que lo volvió difícil de ver son dos cosas:
+
+- **Parecía intermitente y no lo era.** Fallaba según cuántas veces se hubiera corrido
+  antes, que es un estado que no se ve en ningún sitio.
+- **Pasaba al correr el archivo solo.** No por aislamiento: porque `test_tools_neon.py`
+  comparte este esquema y entra con un `DROP SCHEMA pruebas CASCADE`, así que la suite
+  completa dejaba el contador a cero para la siguiente. Eso mandó el diagnóstico hacia
+  «interferencia entre archivos», que era exactamente al revés.
+
+Y el primer arreglo fue el equivocado: subir la `capacidad` que se le pasa a `tomar_cupo`.
+No servía de nada, porque el tope que se alcanzaba era el del CHECK y no el de la
+configuración. **Un tope que salta a la cuarta corrida no se sube: se deja de llenar.**
+
+La regla: **una prueba que siembra en una hora, una clave o un identificador FIJO está
+acumulando.** O se los inventa únicos por corrida, o limpia lo suyo antes de sembrar. El
+helper hace las dos: un contador le da una hora propia a cada prueba dentro de la corrida, y
+un `DELETE` la devuelve limpia entre corridas.
 
 ## Una fecha clavada envejece, y a la tercera le tocó a la suite offline
 
