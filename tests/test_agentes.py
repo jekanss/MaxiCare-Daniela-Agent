@@ -328,11 +328,30 @@ def test_la_oferta_de_horarios_no_se_queda_en_la_manana():
     Con la tool arreglada la lista ya abarca el día; si el modelo sigue tomando las tres
     primeras, el paciente sigue sin enterarse de que hay tarde. Y al revés importa igual:
     quien YA pidió «en la mañana» no quiere que le ofrezcan las cuatro.
+
+    El 22/09/2026 MaxiCare pidió DOS de cada franja en vez de una, y al revisarlo apareció
+    lo que faltaba: el modelo ve una MUESTRA de seis bloques repartidos por `_repartidas`,
+    nunca el total, así que «tengo estos espacios» le hace creer al paciente que la clínica
+    está llena cuando puede estar casi vacía. Visto en una conversación real de ese día: se
+    ofreció miércoles y sábado, y el paciente no tenía cómo saber si el jueves y el viernes
+    estaban libres.
+
+    Por eso son TRES reglas y no una. La oferta se presenta como lo más próximo y no como
+    el inventario; y la puerta a otro día va en la MISMA frase, porque un menú cerrado
+    obliga al paciente a rechazar las horas por iniciativa propia, que es donde se cae.
     """
     texto = agentes.INSTRUCCIONES_DANIELA
 
-    assert "ofrécele al menos una de cada" in texto
+    assert "ofrécele DOS de cada una si las hay" in texto
+    assert "no inventes la segunda" in texto, "dos de cada franja SI las hay, no siempre"
     assert "Si él ya pidió una franja, respétala" in texto
+    assert "NUNCA como todo lo que queda" in texto, (
+        "sin esto el modelo ofrece su muestra como si fuera la agenda entera"
+    )
+    assert "Si prefieres otro día u otra jornada" in texto, (
+        "la puerta va en la misma frase de la oferta, no en un turno aparte"
+    )
+    assert "máximo cuatro" in texto, "2+2 son cuatro: con el tope en tres, la regla no cabe"
 
 
 def test_una_confirmacion_no_se_queda_en_el_dato_seco():
