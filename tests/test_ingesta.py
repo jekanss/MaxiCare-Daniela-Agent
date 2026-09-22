@@ -491,6 +491,9 @@ def _sin_base(monkeypatch):
     # docstring de arriba, y que ya hizo caer a
     # `test_el_lector_no_retrasa_la_entrega_del_archivo` con 2.78 s de espera.
     monkeypatch.setattr(mod, "_en_relevo", lambda url, telefono: False)
+    # Y guardar la transcripción (migración 027) tampoco abre conexión: mismo motivo que las
+    # de arriba. La prueba que mide que se guarda la sobrescribe con un capturador.
+    monkeypatch.setattr(mod, "_guardar_transcripcion", lambda url, wamid, texto: None)
 
 
 def _mensaje_con_foto(**cambios):
@@ -1719,6 +1722,84 @@ def test_una_nota_de_voz_ENTENDIDA_no_timbra_en_el_General(monkeypatch):
     assert _mensajes_al_general(tg) == [], (
         "timbro en el General por una nota de voz que Daniela ya contesto"
     )
+
+
+def test_lo_que_se_entendio_se_GUARDA_con_el_wamid_de_su_audio(monkeypatch):
+    """La migracion 027. Este es el unico punto del proyecto donde coexisten las dos cosas.
+
+    Mas adelante la transcripcion viaja suelta hasta el turno --por `Resultado.transcripcion`,
+    luego al bufer, luego a la entrada del modelo-- y ya nadie sabe de que mensaje salio. Sin
+    guardarla aqui, el sistema entiende la nota de voz, la contesta y despues la olvida: en el
+    panel queda «(nota de voz)» sobre algo que si se entendio.
+    """
+    import asyncio
+
+    from maxicare_daniela import ingesta, lectura, transcripcion
+
+    _sin_base(monkeypatch)
+    monkeypatch.setattr(lectura, "asegurar_tema", _devuelve_async(TEMA_DE_ANA))
+    monkeypatch.setattr(
+        transcripcion, "transcribir_y_repartir", _devuelve_async("cuanto vale la limpieza?")
+    )
+    guardadas: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        ingesta,
+        "_guardar_transcripcion",
+        lambda url, wamid, texto: guardadas.append((wamid, texto)),
+    )
+
+    async def corrida():
+        r = await ingesta.procesar_mensaje(
+            _nota_de_voz(),
+            whatsapp=WhatsAppConAudio(),
+            telegram=TelegramConTemas(),
+            database_url="postgresql://x",
+            tema_general=TEMA_GENERAL,
+        )
+        if r.transcripcion is not None:
+            await r.transcripcion
+        return r
+
+    asyncio.run(corrida())
+
+    assert guardadas == [(_nota_de_voz().wamid, "cuanto vale la limpieza?")], (
+        f"no se guardo la transcripcion con su wamid: {guardadas}"
+    )
+
+
+def test_un_audio_que_NO_se_entendio_no_guarda_una_fila_vacia(monkeypatch):
+    """Sin texto no hay nada que guardar, y escribir la cadena vacia seria peor que no
+    escribir: `panel.hilo` la leeria como «se transcribio» y pintaria una burbuja en blanco
+    marcada como transcripcion, que es afirmar que el paciente dijo algo y no decir el que."""
+    import asyncio
+
+    from maxicare_daniela import ingesta, lectura, transcripcion
+
+    _sin_base(monkeypatch)
+    monkeypatch.setattr(lectura, "asegurar_tema", _devuelve_async(TEMA_DE_ANA))
+    monkeypatch.setattr(transcripcion, "transcribir_y_repartir", _devuelve_async(None))
+    guardadas: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        ingesta,
+        "_guardar_transcripcion",
+        lambda url, wamid, texto: guardadas.append((wamid, texto)),
+    )
+
+    async def corrida():
+        r = await ingesta.procesar_mensaje(
+            _nota_de_voz(),
+            whatsapp=WhatsAppConAudio(),
+            telegram=TelegramConTemas(),
+            database_url="postgresql://x",
+            tema_general=TEMA_GENERAL,
+        )
+        if r.transcripcion is not None:
+            await r.transcripcion
+        return r
+
+    asyncio.run(corrida())
+
+    assert guardadas == [], f"se guardo algo sin haber entendido nada: {guardadas}"
 
 
 def test_una_nota_de_voz_que_NO_se_entendio_SI_timbra_y_dice_por_que(monkeypatch):

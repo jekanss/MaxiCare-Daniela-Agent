@@ -329,7 +329,16 @@ una —qué se midió, qué costó— está en la regla que cubre ese archivo.
    timbrazo como un escalamiento, y desde fuera es indistinguible de uno: mismo botón, cero
    filas en `escalamientos`--. Si no se entendió SÍ timbra, con un texto que dice que hay que
    OÍRLA; y sin transcriptor timbra como siempre. Lo decide `_transcribir_con_grupo`, que es el
-   único sitio donde se sabe si hubo texto.
+   único sitio donde se sabe si hubo texto. **Y desde la 027 se GUARDA, en
+   `mensajes_entrantes.transcripcion` y NUNCA en `texto`**: `texto` es lo que el paciente
+   ESCRIBIÓ y esto es lo que DIJO según una máquina, y quien lee una frase clínica tiene
+   derecho a saber de cuál de las dos se fía --«el 46» y «el 40» suenan casi igual--. Se
+   escribe en ese mismo `_transcribir_con_grupo` porque es el único punto donde coexisten el
+   `wamid` y el texto: después la transcripción viaja suelta hasta el turno y ya nadie sabe de
+   qué mensaje salió. Hasta entonces el sistema entendía la nota de voz, la contestaba y la
+   olvidaba: el panel pintaba «(nota de voz)» sobre algo que sí se había entendido, y **el
+   volcado que recibe el doctor al TOMAR la conversación se las comía enteras** --filtraba
+   `texto IS NOT NULL`--, así que entraba a conversar sin saber que el paciente había hablado.
 
 # Dónde está el resto
 

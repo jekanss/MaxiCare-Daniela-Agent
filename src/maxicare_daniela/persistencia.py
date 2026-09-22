@@ -767,10 +767,20 @@ def transcripcion(conn, telefono: str, *, limite: int = 40) -> list[tuple[str, s
     lineas: list[tuple[str, str, Any]] = []
 
     with conn.cursor() as cur:
+        # `coalesce(texto, transcripcion)`, y el orden importa: si un audio trae caption, lo
+        # que el paciente ESCRIBIÓ manda sobre lo que una máquina entendió que dijo.
+        #
+        # Sin la transcripción (migración 027) este filtro se comía las notas de voz enteras:
+        # el doctor que tomaba la conversación entraba sin saber siquiera que el paciente
+        # había hablado, porque un audio no tiene `texto` y el WHERE lo descartaba. Es el
+        # mismo hueco que estrenó esta función --un tema recién creado y vacío-- por otra
+        # puerta, y en el peor sitio: aquí el destinatario es un humano decidiendo.
         cur.execute(
             """
-            SELECT texto, recibido_en FROM mensajes_entrantes
-             WHERE telefono = %(tel)s AND texto IS NOT NULL AND texto <> ''
+            SELECT coalesce(texto, transcripcion), recibido_en FROM mensajes_entrantes
+             WHERE telefono = %(tel)s
+               AND coalesce(texto, transcripcion) IS NOT NULL
+               AND coalesce(texto, transcripcion) <> ''
             """,
             parametros,
         )
@@ -1201,6 +1211,29 @@ def marcar_fallo_respuesta(conn, wamid: str, *, motivo: str) -> None:
         )
         if cur.rowcount == 0:
             log.warning("marcar_fallo_respuesta: %s no existe en mensajes_entrantes", wamid)
+    conn.commit()
+
+
+def guardar_transcripcion(conn, wamid: str, texto: str) -> None:
+    """Guarda lo que se entendió de una nota de voz (migración 027).
+
+    Se escribe DESPUÉS de repartirla --al paciente ya se le contestó y el doctor ya la tiene
+    en su hilo-- y por el mismo criterio que `consumo.anotar`: si esto revienta se pierde una
+    fila, nunca una respuesta. Quien llama se traga el fallo.
+
+    Va en `transcripcion` y NUNCA en `texto`, y la diferencia no es de orden: `texto` es lo
+    que el paciente ESCRIBIÓ y esto es lo que DIJO según una máquina. Mezclarlas haría
+    imposible saber cuál de las dos se está leyendo --y una transcripción puede equivocarse,
+    que es justo lo que quien lee tiene derecho a saber-- además de invertir el significado
+    de `texto IS NULL`, que hoy es lo que separa un mensaje con palabras de un archivo.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE mensajes_entrantes SET transcripcion = %s WHERE wamid = %s",
+            (texto, wamid),
+        )
+        if cur.rowcount == 0:
+            log.warning("guardar_transcripcion: %s no existe en mensajes_entrantes", wamid)
     conn.commit()
 
 

@@ -366,6 +366,11 @@ export type MensajeDelHilo = {
   /** Solo los del doctor, y solo si el envío a WhatsApp falló. Lo que hace que el hilo
    *  distinga «no lo escribió» de «lo escribió y no salió». */
   fallo: string | null
+  /** El paciente no escribió esto: lo DIJO, y lo transcribió una máquina (migración 027).
+   *  La pantalla tiene que decirlo, porque una transcripción puede estar mal oída y quien
+   *  lee una frase clínica necesita saber de quién se está fiando. Un audio que no se pudo
+   *  transcribir llega con `texto: '(nota de voz)'` y esto en `false`. */
+  voz: boolean
 }
 
 export type HiloDeConversacion = {

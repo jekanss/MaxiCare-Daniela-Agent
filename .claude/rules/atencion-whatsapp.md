@@ -306,6 +306,24 @@ procesar_mensaje ─┬─ descarga  ──→ Telegram del doctor       ← INT
   nadie va a entender ese audio si no lo oye una persona. La decisión vive dentro de
   `_transcribir_con_grupo` porque solo ahí se sabe si hubo texto; `_primer_archivo_de_la_tanda`
   da lo mismo desde los dos sitios gracias a su `wamid <>`, que está puesto justo para eso.
+- **Y se GUARDA, desde la migración 027** (`mensajes_entrantes.transcripcion`). Hasta
+  entonces el texto se le pasaba a Daniela, sonaba en el hilo del doctor y se tiraba: la
+  columna `texto` de un audio se quedaba en NULL para siempre. Dos consecuencias, y la
+  segunda es la grave. En el panel, `panel._MARCA_POR_TIPO` pintaba la cadena literal
+  «(nota de voz)» sobre algo que el sistema sí había entendido —los SEIS audios que vio el
+  sistema en su vida estaban así—. Y en `persistencia.transcripcion` —el volcado que recibe
+  un doctor al TOMAR la conversación— el filtro `texto IS NOT NULL AND texto <> ''` se las
+  comía **enteras**: ni siquiera salían como «(nota de voz)», así que el doctor entraba a
+  conversar sin saber que el paciente había hablado. Ahí el destinatario es un humano
+  decidiendo, que es el peor sitio para un hueco silencioso. Hoy las dos consultas van con
+  `coalesce(texto, transcripcion)`, y **el orden importa**: lo que el paciente ESCRIBIÓ manda
+  sobre lo que una máquina entendió que dijo. La escritura vive en
+  `ingesta._guardar_transcripcion`, se llama DESPUÉS de repartir —a esa altura el audio ya
+  está entregado, la transcripción ya sonó y el turno ya va en camino— y se traga sus propios
+  fallos, igual que `consumo.anotar`: lo que se puede perder aquí es una fila, nunca una
+  respuesta. **No se escribe la cadena vacía**: `panel.hilo` la leería como «sí se
+  transcribió» y pintaría una burbuja en blanco marcada como transcripción, que es afirmar
+  que el paciente dijo algo sin decir el qué.
 - **El barrido de arranque las degrada, y está dicho en el código.** Los bytes del audio viven
   en memoria, así que un proceso que muere se los lleva; el rescate no vuelve a canjear el
   `media_id` contra Meta. El paciente rescatado recibe «no te entendí, ¿me lo escribes?». Es

@@ -213,6 +213,25 @@ uv run uvicorn maxicare_daniela.runtime:app --port 8080
   clínica acabaría leyendo dos nombres para el mismo problema, y dos lecturas del mismo ISO
   ya costaron una agenda corrida entera.
 
+- **El estado de carga y el de error viven en `componentes/Estado.tsx`, y el esqueleto lleva
+  la FORMA de cada pantalla.** Antes estaban copiados siete veces: cinco «Cargando…», cinco
+  bloques rojos y un solo botón de reintentar en toda la aplicación. Un esqueleto con la
+  forma del contenido no es adorno frente a un spinner: evita el salto de la página cuando
+  los datos llegan, y en la Agenda —donde la espera contra Google Calendar es de 3 a 5
+  segundos— es la diferencia entre esperar y creer que se colgó. Dos cosas que no se pueden
+  aflojar: **`Fallo` solo lleva `alReintentar` sobre una LECTURA** (sobre una escritura, ese
+  botón promete repetir un guardado que no repite: por eso `Tratamientos` tiene dos estados
+  de error y no uno), y **un fallo de refresco con datos ya en pantalla no los borra** —el
+  hilo de Conversaciones avisa y deja leer lo que hay—.
+
+- **`MensajeDelHilo.voz` es clínico, no decorativo.** Dice que el paciente no escribió eso:
+  lo DIJO, y lo pasó a texto una máquina (migración 027). «El 46» y «el 40» suenan casi
+  igual, así que quien lee una frase sobre un síntoma tiene derecho a saber de quién se fía.
+  Un audio que no se pudo transcribir llega con `texto: '(nota de voz)'` y `voz: false`, que
+  es lo correcto: ahí no hay ninguna máquina de la que desconfiar. Y el doctor se distingue
+  de Daniela por FORMA —rótulo arriba y barra lateral— y no por tono: los dos lilas que había
+  (`#EDE9FE` contra `#F4F1F9`) no se distinguen en la pantalla de un consultorio.
+
 ## Del lado de Python, pero solo importa desde aquí
 
 - Sin `MAXICARE_SECRETO_SESION` el panel se apaga con un 503 y **el webhook sigue vivo**.

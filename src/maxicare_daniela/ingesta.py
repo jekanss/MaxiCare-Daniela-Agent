@@ -536,6 +536,16 @@ async def procesar_mensaje(
                                 tema_general=tema_general,
                                 porque_no_se_entendio=True,
                             )
+
+                    # Y se guarda. Este es el ÚNICO punto del proyecto donde coexisten el
+                    # `wamid` del audio y lo que se entendió de él: más adelante la
+                    # transcripción viaja suelta hasta el turno y ya nadie sabe de qué
+                    # mensaje salió. Sin esto, el panel pinta «(nota de voz)» sobre algo que
+                    # el sistema sí entendió, contestó y después olvidó.
+                    if texto_dicho:
+                        await asyncio.to_thread(
+                            _guardar_transcripcion, database_url, m.wamid, texto_dicho
+                        )
                     return texto_dicho
 
                 tarea_voz = asyncio.create_task(_transcribir_con_grupo())
@@ -651,6 +661,24 @@ def _conversacion_viva(database_url: str, telefono: str) -> str | None:
         log.warning("no se pudo resolver la conversación de %s para el trace", telefono)
         return None
     return viva[0] if viva else None
+
+
+def _guardar_transcripcion(database_url: str, wamid: str, texto: str) -> None:
+    """Deja en la base lo que se entendió de una nota de voz (migración 027).
+
+    Se traga cualquier fallo, con el mismo criterio que `_conversacion_viva` y que
+    `consumo.anotar`: a esta altura el audio YA está entregado al doctor, la transcripción YA
+    sonó en su hilo y el turno del paciente YA va en camino. Lo único que se puede perder
+    aquí es una fila de historial, y perderla nunca puede costar una respuesta.
+
+    Y por eso mismo va DESPUÉS de repartir y no antes: guardar primero no adelantaría nada y
+    metería una escritura a Neon delante de lo que el doctor está esperando oír.
+    """
+    try:
+        with persistencia.conectar(database_url) as conn:
+            persistencia.guardar_transcripcion(conn, wamid, texto)
+    except Exception:  # noqa: BLE001 -- ver el docstring
+        log.exception("no se pudo guardar la transcripción de %s", wamid)
 
 
 def _tema_existente(database_url: str, telefono: str) -> int | None:

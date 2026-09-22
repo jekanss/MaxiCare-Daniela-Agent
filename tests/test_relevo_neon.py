@@ -550,6 +550,53 @@ def test_la_transcripcion_junta_las_dos_mitades_en_orden(esquema):
     ], "la transcripcion no salio en orden, o se colo un item que no es una frase"
 
 
+def test_una_NOTA_DE_VOZ_entra_en_el_volcado_que_recibe_el_doctor(esquema):
+    """Lo que el paciente DIJO tiene que llegarle al doctor que toma la conversacion.
+
+    Hasta la migracion 027 este volcado filtraba `texto IS NOT NULL`, y una nota de voz no
+    tiene texto: desaparecia entera del resumen. Ni siquiera salia como «(nota de voz)». El
+    doctor entraba a conversar sin saber que el paciente habia hablado, y esa es la peor
+    version del hueco --aqui el destinatario es un humano decidiendo, no una pantalla--.
+    """
+    _conversacion(esquema)
+    base = datetime.now(timezone.utc) - timedelta(minutes=10)
+
+    with persistencia.conectar(esquema) as conn, conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO mensajes_entrantes (wamid, telefono, tipo, texto, recibido_en,"
+            " transcripcion) VALUES (%s, %s, 'audio', NULL, %s, %s)",
+            ("w-voz", TEL, base, "Me duele mucho la muela de abajo a la izquierda"),
+        )
+        conn.commit()
+
+    with persistencia.conectar(esquema) as conn:
+        lineas = persistencia.transcripcion(conn, TEL)
+
+    assert [(q, t) for q, t, _ in lineas] == [
+        ("paciente", "Me duele mucho la muela de abajo a la izquierda")
+    ], "la nota de voz no llego al volcado del relevo"
+
+
+def test_un_audio_SIN_transcribir_sigue_sin_ensuciar_el_volcado(esquema):
+    """El otro lado de la moneda: sin transcripcion no hay nada que contar.
+
+    Una fila vacia en el volcado le diria al doctor que el paciente dijo algo y no le diria
+    el que. El audio ya esta sonando en su hilo, que es donde se resuelve.
+    """
+    _conversacion(esquema)
+
+    with persistencia.conectar(esquema) as conn, conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO mensajes_entrantes (wamid, telefono, tipo, texto, recibido_en,"
+            " transcripcion) VALUES (%s, %s, 'audio', NULL, %s, NULL)",
+            ("w-muda", TEL, datetime.now(timezone.utc) - timedelta(minutes=10)),
+        )
+        conn.commit()
+
+    with persistencia.conectar(esquema) as conn:
+        assert persistencia.transcripcion(conn, TEL) == []
+
+
 def test_la_transcripcion_de_un_numero_nuevo_esta_vacia(esquema):
     with persistencia.conectar(esquema) as conn:
         assert persistencia.transcripcion(conn, TEL) == []

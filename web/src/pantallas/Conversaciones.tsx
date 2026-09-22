@@ -312,13 +312,34 @@ function Burbuja({ m }: { m: MensajeDelHilo }) {
             Doctor · {quienDice}
           </span>
         )}
+        {/* Esto NO lo escribió el paciente: lo dijo, y lo pasó a texto una máquina. Decirlo
+            es clínico y no decorativo -- «el 46» y «el 40» suenan casi igual, y quien lee
+            una frase sobre un síntoma tiene derecho a saber de quién se está fiando. */}
+        {m.voz && (
+          <span
+            style={{
+              fontFamily: MONO,
+              fontSize: '10px',
+              fontWeight: 700,
+              letterSpacing: '0.12em',
+              textTransform: 'uppercase',
+              color: '#6B7280',
+              textAlign: 'left',
+            }}
+          >
+            Nota de voz · transcrita
+          </span>
+        )}
         <div
           style={{
             backgroundColor: fondo,
             border: `1px solid ${borde}`,
             // La barra va en el costado interior --el que mira al centro del hilo-- para que
-            // se lea como el margen de una nota escrita a mano y no como un borde más.
+            // se lea como el margen de una nota escrita a mano y no como un borde más. En la
+            // transcripción va a PUNTOS y del lado del paciente, porque dice otra cosa: que
+            // lo de dentro es aproximado.
             borderLeft: delDoctor && !fallido ? '3px solid #7C3AED' : undefined,
+            borderRight: m.voz ? '3px dashed #9CA3AF' : undefined,
             padding: '12px 14px',
             fontSize: '14.5px',
             fontWeight: 300,

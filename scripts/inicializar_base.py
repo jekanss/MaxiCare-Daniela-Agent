@@ -82,6 +82,23 @@ VALOR_DE_LA_021 = "citas"
 #: apagado en silencio. Por eso se verifican.
 TABLAS_DEL_PERIMETRO = ("consumo_modelo", "cuotas_avisadas", "alertas_gasto")
 
+#: Las dos migraciones que completan el hilo de la pantalla de Conversaciones, y que hasta hoy
+#: no verificaba nadie. Van juntas porque su modo de fallo es el mismo y es de los peores: el
+#: hilo se pinta igual, sin error y sin log, con un hueco donde debería estar lo que dijo
+#: alguien.
+#:
+#: Sin la 026 (`mensajes_del_doctor`) el GET del hilo revienta con `UndefinedTable` y la
+#: pantalla se queda cargando --`panel.hilo` la consulta fuera de todo `try`-- mientras la
+#: ESCRITURA se pierde en silencio, porque esa sí la traga un `except`. Sin la 027
+#: (`mensajes_entrantes.transcripcion`) pasa lo contrario y es más sutil: no revienta nada,
+#: simplemente toda nota de voz vuelve a decir «(nota de voz)» y el volcado que recibe el
+#: doctor al tomar la conversación se las come enteras.
+#:
+#: Una es una TABLA y la otra una COLUMNA, así que el molde de `_tablas_de` no sirve para las
+#: dos: es la misma lección de la 021 --lo que no se puede buscar por nombre de tabla necesita
+#: su propia comprobación-- por una tercera puerta.
+COLUMNA_DE_LA_027 = ("mensajes_entrantes", "transcripcion")
+
 
 def _enmascarar(url: str) -> str:
     """Deja ver a qué host se conectó, nunca las credenciales."""
@@ -99,6 +116,16 @@ def _tablas_de(conn, esquema: str) -> set[str]:
             (esquema,),
         )
         return {fila[0] for fila in cur.fetchall()}
+
+
+def _tiene_columna(conn, esquema: str, tabla: str, columna: str) -> bool:
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT 1 FROM information_schema.columns"
+            " WHERE table_schema = %s AND table_name = %s AND column_name = %s",
+            (esquema, tabla, columna),
+        )
+        return cur.fetchone() is not None
 
 
 def _bitacora_admite(conn, esquema: str, valor: str) -> bool:
@@ -371,9 +398,46 @@ def main() -> int:
             if faltan:
                 return 1
 
+        # ---------------------------------------------------------------------------
+        # 10. Las migraciones 026 y 027 (el hilo completo de Conversaciones).
+        #
+        #     Una tabla y una columna, verificadas juntas porque comparten modo de
+        #     fallo: el hilo se pinta igual y le falta una voz. Ver el comentario de
+        #     `COLUMNA_DE_LA_027` para qué esconde cada una.
+        # ---------------------------------------------------------------------------
+        print()
+        print("=" * 78)
+        print("VERIFICACIÓN DE LA 026 Y LA 027 (el hilo de Conversaciones)")
+        print("=" * 78)
+
+        tabla_027, columna_027 = COLUMNA_DE_LA_027
+        for esquema in ("public", esquema_pruebas):
+            if esquema != "public" and not _existe_esquema(conn, esquema):
+                print(f"\n  {esquema}: no existe todavía (nada que verificar)")
+                continue
+
+            hay_tabla = "mensajes_del_doctor" in _tablas_de(conn, esquema)
+            print(f"\n  {esquema}: {'OK  ' if hay_tabla else 'FALLA'} "
+                  + ("mensajes_del_doctor (026)" if hay_tabla
+                     else "falta mensajes_del_doctor -- el hilo del panel se queda "
+                          "«Cargando…» para siempre y lo que escriba un doctor NO se "
+                          "guarda; corre este script sin --solo-verificar"))
+            if not hay_tabla:
+                return 1
+
+            hay_columna = _tiene_columna(conn, esquema, tabla_027, columna_027)
+            print(f"  {esquema}: {'OK  ' if hay_columna else 'FALLA'} "
+                  + (f"{tabla_027}.{columna_027} (027)" if hay_columna
+                     else f"falta {tabla_027}.{columna_027} -- toda nota de voz vuelve a "
+                          "decir «(nota de voz)» y el volcado del relevo se las come; corre "
+                          "este script sin --solo-verificar"))
+            if not hay_columna:
+                return 1
+
     print("\n" + "=" * 78)
     print("FASE 1 — segunda mitad: OK  ·  FASE 7 — el historial: OK  ·  019 — contacto y "
-          "consentimiento: OK  ·  021 — la marca de asistencia: OK  ·  022 — el perímetro: OK")
+          "consentimiento: OK  ·  021 — la marca de asistencia: OK  ·  022 — el perímetro: "
+          "OK  ·  026/027 — el hilo completo: OK")
     print("=" * 78)
     return 0
 

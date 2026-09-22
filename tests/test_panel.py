@@ -1712,13 +1712,33 @@ def _telefono_nuevo() -> str:
     return f"5730{uuid.uuid4().int % 10**8:08d}"
 
 
-def _entra(conn, telefono, *, texto, cuando, respondido=None, fallo=None, tipo="text"):
+def _entra(
+    conn,
+    telefono,
+    *,
+    texto,
+    cuando,
+    respondido=None,
+    fallo=None,
+    tipo="text",
+    transcripcion=None,
+):
     with conn.cursor() as cur:
         cur.execute(
             "INSERT INTO mensajes_entrantes"
-            " (wamid, telefono, tipo, texto, recibido_en, respondido_en, fallo_respuesta)"
-            " VALUES (%s, %s, %s, %s, %s, %s, %s)",
-            (f"wamid-{uuid.uuid4()}", telefono, tipo, texto, cuando, respondido, fallo),
+            " (wamid, telefono, tipo, texto, recibido_en, respondido_en, fallo_respuesta,"
+            "  transcripcion)"
+            " VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+            (
+                f"wamid-{uuid.uuid4()}",
+                telefono,
+                tipo,
+                texto,
+                cuando,
+                respondido,
+                fallo,
+                transcripcion,
+            ),
         )
     conn.commit()
 
@@ -1893,6 +1913,87 @@ def test_el_hilo_junta_las_tres_voces_en_orden(conn):
         "se volcó el JSON de RespuestaDaniela en vez de la frase"
     )
     assert lineas[2]["autor"] == "Dra. Ruiz"
+
+
+@pytest.mark.neon
+def test_una_nota_de_voz_transcrita_se_LEE_en_el_hilo(conn):
+    """Lo que el paciente DIJO sale en el hilo, marcado como transcripción (migración 027).
+
+    Hasta ella, el sistema entendía la nota de voz, la contestaba y después la olvidaba: en
+    el panel quedaba la cadena «(nota de voz)» sobre algo que sí se había entendido.
+    """
+    tel = _telefono_nuevo()
+    ahora = _AHORA_CONVERSACIONES
+
+    _entra(
+        conn,
+        tel,
+        texto=None,
+        tipo="audio",
+        transcripcion="Hola, quiero saber cuánto cuesta una limpieza.",
+        cuando=ahora - timedelta(minutes=10),
+    )
+
+    lineas = panel.hilo(conn, tel)
+
+    assert len(lineas) == 1
+    assert lineas[0]["texto"] == "Hola, quiero saber cuánto cuesta una limpieza.", (
+        "el hilo pintó la marca del tipo en vez de lo que se entendió"
+    )
+    assert lineas[0]["voz"] is True, (
+        "sin esta marca la pantalla no puede decir que lo transcribió una máquina, y una "
+        "transcripción mal oída se leería como palabras textuales del paciente"
+    )
+
+
+@pytest.mark.neon
+def test_una_nota_de_voz_SIN_transcribir_sigue_diciendo_que_es_una_nota_de_voz(conn):
+    """El caso que la 027 NO arregla, y que tiene que seguir comportándose como antes.
+
+    Un audio sin transcripción --el transcriptor apagado, la cuota cortando, o los seis
+    anteriores a la migración-- no tiene nada que enseñar, y `voz` va en falso porque no hay
+    ninguna máquina de la que desconfiar: ahí no se entendió nada y se dice.
+    """
+    tel = _telefono_nuevo()
+
+    _entra(
+        conn,
+        tel,
+        texto=None,
+        tipo="audio",
+        transcripcion=None,
+        cuando=_AHORA_CONVERSACIONES - timedelta(minutes=10),
+    )
+
+    lineas = panel.hilo(conn, tel)
+
+    assert lineas[0]["texto"] == "(nota de voz)"
+    assert lineas[0]["voz"] is False
+
+
+@pytest.mark.neon
+def test_el_caption_de_un_audio_MANDA_sobre_lo_que_se_entendio(conn):
+    """Lo que el paciente ESCRIBIÓ vence a lo que una máquina entendió que dijo.
+
+    Es raro --WhatsApp no suele dejar caption en una nota de voz-- y decide la precedencia
+    del `coalesce` en los tres sitios que la aplican: el hilo, la vista previa y el volcado
+    del relevo. Sus palabras antes que nuestra interpretación de ellas.
+    """
+    tel = _telefono_nuevo()
+
+    _entra(
+        conn,
+        tel,
+        texto="mira esto",
+        tipo="audio",
+        transcripcion="Mira esto, por favor.",
+        cuando=_AHORA_CONVERSACIONES - timedelta(minutes=10),
+    )
+
+    lineas = panel.hilo(conn, tel)
+
+    assert lineas[0]["texto"] == "mira esto"
+    assert lineas[0]["voz"] is False, "con caption no hay transcripción que advertir"
 
 
 @pytest.mark.neon

@@ -698,7 +698,7 @@ def listar_conversaciones(
         cur.execute(
             "WITH ultimo AS ("
             "    SELECT DISTINCT ON (telefono)"
-            "           telefono, texto, tipo, nombre_perfil, recibido_en"
+            "           telefono, texto, tipo, nombre_perfil, recibido_en, transcripcion"
             "      FROM mensajes_entrantes"
             "     WHERE recibido_en >= %(desde)s"
             "     ORDER BY telefono, recibido_en DESC"
@@ -721,7 +721,8 @@ def listar_conversaciones(
             "     ORDER BY telefono, actualizada_en DESC"
             ") "
             "SELECT u.telefono, p.nombre_completo, u.nombre_perfil, u.texto, u.tipo,"
-            "       u.recibido_en, coalesce(e.n, 0), v.tomada_por, v.actualizada_en"
+            "       u.recibido_en, coalesce(e.n, 0), v.tomada_por, v.actualizada_en,"
+            "       u.transcripcion"
             "  FROM ultimo u"
             "  LEFT JOIN esperando e ON e.telefono = u.telefono"
             "  LEFT JOIN viva      v ON v.telefono = u.telefono"
@@ -734,13 +735,16 @@ def listar_conversaciones(
 
     ventana = ahora - timedelta(hours=VENTANA_RESPUESTA_HORAS)
     lista: list[dict[str, Any]] = []
-    for tel, ficha, perfil, texto, tipo, recibido, esperando, tomada, tocada in filas:
+    for tel, ficha, perfil, texto, tipo, recibido, esperando, tomada, tocada, dicho in filas:
         ultimo_en = max(recibido, tocada) if tocada else recibido
         lista.append(
             {
                 "telefono": tel,
                 "nombre": _nombre_visible(ficha, perfil),
-                "vista_previa": (texto or "").strip() or _marca(tipo),
+                # Una nota de voz transcrita se asoma con lo que dijo, no con «(nota de voz)»:
+                # la lista existe para decidir a quién abrir, y «me duele mucho» y «¿cuánto
+                # cuesta?» llevan a decisiones distintas.
+                "vista_previa": (texto or "").strip() or (dicho or "").strip() or _marca(tipo),
                 "ultimo_en": ultimo_en.isoformat(),
                 "sin_contestar": esperando,
                 "tomada_por": tomada,
@@ -777,18 +781,28 @@ def hilo(conn, telefono: str, *, limite: int = 60) -> list[dict[str, Any]]:
 
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT texto, tipo, recibido_en FROM mensajes_entrantes"
+            "SELECT texto, tipo, recibido_en, transcripcion FROM mensajes_entrantes"
             " WHERE telefono = %s ORDER BY recibido_en DESC LIMIT %s",
             (telefono, limite),
         )
-        for texto, tipo, cuando in cur.fetchall():
+        for texto, tipo, cuando, transcrito in cur.fetchall():
+            escrito = (texto or "").strip()
+            dicho = (transcrito or "").strip()
             lineas.append(
                 {
                     "quien": "paciente",
                     "autor": None,
-                    "texto": (texto or "").strip() or _marca(tipo),
+                    # Lo ESCRITO manda sobre lo dicho: si un audio trajera caption, esas son
+                    # las palabras del paciente y lo demás es lo que una máquina entendió.
+                    "texto": escrito or dicho or _marca(tipo),
                     "cuando": cuando,
                     "fallo": None,
+                    # La pantalla tiene que poder decir que esto se DIJO y que lo transcribió
+                    # una máquina. No es un adorno: «el 46» y «el 40» suenan casi igual, y
+                    # quien lee una frase clínica tiene derecho a saber que puede estar mal
+                    # oída. Un audio sin transcribir se queda en `(nota de voz)` con `voz` en
+                    # falso, que es lo correcto: ahí no hay nada que desconfiar.
+                    "voz": bool(dicho) and not escrito,
                 }
             )
 
@@ -817,6 +831,7 @@ def hilo(conn, telefono: str, *, limite: int = 60) -> list[dict[str, Any]]:
                         "texto": dicho,
                         "cuando": cuando,
                         "fallo": None,
+                        "voz": False,
                     }
                 )
 
@@ -828,6 +843,7 @@ def hilo(conn, telefono: str, *, limite: int = 60) -> list[dict[str, Any]]:
                 "texto": fila["texto"],
                 "cuando": fila["cuando"],
                 "fallo": fila["fallo"],
+                "voz": False,
             }
         )
 
