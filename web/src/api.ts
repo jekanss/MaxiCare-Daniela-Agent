@@ -335,3 +335,63 @@ export type ResumenInicio = {
 export async function leerInicio(): Promise<ResumenInicio> {
   return pedir<ResumenInicio>('/api/inicio')
 }
+
+// ------------------------------------------------------------------------------------------
+// Conversaciones
+// ------------------------------------------------------------------------------------------
+
+/** Los cuatro estados de la lista, en orden de precedencia. `relevo` gana a `esperando`:
+ *  una conversación tomada en la que entran mensajes cumple las dos, y lo que hay que decir
+ *  es que ya hay alguien encima, no que nadie contesta. */
+export type EstadoConversacion = 'relevo' | 'esperando' | 'activa' | 'cerrada'
+
+export type ResumenConversacion = {
+  telefono: string
+  /** `null` cuando no hay ficha ni nombre de perfil -- o cuando la ficha dice `PENDIENTE`,
+   *  que el servidor ya traduce a `null`. La pantalla cae al teléfono. */
+  nombre: string | null
+  vista_previa: string
+  ultimo_en: string
+  sin_contestar: number
+  tomada_por: string | null
+  estado: EstadoConversacion
+}
+
+export type MensajeDelHilo = {
+  quien: 'paciente' | 'daniela' | 'doctor'
+  /** El nombre de quien escribió. Solo lo llevan los del doctor. */
+  autor: string | null
+  texto: string
+  cuando: string
+  /** Solo los del doctor, y solo si el envío a WhatsApp falló. Lo que hace que el hilo
+   *  distinga «no lo escribió» de «lo escribió y no salió». */
+  fallo: string | null
+}
+
+export type HiloDeConversacion = {
+  telefono: string
+  mensajes: MensajeDelHilo[]
+  /** La ventana de 24 h de Meta. `horas` es `null` si esa persona nunca escribió. */
+  ventana: { puede: boolean; horas: number | null }
+  puede_escribir: boolean
+}
+
+export type ListaDeConversaciones = {
+  conversaciones: ResumenConversacion[]
+  /** Si el ROL puede tomar y escribir. No es el control de acceso --ese vive en el
+   *  servidor-- sino lo que evita pintar botones que van a devolver 403. */
+  puede_escribir: boolean
+  usuario: string
+}
+
+/** La lista. De SOLO LECTURA, y es la ruta que más veces se pide del panel: la pantalla se
+ *  refresca sola cada diez segundos mientras esté a la vista. */
+export async function leerConversaciones(): Promise<ListaDeConversaciones> {
+  return pedir<ListaDeConversaciones>('/api/conversaciones')
+}
+
+/** El hilo de un paciente: las tres voces en orden. No trae el estado de la conversación --
+ *  eso lo trae la lista, en la misma vuelta-- para que las dos rutas no puedan contradecirse. */
+export async function leerHilo(telefono: string): Promise<HiloDeConversacion> {
+  return pedir<HiloDeConversacion>(`/api/conversaciones/${encodeURIComponent(telefono)}`)
+}
