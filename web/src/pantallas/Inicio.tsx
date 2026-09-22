@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { leerInicio, SesionCaducada, type ResumenInicio } from '@/api'
+import { hhmm } from '@/pantallas/Agenda'
+import { titulo } from '@/pantallas/SinResolver'
 
 /* La portada del panel: cinco números que contestan en cinco segundos si Daniela está
  * funcionando. Sigue `docs/diseno/panel-2026-09-22.dc.html` (líneas 178-330).
@@ -73,9 +75,38 @@ function tarjetas(r: ResumenInicio): Tarjeta[] {
   ]
 }
 
-const DIA_LARGO: Intl.DateTimeFormatOptions = { weekday: 'long', day: 'numeric', month: 'long' }
+/* La clínica está en Bogotá y la pantalla se puede abrir desde cualquier parte. Todo lo que
+   se lee como «hoy» va clavado a esa zona: sin `timeZone`, un portátil en otro huso saluda
+   «buenas noches» a media mañana y pone la fecha del día anterior. Es el mismo criterio que
+   ya aplica `Agenda.tsx` a las horas de las citas. */
+const ZONA = 'America/Bogota'
+const FMT_HOY = new Intl.DateTimeFormat('es-CO', {
+  timeZone: ZONA,
+  weekday: 'long',
+  day: 'numeric',
+  month: 'long',
+})
+const FMT_HORA_BOGOTA = new Intl.DateTimeFormat('en-GB', {
+  timeZone: ZONA,
+  hour: '2-digit',
+  hour12: false,
+})
 
-function saludo(hora: number): string {
+/* `volumen[].dia` es una fecha pelada («2026-09-16») que Postgres ya cortó en hora de
+   Bogotá. `new Date` la lee como medianoche UTC, así que se formatea EN UTC: con la zona
+   del navegador, un portátil al oeste de Greenwich pintaría el día anterior en cada rótulo. */
+const FMT_DIA_CORTO = new Intl.DateTimeFormat('es-CO', {
+  timeZone: 'UTC',
+  day: 'numeric',
+})
+const FMT_DIA_MES = new Intl.DateTimeFormat('es-CO', {
+  timeZone: 'UTC',
+  day: 'numeric',
+  month: 'long',
+})
+
+function saludo(ahora: Date): string {
+  const hora = Number(FMT_HORA_BOGOTA.format(ahora))
   if (hora < 12) return 'Buenos días'
   if (hora < 19) return 'Buenas tardes'
   return 'Buenas noches'
@@ -126,7 +157,7 @@ function Cabecera({ resumen }: { resumen: ResumenInicio | null }) {
                 color: '#6E6880',
               }}
             >
-              Asistente activa · {ahora.toLocaleDateString('es-CO', DIA_LARGO)}
+              Asistente activa · {FMT_HOY.format(ahora)}
             </span>
           </div>
           <h1
@@ -140,25 +171,28 @@ function Cabecera({ resumen }: { resumen: ResumenInicio | null }) {
               color: '#16111F',
             }}
           >
-            {saludo(ahora.getHours())}
+            {saludo(ahora)}
             {resumen ? `, ${resumen.usuario}.` : '.'}
           </h1>
-          {/* La ventana es de 30 días y las cinco cifras la comparten. El mockup decía «las
-              últimas 24 horas»; copiarlo habría puesto un rótulo que miente sobre lo que
-              hay debajo. */}
-          <p
-            className="m-0"
-            style={{
-              fontSize: 'clamp(14.5px,1.2vw,16.5px)',
-              fontWeight: 300,
-              lineHeight: 1.6,
-              color: '#4A4458',
-              maxWidth: '56ch',
-            }}
-          >
-            Los últimos {resumen?.dias ?? 30} días, comparados con cómo iba la clínica antes
-            de Daniela.
-          </p>
+          {/* La ventana la dice el SERVIDOR, y por eso esta frase no aparece hasta que hay
+              respuesta: escribir «30 días» mientras carga sería una cifra del frontend que
+              podría no ser la que se consultó. El mockup decía «las últimas 24 horas»;
+              copiarlo habría puesto un rótulo que miente sobre lo que hay debajo. */}
+          {resumen && (
+            <p
+              className="m-0"
+              style={{
+                fontSize: 'clamp(14.5px,1.2vw,16.5px)',
+                fontWeight: 300,
+                lineHeight: 1.6,
+                color: '#4A4458',
+                maxWidth: '56ch',
+              }}
+            >
+              Los últimos {resumen.dias} días, comparados con cómo iba la clínica antes de
+              Daniela.
+            </p>
+          )}
         </div>
       </div>
     </header>
@@ -243,6 +277,280 @@ function Cifra({ tarjeta, retraso }: { tarjeta: Tarjeta; retraso: number }) {
   )
 }
 
+/** El armazón de los bloques de abajo: franja de color arriba, título, y a la derecha o un
+ *  recuento o un enlace. Uno solo para los tres, porque los tres son la misma caja. */
+function Bloque({
+  id,
+  franja,
+  encabezado,
+  derecha,
+  retraso,
+  children,
+}: {
+  id: string
+  franja: string
+  encabezado: string
+  derecha: React.ReactNode
+  retraso: number
+  children: React.ReactNode
+}) {
+  return (
+    <section
+      aria-labelledby={id}
+      className="flex flex-col"
+      style={{
+        backgroundColor: '#FFFFFF',
+        border: '1px solid #DCD8E6',
+        animation: `mcRise 460ms ease both ${retraso}ms`,
+      }}
+    >
+      <div aria-hidden="true" style={{ height: 4, backgroundColor: franja }} />
+      <div
+        className="flex items-baseline justify-between gap-3"
+        style={{ padding: '20px clamp(16px,2vw,24px) 6px' }}
+      >
+        <h2
+          id={id}
+          className="m-0"
+          style={{
+            fontFamily: SG,
+            fontWeight: 600,
+            fontSize: 'clamp(18px,1.7vw,22px)',
+            letterSpacing: '-0.022em',
+            color: '#16111F',
+          }}
+        >
+          {encabezado}
+        </h2>
+        {derecha}
+      </div>
+      <div style={{ padding: '12px clamp(16px,2vw,24px) 22px' }}>{children}</div>
+    </section>
+  )
+}
+
+function Rotulo({ children }: { children: React.ReactNode }) {
+  return (
+    <span
+      className="whitespace-nowrap"
+      style={{
+        fontFamily: MONO,
+        fontSize: 10.5,
+        letterSpacing: '0.14em',
+        textTransform: 'uppercase',
+        color: '#6E6880',
+      }}
+    >
+      {children}
+    </span>
+  )
+}
+
+function Enlace({ a, children }: { a: string; children: React.ReactNode }) {
+  return (
+    <a
+      href={a}
+      className="whitespace-nowrap transition-colors hover:text-[#4C1D95]"
+      style={{
+        fontFamily: MONO,
+        fontSize: 10.5,
+        letterSpacing: '0.14em',
+        textTransform: 'uppercase',
+        color: '#6D28D9',
+      }}
+    >
+      {children}
+    </a>
+  )
+}
+
+function Vacio({ children }: { children: React.ReactNode }) {
+  return (
+    <p className="m-0" style={{ fontSize: 13.5, fontWeight: 300, color: '#6E6880' }}>
+      {children}
+    </p>
+  )
+}
+
+/** La agenda de hoy. El enlace lleva a `#/agenda` y no reconstruye el día aquí: es ALLÍ
+ *  donde el sistema contrasta las citas contra Google Calendar, y esa promesa vive en una
+ *  sola pantalla. */
+function AgendaDeHoy({ citas }: { citas: ResumenInicio['agenda_hoy'] }) {
+  return (
+    <Bloque
+      id="mc-hoy"
+      franja="#7C3AED"
+      encabezado="La agenda de hoy"
+      derecha={
+        citas.length ? (
+          <Rotulo>
+            {citas.length} {citas.length === 1 ? 'cita' : 'citas'}
+          </Rotulo>
+        ) : (
+          <Enlace a="#/agenda">Ver agenda</Enlace>
+        )
+      }
+      retraso={300}
+    >
+      {citas.length === 0 ? (
+        <Vacio>No hay citas para hoy.</Vacio>
+      ) : (
+        <ul className="m-0 p-0 list-none flex flex-col">
+          {citas.map((c) => (
+            <li
+              key={c.id}
+              className="flex items-center gap-3.5"
+              style={{ padding: '13px 0', borderBottom: '1px solid #ECE8F4' }}
+            >
+              <span
+                className="shrink-0"
+                style={{ fontFamily: MONO, fontSize: 12.5, color: '#4C1D95', width: 52 }}
+              >
+                {hhmm(c.inicio)}
+              </span>
+              <span className="flex-1 min-w-0 flex flex-col gap-0.5">
+                <span className="truncate" style={{ fontSize: 14.5, fontWeight: 500, color: '#16111F' }}>
+                  {c.nombre_completo} · {c.tratamiento}
+                </span>
+                {/* `asistio` tiene TRES valores y el `null` no se colapsa con el `false`:
+                    decir «no vino» cuando lo único cierto es que nadie lo ha marcado le
+                    apunta al paciente una falta que no cometió. */}
+                <span style={{ fontSize: 12.5, fontWeight: 300, color: '#6E6880' }}>
+                  {c.asistio === true
+                    ? 'Llegó'
+                    : c.asistio === false
+                      ? 'No llegó'
+                      : 'Sin marcar'}
+                </span>
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </Bloque>
+  )
+}
+
+/** Los tres casos más frecuentes de «sin resolver». El título lo compone `titulo()` de esa
+ *  misma pantalla: la huella cruda es un identificador, no una frase para la clínica. */
+function NecesitaAtencion({ casos }: { casos: ResumenInicio['atencion'] }) {
+  return (
+    <Bloque
+      id="mc-atencion"
+      franja="#16111F"
+      encabezado="Qué necesita su atención"
+      derecha={<Enlace a="#/bandeja">Ver todo</Enlace>}
+      retraso={360}
+    >
+      {casos.length === 0 ? (
+        <Vacio>Nada sin resolver. Buena señal.</Vacio>
+      ) : (
+        <ul className="m-0 p-0 list-none flex flex-col">
+          {casos.map((caso) => (
+            <li
+              key={caso.huella}
+              className="flex gap-3.5"
+              style={{ padding: '14px 0', borderBottom: '1px solid #ECE8F4' }}
+            >
+              <span
+                className="shrink-0"
+                style={{
+                  fontFamily: SG,
+                  fontWeight: 600,
+                  fontSize: 22,
+                  letterSpacing: '-0.02em',
+                  color: '#6D28D9',
+                  width: 36,
+                }}
+              >
+                {caso.contador}
+              </span>
+              <span className="flex-1 min-w-0 flex flex-col gap-1">
+                <span style={{ fontSize: 14.5, fontWeight: 500, color: '#16111F' }}>
+                  {titulo(caso)}
+                </span>
+                {caso.informe && (
+                  <span style={{ fontSize: 12.5, fontWeight: 300, lineHeight: 1.5, color: '#4A4458' }}>
+                    {caso.informe.que_paso}
+                  </span>
+                )}
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </Bloque>
+  )
+}
+
+/** El volumen por día, con divs y no con una librería de gráficos: no hay ninguna en
+ *  `package.json` y una dependencia nueva por ocho barras no se paga.
+ *
+ *  El rótulo dice el primer día CON datos, nunca «30 días»: un eje de treinta días con
+ *  veintiséis vacíos dibuja una caída que no ocurrió. Y si no hay ni un día, el bloque no se
+ *  pinta: un gráfico vacío no informa de nada. */
+function Volumen({ datos }: { datos: ResumenInicio['volumen'] }) {
+  if (datos.length === 0) return null
+
+  const tope = Math.max(...datos.map((d) => d.conversaciones))
+  const todosLosRotulos = datos.length <= 12
+
+  return (
+    <section
+      aria-labelledby="mc-volumen"
+      className="flex flex-col gap-4"
+      style={{
+        backgroundColor: '#FFFFFF',
+        border: '1px solid #DCD8E6',
+        padding: 'clamp(18px,2.2vw,26px)',
+        animation: 'mcRise 460ms ease both 420ms',
+      }}
+    >
+      <h2
+        id="mc-volumen"
+        className="m-0"
+        style={{
+          fontFamily: SG,
+          fontWeight: 600,
+          fontSize: 'clamp(17px,1.6vw,21px)',
+          letterSpacing: '-0.022em',
+          color: '#16111F',
+        }}
+      >
+        Conversaciones por día · desde el {FMT_DIA_MES.format(new Date(datos[0].dia))}
+      </h2>
+
+      <div className="flex items-end gap-1.5" style={{ height: 96 }}>
+        {datos.map((d, i) => (
+          <div key={d.dia} className="flex-1 flex flex-col items-center gap-1.5 min-w-0">
+            <span
+              title={`${d.conversaciones} el ${FMT_DIA_MES.format(new Date(d.dia))}`}
+              className="w-full block"
+              style={{
+                height: `${Math.max(3, Math.round((d.conversaciones / tope) * 74))}px`,
+                backgroundColor: '#7C3AED',
+                transformOrigin: 'bottom',
+                animation: `mcGrowY 700ms cubic-bezier(.22,1,.36,1) both ${440 + i * 40}ms`,
+              }}
+            />
+            <span
+              style={{
+                fontFamily: MONO,
+                fontSize: 9.5,
+                color: '#6E6880',
+                visibility:
+                  todosLosRotulos || i === 0 || i === datos.length - 1 ? 'visible' : 'hidden',
+              }}
+            >
+              {FMT_DIA_CORTO.format(new Date(d.dia))}
+            </span>
+          </div>
+        ))}
+      </div>
+    </section>
+  )
+}
+
 export default function Inicio({ alCaducarSesion }: Props) {
   const [resumen, setResumen] = useState<ResumenInicio | null>(null)
   const [cargando, setCargando] = useState(true)
@@ -312,6 +620,19 @@ export default function Inicio({ alCaducarSesion }: Props) {
           <Cifra key={t.rotulo} tarjeta={t} retraso={60 + i * 60} />
         ))}
       </section>
+
+      <div
+        className="grid items-start"
+        style={{
+          gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%,330px), 1fr))',
+          gap: 'clamp(12px,1.4vw,18px)',
+        }}
+      >
+        <AgendaDeHoy citas={resumen.agenda_hoy} />
+        <NecesitaAtencion casos={resumen.atencion} />
+      </div>
+
+      <Volumen datos={resumen.volumen} />
     </Marco>
   )
 }

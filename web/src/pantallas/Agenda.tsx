@@ -62,7 +62,10 @@ function instante(iso: string): number {
   return new Date(conZona ? iso : `${iso}-05:00`).getTime()
 }
 
-function hhmm(iso: string): string {
+/* Se exporta para la portada, que pinta la agenda del dia con las mismas horas. Repetir la
+   conversion alla dejaria dos lecturas del mismo ISO que se separan en silencio, y la del
+   ISO sin zona es justo la que ya costo una agenda corrida entera. */
+export function hhmm(iso: string): string {
   return FMT_HORA.format(instante(iso))
 }
 

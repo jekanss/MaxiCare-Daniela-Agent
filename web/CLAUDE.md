@@ -176,6 +176,43 @@ uv run uvicorn maxicare_daniela.runtime:app --port 8080
   fila. Si algún día se añade un campo editable a la ficha, tiene que anotarse también, o
   esta frase vuelve a ser mentira para ese campo y el límite deja de ser aceptable.
 
+- **`GET /api/inicio` NO reconcilia, y `GET /api/agenda` SÍ. La asimetría es deliberada.**
+  Inicio es la PRIMERA pantalla de cada sesión —el hash vacío cae ahí desde el 22/09/2026—,
+  así que una sola llamada a Google en ese camino son escrituras en Neon y peticiones a la
+  API de Calendar en cada ingreso al panel, varias veces al día y por cada persona de la
+  clínica que entre. Quien quiera el día contrastado abre Agenda, que es donde vive esa
+  promesa y donde está escrita. Lo vigilan dos pruebas offline de `tests/test_panel.py`:
+  `test_api_inicio_no_toca_el_calendario` —que espía `runtime._calendario`, **no**
+  `runtime.calendario`, que no existe— y `test_api_inicio_es_de_solo_lectura`, que corre el
+  SQL de verdad contra una conexión que apunta el verbo de cada sentencia.
+
+- **La unidad de la portada es el TELÉFONO, nunca la conversación.** Una conversación caduca
+  por inactividad de 24 h (`persistencia.conversacion_viva`), así que una negociación de tres
+  días son tres filas en `conversaciones` y una sola persona. Contar filas inflaría el
+  denominador de todas las tasas y haría parecer a Daniela peor de lo que es. Por eso
+  `panel.resumen_inicio` cuenta `DISTINCT telefono` en los dos primeros números.
+
+- **Las cifras llegan CRUDAS y los porcentajes se calculan en la pantalla.** `llegaron` viaja
+  con `marcadas` y `cumplibles` al lado, que es lo que permite escribir «8 de 12 marcadas» en
+  vez de un 67 % que no dice sobre cuántas citas se calculó. Y los estados vacíos se
+  resuelven ANTES que los llenos, en `tarjetas()` de `Inicio.tsx`: con cero citas cumplidas
+  la tarjeta dice «sin citas cumplidas todavía» y no `0 %`, que se lee como un fracaso. Una
+  barra de progreso sobre un denominador cero es una barra vacía, y una barra vacía dice
+  «fallaste», no «todavía no»: por eso `barra` es `null` y no `0` en ese caso.
+
+- **Las pruebas de la portada miden un DELTA, no un total, y eso no es estilo.** El esquema
+  `pruebas` no se borra entre pruebas ni entre corridas, y otros seis archivos de Neon
+  (`test_tools_neon`, `test_relevo_neon`, `test_seguimientos_neon`, `test_reseteo_neon`,
+  `test_reactivacion_neon`, `test_ingesta_neon`) insertan en `mensajes_entrantes`,
+  `conversaciones` y `citas` ahí mismo. `resumen_inicio` cuenta la tabla ENTERA, así que un
+  `== 1` mediría la basura acumulada de todo el proyecto y amanecería en rojo sin que nadie
+  tocara nada.
+
+- **`titulo()` de `SinResolver.tsx` y `hhmm()` de `Agenda.tsx` están exportados para la
+  portada.** No se duplican: dos traducciones de la misma huella se separan en silencio y la
+  clínica acabaría leyendo dos nombres para el mismo problema, y dos lecturas del mismo ISO
+  ya costaron una agenda corrida entera.
+
 ## Del lado de Python, pero solo importa desde aquí
 
 - Sin `MAXICARE_SECRETO_SESION` el panel se apaga con un 503 y **el webhook sigue vivo**.

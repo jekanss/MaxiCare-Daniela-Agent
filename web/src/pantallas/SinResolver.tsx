@@ -8,8 +8,12 @@ type Props = { alCaducarSesion: () => void }
 /** `falta_dato:ortodoncia:precio` -> «Falta el dato «precio» de ORTODONCIA».
  *
  * La huella cruda no se le ensena a la clinica: es un identificador, no una frase. El
- * detalle tecnico vive detras del `<details>` de admin. */
-function titulo(caso: CasoSinResolver): string {
+ * detalle tecnico vive detras del `<details>` de admin.
+ *
+ * Se exporta porque la portada pinta los tres casos mas frecuentes y necesita los mismos
+ * titulos. Duplicarla dejaria dos traducciones de la misma huella que se separan en
+ * silencio: la clinica leeria dos nombres distintos para el mismo problema. */
+export function titulo(caso: CasoSinResolver): string {
   const [, uno = '', dos = ''] = caso.huella.split(':')
   switch (caso.tipo) {
     case 'FALTA_DATO':

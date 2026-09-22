@@ -47,6 +47,9 @@ body {
    cabecera; `mcRise`, la entrada de cada bloque. */
 @keyframes mcRise { from { opacity: 0; transform: translateY(16px); } to { opacity: 1; transform: none; } }
 @keyframes mcGrow { from { transform: scaleX(0); } to { transform: scaleX(1); } }
+/* La vertical no está en el archivo de diseño --allí el volumen era un SVG de línea-- y es
+   la misma idea girada: las barras de la portada las dibujan divs. */
+@keyframes mcGrowY { from { transform: scaleY(0); } to { transform: scaleY(1); } }
 @keyframes mcTick { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
 @keyframes mcPulse { 0% { opacity: 1; transform: scale(1); } 70%, 100% { opacity: 0; transform: scale(2.6); } }
 
