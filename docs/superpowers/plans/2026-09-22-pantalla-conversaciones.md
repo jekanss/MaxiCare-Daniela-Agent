@@ -3,6 +3,34 @@
 **Spec:** `docs/superpowers/specs/2026-09-22-pantalla-conversaciones-design.md`
 **Rama:** `pantalla-conversaciones` (sale de `main`, con Inicio ya fundido)
 
+## DÓNDE VA ESTO (22/09/2026)
+
+Pausado a petición de MaxiCare para atender un comportamiento de Daniela. Rama
+`pantalla-conversaciones`, árbol limpio, cuatro commits sobre `main`.
+
+| Tarea | Estado |
+|---|---|
+| 1 · Migración 026 y el registro de lo que escribe el doctor | **HECHA** (`84d80e2`) |
+| 2 · `panel.listar_conversaciones` / `hilo` / `puede_escribir` y los dos GET | **HECHA** (`d5f647b`) |
+| 3 · La pantalla, el hilo y el refresco cada 10 s | **HECHA** (`5ebdbe6`) |
+| 4 · Tomar, escribir y cerrar (backend) | pendiente |
+| 5 · Tomar, escribir y cerrar (pantalla) | pendiente |
+
+Verde al pausar: `uv run pytest -q` → 1222 · `-m neon` → 230 (y 29 en `test_panel.py` con
+lo nuevo) · `npm run build` limpio.
+
+**La migración 026 YA está aplicada en el `public` de producción** (tabla vacía + índice; no
+tocó ninguna fila existente). `public` pasó de 23 a 24 tablas. No hace falta volver a
+aplicarla; `desplegar.sh` la encontrará idempotente.
+
+**Nada desplegado y nada empujado.** `daniela.maxicarecol.com` sigue con el panel viejo.
+
+Un fallo que ya se cazó y no hay que volver a buscar: la clave del diccionario del relevo es
+`doctor`, **no** `tomada_por`. Como el guardado va envuelto en un `try` que se lo traga todo,
+habría fallado en silencio en cada relevo. Lo cazó el doble de las pruebas.
+
+---
+
 **Objetivo:** ver el hilo completo de cada paciente en el panel, refrescándose solo, y poder
 tomar la conversación, responderle y devolvérsela a Daniela sin salir de ahí.
 
@@ -62,7 +90,7 @@ y llama a persistencia, más las dos llamadas dentro de `relevar_mensaje`:
 Las dos van en un `try` propio que se traga todo y solo registra en el log: si el registro
 revienta se pierde una fila, **nunca un mensaje al paciente** (no negociable 22).
 
-`autor = relevo["tomada_por"]`, `telefono = relevo["telefono"]`,
+`autor = relevo["doctor"]` --**no** `tomada_por`: esa es la columna de la tabla, pero la clave del diccionario que devuelve `relevo_por_tema` es `doctor`--, `telefono = relevo["telefono"]`,
 `conversacion_id = relevo["id_conversacion"]`.
 
 **Verificación:**
