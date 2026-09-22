@@ -14,6 +14,8 @@ bitácora es lo único que permite reconstruir qué decía antes y quién lo cam
 
 from __future__ import annotations
 
+import csv
+import io
 import re
 import uuid
 from collections.abc import Sequence
@@ -765,7 +767,7 @@ def listar_conversaciones(
     return lista
 
 
-def hilo(conn, telefono: str, *, limite: int = 60) -> list[dict[str, Any]]:
+def hilo(conn, telefono: str, *, limite: int | None = 60) -> list[dict[str, Any]]:
     """Lo que se dijeron los tres, en orden. SOLO LECTURA.
 
     Modelado sobre `persistencia.transcripcion` --que hace esto mismo para volcarlo en el
@@ -776,6 +778,13 @@ def hilo(conn, telefono: str, *, limite: int = 60) -> list[dict[str, Any]]:
 
     El corte va por el FINAL. Lo que hace falta para entender qué está pasando es lo último
     que se dijeron, no cómo empezó todo hace dos meses.
+
+    **`limite=None` devuelve el hilo ENTERO, y existe para el export.** Un archivo que la
+    clínica se descarga para guardar o para enseñárselo a alguien no puede venir recortado
+    por un default pensado para una pantalla: sería un recorte que nadie pidió y que nada
+    anuncia. La pantalla sigue pidiendo sus 60. `LIMIT NULL` es «sin límite» en Postgres, así
+    que el `None` viaja tal cual a las dos consultas y solo hay que cuidar las dos cuentas
+    que se hacen en Python con él.
     """
     lineas: list[dict[str, Any]] = []
 
@@ -819,7 +828,7 @@ def hilo(conn, telefono: str, *, limite: int = 60) -> list[dict[str, Any]]:
             " WHERE m.session_id IN ("
             "        SELECT id::text FROM conversaciones WHERE telefono = %s)"
             " ORDER BY m.created_at DESC LIMIT %s",
-            (telefono, limite * 4),
+            (telefono, None if limite is None else limite * 4),
         )
         for crudo, cuando in cur.fetchall():
             dicho = persistencia.texto_de_daniela(crudo)
@@ -848,9 +857,173 @@ def hilo(conn, telefono: str, *, limite: int = 60) -> list[dict[str, Any]]:
         )
 
     lineas.sort(key=lambda l: l["cuando"])
-    return [
-        {**linea, "cuando": linea["cuando"].isoformat()} for linea in lineas[-limite:]
-    ]
+    recorte = lineas if limite is None else lineas[-limite:]
+    return [{**linea, "cuando": linea["cuando"].isoformat()} for linea in recorte]
+
+
+def borrar_conversacion(
+    conn, telefono: str, *, usuario: str, ahora: datetime
+) -> dict[str, Any]:
+    """Borra el hilo de ese número, conserva sus citas, y deja constancia de quién lo hizo.
+
+    Es el único borrado que este panel puede hacer, y no tiene vuelta atrás. Por eso la
+    bitácora va en la MISMA transacción que el borrado --la regla de la cabecera de este
+    módulo-- y con más razón que en un cambio de precio: allí la fila permite reconstruir qué
+    decía antes, y aquí es lo único que va a quedar.
+
+    Lo que se escribe en `valor_anterior` es el recuento, no el contenido. Copiar los mensajes
+    a la bitácora convertiría el borrado en un traslado: el paciente que pide que borren lo
+    suyo acabaría con su conversación entera guardada en otra tabla, donde nadie la busca y
+    nadie la borra.
+
+    Lo que se borra y lo que sobrevive está en `persistencia.borrar_conversacion` y en la
+    migración 028. Aquí solo se añade el quién.
+    """
+    resumen = persistencia.lo_que_se_borraria(conn, telefono, ahora=ahora)
+    borradas = persistencia.borrar_conversacion(conn, telefono, commit=False)
+
+    citas = len(resumen["citas_futuras"])
+    with conn.cursor() as cur:
+        _anotar(
+            cur,
+            tabla="conversaciones",
+            clave=telefono,
+            anterior=(
+                f"{resumen['mensajes']} mensajes, "
+                f"{borradas['conversaciones']} conversaciones, "
+                f"{borradas['casos_sin_resolver']} frases en sin-resolver"
+            ),
+            nuevo=(
+                f"BORRADA. Se conservaron {borradas['citas_conservadas']} citas "
+                f"({citas} futuras, que quedan SIN recordatorio)."
+            ),
+            usuario=usuario,
+        )
+    conn.commit()
+    return {**borradas, "mensajes": resumen["mensajes"], "citas_futuras": citas}
+
+
+# ------------------------------------------------------------------------------------------
+# El export
+# ------------------------------------------------------------------------------------------
+
+#: Las columnas del CSV, en orden. Es un contrato con quien abra el archivo dentro de un año:
+#: añadir una al final es seguro, reordenarlas rompe cualquier plantilla que la clínica haya
+#: montado encima.
+COLUMNAS_DEL_EXPORT = (
+    "telefono", "fecha_hora", "quien", "autor", "texto", "nota_de_voz",
+)
+
+#: Punto y coma, y no coma. El archivo existe para abrirse en el Excel de una clínica
+#: colombiana, donde el separador de listas del sistema es `;`: con comas, Excel mete las seis
+#: columnas en una sola y el export deja de servir para lo único que se pidió. Va junto al BOM
+#: de abajo, que es lo que hace que Excel lo lea como UTF-8 y no parta los acentos.
+SEPARADOR_CSV = ";"
+
+#: Excel no detecta UTF-8 sin esto: «valoración» se abre como «valoraciÃ³n». Es un carácter
+#: invisible al principio del archivo, y las demás herramientas (Sheets, pandas, un editor) lo
+#: ignoran o lo absorben solas.
+BOM = "﻿"
+
+#: Lo que se le pone a `quien` en el archivo. Las claves son las del hilo; los valores, algo
+#: que signifique lo mismo para alguien que abre el CSV en seis meses y no sabe que la agente
+#: se llama Daniela ni que `doctor` incluye a recepción.
+QUIEN_EN_EL_ARCHIVO = {
+    "paciente": "Paciente",
+    "daniela": "Daniela (automático)",
+    "doctor": "Clínica (persona)",
+}
+
+
+def telefonos_con_hilo(conn) -> list[str]:
+    """Todos los números que tienen algo que exportar, ordenados.
+
+    Se juntan las TRES tablas y no solo `conversaciones`: un número puede tener mensajes
+    entrantes cuya conversación se borró --quedan con `conversacion_id` en NULL-- y un export
+    que no los viera diría que ese paciente nunca escribió.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT telefono FROM conversaciones
+            UNION SELECT telefono FROM mensajes_entrantes
+            UNION SELECT telefono FROM mensajes_del_doctor
+             ORDER BY 1
+            """
+        )
+        return [f[0] for f in cur.fetchall() if f[0]]
+
+
+def _dentro_del_rango(iso: str, desde: str | None, hasta: str | None) -> bool:
+    """¿Cae este instante dentro del rango de días pedido? En hora de Bogotá.
+
+    El rango lo escribe una persona mirando un calendario, así que `hasta` INCLUYE su día
+    entero: pedir del 1 al 30 y que el 30 no salga es la clase de recorte que nadie nota
+    hasta que falta el mensaje que se buscaba.
+    """
+    dia = datetime.fromisoformat(iso).astimezone(ZONA_BOGOTA).date().isoformat()
+    if desde and dia < desde:
+        return False
+    if hasta and dia > hasta:
+        return False
+    return True
+
+
+def exportar_csv(
+    conn,
+    *,
+    telefono: str | None = None,
+    desde: str | None = None,
+    hasta: str | None = None,
+) -> tuple[str, int]:
+    """El CSV y cuántas líneas de conversación lleva. SOLO LECTURA.
+
+    Los tres filtros son opcionales y se combinan: sin ninguno sale todo, con `telefono` sale
+    una conversación, y con `desde`/`hasta` (fechas `YYYY-MM-DD` de Bogotá) sale el periodo.
+    Las tres formas que pidió MaxiCare son la misma función con argumentos distintos, y eso
+    es deliberado: con tres endpoints, arreglar el formato en uno y olvidarlo en otro produce
+    dos archivos que dicen cosas distintas de los mismos datos.
+
+    **Pide el hilo SIN límite.** `panel.hilo` recorta a 60 para la pantalla, que es lo
+    correcto ahí y sería mentira aquí: un archivo que la clínica guarda o enseña no puede
+    venir cortado por un default que nada anuncia.
+
+    Las filas van agrupadas por teléfono y, dentro, en orden cronológico. Ordenarlo todo por
+    fecha mezclaría a doce pacientes línea a línea, que es ilegible; así cada conversación se
+    lee de corrida y el filtro de Excel sigue sirviendo para lo demás.
+
+    El teléfono va COMPLETO dentro del archivo, decidido por MaxiCare el 22/09/2026: quien
+    descarga ya los ve todos en la pantalla, y sin el número un export de varias
+    conversaciones no sirve para volver a contactar a nadie ni para cruzarlo con la agenda.
+    """
+    numeros = [telefono] if telefono else telefonos_con_hilo(conn)
+
+    filas: list[list[str]] = []
+    for numero in numeros:
+        for linea in hilo(conn, numero, limite=None):
+            if not _dentro_del_rango(linea["cuando"], desde, hasta):
+                continue
+            cuando = datetime.fromisoformat(linea["cuando"]).astimezone(ZONA_BOGOTA)
+            filas.append([
+                numero,
+                cuando.strftime("%Y-%m-%d %H:%M"),
+                QUIEN_EN_EL_ARCHIVO.get(linea["quien"], linea["quien"]),
+                linea["autor"] or "",
+                linea["texto"] or "",
+                "si" if linea["voz"] else "no",
+            ])
+
+    # `QUOTE_ALL` y no el default: un mensaje de WhatsApp lleva saltos de línea, punto y coma
+    # y comillas con total normalidad, y una sola celda mal cerrada desplaza todas las
+    # columnas de ahí hacia abajo sin que nada avise. `\r\n` es lo que manda el RFC 4180 y lo
+    # que Excel espera dentro de una celda multilínea.
+    buffer = io.StringIO()
+    escritor = csv.writer(
+        buffer, delimiter=SEPARADOR_CSV, quoting=csv.QUOTE_ALL, lineterminator="\r\n"
+    )
+    escritor.writerow(COLUMNAS_DEL_EXPORT)
+    escritor.writerows(filas)
+    return BOM + buffer.getvalue(), len(filas)
 
 
 def puede_escribir(conn, telefono: str, *, ahora: datetime) -> dict[str, Any]:

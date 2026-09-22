@@ -20,7 +20,44 @@ cada vez que se corre. De ahí las dos reglas:
    `pruebas_web` — o sea que ninguna prueba contra Neon podía demostrar que la lista
    cerrada seguía cerrada. Lo arregla la 013.
 2. **Una migración ya aplicada no se edita.** Se añade la siguiente con el número
-   que sigue: `004_...sql`.
+   que sigue: `004_...sql`. **Con una excepción, y solo una: cuando la migración vieja es la
+   que impide que la nueva exista.** Ver abajo.
+
+# AMPLIAR un CHECK: el `DROP` + `ADD` a pelo es una bomba de relojería
+
+Esto costó una hora el 22/09/2026 y habría tumbado el arranque en producción.
+
+La 021 amplió el CHECK de `cambios_configuracion.tabla` de tres valores a cuatro, así:
+
+```sql
+ALTER TABLE cambios_configuracion DROP CONSTRAINT IF EXISTS ck_...;
+ALTER TABLE cambios_configuracion ADD  CONSTRAINT ck_... CHECK (tabla IN (los cuatro));
+```
+
+Correcto, idempotente y verde durante una semana. **Y roto desde el minuto en que la 028
+añadió el quinto valor**, porque las migraciones se aplican TODAS en cada arranque y por
+orden de nombre:
+
+```
+arranque n+1:   ... 021 (vuelve a poner los CUATRO)  ->  028 (pone los cinco)
+                     ↑
+                     ya hay filas con el quinto valor
+                     ERROR: is violated by some row  ->  aplicar_esquema entero abortado
+```
+
+`desplegar.sh` corre `inicializar_base.py` **antes** de levantar el contenedor, así que eso
+no es un aviso: es un despliegue que no arranca. Lo reprodujo `-m neon` en cuanto una prueba
+dejó la primera fila con el valor nuevo.
+
+**La regla, entonces: un `ADD CONSTRAINT` que no vaya dentro de su `DO $$ ... IF NOT EXISTS`
+es correcto hoy y falla el día que alguien amplíe esa misma lista.** La guarda no es solo
+para no duplicar: es lo que hace que una migración vieja se aparte cuando una nueva manda.
+
+Y por eso la 021 **sí se editó**, que es la excepción a la regla 2 de arriba. No era historia
+que reescribir: es un paso que corre en cada arranque y que estaba a punto de tumbar el
+siguiente. La alternativa --una migración más que reparase el CHECK después-- deja la 021
+armada para la próxima vez. Quien tenga que elegir otra vez: se edita la vieja **solo** para
+volverla inofensiva, nunca para cambiar lo que hizo.
 
 # Lo que el esquema protege
 

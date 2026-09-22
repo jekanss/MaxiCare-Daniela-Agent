@@ -242,6 +242,13 @@ def _borrar(database_url: str, telefono: str, conservar_wamid: str | None) -> di
 #: no pueda entrar aquí por la puerta de atrás.
 ETIQUETAS_DE_TABLA: dict[str, tuple[str, str]] = {
     "mensajes_entrantes": ("mensaje", "mensajes"),
+    # Lo que un doctor le escribió desde el panel (026). `borrar_rastro` no la tocaba --y
+    # sin ese DELETE el reseteo entero reventaba contra su clave foránea en cuanto la tabla
+    # dejó de estar vacía--, así que esta entrada llega con el arreglo. Se llama «respuesta
+    # de la clínica» y no «mensaje del doctor» porque quien lee esto es el paciente: para él
+    # no hay diferencia entre un doctor y una recepcionista, y sí la hay entre lo que
+    # escribió él y lo que le contestaron.
+    "mensajes_del_doctor": ("respuesta de la clínica", "respuestas de la clínica"),
     "citas": ("cita", "citas"),
     "reservas": ("reserva", "reservas"),
     "agent_sessions": ("historial de conversación", "historiales de conversación"),

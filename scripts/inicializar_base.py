@@ -70,6 +70,18 @@ TABLAS_DEL_CONSENTIMIENTO = ("contactos", "consentimientos")
 #: Sin este bloque, `--solo-verificar` decía OK sobre una base en ese estado exacto.
 VALOR_DE_LA_021 = "citas"
 
+#: Lo mismo, una migración después: la 028 abre el CHECK a `conversaciones` para que borrar
+#: el hilo de un paciente deje constancia de quién lo hizo. Mismo modo de fallo exacto que la
+#: 021 --`panel.borrar_conversacion` mete el borrado y su bitácora en la misma transacción,
+#: así que un CHECK viejo revienta el INSERT y arrastra al borrado-- con una diferencia que lo
+#: empeora: aquí el `CheckViolation` no rompe una marca que se puede volver a poner, sino la
+#: única fila que iba a quedar de algo que no se puede deshacer.
+#:
+#: Los dos se comprueban en el mismo bloque, con la misma función, porque son la misma
+#: pregunta hecha dos veces: la lista del CHECK es cerrada a propósito, así que la SÉPTIMA
+#: escritura del panel añadirá aquí su propia línea.
+VALOR_DE_LA_028 = "conversaciones"
+
 #: Las tres tablas de la 022, el perímetro contra el abuso de coste.
 #:
 #: `consumo_modelo` es la contabilidad --sin ella el sistema vuelve a ser ciego a su propia
@@ -362,22 +374,27 @@ def main() -> int:
         # ---------------------------------------------------------------------------
         print()
         print("=" * 78)
-        print("VERIFICACIÓN DE LA 021 (la bitácora admite la marca de asistencia)")
+        print("VERIFICACIÓN DE LA 021 Y LA 028 (lo que la bitácora admite)")
         print("=" * 78)
 
+        que_rompe = {
+            VALOR_DE_LA_021: "la marca de asistencia del panel está rota",
+            VALOR_DE_LA_028: "borrar una conversación desde el panel está roto",
+        }
         for esquema in ("public", esquema_pruebas):
             if esquema != "public" and not _existe_esquema(conn, esquema):
                 print(f"\n  {esquema}: no existe todavía (nada que verificar)")
                 continue
-            admite = _bitacora_admite(conn, esquema, VALOR_DE_LA_021)
-            print(f"\n  {esquema}: {'OK  ' if admite else 'FALLA'} "
-                  + (f"cambios_configuracion.tabla admite '{VALOR_DE_LA_021}'" if admite
-                     else f"cambios_configuracion.tabla NO admite '{VALOR_DE_LA_021}' -- la "
-                          "marca de asistencia del panel está rota (el UPDATE y su bitácora "
-                          "van en la misma transacción); corre este script sin "
-                          "--solo-verificar"))
-            if not admite:
-                return 1
+            print()
+            for valor, rotura in que_rompe.items():
+                admite = _bitacora_admite(conn, esquema, valor)
+                print(f"  {esquema}: {'OK  ' if admite else 'FALLA'} "
+                      + (f"cambios_configuracion.tabla admite '{valor}'" if admite
+                         else f"cambios_configuracion.tabla NO admite '{valor}' -- {rotura} "
+                              "(el cambio y su bitácora van en la misma transacción); corre "
+                              "este script sin --solo-verificar"))
+                if not admite:
+                    return 1
 
         # ---------------------------------------------------------------------------
         # 9. La MIGRACIÓN 022 (las cuotas y el consumo), en los dos esquemas.
@@ -504,7 +521,7 @@ def main() -> int:
 
     print("\n" + "=" * 78)
     print("FASE 1 — segunda mitad: OK  ·  FASE 7 — el historial: OK  ·  019 — contacto y "
-          "consentimiento: OK  ·  021 — la marca de asistencia: OK  ·  022 — el perímetro: "
+          "consentimiento: OK  ·  021/028 — la bitácora: OK  ·  022 — el perímetro: "
           "OK  ·  026/027 — el hilo completo: OK  ·  vocabulario: revisado arriba")
     print("=" * 78)
     return 0

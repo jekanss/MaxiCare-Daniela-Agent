@@ -379,6 +379,15 @@ estrenar una línea de teléfono. Vive en `reseteo.py`, y `runtime._entregar` lo
   borrado parecería haber funcionado. `agent_messages` no se borra a mano: se va sola por su
   propio `ON DELETE CASCADE`. Lo único de memoria del proceso que hay que sacar aparte es el
   búfer, y de eso se encarga `atencion.olvidar`.
+- **Una tabla nueva que apunte a `conversaciones` sin cascada hay que añadirla A MANO a
+  `borrar_rastro`, y olvidarlo no se ve hasta que la tabla deja de estar vacía.** Pasó con
+  `mensajes_del_doctor` (026): se creó el 22/09/2026, `borrar_rastro` no la tocaba, y no
+  estalló porque tuvo cero filas hasta que ESE MISMO DÍA se desplegó la pantalla que la
+  llena. A partir del primer doctor que contestara desde el panel, `/clearstate` moría entero
+  para ese paciente con violación de clave foránea en el `DELETE FROM conversaciones`. La
+  guarda que existe ahora es `test_clearstate_ya_no_revienta_con_un_mensaje_del_doctor`, en
+  `-m neon`, y la entrada en `reseteo.ETIQUETAS_DE_TABLA` --sin ella el paciente recibiría
+  «3 en mensajes_del_doctor» por WhatsApp--.
 - **La excepción, y es el punto entero de la migración 019: `/clearstate` resetea el aviso y
   NUNCA la baja.** `contactos.aviso_mostrado_en` y `politica_version` vuelven a NULL —lo
   volverá a ver, que es lo correcto en un reseteo—, pero `no_contactar` no se toca y **la fila

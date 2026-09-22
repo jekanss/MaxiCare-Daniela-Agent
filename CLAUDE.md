@@ -359,6 +359,24 @@ una —qué se midió, qué costó— está en la regla que cubre ese archivo.
    clave sin NADA que decir no se ve --ni error, ni log, ni prueba en rojo--, así que la
    vigila el bloque 11 de `inicializar_base.py`, que **avisa y no falla**.
 
+31. **Borrar una conversación desde el panel se lleva lo que cuelga de `conversaciones` y
+   NUNCA lo que va por teléfono.** Se van los mensajes de las tres voces, el historial del
+   agente, los escalamientos, las notas y --en cascada-- los seguimientos. Sobreviven las
+   CITAS (con su cupo y su evento de Google), la ficha de `pacientes`, el hilo de Telegram,
+   `contactos` y la bitácora `consentimientos`. Es la elección de MaxiCare del 22/09/2026 y
+   la diferencia entera con `/clearstate`, que sí resetea a primer contacto. **La cita se
+   DESENGANCHA (`UPDATE ... SET conversacion_id = NULL`), no se cascadea**: la 028 le quitó
+   el NOT NULL y dejó la FK sin `ON DELETE` a propósito, para que un `DELETE FROM
+   conversaciones` escrito en otro sitio siga fallando ruidosamente en vez de desenganchar
+   citas en silencio. **Y la reserva se desengancha, no se borra**: `citas.reserva_id` es
+   `ON DELETE SET NULL`, así que borrarla dejaría la cita viva y el cupo LIBRE, y la clínica
+   le daría esa hora a otro. **La cita conservada pierde su recordatorio** --`seguimientos`
+   cuelga de la conversación-- y por eso la ventana de confirmación cuenta las citas futuras
+   y lo dice ANTES. Solo `admin`, y con su fila en `cambios_configuracion` dentro de la misma
+   transacción. El export es la otra mitad: un CSV con `;` y BOM (Excel colombiano), el hilo
+   COMPLETO --`panel.hilo(limite=None)`, porque el recorte a 60 que sirve en la pantalla es
+   una mentira en un archivo-- y `admin` solo para llevárselo todo o por rango.
+
 # Dónde está el resto
 
 El detalle de cada área se carga solo cuando tocas sus archivos:

@@ -9,7 +9,7 @@ import json
 import os
 import re
 import uuid
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import psycopg
@@ -2358,3 +2358,387 @@ def test_cerrar_sin_cita_ni_siquiera_mira_el_catalogo(monkeypatch):
     assert r.status_code == 200 and r.json()["cerrado"] is True
     assert recibidos["hubo_cita"] is False and recibidos["cuando"] is None
     assert recibidos["doctor"] == "Prueba"
+
+
+# ==========================================================================================
+# Borrar una conversación (028) y exportar
+# ==========================================================================================
+#
+# La decisión de MaxiCare del 22/09/2026, y lo que estas pruebas existen para fijar: borrar
+# la conversación NO borra las citas. La cita sobrevive, su cupo sigue tomado y su evento de
+# Google Calendar sigue en pie; lo que se va es lo que se dijeron. Un borrado que se llevara
+# la cita por delante dejaría a un paciente presentándose a una hora que ya no existe en la
+# agenda de nadie, y es exactamente lo que el esquema hacía obligatorio antes de la 028.
+
+
+def _un_hilo_completo(conn, tel: str) -> tuple[str, str]:
+    """Una conversación con las tres voces, una cita futura con cupo, y ficha de paciente.
+
+    Devuelve `(id_conversacion, id_cita)`. Se siembra a mano y no con las tools porque lo que
+    se prueba es el SQL del borrado, no cómo se llegó a ese estado.
+    """
+    cid = _conversacion(conn, tel)
+    _entra(conn, tel, texto="hola, quiero una cita", cuando=_AHORA_CONVERSACIONES)
+    persistencia.guardar_mensaje_del_doctor(
+        conn,
+        telefono=tel,
+        conversacion_id=cid,
+        autor="Dra. Prueba",
+        origen="panel",
+        texto="yo le respondo",
+        wamid=f"w-{uuid.uuid4()}",
+    )
+    inicio = _AHORA_CONVERSACIONES + timedelta(days=3)
+    cupo = persistencia.tomar_cupo(
+        conn,
+        inicio=inicio,
+        # Capacidad alta a proposito: el esquema `pruebas` no se borra entre corridas y
+        # con la capacidad real esta hora se llena a la segunda vez. Lo que se prueba
+        # aqui es que el cupo SOBREVIVA al borrado, no el reparto de cupos.
+        capacidad=1000,
+        clave_idempotencia=f"prueba-{uuid.uuid4()}",
+        conversacion_id=cid,
+    )
+    id_cita = str(uuid.uuid4())
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO agent_sessions (session_id) VALUES (%s)"
+            " ON CONFLICT (session_id) DO NOTHING",
+            (cid,),
+        )
+        cur.execute(
+            "INSERT INTO agent_messages (session_id, message_data) VALUES (%s, %s)",
+            (cid, json.dumps({"role": "assistant", "content": "claro que si"})),
+        )
+        cur.execute(
+            "INSERT INTO pacientes (nombre_completo, telefono) VALUES (%s, %s)"
+            " ON CONFLICT (telefono) DO NOTHING",
+            ("Paciente De Prueba", tel),
+        )
+        cur.execute(
+            "INSERT INTO citas (id, conversacion_id, reserva_id, nombre_completo, telefono,"
+            "                   tratamiento, inicio, duracion_minutos, evento_calendar_id)"
+            " VALUES (%s, %s, %s, %s, %s, 'cordales', %s, 60, 'evento-de-google')",
+            (id_cita, cid, cupo[0] if cupo else None, "Paciente De Prueba", tel, inicio),
+        )
+    conn.commit()
+    return cid, id_cita
+
+
+@pytest.mark.neon
+def test_borrar_una_conversacion_CONSERVA_la_cita_Y_su_cupo(conn):
+    """El corazón de la 028, y las dos mitades importan.
+
+    Conservar la cita y borrar su reserva sería peor que borrarla entera: `citas.reserva_id`
+    es `ON DELETE SET NULL`, así que la cita seguiría viva **con el cupo liberado** y la
+    clínica le daría esa hora a otro paciente. La cita se desengancha; la reserva, también.
+    """
+    tel = _telefono_nuevo()
+    cid, id_cita = _un_hilo_completo(conn, tel)
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT reserva_id FROM citas WHERE id = %s", (id_cita,))
+        reserva_antes = cur.fetchone()[0]
+    assert reserva_antes is not None, "la siembra no tomó cupo: la prueba no probaría nada"
+
+    persistencia.borrar_conversacion(conn, tel)
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT conversacion_id, reserva_id, estado, evento_calendar_id"
+            "  FROM citas WHERE id = %s",
+            (id_cita,),
+        )
+        fila = cur.fetchone()
+        assert fila is not None, "se borró la cita: es justo lo que MaxiCare pidió que NO"
+        assert fila[0] is None, "la cita tiene que quedar desenganchada, no apuntando a nada"
+        assert fila[1] == reserva_antes, "la cita perdió su cupo"
+        assert fila[2] == "confirmada", "la cita cambió de estado"
+        assert fila[3] == "evento-de-google", "se tocó el evento de Google Calendar"
+
+        cur.execute("SELECT count(*) FROM reservas WHERE id = %s", (reserva_antes,))
+        assert cur.fetchone()[0] == 1, "se borró la reserva y el cupo quedó libre"
+
+        cur.execute("SELECT count(*) FROM conversaciones WHERE id = %s", (cid,))
+        assert cur.fetchone()[0] == 0, "la conversación sigue ahí"
+
+
+@pytest.mark.neon
+def test_borrar_una_conversacion_se_lleva_las_TRES_voces_y_el_historial(conn):
+    """Lo que se borra. `agent_sessions` va antes que `conversaciones` o queda huérfano vivo.
+
+    `mensajes_del_doctor` está aquí por partida doble: es una de las tres voces del hilo, y
+    es la tabla que `borrar_rastro` se olvidaba --su clave foránea sin cascada tumbaba el
+    borrado entero-- hasta el 22/09/2026.
+    """
+    tel = _telefono_nuevo()
+    cid, _ = _un_hilo_completo(conn, tel)
+
+    borradas = persistencia.borrar_conversacion(conn, tel)
+
+    assert borradas["mensajes_entrantes"] == 1
+    assert borradas["mensajes_del_doctor"] == 1
+    assert borradas["agent_sessions"] == 1
+    assert borradas["citas_conservadas"] == 1
+
+    with conn.cursor() as cur:
+        for tabla in ("mensajes_entrantes", "mensajes_del_doctor"):
+            cur.execute(f"SELECT count(*) FROM {tabla} WHERE telefono = %s", (tel,))
+            assert cur.fetchone()[0] == 0, f"quedaron filas en {tabla}"
+        # Por su ON DELETE CASCADE de la 010, no por un DELETE nuestro.
+        cur.execute("SELECT count(*) FROM agent_messages WHERE session_id = %s", (cid,))
+        assert cur.fetchone()[0] == 0, "el historial del diálogo sobrevivió al borrado"
+
+
+@pytest.mark.neon
+def test_borrar_una_conversacion_NO_toca_lo_que_va_por_TELEFONO(conn):
+    """La regla que separa este borrado de `/clearstate`, en una prueba.
+
+    Se va lo que cuelga de `conversaciones`; sobrevive lo que está indexado por el número. La
+    ficha se queda porque la cita conservada apunta ahí y es lo que deja al paciente mover lo
+    suyo; el hilo de Telegram, porque existe de verdad en el grupo y borrar la fila sin
+    borrar el tema mata el siguiente archivo de ese número.
+    """
+    tel = _telefono_nuevo()
+    _un_hilo_completo(conn, tel)
+    persistencia.guardar_tema(conn, telefono=tel, topic_id=uuid.uuid4().int % 10**8)
+
+    persistencia.borrar_conversacion(conn, tel)
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM pacientes WHERE telefono = %s", (tel,))
+        assert cur.fetchone()[0] == 1, "se borró la ficha del paciente"
+        cur.execute("SELECT count(*) FROM temas_telegram WHERE telefono = %s", (tel,))
+        assert cur.fetchone()[0] == 1, "se borró el hilo de Telegram del doctor"
+
+
+@pytest.mark.neon
+def test_borrar_desde_el_panel_deja_su_fila_en_la_bitacora(conn):
+    """Es lo único que va a quedar. Y va en la MISMA transacción que el borrado.
+
+    Sin el valor 'conversaciones' en el CHECK que abre la 028, este INSERT revienta con
+    `CheckViolation` y se lleva por delante el borrado entero -- el mismo modo de fallo que
+    la 021 ya cerró para la marca de asistencia.
+    """
+    tel = _telefono_nuevo()
+    _un_hilo_completo(conn, tel)
+
+    panel.borrar_conversacion(conn, tel, usuario="Ana Admin", ahora=_AHORA_CONVERSACIONES)
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT valor_anterior, valor_nuevo, usuario FROM cambios_configuracion"
+            " WHERE tabla = 'conversaciones' AND clave = %s",
+            (tel,),
+        )
+        filas = cur.fetchall()
+    assert len(filas) == 1, "el borrado no dejó constancia de quién lo hizo"
+    anterior, nuevo, usuario = filas[0]
+    assert usuario == "Ana Admin"
+    assert "mensajes" in anterior
+    assert "BORRADA" in nuevo and "1 citas" in nuevo
+
+
+@pytest.mark.neon
+def test_la_advertencia_del_borrado_CUENTA_las_citas_futuras(conn):
+    """Lo que hace honesta a la ventana de confirmación.
+
+    La cita sobrevive pero su recordatorio no --`seguimientos` cae en cascada con la
+    conversación-- así que la pantalla tiene que poder decirlo ANTES. Una cita pasada no
+    entra: avisar de su recordatorio sería mentir, porque ya se envió o ya caducó.
+    """
+    tel = _telefono_nuevo()
+    _un_hilo_completo(conn, tel)  # deja una cita a tres días vista
+    cid = _conversacion(conn, tel)
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO citas (id, conversacion_id, nombre_completo, telefono, tratamiento,"
+            "                   inicio, duracion_minutos)"
+            " VALUES (%s, %s, 'Paciente De Prueba', %s, 'limpieza', %s, 60)",
+            (str(uuid.uuid4()), cid, tel, _AHORA_CONVERSACIONES - timedelta(days=5)),
+        )
+    conn.commit()
+
+    resumen = persistencia.lo_que_se_borraria(conn, tel, ahora=_AHORA_CONVERSACIONES)
+
+    assert len(resumen["citas_futuras"]) == 1, "contó la cita pasada, o se dejó la futura"
+    assert resumen["citas_futuras"][0]["tratamiento"] == "cordales"
+    # Las tres voces juntas: el mensaje del paciente, el del doctor y el del agente.
+    assert resumen["mensajes"] == 3
+
+
+@pytest.mark.neon
+def test_clearstate_ya_no_revienta_con_un_mensaje_del_doctor(conn):
+    """La regresión del 22/09/2026, que se armó el día que se desplegó el panel.
+
+    `borrar_rastro` no borraba `mensajes_del_doctor`, y esa tabla apunta a `conversaciones`
+    sin cascada desde la 026: en cuanto un doctor contestaba desde el panel, `/clearstate`
+    moría con violación de clave foránea para ese paciente. No estalló antes porque la tabla
+    estuvo vacía hasta ese día.
+    """
+    tel = _telefono_nuevo()
+    _un_hilo_completo(conn, tel)
+
+    borradas = persistencia.borrar_rastro(conn, tel)
+
+    assert borradas["mensajes_del_doctor"] == 1
+    with conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM conversaciones WHERE telefono = %s", (tel,))
+        assert cur.fetchone()[0] == 0, "el reseteo no llegó a borrar la conversación"
+        cur.execute("SELECT count(*) FROM citas WHERE telefono = %s", (tel,))
+        assert cur.fetchone()[0] == 0, "/clearstate sí se lleva las citas, y debe seguir así"
+
+
+@pytest.mark.neon
+def test_el_export_NO_recorta_el_hilo_a_sesenta_mensajes(conn):
+    """El recorte que sirve en la pantalla es una mentira en un archivo.
+
+    `panel.hilo` corta a 60 por defecto --lo último es lo que hace falta para entender qué
+    pasa-- y el export pide `limite=None`. Sin esto, la clínica se descargaría un archivo
+    silenciosamente incompleto y no habría nada que se lo dijera.
+    """
+    tel = _telefono_nuevo()
+    for i in range(70):
+        _entra(
+            conn,
+            tel,
+            texto=f"mensaje numero {i}",
+            cuando=_AHORA_CONVERSACIONES - timedelta(minutes=70 - i),
+        )
+
+    contenido, cuantas = panel.exportar_csv(conn, telefono=tel)
+
+    assert cuantas == 70, f"el export se quedó en {cuantas} de 70"
+    assert "mensaje numero 0" in contenido, "falta el más viejo, que es el que se recortaba"
+    assert "mensaje numero 69" in contenido
+    cabecera = panel.SEPARADOR_CSV.join(f'"{c}"' for c in panel.COLUMNAS_DEL_EXPORT)
+    assert contenido.startswith(panel.BOM + cabecera), (
+        "sin el BOM y sin el punto y coma, Excel no abre bien el archivo"
+    )
+
+
+@pytest.mark.neon
+def test_el_export_por_rango_INCLUYE_el_dia_de_hasta(conn):
+    """Pedir del 20 al 22 y que falte el 22 es el recorte que nadie nota hasta que falta."""
+    tel = _telefono_nuevo()
+    for dia, texto in ((20, "el veinte"), (21, "el veintiuno"), (22, "el veintidos")):
+        _entra(
+            conn, tel, texto=texto, cuando=datetime(2026, 9, dia, 15, 0, tzinfo=ZONA_BOGOTA)
+        )
+
+    contenido, cuantas = panel.exportar_csv(
+        conn, telefono=tel, desde="2026-09-21", hasta="2026-09-22"
+    )
+
+    assert cuantas == 2
+    assert "el veintiuno" in contenido and "el veintidos" in contenido
+    assert "el veinte" not in contenido
+
+
+# ------------------------------------------------------------------------------------------
+# Los permisos del borrado y del export, sin base de datos
+# ------------------------------------------------------------------------------------------
+#
+# Estas van SIN `-m neon` a propósito: un 403 se decide antes de tocar la base, y una prueba
+# de permisos que necesita Neon es una prueba que no se corre. Son la mitad que de verdad
+# protege --esconder el botón en la pantalla no protege nada-- y la única forma de cazar el
+# día que alguien le cambie el rol a una de las tres rutas.
+
+
+def test_solo_admin_puede_borrar_una_conversacion():
+    """Decisión de MaxiCare del 22/09/2026. Es la única acción del panel que destruye algo."""
+    for rol in ("doctor", "recepcion"):
+        runtime.app.dependency_overrides[runtime.usuario_actual] = _como(rol)
+        try:
+            r = TestClient(runtime.app).delete("/api/conversaciones/573001112233")
+            assert r.status_code == 403, f"{rol} pudo borrar una conversación"
+        finally:
+            runtime.app.dependency_overrides.clear()
+
+
+def test_la_confirmacion_del_borrado_tambien_es_solo_de_admin():
+    """Va con el borrado y no con la lectura del hilo.
+
+    Enseñarle la ventana de «esto se va a borrar» a quien luego va a recibir un 403 es una
+    pantalla que miente sobre lo que se puede hacer.
+    """
+    runtime.app.dependency_overrides[runtime.usuario_actual] = _como("doctor")
+    try:
+        r = TestClient(runtime.app).get(
+            "/api/conversaciones/573001112233/antes-de-borrar"
+        )
+        assert r.status_code == 403
+    finally:
+        runtime.app.dependency_overrides.clear()
+
+
+def test_exportarlo_TODO_es_solo_de_admin_y_exportar_UNA_no():
+    """El único permiso del panel que depende de los argumentos, y por qué.
+
+    Exportar una conversación no enseña nada que quien la pidió no tuviera ya en pantalla.
+    Llevarse todas --o un periodo entero-- es sacar la base de pacientes de la clínica en un
+    archivo, que es otra cosa.
+    """
+    runtime.app.dependency_overrides[runtime.usuario_actual] = _como("recepcion")
+    try:
+        c = TestClient(runtime.app)
+        assert c.get("/api/conversaciones/exportar").status_code == 403
+        assert c.get("/api/conversaciones/exportar?desde=2026-09-01").status_code == 403
+        # Y con teléfono NO es un 403. No se comprueba el 200 --eso necesitaría la base-- sino
+        # que el permiso deja pasar: lo que falle después será otra cosa, nunca un 403.
+        r = c.get("/api/conversaciones/exportar?telefono=573001112233")
+        assert r.status_code != 403
+    finally:
+        runtime.app.dependency_overrides.clear()
+
+
+def test_una_fecha_que_no_es_una_fecha_se_rechaza_antes_de_tocar_la_base():
+    runtime.app.dependency_overrides[runtime.usuario_actual] = _como("admin")
+    try:
+        r = TestClient(runtime.app).get("/api/conversaciones/exportar?desde=ayer")
+        assert r.status_code == 400
+        assert "2026-09-22" in r.json()["detalle"], "el error no dice qué formato se espera"
+    finally:
+        runtime.app.dependency_overrides.clear()
+
+
+def test_la_ruta_de_export_no_se_la_come_el_parametro_del_telefono():
+    """`/api/conversaciones/exportar` frente a `/api/conversaciones/{telefono}`.
+
+    FastAPI resuelve por orden de declaración. Con la del parámetro delante, «exportar»
+    entraría por ahí y `_telefono_valido` devolvería un 404 sobre una ruta que existe. Es un
+    fallo que no se ve leyendo el código de ninguna de las dos.
+    """
+    rutas = [
+        r.path for r in runtime.app.routes
+        if getattr(r, "path", "").startswith("/api/conversaciones")
+    ]
+    assert rutas.index("/api/conversaciones/exportar") < rutas.index(
+        "/api/conversaciones/{telefono}"
+    ), "la ruta de export quedó DESPUÉS de la del teléfono y es inalcanzable"
+
+
+def test_el_rango_del_export_incluye_el_dia_de_hasta_y_excluye_el_de_antes():
+    """La regla de inclusión, aislada de la base. `hasta` incluye su día entero."""
+    en_el_veintiuno = datetime(2026, 9, 21, 23, 30, tzinfo=ZONA_BOGOTA).isoformat()
+    en_el_veintidos = datetime(2026, 9, 22, 0, 30, tzinfo=ZONA_BOGOTA).isoformat()
+
+    assert panel._dentro_del_rango(en_el_veintiuno, "2026-09-21", "2026-09-21") is True
+    assert panel._dentro_del_rango(en_el_veintidos, "2026-09-21", "2026-09-21") is False
+    assert panel._dentro_del_rango(en_el_veintidos, None, "2026-09-22") is True
+    assert panel._dentro_del_rango(en_el_veintiuno, "2026-09-22", None) is False
+    # Sin filtros entra todo: es el caso «exportar todas».
+    assert panel._dentro_del_rango(en_el_veintiuno, None, None) is True
+
+
+def test_el_rango_se_mide_en_hora_de_BOGOTA_y_no_en_UTC():
+    """Las 8 de la noche del 21 en Bogotá son la 1 de la madrugada del 22 en UTC.
+
+    Sin la conversión, un mensaje de la tarde saldría en el export del día siguiente y
+    faltaría en el del suyo. Es el fallo que no se ve hasta que alguien busca una
+    conversación por fecha y no la encuentra donde la vivió.
+    """
+    de_noche_en_bogota = datetime(2026, 9, 22, 1, 30, tzinfo=timezone.utc).isoformat()
+
+    assert panel._dentro_del_rango(de_noche_en_bogota, "2026-09-21", "2026-09-21") is True
+    assert panel._dentro_del_rango(de_noche_en_bogota, "2026-09-22", "2026-09-22") is False

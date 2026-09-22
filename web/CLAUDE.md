@@ -232,6 +232,32 @@ uv run uvicorn maxicare_daniela.runtime:app --port 8080
   de Daniela por FORMA —rótulo arriba y barra lateral— y no por tono: los dos lilas que había
   (`#EDE9FE` contra `#F4F1F9`) no se distinguen en la pantalla de un consultorio.
 
+- **Borrar una conversación es lo único de este panel que destruye algo, y la confirmación
+  pide los datos al SERVIDOR en vez de suponerlos.** `loQueSeVaAlBorrar` existe por una línea
+  concreta: la cita del paciente SOBREVIVE al borrado --lo eligió MaxiCare-- pero **su
+  recordatorio no**, porque los seguimientos cuelgan de la conversación con borrado en
+  cascada. Ni la lista ni el hilo traen las citas futuras, así que sin esa llamada la
+  advertencia tendría que inventarse el dato o callárselo. Tres cosas más de esa ventana que
+  no son cosméticas: `porBorrar` guarda el TELÉFONO y no un booleano (la lista se refresca
+  cada diez segundos por debajo, y con un booleano un cambio de selección dejaría la
+  confirmación apuntando a otra persona sin cambiar de texto); **Escape la cierra**, porque
+  una ventana destructiva que solo se cierra acertándole a un botón se acaba confirmando por
+  inercia; y al borrar se suelta la SELECCIÓN antes de refrescar, o la pantalla pediría el
+  hilo de alguien que ya no existe.
+
+- **`es_admin` viaja en la lista, junto a `puede_escribir`, y por lo mismo: para no pintar
+  botones que el servidor va a rechazar.** Ninguno de los dos ES el permiso --eso vive en
+  `exigir_rol`, y hay pruebas offline que lo fijan para las tres rutas nuevas--. Esconder el
+  botón de borrar no protege nada; lo que protege es el 403.
+
+- **El export no pasa por `pedir` y repite sus dos promesas a mano.** Lo que vuelve es un
+  archivo, no JSON, así que `descargarExport` hace su propio `fetch` --con
+  `credentials: 'same-origin'` y el 401 como `SesionCaducada`, que es justo lo que `pedir`
+  compra y aquí habría que recordar--. Y baja por Blob y no mandando el navegador a la URL:
+  así el 403 de «exportarlo todo es de admin» llega como un mensaje que la pantalla pinta, en
+  vez de como una pestaña en blanco con un JSON dentro. El `URL.revokeObjectURL` del final no
+  sobra: sin él, exportar treinta veces en una tarde deja treinta copias en el navegador.
+
 ## Del lado de Python, pero solo importa desde aquí
 
 - Sin `MAXICARE_SECRETO_SESION` el panel se apaga con un 503 y **el webhook sigue vivo**.

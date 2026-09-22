@@ -386,6 +386,9 @@ export type ListaDeConversaciones = {
   /** Si el ROL puede tomar y escribir. No es el control de acceso --ese vive en el
    *  servidor-- sino lo que evita pintar botones que van a devolver 403. */
   puede_escribir: boolean
+  /** Si el rol es `admin`: borrar un hilo y exportarlo todo. Mismo criterio que el de
+   *  arriba, y el mismo aviso: esconder el botón no es el permiso. */
+  es_admin: boolean
   usuario: string
 }
 
@@ -442,4 +445,77 @@ export async function cerrarRelevo(
     method: 'POST',
     body: JSON.stringify(cierre),
   })
+}
+
+/** Lo que se pierde y lo que sobrevive si se borra un hilo. Lo pinta la confirmación. */
+export type AntesDeBorrar = {
+  /** Las tres voces juntas: lo que el paciente escribió, lo que contestó Daniela y lo que
+   *  escribió la clínica. Se cuentan juntas porque así se ven en el hilo. */
+  mensajes: number
+  /** Solo las FUTURAS y vivas. Sobreviven al borrado, pero **su recordatorio no**: los
+   *  seguimientos cuelgan de la conversación con borrado en cascada. Por eso este dato viaja
+   *  hasta la pantalla en vez de quedarse en el servidor. */
+  citas_futuras: { inicio: string; tratamiento: string }[]
+}
+
+export async function loQueSeVaAlBorrar(telefono: string): Promise<AntesDeBorrar> {
+  return pedir<AntesDeBorrar>(
+    `/api/conversaciones/${encodeURIComponent(telefono)}/antes-de-borrar`,
+  )
+}
+
+/** Borra el hilo y CONSERVA las citas. No tiene vuelta atrás y solo lo puede hacer un admin.
+ *
+ *  Lo que se va: los mensajes de los tres, el historial del agente, los escalamientos y los
+ *  recordatorios. Lo que se queda: las citas --y sus eventos en Google Calendar--, la ficha
+ *  del paciente y el hilo del doctor en Telegram. */
+export async function borrarConversacion(
+  telefono: string,
+): Promise<{ ok: boolean; mensajes: number; citas_conservadas: number }> {
+  return pedir(`/api/conversaciones/${encodeURIComponent(telefono)}`, { method: 'DELETE' })
+}
+
+/** Descarga el CSV: una conversación, todas, o un periodo. Los tres filtros se combinan.
+ *
+ *  No pasa por `pedir` porque lo que vuelve es un archivo y no JSON, pero sí repite sus dos
+ *  promesas a mano --la cookie y el 401 como sesión caducada--: sin ellas, una sesión que
+ *  caduca durante la descarga abriría una pestaña con un error crudo en vez de mandar a
+ *  ingresar de nuevo.
+ *
+ *  La descarga se hace con un Blob y no mandando el navegador a la URL: así el 403 de
+ *  «exportarlo todo es de admin» llega como un mensaje que la pantalla puede pintar, en vez
+ *  de como una página en blanco con un JSON dentro. */
+export async function descargarExport(filtros: {
+  telefono?: string
+  desde?: string
+  hasta?: string
+}): Promise<void> {
+  const parametros = new URLSearchParams()
+  if (filtros.telefono) parametros.set('telefono', filtros.telefono)
+  if (filtros.desde) parametros.set('desde', filtros.desde)
+  if (filtros.hasta) parametros.set('hasta', filtros.hasta)
+
+  const r = await fetch(`/api/conversaciones/exportar?${parametros}`, {
+    credentials: 'same-origin',
+  })
+  if (r.status === 401) throw new SesionCaducada('Tu sesión se cerró. Vuelve a ingresar.')
+  if (!r.ok) {
+    const cuerpo = await r.json().catch(() => null)
+    throw new Error(cuerpo?.detalle ?? `No se pudo exportar (${r.status}).`)
+  }
+
+  const nombre =
+    /filename="([^"]+)"/.exec(r.headers.get('Content-Disposition') ?? '')?.[1] ??
+    'conversaciones.csv'
+  const blob = await r.blob()
+  const url = URL.createObjectURL(blob)
+  const enlace = document.createElement('a')
+  enlace.href = url
+  enlace.download = nombre
+  document.body.appendChild(enlace)
+  enlace.click()
+  enlace.remove()
+  // Sin esto el Blob se queda en memoria hasta que se recargue la pestaña, y exportar
+  // treinta veces en una tarde deja treinta copias del archivo dentro del navegador.
+  URL.revokeObjectURL(url)
 }

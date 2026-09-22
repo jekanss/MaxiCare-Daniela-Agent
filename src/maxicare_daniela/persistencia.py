@@ -921,12 +921,17 @@ def guardar_mensaje_del_doctor(
     conn.commit()
 
 
-def mensajes_del_doctor(conn, telefono: str, *, limite: int = 60) -> list[dict[str, Any]]:
+def mensajes_del_doctor(
+    conn, telefono: str, *, limite: int | None = 60
+) -> list[dict[str, Any]]:
     """Lo que los humanos le escribieron a ese número, lo más viejo primero.
 
     El corte va por el FINAL --los últimos `limite`-- por lo mismo que en `transcripcion`: lo
     que hace falta para entender qué está pasando es lo último que se dijeron, no cómo empezó
     todo hace dos meses. Por eso la consulta ordena DESC, corta, y se invierte en Python.
+
+    `limite=None` las trae TODAS, para el export del panel: `LIMIT NULL` es «sin límite» en
+    Postgres, así que el `None` viaja tal cual y no hace falta una segunda consulta.
     """
     with conn.cursor() as cur:
         cur.execute(
@@ -3708,9 +3713,10 @@ def revocar_baja(
 def borrar_rastro(conn, telefono: str, *, conservar_wamid: str | None = None) -> dict[str, int]:
     """Borra de la base todo lo que ata un teléfono a este sistema. Devuelve el conteo.
 
-    EL ORDEN NO ES ESTILO: ES LO QUE LA BASE PERMITE. `citas`, `reservas` y
-    `mensajes_entrantes` apuntan a `conversaciones` sin `ON DELETE CASCADE`, y
-    `conversaciones.paciente_id` apunta a `pacientes` igual de desnudo. Empezar por el
+    EL ORDEN NO ES ESTILO: ES LO QUE LA BASE PERMITE. `citas`, `reservas`,
+    `mensajes_entrantes` y `mensajes_del_doctor` apuntan a `conversaciones` sin
+    `ON DELETE CASCADE`, y `conversaciones.paciente_id` apunta a `pacientes` igual de
+    desnudo. Empezar por el
     paciente --que es por donde uno empezaría-- falla con un error de integridad y no borra
     nada. De la hoja a la raíz, y las cuatro tablas con CASCADE (`estado_oportunidad`,
     `notas_archivo`, `seguimientos`, `escalamientos`) se van solas al caer la conversación.
@@ -3761,6 +3767,25 @@ def borrar_rastro(conn, telefono: str, *, conservar_wamid: str | None = None) ->
                 parametros,
             )
             borradas["mensajes_entrantes"] = cur.rowcount
+
+            # Lo que el doctor escribió desde el panel (026). Se le OLVIDÓ a este borrado
+            # durante toda la vida de la tabla, y no estalló porque estuvo vacía hasta el
+            # día en que se desplegó la pantalla que la llena: `mensajes_del_doctor`
+            # apunta a `conversaciones` SIN cascada, así que el `DELETE FROM conversaciones`
+            # de más abajo revienta con violación de clave foránea en cuanto un doctor haya
+            # contestado a ese número. `/clearstate` entero, muerto, para ese paciente.
+            #
+            # El filtro va por las DOS puertas, como el de arriba: la tabla guarda el
+            # teléfono además del `conversacion_id`, y esa columna es nullable.
+            cur.execute(
+                f"""
+                DELETE FROM mensajes_del_doctor
+                 WHERE telefono = %(tel)s
+                    OR conversacion_id IN ({_CONVERSACIONES_DEL_TELEFONO})
+                """,
+                parametros,
+            )
+            borradas["mensajes_del_doctor"] = cur.rowcount
 
             cur.execute(
                 f"""
@@ -3907,6 +3932,193 @@ def borrar_rastro(conn, telefono: str, *, conservar_wamid: str | None = None) ->
                 parametros,
             )
         conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+    return borradas
+
+
+def lo_que_se_borraria(conn, telefono: str, *, ahora: datetime) -> dict[str, Any]:
+    """Qué se pierde y qué sobrevive si se borra el hilo de este teléfono. SOLO LECTURA.
+
+    Existe para que la ventana de confirmación del panel diga la verdad ANTES, y no para
+    adornarla. Lo que de verdad importa es `citas_futuras`: la cita sobrevive al borrado
+    --es lo que MaxiCare eligió-- pero su recordatorio NO, porque `seguimientos` cuelga de
+    la conversación con `ON DELETE CASCADE` desde la 001 y la 028 decidió no aflojar también
+    esa columna. Un paciente que se queda sin el aviso de su cita es el precio del borrado, y
+    tiene que estar escrito en la pantalla donde alguien lo paga.
+
+    `mensajes` cuenta las tres voces juntas, que es como se ven en el hilo: no tendría
+    sentido decirle a nadie «se borran 31 filas de una tabla y 14 de otra».
+    """
+    parametros = {"tel": telefono}
+    with conn.cursor() as cur:
+        cur.execute(
+            f"""
+            SELECT
+              (SELECT count(*) FROM mensajes_entrantes
+                WHERE telefono = %(tel)s
+                   OR conversacion_id IN ({_CONVERSACIONES_DEL_TELEFONO}))
+            + (SELECT count(*) FROM mensajes_del_doctor
+                WHERE telefono = %(tel)s
+                   OR conversacion_id IN ({_CONVERSACIONES_DEL_TELEFONO}))
+            + (SELECT count(*) FROM agent_messages
+                WHERE session_id IN (SELECT id::text FROM conversaciones
+                                      WHERE id IN ({_CONVERSACIONES_DEL_TELEFONO})))
+            """,
+            parametros,
+        )
+        fila = cur.fetchone()
+        mensajes = int(fila[0]) if fila and fila[0] is not None else 0
+
+        # Solo las FUTURAS y solo las vivas. Una cita de la semana pasada sobrevive igual al
+        # borrado, pero avisar de su recordatorio sería mentir: ya se envió o ya caducó.
+        cur.execute(
+            f"""
+            SELECT inicio, tratamiento
+              FROM citas
+             WHERE inicio >= %(ahora)s
+               AND estado = 'confirmada'
+               AND (telefono = %(tel)s
+                    OR conversacion_id IN ({_CONVERSACIONES_DEL_TELEFONO})
+                    OR paciente_id IN (SELECT id FROM pacientes WHERE telefono = %(tel)s))
+             ORDER BY inicio
+            """,
+            {**parametros, "ahora": ahora},
+        )
+        citas = [
+            {"inicio": inicio.astimezone(ZONA_BOGOTA).isoformat(), "tratamiento": tratamiento}
+            for inicio, tratamiento in cur.fetchall()
+        ]
+
+    return {"mensajes": mensajes, "citas_futuras": citas}
+
+
+def borrar_conversacion(conn, telefono: str, *, commit: bool = True) -> dict[str, int]:
+    """Borra el hilo de un teléfono CONSERVANDO sus citas. Devuelve el conteo por tabla.
+
+    `commit=False` lo llama `panel.borrar_conversacion`, que necesita meter la fila de la
+    bitácora en ESTA misma transacción: un borrado que se guarda y un registro que se pierde
+    dejarían el hecho sin quién lo hizo, que es justo lo que esa fila existe para impedir.
+
+    Es el hermano de `borrar_rastro` y la diferencia cabe en una frase: aquél resetea a un
+    número a primer contacto --se lleva las citas, la ficha y el hilo de Telegram-- y éste
+    solo borra lo que se dijeron. La regla que los separa, y que hay que respetar al añadir
+    cualquier tabla nueva:
+
+        SE VA lo que cuelga de `conversaciones`.  SOBREVIVE lo que va por TELÉFONO.
+
+    Por eso aquí no aparecen `pacientes`, `temas_telegram`, `contactos` ni `consentimientos`.
+    No es un olvido en ninguno de los cuatro:
+
+    - `pacientes` se queda porque la cita que se conserva apunta ahí, y esa ficha es lo que
+      le permite al paciente mover o cancelar lo suyo (no negociable 12). Borrarla le dejaría
+      una cita que no puede tocar, que es el callejón sin salida que `crear_cita` ya cerró.
+    - `temas_telegram` se queda porque el tema existe de verdad en Telegram y va por teléfono
+      desde la 014. Borrar la fila sin borrar el tema deja al siguiente archivo de ese número
+      muriendo con «message thread not found».
+    - `contactos` y `consentimientos`, por lo de siempre: el «no» del paciente no es del
+      sistema, y la bitácora tiene `ON DELETE RESTRICT` justamente para que esto sea
+      imposible.
+
+    EL ORDEN ES EL MISMO MURO QUE EN `borrar_rastro`, con un paso más al principio. Cuatro
+    tablas apuntan a `conversaciones` sin cascada y hay que desactivarlas antes:
+
+    1. `citas` se DESENGANCHA, no se borra. La 028 le quitó el NOT NULL para que esto se
+       pueda escribir; la clave foránea sigue sin `ON DELETE` a propósito, así que este
+       UPDATE es obligatorio y visible en vez de una cascada que nadie decide.
+    2. `reservas` se DESENGANCHA, tampoco se borra, y esto es más sutil: `citas.reserva_id`
+       es `ON DELETE SET NULL`, así que borrar la reserva dejaría la cita viva **y el cupo
+       libre**. La clínica le daría esa hora a otro paciente.
+    3. `mensajes_entrantes` y `mensajes_del_doctor` sí se borran: son el hilo.
+    4. `agent_sessions` va ANTES que `conversaciones` por la misma razón irreversible de
+       siempre -- `session_id` ES el id de la conversación y no hay clave foránea que lo
+       salve (010). Después del DELETE no habría forma de saber cuáles eran, y el historial
+       del diálogo quedaría vivo, huérfano e inalcanzable.
+
+    Al caer `conversaciones` se van solas, por sus cascadas de la 001: `estado_oportunidad`,
+    `notas_archivo`, `escalamientos` y `seguimientos` -- esta última incluye el recordatorio
+    de la cita que se conserva. Está decidido y la pantalla lo advierte antes; ver la 028.
+
+    Todo en una transacción: un borrado a medias dejaría una conversación sin mensajes o unas
+    citas desenganchadas de una conversación que sigue viva, y ninguno de los dos estados lo
+    espera el resto del código.
+    """
+    parametros = {"tel": telefono}
+    borradas: dict[str, int] = {}
+
+    try:
+        with conn.cursor() as cur:
+            # 1. Las citas sobreviven, desenganchadas. Va PRIMERO porque es lo que convierte
+            #    el DELETE del final en algo posible.
+            cur.execute(
+                f"""
+                UPDATE citas SET conversacion_id = NULL
+                 WHERE conversacion_id IN ({_CONVERSACIONES_DEL_TELEFONO})
+                """,
+                parametros,
+            )
+            borradas["citas_conservadas"] = cur.rowcount
+
+            # 2. Las reservas también se desenganchan. Borrarlas liberaría el cupo de una
+            #    cita que sí sigue en pie: ver el docstring.
+            cur.execute(
+                f"""
+                UPDATE reservas SET conversacion_id = NULL
+                 WHERE conversacion_id IN ({_CONVERSACIONES_DEL_TELEFONO})
+                """,
+                parametros,
+            )
+
+            cur.execute(
+                f"""
+                DELETE FROM mensajes_entrantes
+                 WHERE telefono = %(tel)s
+                    OR conversacion_id IN ({_CONVERSACIONES_DEL_TELEFONO})
+                """,
+                parametros,
+            )
+            borradas["mensajes_entrantes"] = cur.rowcount
+
+            cur.execute(
+                f"""
+                DELETE FROM mensajes_del_doctor
+                 WHERE telefono = %(tel)s
+                    OR conversacion_id IN ({_CONVERSACIONES_DEL_TELEFONO})
+                """,
+                parametros,
+            )
+            borradas["mensajes_del_doctor"] = cur.rowcount
+
+            cur.execute(
+                f"""
+                DELETE FROM agent_sessions
+                 WHERE session_id IN (
+                        SELECT id::text FROM conversaciones
+                         WHERE id IN ({_CONVERSACIONES_DEL_TELEFONO})
+                 )
+                """,
+                parametros,
+            )
+            borradas["agent_sessions"] = cur.rowcount
+
+            # Las frases de este número en el informe de «sin resolver». Se van SIN bajar el
+            # contador, exactamente igual que en `/clearstate` (no negociable 22): «doce
+            # personas preguntaron por ortodoncia» tiene que seguir siendo cierto después de
+            # que alguien borre una de las doce conversaciones.
+            cur.execute(_CONTAR_EJEMPLOS_DEL_TELEFONO, parametros)
+            fila = cur.fetchone()
+            borradas["casos_sin_resolver"] = fila[0] if fila else 0
+            cur.execute(_OLVIDAR_EJEMPLOS_DEL_TELEFONO, parametros)
+
+            cur.execute(
+                f"DELETE FROM conversaciones WHERE id IN ({_CONVERSACIONES_DEL_TELEFONO})",
+                parametros,
+            )
+            borradas["conversaciones"] = cur.rowcount
+        if commit:
+            conn.commit()
     except Exception:
         conn.rollback()
         raise

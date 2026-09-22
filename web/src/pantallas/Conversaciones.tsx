@@ -1,12 +1,16 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
+  borrarConversacion,
   cerrarRelevo,
+  descargarExport,
   escribirAlPaciente,
   leerConversaciones,
   leerHilo,
   listarTratamientos,
+  loQueSeVaAlBorrar,
   SesionCaducada,
   tomarConversacion,
+  type AntesDeBorrar,
   type EstadoConversacion,
   type HiloDeConversacion,
   type MensajeDelHilo,
@@ -799,6 +803,254 @@ function FormularioDeCierre(p: PropsDelCierre) {
 // La pantalla
 // ==========================================================================================
 
+/* ---------------------------------------------------------------- Exportar y borrar */
+
+/** Un botón pequeño de cabecera. `peligro` lo pinta en rojo y no es decoración: borrar es la
+ *  única acción de esta pantalla que destruye algo, y tiene que verse distinta de las otras
+ *  tres antes de pulsarla, no después. */
+function AccionDeCabecera({
+  children, alPulsar, ocupado = false, peligro = false, activo = false,
+}: {
+  children: React.ReactNode
+  alPulsar: () => void
+  ocupado?: boolean
+  peligro?: boolean
+  activo?: boolean
+}) {
+  const tinta = peligro ? '#B91C1C' : '#4C1D95'
+  const borde = peligro ? '#FECACA' : '#DCD8E6'
+  return (
+    <button
+      type="button"
+      onClick={alPulsar}
+      disabled={ocupado}
+      className="transition-all disabled:cursor-not-allowed disabled:opacity-40 hover:brightness-95"
+      style={{
+        backgroundColor: activo ? (peligro ? '#FEF2F2' : '#EDE9FE') : '#FFFFFF',
+        color: tinta,
+        border: `1px solid ${borde}`,
+        fontFamily: MONO,
+        fontSize: '10.5px',
+        letterSpacing: '0.1em',
+        textTransform: 'uppercase',
+        fontWeight: 700,
+        padding: '7px 11px',
+        minHeight: '32px',
+      }}
+    >
+      {children}
+    </button>
+  )
+}
+
+/** El formulario de export por rango. Vive plegado dentro de la cabecera de la lista.
+ *
+ *  Las dos fechas son opcionales y se combinan: sin ninguna sale todo, con una sola sale
+ *  desde o hasta ahí. El servidor INCLUYE el día de «hasta» entero -- pedir del 1 al 30 y que
+ *  falte el 30 es la clase de recorte que no se nota hasta que falta el mensaje que se
+ *  buscaba. */
+function PanelDeExport({
+  alExportar, ocupado,
+}: {
+  alExportar: (desde: string, hasta: string) => void
+  ocupado: boolean
+}) {
+  const [desde, setDesde] = useState('')
+  const [hasta, setHasta] = useState('')
+  const invertido = Boolean(desde && hasta && desde > hasta)
+
+  return (
+    <div
+      className="flex flex-wrap items-end gap-2"
+      style={{ backgroundColor: '#FAF9FC', border: '1px solid #ECE8F4', padding: '12px' }}
+    >
+      {([['Desde', desde, setDesde], ['Hasta', hasta, setHasta]] as const).map(
+        ([etiqueta, valor, poner]) => (
+          <label key={etiqueta} className="flex min-w-0 flex-col gap-1">
+            <span style={{ fontFamily: MONO, fontSize: '9.5px', letterSpacing: '0.12em', color: '#6E6880' }}>
+              {etiqueta.toUpperCase()}
+            </span>
+            <input
+              type="date"
+              value={valor}
+              onChange={(e) => poner(e.target.value)}
+              className={CAMPO}
+              style={{ ...ESTILO_CAMPO, minHeight: '34px', width: '9.5rem' }}
+            />
+          </label>
+        ),
+      )}
+      <button
+        type="button"
+        onClick={() => alExportar(desde, hasta)}
+        disabled={ocupado || invertido}
+        className={`${BOTON} py-2`}
+        style={{ backgroundColor: '#6D28D9', color: '#FFFFFF', minHeight: '34px' }}
+      >
+        {ocupado ? 'Preparando…' : 'Descargar CSV'}
+      </button>
+      <p style={{ margin: 0, flexBasis: '100%', fontSize: '11.5px', color: invertido ? '#B91C1C' : '#6E6880' }}>
+        {invertido
+          ? 'La fecha «desde» es posterior a «hasta».'
+          : 'Sin fechas se descargan todas las conversaciones. El día de «hasta» se incluye.'}
+      </p>
+    </div>
+  )
+}
+
+/** La confirmación de borrado. Pide los datos al servidor en vez de suponerlos.
+ *
+ *  Lo que de verdad justifica esta ventana es la línea de las citas: sobreviven al borrado
+ *  --es lo que eligió MaxiCare-- pero **su recordatorio no**, porque los seguimientos cuelgan
+ *  de la conversación con borrado en cascada. Un paciente que se queda sin el aviso de su
+ *  cita es el precio de esta acción, y tiene que estar escrito donde alguien lo paga. */
+function ConfirmarBorrado({
+  telefono, nombre, alCerrar, alBorrado, alCaducar,
+}: {
+  telefono: string
+  nombre: string
+  alCerrar: () => void
+  alBorrado: () => void
+  alCaducar: () => void
+}) {
+  const [datos, setDatos] = useState<AntesDeBorrar | null>(null)
+  const [error, setError] = useState('')
+  const [borrando, setBorrando] = useState(false)
+
+  useEffect(() => {
+    let vivo = true
+    loQueSeVaAlBorrar(telefono)
+      .then((d) => { if (vivo) setDatos(d) })
+      .catch((e) => {
+        if (e instanceof SesionCaducada) alCaducar()
+        else if (vivo) setError('No se pudo leer qué contiene esta conversación.')
+      })
+    return () => { vivo = false }
+    // `alCaducar` se omite a propósito: llega distinta en cada render y meterla aquí
+    // repetiría la petición en bucle. Es la misma trampa de `alCaducarSesion`.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [telefono])
+
+  // Escape cierra. Una ventana destructiva que solo se puede cerrar acertándole a un botón
+  // es una ventana que se acaba confirmando por inercia.
+  useEffect(() => {
+    const alTeclear = (e: KeyboardEvent) => { if (e.key === 'Escape') alCerrar() }
+    document.addEventListener('keydown', alTeclear)
+    return () => document.removeEventListener('keydown', alTeclear)
+  }, [alCerrar])
+
+  const borrar = async () => {
+    setBorrando(true)
+    setError('')
+    try {
+      await borrarConversacion(telefono)
+      alBorrado()
+    } catch (e) {
+      if (e instanceof SesionCaducada) alCaducar()
+      else setError(e instanceof Error ? e.message : 'No se pudo borrar.')
+      setBorrando(false)
+    }
+  }
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center p-4"
+      style={{ backgroundColor: 'rgba(22, 17, 31, 0.55)' }}
+      onClick={(e) => { if (e.target === e.currentTarget) alCerrar() }}
+    >
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="titulo-borrado"
+        className="flex w-full flex-col gap-4 overflow-y-auto"
+        style={{
+          maxWidth: '30rem', maxHeight: '90vh', backgroundColor: '#FFFFFF',
+          border: '1px solid #DCD8E6', padding: '22px',
+        }}
+      >
+        <h2
+          id="titulo-borrado"
+          style={{ margin: 0, fontFamily: SG, fontWeight: 600, fontSize: '18px', letterSpacing: '-0.022em', color: '#16111F' }}
+        >
+          ¿Borrar la conversación de {nombre}?
+        </h2>
+
+        {datos === null && !error ? (
+          <Cargando que="Comprobando qué contiene esta conversación…">
+            <Bloque alto={14} />
+            <Bloque alto={14} ancho="70%" retraso={120} />
+          </Cargando>
+        ) : null}
+
+        {datos !== null ? (
+          <>
+            <ul className="m-0 flex list-none flex-col gap-2 p-0" style={{ fontSize: '13.5px', color: '#2C2439' }}>
+              <li>
+                <strong>Se borran {datos.mensajes} mensajes</strong> --lo que escribió el
+                paciente, lo que contestó Daniela y lo que le escribió la clínica-- y el
+                historial del agente. Daniela empieza de cero con este número.
+              </li>
+              <li>
+                <strong>Se conservan sus citas</strong> y sus eventos en Google Calendar, su
+                ficha de paciente y su hilo en el grupo de Telegram.
+              </li>
+            </ul>
+
+            {datos.citas_futuras.length > 0 ? (
+              <div role="alert" style={{ backgroundColor: '#FFFBEB', border: '1px solid #FDE68A', padding: '12px' }}>
+                <p style={{ margin: '0 0 6px', fontFamily: MONO, fontSize: '10.5px', letterSpacing: '0.1em', color: '#92400E' }}>
+                  OJO · {datos.citas_futuras.length === 1 ? 'UNA CITA FUTURA' : `${datos.citas_futuras.length} CITAS FUTURAS`}
+                </p>
+                <ul className="m-0 flex list-none flex-col gap-1 p-0" style={{ fontSize: '13px', color: '#78350F' }}>
+                  {datos.citas_futuras.map((c) => (
+                    <li key={c.inicio}>
+                      {FMT_DIA_LARGO.format(new Date(c.inicio))} · {FMT_HORA.format(new Date(c.inicio))} · {c.tratamiento}
+                    </li>
+                  ))}
+                </ul>
+                <p style={{ margin: '8px 0 0', fontSize: '13px', color: '#78350F' }}>
+                  La cita sigue en pie, pero <strong>su recordatorio se borra con la
+                  conversación</strong>: el paciente no recibirá el aviso de las 24 horas ni
+                  el de las 2 horas.
+                </p>
+              </div>
+            ) : null}
+
+            <p style={{ margin: 0, fontSize: '13px', color: '#6E6880' }}>
+              Esto no se puede deshacer. Queda registrado quién lo hizo y cuándo.
+            </p>
+          </>
+        ) : null}
+
+        {error ? (
+          <p role="alert" style={{ margin: 0, fontSize: '13px', color: '#B91C1C' }}>{error}</p>
+        ) : null}
+
+        <div className="flex flex-wrap justify-end gap-2">
+          <button
+            type="button"
+            onClick={alCerrar}
+            disabled={borrando}
+            className={`${BOTON} py-2`}
+            style={{ backgroundColor: '#FFFFFF', color: '#4A4458', border: '1px solid #DCD8E6' }}
+          >
+            Cancelar
+          </button>
+          <button
+            type="button"
+            onClick={() => void borrar()}
+            disabled={borrando || datos === null}
+            className={`${BOTON} py-2`}
+            style={{ backgroundColor: '#B91C1C', color: '#FFFFFF' }}
+          >
+            {borrando ? 'Borrando…' : 'Borrar la conversación'}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 export default function Conversaciones({ alCaducarSesion }: Props) {
   const [lista, setLista] = useState<ResumenConversacion[]>([])
   const [hilo, setHilo] = useState<HiloDeConversacion | null>(null)
@@ -814,6 +1066,16 @@ export default function Conversaciones({ alCaducarSesion }: Props) {
   // El rol, ya resuelto por el servidor. No es el control de acceso --ese vive en
   // `exigir_rol`-- sino lo que evita pintarle a recepción botones que van a devolver 403.
   const [puedoEscribir, setPuedoEscribir] = useState(false)
+  const [soyAdmin, setSoyAdmin] = useState(false)
+
+  // Exportar y borrar. `porBorrar` guarda el teléfono cuya confirmación está abierta, y no un
+  // booleano: la lista se refresca cada diez segundos por debajo de la ventana, y con un
+  // booleano bastaría un cambio de selección para que la confirmación acabara apuntando a
+  // otra persona sin cambiar de texto.
+  const [porBorrar, setPorBorrar] = useState<string | null>(null)
+  const [exportAbierto, setExportAbierto] = useState(false)
+  const [exportando, setExportando] = useState(false)
+  const [avisoExport, setAvisoExport] = useState('')
 
   // Las dos vueltas de refresco, guardadas para poder pedirlas a mano después de escribir.
   // Por `ref` y no por una dependencia más: meter un contador en las deps de los `useEffect`
@@ -844,6 +1106,7 @@ export default function Conversaciones({ alCaducarSesion }: Props) {
         if (!vivo) return
         setLista(datos.conversaciones)
         setPuedoEscribir(datos.puede_escribir)
+        setSoyAdmin(datos.es_admin)
         setError('')
       } catch (e) {
         if (e instanceof SesionCaducada) caducar.current()
@@ -935,6 +1198,22 @@ export default function Conversaciones({ alCaducarSesion }: Props) {
   const visibles = lista.filter((c) => pasaElFiltro(c, filtro) && coincide(c, busqueda))
   const elegida = seleccion ? lista.find((c) => c.telefono === seleccion) : undefined
 
+  // Una sola función para las dos formas de exportar: con teléfono baja una conversación, sin
+  // él bajan todas o el rango. El `finally` es obligatorio -- si la descarga falla y el botón
+  // se queda en «Preparando…», la pantalla se cierra sobre sí misma.
+  const exportar = async (filtros: { telefono?: string; desde?: string; hasta?: string }) => {
+    setExportando(true)
+    setAvisoExport('')
+    try {
+      await descargarExport(filtros)
+    } catch (e) {
+      if (e instanceof SesionCaducada) caducar.current()
+      else setAvisoExport(e instanceof Error ? e.message : 'No se pudo exportar.')
+    } finally {
+      setExportando(false)
+    }
+  }
+
   return (
     <main className="min-w-0 flex-1 overflow-hidden" style={{ backgroundColor: '#F7F6FA' }}>
       <div className="flex h-full flex-wrap items-stretch gap-4 p-4 md:gap-5 md:p-6">
@@ -967,12 +1246,35 @@ export default function Conversaciones({ alCaducarSesion }: Props) {
               >
                 Conversaciones
               </h1>
-              <Rotulo>
-                {visibles.length === lista.length
-                  ? `${lista.length} ${lista.length === 1 ? 'hilo' : 'hilos'}`
-                  : `${visibles.length} de ${lista.length}`}
-              </Rotulo>
+              <div className="flex shrink-0 items-center gap-2">
+                <Rotulo>
+                  {visibles.length === lista.length
+                    ? `${lista.length} ${lista.length === 1 ? 'hilo' : 'hilos'}`
+                    : `${visibles.length} de ${lista.length}`}
+                </Rotulo>
+                {soyAdmin ? (
+                  <AccionDeCabecera
+                    alPulsar={() => setExportAbierto((a) => !a)}
+                    activo={exportAbierto}
+                  >
+                    Exportar
+                  </AccionDeCabecera>
+                ) : null}
+              </div>
             </div>
+
+            {soyAdmin && exportAbierto ? (
+              <PanelDeExport
+                ocupado={exportando}
+                alExportar={(desde, hasta) => void exportar({ desde, hasta })}
+              />
+            ) : null}
+
+            {avisoExport ? (
+              <p role="alert" style={{ margin: 0, fontSize: '12.5px', color: '#B91C1C' }}>
+                {avisoExport}
+              </p>
+            ) : null}
 
             <label
               className="flex items-center gap-2"
@@ -1113,6 +1415,20 @@ export default function Conversaciones({ alCaducarSesion }: Props) {
                   </span>
                 </span>
                 <Insignia estado={elegida.estado} />
+                {/* Exportar UNA conversación lo puede hacer cualquiera que ya la esté
+                    viendo: el archivo no enseña nada que no estuviera en pantalla. Borrar es
+                    de admin, y es lo único de aquí que destruye algo. */}
+                <AccionDeCabecera
+                  alPulsar={() => void exportar({ telefono: elegida.telefono })}
+                  ocupado={exportando}
+                >
+                  {exportando ? 'Preparando…' : 'Exportar'}
+                </AccionDeCabecera>
+                {soyAdmin ? (
+                  <AccionDeCabecera peligro alPulsar={() => setPorBorrar(elegida.telefono)}>
+                    Borrar
+                  </AccionDeCabecera>
+                ) : null}
               </div>
 
               <div
@@ -1198,6 +1514,25 @@ export default function Conversaciones({ alCaducarSesion }: Props) {
           )}
         </section>
       </div>
+
+      {porBorrar ? (
+        <ConfirmarBorrado
+          telefono={porBorrar}
+          nombre={
+            lista.find((c) => c.telefono === porBorrar)?.nombre ?? telefonoLegible(porBorrar)
+          }
+          alCerrar={() => setPorBorrar(null)}
+          alBorrado={() => {
+            setPorBorrar(null)
+            // La selección se suelta ANTES de refrescar: el hilo que estaba a la vista ya no
+            // existe, y dejarlo seleccionado pediría un hilo vacío y pintaría una cabecera
+            // con el nombre de alguien que ya no está en la lista.
+            setSeleccion(null)
+            refrescarLista.current()
+          }}
+          alCaducar={() => caducar.current()}
+        />
+      ) : null}
     </main>
   )
 }

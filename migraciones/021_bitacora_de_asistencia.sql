@@ -27,18 +27,39 @@
 -- que es el defecto que la 013 tuvo que ir a reparar.
 -- =========================================================================================
 
-ALTER TABLE cambios_configuracion
-    DROP CONSTRAINT IF EXISTS cambios_configuracion_tabla_check;
+-- OJO CON LA GUARDA: este bloque era un DROP + ADD a pelo, y eso lo convertia en una bomba
+-- de relojeria para la SIGUIENTE migracion que ampliara la misma lista. `aplicar_esquema`
+-- corre TODOS los .sql en cada arranque y por orden de nombre, asi que la 021 se ejecuta
+-- despues de que la 028 haya anadido 'conversaciones' y ANTES que ella: sin la guarda, la 021
+-- volvia a poner la lista de cuatro valores sobre una tabla que ya tenia filas con el quinto
+-- y moria con `CheckViolation ... is violated by some row`.
+--
+-- No es un fallo hipotetico: lo reprodujo `-m neon` el 22/09/2026 en cuanto una prueba dejo
+-- la primera fila 'conversaciones' en el esquema. En produccion habria sido peor -- el
+-- arranque entero, porque `desplegar.sh` corre `inicializar_base.py` antes de levantar nada.
+--
+-- Con la guarda, la 021 hace su trabajo UNA vez --sobre una base que viene de la 007-- y a
+-- partir de ahi no toca nada. Quien amplie la lista lo hace en SU migracion, que por ser
+-- posterior manda. Es el mismo molde del `DO $$` de la 018.
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+          FROM pg_constraint
+         WHERE conname  = 'ck_cambios_configuracion_tabla'
+           AND conrelid = 'cambios_configuracion'::regclass
+    ) THEN
+        ALTER TABLE cambios_configuracion
+            DROP CONSTRAINT IF EXISTS cambios_configuracion_tabla_check;
 
-ALTER TABLE cambios_configuracion
-    DROP CONSTRAINT IF EXISTS ck_cambios_configuracion_tabla;
-
-ALTER TABLE cambios_configuracion
-    ADD CONSTRAINT ck_cambios_configuracion_tabla CHECK (
-        tabla IN (
-            'base_conocimiento',  -- una ficha de conocimiento: 'implantes/precio'
-            'tratamientos',       -- el vocabulario: 'carillas'
-            'configuracion',      -- las perillas operativas
-            'citas'               -- la marca de asistencia (fase 8): el id de la cita
-        )
-    );
+        ALTER TABLE cambios_configuracion
+            ADD CONSTRAINT ck_cambios_configuracion_tabla CHECK (
+                tabla IN (
+                    'base_conocimiento',  -- una ficha: 'implantes/precio'
+                    'tratamientos',       -- el vocabulario: 'carillas'
+                    'configuracion',      -- las perillas operativas
+                    'citas'               -- la marca de asistencia (fase 8)
+                )
+            );
+    END IF;
+END $$;

@@ -2170,8 +2170,84 @@ async def api_conversaciones(quien: dict = Depends(usuario_actual)) -> dict:
     return {
         "conversaciones": conversaciones,
         "puede_escribir": quien["rol"] in ROLES_QUE_ESCRIBEN,
+        # Borrar un hilo y llevarse TODAS las conversaciones en un archivo son cosa de
+        # `admin`, y viaja por lo mismo que `puede_escribir`: para no pintar botones que el
+        # servidor va a rechazar. Tampoco ES el control de acceso -- ese vive en
+        # `exigir_rol("admin")`, en las tres rutas que lo exigen.
+        "es_admin": quien["rol"] == "admin",
         "usuario": quien["nombre"],
     }
+
+
+def _fecha_valida(valor: str | None, campo: str) -> str | None:
+    """Una fecha del filtro de export es `YYYY-MM-DD` o no es nada."""
+    if not valor:
+        return None
+    try:
+        return date.fromisoformat(valor).isoformat()
+    except ValueError:
+        raise HTTPException(
+            status_code=400, detail=f"«{campo}» tiene que ser una fecha como 2026-09-22"
+        ) from None
+
+
+# Va declarada ANTES que `/api/conversaciones/{telefono}` y no es cosmética: FastAPI resuelve
+# por orden de declaración, así que con esta detrás, «exportar» entraría por el parámetro y
+# `_telefono_valido` devolvería un 404 sobre una ruta que existe.
+@app.get("/api/conversaciones/exportar")
+async def api_exportar_conversaciones(
+    telefono: str | None = None,
+    desde: str | None = None,
+    hasta: str | None = None,
+    quien: dict = Depends(usuario_actual),
+) -> Response:
+    """El CSV de una conversación, de todas, o de un periodo. SOLO LECTURA.
+
+    Un solo endpoint para las tres formas que pidió MaxiCare, por lo mismo que una sola
+    función: tres rutas serían tres sitios donde arreglar el formato y dos donde olvidarlo.
+
+    **El permiso NO es el mismo para las tres**, y esta es la única ruta del panel donde
+    depende de los argumentos. Exportar UNA conversación lo puede hacer cualquiera que ya la
+    esté viendo en pantalla: el archivo no le enseña nada que no tuviera delante. Llevarse
+    TODAS --o un periodo entero-- es sacar la base de pacientes de la clínica en un archivo,
+    que es otra cosa, y queda en `admin` por decisión de MaxiCare del 22/09/2026.
+
+    Queda en el log quién se llevó qué. No va a `cambios_configuracion` porque esa tabla
+    registra CAMBIOS y esto no cambia nada; el precio de esa decisión, dicho aquí para que
+    nadie lo descubra solo: una descarga se puede rastrear en los logs del contenedor, que
+    caducan, y no en la base.
+    """
+    desde = _fecha_valida(desde, "desde")
+    hasta = _fecha_valida(hasta, "hasta")
+    if telefono is not None:
+        telefono = _telefono_valido(telefono)
+    elif quien["rol"] != "admin":
+        raise HTTPException(
+            status_code=403,
+            detail="Exportar todas las conversaciones es solo para administradores.",
+        )
+
+    with persistencia.conectar(config.database_url) as conn:
+        contenido, cuantas = panel.exportar_csv(
+            conn, telefono=telefono, desde=desde, hasta=hasta
+        )
+
+    if telefono:
+        nombre = f"conversacion-{telefono}.csv"
+        alcance = f"+{telefono}"
+    else:
+        nombre = f"conversaciones-{desde or 'inicio'}-a-{hasta or 'hoy'}.csv"
+        alcance = f"TODAS ({desde or 'inicio'} a {hasta or 'hoy'})"
+    log.info("%s exportó %s: %d líneas", quien["usuario"], alcance, cuantas)
+
+    return Response(
+        content=contenido,
+        media_type="text/csv; charset=utf-8",
+        headers={
+            "Content-Disposition": f'attachment; filename="{nombre}"',
+            "Cache-Control": "no-store",
+        },
+    )
 
 
 @app.get("/api/conversaciones/{telefono}")
@@ -2346,6 +2422,71 @@ async def api_cerrar_relevo(
         entrada.hubo_cita,
     )
     return {"ok": True, "cerrado": cerrado}
+
+
+@app.get("/api/conversaciones/{telefono}/antes-de-borrar")
+async def api_antes_de_borrar(
+    telefono: str, quien: dict = Depends(exigir_rol("admin"))
+) -> dict:
+    """Qué se pierde si se borra este hilo. SOLO LECTURA, y es la mitad del arreglo.
+
+    La ventana de confirmación se pinta con esto y no con lo que la pantalla ya tenga en
+    memoria, por una razón concreta: la lista se refresca cada diez segundos y el hilo
+    también, pero las citas futuras NO viajan en ninguna de las dos. Sin esta llamada, la
+    advertencia de «su recordatorio se va con ella» tendría que inventarse el dato o
+    callárselo, y callárselo es el defecto que la 028 existe para no cometer.
+
+    Lleva `exigir_rol("admin")` aunque solo lea: es el paso 1 de un borrado, y una pantalla
+    que deja ver la confirmación a quien luego va a recibir un 403 es una pantalla que miente
+    sobre lo que se puede hacer.
+    """
+    telefono = _telefono_valido(telefono)
+    with persistencia.conectar(config.database_url) as conn:
+        return persistencia.lo_que_se_borraria(conn, telefono, ahora=_ahora_en_bogota())
+
+
+@app.delete("/api/conversaciones/{telefono}")
+async def api_borrar_conversacion(
+    telefono: str, quien: dict = Depends(exigir_rol("admin"))
+) -> dict:
+    """Borra el hilo de ese número y CONSERVA sus citas. No tiene vuelta atrás.
+
+    Lo que se va, lo que se queda y por qué está en `persistencia.borrar_conversacion` y en
+    la migración 028. Aquí solo hay tres cosas que decir:
+
+    - **Solo `admin`**, decisión de MaxiCare del 22/09/2026. Es, junto con exportarlo todo,
+      la acción más grave del panel, y la única que destruye algo.
+    - **No toca Telegram ni Google Calendar.** El hilo del doctor en el grupo sigue abierto y
+      la cita sigue en el calendario, que es exactamente lo que significa «conservando las
+      citas»: si esto borrara el evento, la clínica tendría un paciente presentándose a una
+      hora que ya no existe en la agenda de nadie.
+    - **Daniela empieza de cero con ese número.** Al irse la conversación se va el historial
+      del agente, así que el siguiente mensaje de ese paciente abre una conversación nueva.
+      La ficha de `pacientes` se queda, así que sigue identificado y puede mover su cita.
+    """
+    telefono = _telefono_valido(telefono)
+    with persistencia.conectar(config.database_url) as conn:
+        borradas = await asyncio.to_thread(
+            panel.borrar_conversacion,
+            conn,
+            telefono,
+            usuario=quien["nombre"],
+            ahora=_ahora_en_bogota(),
+        )
+    # A nivel WARNING y no INFO: es lo único del panel que destruye datos de un paciente, y
+    # el día que alguien pregunte «¿quién borró esto?» la bitácora es la respuesta y esta
+    # línea es la que hace que se busque en el sitio correcto.
+    log.warning(
+        "%s BORRÓ la conversación de +%s: %s mensajes, %s conversaciones; "
+        "se conservaron %s citas (%s futuras, sin recordatorio)",
+        quien["usuario"],
+        telefono,
+        borradas["mensajes"],
+        borradas["conversaciones"],
+        borradas["citas_conservadas"],
+        borradas["citas_futuras"],
+    )
+    return {"ok": True, **borradas}
 
 
 # ------------------------------------------------------------------------------------------
