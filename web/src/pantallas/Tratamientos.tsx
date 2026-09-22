@@ -12,6 +12,7 @@ import {
   type Sesion,
   type TratamientoFila,
 } from '@/api'
+import { Bloque, Cargando, Fallo } from '@/componentes/Estado'
 
 const SP = "'Space Grotesk', sans-serif"
 
@@ -1026,6 +1027,11 @@ export default function Tratamientos({
   const [falloBitacora, setFalloBitacora] = useState<string | null>(null)
   const [cargando, setCargando] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  /* El fallo de LEER va aparte del de escribir, y no es orden por el orden: el botón
+     «Reintentar» solo tiene sentido sobre una lectura. Puesto sobre el mismo estado, aparecía
+     también cuando lo que falló fue guardar un precio, y ahí «reintentar» promete repetir la
+     escritura --que es justo lo que ese botón NO hace--. */
+  const [falloDeCarga, setFalloDeCarga] = useState<string | null>(null)
   const [pestana, setPestana] = useState<'tratamientos' | 'clinica'>('tratamientos')
   const [abierta, setAbierta] = useState<string | null>(null)
   const [nuevaEn, setNuevaEn] = useState<string | null>(null)
@@ -1048,11 +1054,13 @@ export default function Tratamientos({
   })
 
   const recargar = useCallback(async () => {
+    setCargando(true)
     try {
       const [t, f] = await Promise.all([listarTratamientos(), listarFichas()])
       setTratamientos(t)
       setFichas(f)
       setError(null)
+      setFalloDeCarga(null)
     } catch (err) {
       /* El momento más común para descubrir que una sesión caducó es este --volver a la
          pestaña después de comer y que la pantalla cargue--, no pulsar «Guardar». Dejarlo
@@ -1062,7 +1070,7 @@ export default function Tratamientos({
         caducar.current()
         return
       }
-      setError(mensajeDe(err))
+      setFalloDeCarga(mensajeDe(err))
     } finally {
       setCargando(false)
     }
@@ -1277,12 +1285,28 @@ export default function Tratamientos({
             </div>
           )}
 
+          {falloDeCarga !== null && (
+            <Fallo mensaje={falloDeCarga} alReintentar={() => void recargar()} />
+          )}
+
           {verBitacora && <Bitacora cambios={cambios} fallo={falloBitacora} />}
 
           {cargando ? (
-            <p className="text-sm" style={{ color: '#9CA3AF' }}>
-              Leyendo la base…
-            </p>
+            <Cargando que="Leyendo la base…" className="flex flex-col gap-3">
+              {[0, 1, 2, 3, 4].map((i) => (
+                <div
+                  key={i}
+                  className="rounded-xl px-5 py-4 flex items-center justify-between gap-4"
+                  style={{ backgroundColor: '#FFFFFF', border: '1px solid #E5E7EB' }}
+                >
+                  <div className="flex flex-col gap-2 flex-1 min-w-0">
+                    <Bloque alto={13} ancho="34%" retraso={i * 110} />
+                    <Bloque alto={11} ancho="56%" retraso={i * 110 + 60} />
+                  </div>
+                  <Bloque alto={24} ancho={78} radio={8} retraso={i * 110 + 30} />
+                </div>
+              ))}
+            </Cargando>
           ) : pestana === 'tratamientos' ? (
             tratamientos.map((t) => (
               <FilaTratamiento

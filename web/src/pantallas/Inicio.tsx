@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { leerInicio, SesionCaducada, type ResumenInicio } from '@/api'
+// Con alias: esta pantalla ya tiene su propio `Bloque`, que es una sección de la portada.
+import { Bloque as Hueco, Cargando, Fallo, Lineas } from '@/componentes/Estado'
 import { hhmm } from '@/pantallas/Agenda'
 import { titulo } from '@/pantallas/SinResolver'
 
@@ -582,9 +584,45 @@ export default function Inicio({ alCaducarSesion }: Props) {
   if (cargando) {
     return (
       <Marco resumen={null}>
-        <p className="text-sm" style={{ color: '#6E6880' }}>
-          Cargando…
-        </p>
+        <Cargando que="Cargando el resumen…" className="flex flex-col" estilo={{ gap: 'clamp(18px,2.4vw,30px)' }}>
+          <section
+            className="grid"
+            style={{
+              gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%,208px), 1fr))',
+              gap: 'clamp(12px,1.4vw,18px)',
+            }}
+          >
+            {[0, 1, 2, 3, 4].map((i) => (
+              <div
+                key={i}
+                className="flex flex-col gap-3"
+                style={{ backgroundColor: '#FFFFFF', border: '1px solid #DCD8E6', padding: '18px 18px 16px' }}
+              >
+                <Hueco alto={10} ancho="58%" retraso={i * 80} />
+                <Hueco alto={30} ancho="42%" retraso={i * 80 + 50} />
+              </div>
+            ))}
+          </section>
+
+          <div
+            className="grid items-start"
+            style={{
+              gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%,330px), 1fr))',
+              gap: 'clamp(12px,1.4vw,18px)',
+            }}
+          >
+            {[0, 1].map((i) => (
+              <div
+                key={i}
+                className="flex flex-col gap-4"
+                style={{ backgroundColor: '#FFFFFF', border: '1px solid #DCD8E6', padding: '18px' }}
+              >
+                <Hueco alto={12} ancho="44%" retraso={i * 120} />
+                <Lineas cuantas={4} alto={11} retraso={i * 120} />
+              </div>
+            ))}
+          </div>
+        </Cargando>
       </Marco>
     )
   }
@@ -594,14 +632,11 @@ export default function Inicio({ alCaducarSesion }: Props) {
   if (error || !resumen) {
     return (
       <Marco resumen={null}>
-        <div
-          role="alert"
-          style={{ backgroundColor: '#FEF2F2', border: '1px solid #FECACA', padding: '12px 16px' }}
-        >
-          <p className="text-sm m-0" style={{ color: '#B91C1C' }}>
-            {error || 'No se pudo cargar el resumen.'}
-          </p>
-        </div>
+        <Fallo
+          mensaje={error || 'No se pudo cargar el resumen.'}
+          alReintentar={() => void recargar()}
+          estilo={{ borderRadius: 0 }}
+        />
       </Marco>
     )
   }

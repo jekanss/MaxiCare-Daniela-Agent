@@ -13,6 +13,7 @@ import {
   type ResumenConversacion,
   type TratamientoFila,
 } from '@/api'
+import { Bloque, Cargando, Fallo } from '@/componentes/Estado'
 
 /* La pantalla de Conversaciones: la lista de personas a la izquierda y su hilo completo a la
  * derecha, refrescándose sola.
@@ -272,20 +273,23 @@ function FilaDeLaLista({
 }
 
 /** Una burbuja. El paciente a la izquierda; Daniela y el doctor a la derecha, porque los dos
- *  son «la clínica» desde el punto de vista de quien lee. Lo que los distingue es el pie y el
- *  color del borde, no el lado: alinear al doctor en un tercer sitio rompería la lectura. */
+ *  son «la clínica» desde el punto de vista de quien lee. Alinear al doctor en un tercer sitio
+ *  rompería esa lectura, así que lo que cambia es todo lo demás.
+ *
+ *  Y tuvo que cambiar. Hasta el 22/09/2026 el doctor se distinguía de Daniela por dos lilas
+ *  --`#EDE9FE` contra `#F4F1F9`-- y por el nombre en el pie a 10 px: en la pantalla de un
+ *  consultorio eso no es una diferencia, es un matiz. Quien lee el hilo necesita saber en un
+ *  vistazo qué dijo la máquina y qué dijo una persona, porque de eso depende si hay que
+ *  responder. Ahora el mensaje del doctor lleva su nombre ARRIBA, en violeta, con una barra
+ *  del mismo color al costado: el contraste es de forma y no de tono, que es lo único que
+ *  sobrevive a una pantalla con brillo bajo y a quien distingue mal los colores. */
 function Burbuja({ m }: { m: MensajeDelHilo }) {
   const delPaciente = m.quien === 'paciente'
+  const delDoctor = m.quien === 'doctor'
   const fallido = Boolean(m.fallo)
 
-  const fondo = fallido
-    ? '#FEF2F2'
-    : delPaciente
-      ? '#FFFFFF'
-      : m.quien === 'doctor'
-        ? '#EDE9FE'
-        : '#F4F1F9'
-  const borde = fallido ? '#FECACA' : delPaciente ? '#DCD8E6' : '#D6D0E4'
+  const fondo = fallido ? '#FEF2F2' : delPaciente ? '#FFFFFF' : delDoctor ? '#F5F3FF' : '#F4F1F9'
+  const borde = fallido ? '#FECACA' : delPaciente ? '#DCD8E6' : delDoctor ? '#C4B5FD' : '#D6D0E4'
 
   const quienDice =
     m.quien === 'paciente' ? 'Paciente' : m.quien === 'daniela' ? 'Daniela' : (m.autor ?? 'Doctor')
@@ -293,10 +297,28 @@ function Burbuja({ m }: { m: MensajeDelHilo }) {
   return (
     <div className="flex" style={{ justifyContent: delPaciente ? 'flex-start' : 'flex-end' }}>
       <div className="flex flex-col gap-1" style={{ maxWidth: 'min(76%, 540px)' }}>
+        {delDoctor && (
+          <span
+            style={{
+              fontFamily: MONO,
+              fontSize: '10px',
+              fontWeight: 700,
+              letterSpacing: '0.12em',
+              textTransform: 'uppercase',
+              color: fallido ? '#B91C1C' : '#6D28D9',
+              textAlign: 'right',
+            }}
+          >
+            Doctor · {quienDice}
+          </span>
+        )}
         <div
           style={{
             backgroundColor: fondo,
             border: `1px solid ${borde}`,
+            // La barra va en el costado interior --el que mira al centro del hilo-- para que
+            // se lea como el margen de una nota escrita a mano y no como un borde más.
+            borderLeft: delDoctor && !fallido ? '3px solid #7C3AED' : undefined,
             padding: '12px 14px',
             fontSize: '14.5px',
             fontWeight: 300,
@@ -320,7 +342,10 @@ function Burbuja({ m }: { m: MensajeDelHilo }) {
           {/* Un mensaje que no salió lo DICE en su pie. Sin esto, el hilo mostraría el mismo
               silencio para «el doctor no escribió» y para «escribió y Meta lo rechazó». */}
           {fallido ? 'NO SALIÓ · ' : ''}
-          {quienDice} · {FMT_HORA.format(new Date(m.cuando))}
+          {/* El del doctor ya lleva su nombre arriba; repetirlo aquí solo gastaría el renglón
+              que hace legible la hora. */}
+          {delDoctor ? '' : `${quienDice} · `}
+          {FMT_HORA.format(new Date(m.cuando))}
         </span>
       </div>
     </div>
@@ -761,6 +786,10 @@ export default function Conversaciones({ alCaducarSesion }: Props) {
   const [filtro, setFiltro] = useState<Filtro>('todas')
   const [cargando, setCargando] = useState(true)
   const [error, setError] = useState('')
+  /* El fallo del HILO va aparte del de la lista: son dos peticiones distintas y fallan por
+     separado. Y se distingue de `hilo === null` a propósito --uno es «todavía no llega» y el
+     otro «no va a llegar»--, que es justo lo que esta pantalla no sabía decir. */
+  const [errorHilo, setErrorHilo] = useState('')
   // El rol, ya resuelto por el servidor. No es el control de acceso --ese vive en
   // `exigir_rol`-- sino lo que evita pintarle a recepción botones que van a devolver 403.
   const [puedoEscribir, setPuedoEscribir] = useState(false)
@@ -829,14 +858,23 @@ export default function Conversaciones({ alCaducarSesion }: Props) {
     // Se limpia al cambiar de persona. Sin esto, durante la décima de segundo que tarda la
     // petición se verían los mensajes del paciente ANTERIOR bajo el nombre del nuevo.
     setHilo(null)
+    setErrorHilo('')
 
     const tic = async () => {
       if (document.visibilityState !== 'visible') return
       try {
         const datos = await leerHilo(seleccion)
-        if (vivo) setHilo(datos)
+        if (vivo) {
+          setHilo(datos)
+          setErrorHilo('')
+        }
       } catch (e) {
         if (e instanceof SesionCaducada) caducar.current()
+        // Hasta el 22/09/2026 aquí no había nada: cualquier fallo que no fuera la sesión se
+        // tragaba en silencio, `hilo` se quedaba en `null` y la caja mostraba «Cargando…»
+        // PARA SIEMPRE. Una avería que se lee como lentitud es la peor clase de avería,
+        // porque nadie la reporta: se espera.
+        else if (vivo) setErrorHilo('No se pudo cargar esta conversación.')
       }
     }
 
@@ -963,11 +1001,28 @@ export default function Conversaciones({ alCaducarSesion }: Props) {
           </div>
 
           {cargando ? (
-            <Vacio>Cargando…</Vacio>
+            <Cargando que="Cargando las conversaciones…" className="flex min-h-0 flex-1 flex-col">
+              {[0, 1, 2, 3, 4, 5].map((i) => (
+                <div
+                  key={i}
+                  className="flex flex-col gap-2"
+                  style={{ borderBottom: '1px solid #ECE8F4', padding: '15px 16px' }}
+                >
+                  <div className="flex w-full items-baseline justify-between gap-2">
+                    <Bloque alto={13} ancho="46%" retraso={i * 110} />
+                    <Bloque alto={10} ancho={34} retraso={i * 110 + 50} />
+                  </div>
+                  <Bloque alto={11} ancho="78%" retraso={i * 110 + 90} />
+                </div>
+              ))}
+            </Cargando>
           ) : error ? (
             // Si la consulta falló, la pantalla lo DICE. Nunca una lista vieja sin avisar:
             // una pantalla «en vivo» congelada es peor que una que reconoce que no sabe.
-            <Vacio>{error}</Vacio>
+            // Y con salida: antes solo quedaba recargar la página entera.
+            <div className="px-4 py-6">
+              <Fallo mensaje={error} alReintentar={() => refrescarLista.current()} />
+            </div>
           ) : lista.length === 0 ? (
             <Vacio>Todavía no ha escrito nadie.</Vacio>
           ) : visibles.length === 0 ? (
@@ -1045,8 +1100,49 @@ export default function Conversaciones({ alCaducarSesion }: Props) {
                 className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto"
                 style={{ backgroundColor: '#F7F6FA', padding: '20px' }}
               >
-                {hilo === null ? (
-                  <Vacio>Cargando…</Vacio>
+                {/* Un refresco que falla con la conversación YA en pantalla no la borra: se
+                    avisa y se deja leer lo que hay. Vaciar el hilo por un tropiezo de diez
+                    segundos le quitaría al doctor lo que estaba leyendo. */}
+                {hilo !== null && errorHilo ? (
+                  <div
+                    role="alert"
+                    className="shrink-0 rounded-lg px-3 py-2"
+                    style={{ backgroundColor: '#FEF2F2', border: '1px solid #FECACA' }}
+                  >
+                    <span style={{ fontFamily: MONO, fontSize: '10.5px', color: '#B91C1C' }}>
+                      NO SE PUDO ACTUALIZAR · lo de abajo puede estar desactualizado
+                    </span>
+                  </div>
+                ) : null}
+
+                {hilo === null && errorHilo ? (
+                  <div className="flex flex-1 items-center justify-center px-2">
+                    <Fallo
+                      mensaje={errorHilo}
+                      alReintentar={() => refrescarHilo.current()}
+                      className="w-full"
+                      estilo={{ maxWidth: 440 }}
+                    />
+                  </div>
+                ) : hilo === null ? (
+                  <Cargando que="Cargando la conversación…" className="flex flex-col gap-3">
+                    {[
+                      { lado: 'flex-start', ancho: '58%' },
+                      { lado: 'flex-end', ancho: '44%' },
+                      { lado: 'flex-start', ancho: '68%' },
+                      { lado: 'flex-end', ancho: '36%' },
+                    ].map((b, i) => (
+                      <div key={i} className="flex" style={{ justifyContent: b.lado }}>
+                        <Bloque
+                          alto={52}
+                          ancho={b.ancho}
+                          radio={0}
+                          retraso={i * 130}
+                          estilo={{ border: '1px solid #DCD8E6' }}
+                        />
+                      </div>
+                    ))}
+                  </Cargando>
                 ) : hilo.mensajes.length === 0 ? (
                   <Vacio>
                     No hay nada escrito en este hilo. Puede que esta persona solo haya mandado

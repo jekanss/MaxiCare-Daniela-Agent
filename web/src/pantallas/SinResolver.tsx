@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { listarSinResolver, SesionCaducada, type CasoSinResolver } from '@/api'
+import { Bloque, Cargando, Fallo, Lineas } from '@/componentes/Estado'
 
 const SP = "'Space Grotesk', sans-serif"
 
@@ -83,9 +84,28 @@ export default function SinResolver({ alCaducarSesion }: Props) {
     return (
       <div className="flex-1 overflow-y-auto" style={{ fontFamily: SP, backgroundColor: '#F9FAFB' }}>
         <Cabecera />
-        <p className="px-8 py-8 text-sm" style={{ color: '#9CA3AF' }}>
-          Cargando…
-        </p>
+        <Cargando que="Cargando el informe…" className="max-w-3xl mx-auto px-8 py-8">
+          <ul className="flex flex-col gap-4">
+            {[0, 1, 2].map((i) => (
+              <li
+                key={i}
+                className="rounded-2xl overflow-hidden"
+                style={{ backgroundColor: '#FFFFFF', border: '1px solid #E5E7EB' }}
+              >
+                <div
+                  className="px-5 py-3 flex items-baseline justify-between gap-4"
+                  style={{ borderBottom: '1px solid #F3F4F6' }}
+                >
+                  <Bloque alto={13} ancho="46%" retraso={i * 140} />
+                  <Bloque alto={11} ancho={110} retraso={i * 140 + 60} />
+                </div>
+                <div className="px-5 py-4">
+                  <Lineas cuantas={3} retraso={i * 140} />
+                </div>
+              </li>
+            ))}
+          </ul>
+        </Cargando>
       </div>
     )
   }
@@ -95,11 +115,7 @@ export default function SinResolver({ alCaducarSesion }: Props) {
       <div className="flex-1 overflow-y-auto" style={{ fontFamily: SP, backgroundColor: '#F9FAFB' }}>
         <Cabecera />
         <div className="max-w-3xl mx-auto px-8 py-8">
-          <div role="alert" className="rounded-xl px-4 py-3" style={{ backgroundColor: '#FEF2F2', border: '1px solid #FECACA' }}>
-            <p className="text-sm" style={{ color: '#B91C1C' }}>
-              {error}
-            </p>
-          </div>
+          <Fallo mensaje={error} alReintentar={() => void recargar()} />
         </div>
       </div>
     )
