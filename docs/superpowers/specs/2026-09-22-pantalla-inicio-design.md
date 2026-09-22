@@ -28,6 +28,12 @@ sidebar.
 
 ### La línea base, que es lo que le da sentido a cada número
 
+> **RETIRADA DE LA PANTALLA el 22/09/2026, a petición de MaxiCare** («todo eso de antes no
+> lo quiero por ahora»). Se quitó de punta a punta —constante, respuesta del endpoint, tipo
+> y pies de tarjeta— en un commit propio, para que devolverla sea un `git revert` y no una
+> reescritura. El dato sigue vivo donde se midió, que es `brief-agentes.json`; lo que esta
+> sección documenta es por qué existía, y sigue siendo cierto el día que vuelva.
+
 Congelada en `brief-agentes.json → exito`, medida sobre el WhatsApp de la clínica antes de
 que Daniela existiera:
 

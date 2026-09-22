@@ -496,20 +496,6 @@ def citas_sin_marcar(
 # ------------------------------------------------------------------------------------------
 
 
-#: La clínica ANTES de Daniela, medida por MaxiCare sobre un mes de su propio WhatsApp y
-#: congelada en `docs/agentes/brief-agentes.json` -> `exito`.
-#:
-#: Viaja con cada respuesta a propósito. Un número sin su anterior no dice nada: «6 personas
-#: escribieron» no es bueno ni malo hasta que al lado pone que antes eran 97 al mes y que de
-#: esas 97 solo 2 acababan con cita. Y vive aquí y no en el frontend porque es un dato
-#: MEDIDO, no una constante de presentación: si alguna vez se corrige, se corrige en el sitio
-#: donde se puede escribir por qué.
-LINEA_BASE = {
-    "conversaciones_mes": 97,
-    "citas_mes": 2,
-    "sin_responder_pct": 50,
-}
-
 #: Cuánto tiene que llevar un mensaje sin respuesta para contarlo como desatendido. Cinco
 #: minutos: por debajo de eso lo más probable es que el turno siga vivo dentro de la ventana
 #: de silencio del búfer (`atencion._Bufer`), y contarlo sería llamar «sin contestar» a un
@@ -635,7 +621,6 @@ def resumen_inicio(conn, *, ahora: datetime, dias: int = 30) -> dict[str, Any]:
             "minutos": minutos_doctor,
             "conversaciones": conversaciones_con_relevo,
         },
-        "linea_base": LINEA_BASE,
         "volumen": volumen,
         "agenda_hoy": citas_del_dia(
             conn, desde=inicio_del_dia, hasta=inicio_del_dia + timedelta(days=1)

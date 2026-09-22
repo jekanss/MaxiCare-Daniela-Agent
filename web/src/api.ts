@@ -310,9 +310,6 @@ export async function marcarAsistencia(
  *  `marcadas` y `cumplibles` al lado, que es lo que permite escribir «8 de 12 marcadas» en
  *  vez de un 67 % que no dice sobre cuántas citas se calculó.
  *
- *  `linea_base` es la clínica ANTES de Daniela, medida por MaxiCare. Viene del servidor y no
- *  de una constante de este archivo porque es un dato medido, no de presentación.
- *
  *  La unidad de `escribieron` y `con_cita` es el TELÉFONO, no la conversación: una
  *  conversación caduca a las 24 h, así que contar filas inflaría el denominador.
  *
@@ -326,7 +323,6 @@ export type ResumenInicio = {
   asistencia: { llegaron: number; marcadas: number; cumplibles: number }
   sin_contestar: number
   relevo: { minutos: number; conversaciones: number }
-  linea_base: { conversaciones_mes: number; citas_mes: number; sin_responder_pct: number }
   volumen: { dia: string; conversaciones: number }[]
   agenda_hoy: CitaDeAgenda[]
   /** Los tres casos más frecuentes, el mismo tipo que pinta la pantalla de Sin resolver. */

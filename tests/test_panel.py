@@ -1465,7 +1465,6 @@ def test_resumen_inicio_cuenta_personas_y_no_conversaciones(conn):
 
     assert despues["escribieron"] - antes["escribieron"] == 1, "tres mensajes, una persona"
     assert despues["sin_contestar"] == antes["sin_contestar"], "los tres tienen respuesta"
-    assert despues["linea_base"]["citas_mes"] == 2, "la línea base viaja con cada respuesta"
 
 
 @pytest.mark.neon
@@ -1635,7 +1634,6 @@ def test_api_inicio_no_toca_el_calendario(monkeypatch):
             "asistencia": {"llegaron": 0, "marcadas": 0, "cumplibles": 0},
             "sin_contestar": 0,
             "relevo": {"minutos": 0, "conversaciones": 0},
-            "linea_base": panel.LINEA_BASE,
             "volumen": [],
             "agenda_hoy": [],
         },

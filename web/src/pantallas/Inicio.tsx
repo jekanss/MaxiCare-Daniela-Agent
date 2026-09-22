@@ -14,7 +14,10 @@ const MONO = "'JetBrains Mono', monospace"
 
 type Props = { alCaducarSesion: () => void }
 
-type Tarjeta = { rotulo: string; valor: string; pie: string; barra: number | null }
+/** `pie` es opcional: la primera tarjeta no tiene nada honesto que decir debajo de su
+ *  cifra, y un pie de relleno sería ruido. La rejilla estira todas las tarjetas a la misma
+ *  altura, así que la que no lo lleva queda pareja igual. */
+type Tarjeta = { rotulo: string; valor: string; pie: string | null; barra: number | null }
 
 /** Las cinco tarjetas, con sus estados vacíos resueltos ANTES que los llenos.
  *
@@ -32,15 +35,13 @@ function tarjetas(r: ResumenInicio): Tarjeta[] {
     {
       rotulo: 'Personas que escribieron',
       valor: String(r.escribieron),
-      pie: `antes: ${r.linea_base.conversaciones_mes} conversaciones al mes`,
+      pie: null,
       barra: null,
     },
     {
       rotulo: 'Quedaron con cita',
       valor: String(r.con_cita),
-      pie: r.escribieron
-        ? `${r.con_cita} de ${r.escribieron} · antes: ${r.linea_base.citas_mes} al mes`
-        : `antes: ${r.linea_base.citas_mes} al mes`,
+      pie: r.escribieron ? `${r.con_cita} de ${r.escribieron}` : null,
       barra: r.escribieron ? r.con_cita / r.escribieron : null,
     },
     {
@@ -57,10 +58,7 @@ function tarjetas(r: ResumenInicio): Tarjeta[] {
     {
       rotulo: 'Sin contestar',
       valor: String(r.sin_contestar),
-      pie:
-        r.sin_contestar === 0
-          ? `ninguno · antes quedaba sin respuesta el ${r.linea_base.sin_responder_pct} %`
-          : 'hay mensajes esperando respuesta',
+      pie: r.sin_contestar === 0 ? 'ninguno' : 'hay mensajes esperando respuesta',
       barra: null,
     },
     {
@@ -272,7 +270,9 @@ function Cifra({ tarjeta, retraso }: { tarjeta: Tarjeta; retraso: number }) {
           />
         </span>
       )}
-      <span style={{ fontSize: 13, fontWeight: 300, color: '#4A4458' }}>{tarjeta.pie}</span>
+      {tarjeta.pie && (
+        <span style={{ fontSize: 13, fontWeight: 300, color: '#4A4458' }}>{tarjeta.pie}</span>
+      )}
     </article>
   )
 }
