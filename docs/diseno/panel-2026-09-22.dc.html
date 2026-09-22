@@ -1,0 +1,585 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<title>MaxiCare · Panel de operación</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Sora:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  *{box-sizing:border-box;}
+  body{margin:0;background:#F7F6FA;-webkit-font-smoothing:antialiased;}
+  a{color:#6D28D9;text-decoration:none;}
+  a:hover{color:#4C1D95;}
+  :focus-visible{outline:2px solid #7C3AED;outline-offset:3px;}
+  @keyframes mcRise{from{opacity:0;transform:translateY(16px);}to{opacity:1;transform:none;}}
+  @keyframes mcFade{from{opacity:0;}to{opacity:1;}}
+  @keyframes mcSlide{from{transform:translateX(-102%);}to{transform:none;}}
+  @keyframes mcGrow{from{transform:scaleX(0);}to{transform:scaleX(1);}}
+  @keyframes mcPulse{0%{opacity:1;transform:scale(1);}70%{opacity:0;transform:scale(2.6);}100%{opacity:0;transform:scale(2.6);}}
+  @keyframes mcDriftA{0%{transform:translate3d(-8%,-10%,0) scale(1);}50%{transform:translate3d(30%,26%,0) scale(1.2);}100%{transform:translate3d(-8%,-10%,0) scale(1);}}
+  @keyframes mcDriftB{0%{transform:translate3d(12%,40%,0) scale(1.1);}50%{transform:translate3d(-34%,-6%,0) scale(0.92);}100%{transform:translate3d(12%,40%,0) scale(1.1);}}
+  @keyframes mcDraw{from{stroke-dashoffset:260;}to{stroke-dashoffset:0;}}
+  @keyframes mcTick{from{opacity:0;transform:translateY(6px);}to{opacity:1;transform:none;}}
+  details[data-mc-det] summary{list-style:none;cursor:pointer;}
+  details[data-mc-det] summary::-webkit-details-marker{display:none;}
+  details[data-mc-det][open] [data-mc-sign]{transform:rotate(90deg);}
+  @media (prefers-reduced-motion:reduce){*{animation:none !important;transition:none !important;}}
+</style>
+</helmet>
+
+<div style="font-family:'Sora',sans-serif;color:#16111F;background:#F7F6FA;min-height:100vh;display:flex;align-items:stretch;">
+
+  <sc-if value="{{ isDesktop }}" hint-placeholder-val="{{ true }}">
+  <aside style="position:sticky;top:0;align-self:flex-start;height:100vh;flex:none;width:clamp(230px,18vw,272px);background:#0B0912;color:#EDEAF4;display:flex;flex-direction:column;overflow:hidden;">
+    <div aria-hidden="true" style="position:absolute;inset:0;pointer-events:none;overflow:hidden;filter:blur(30px);opacity:0.65;">
+      <div style="position:absolute;top:-10%;left:-20%;width:280px;height:280px;background:radial-gradient(closest-side,rgba(124,58,237,0.55),rgba(124,58,237,0) 72%);animation:mcDriftA 34s ease-in-out infinite;will-change:transform;"></div>
+      <div style="position:absolute;bottom:0;right:-30%;width:260px;height:260px;background:radial-gradient(closest-side,rgba(167,139,250,0.4),rgba(167,139,250,0) 70%);animation:mcDriftB 48s ease-in-out infinite;will-change:transform;"></div>
+    </div>
+
+    <div style="position:relative;padding:26px 22px 22px;display:flex;align-items:center;gap:12px;border-bottom:1px solid rgba(255,255,255,0.1);">
+      <span aria-hidden="true" style="position:relative;width:38px;height:38px;flex:none;background:#7C3AED;display:flex;align-items:center;justify-content:center;">
+        <span style="width:14px;height:14px;border:2.5px solid #FFFFFF;border-radius:50%;display:block;"></span>
+        <span style="position:absolute;right:6px;bottom:6px;width:8px;height:8px;background:#0B0912;display:block;"></span>
+      </span>
+      <span style="display:flex;flex-direction:column;gap:3px;min-width:0;">
+        <span style="font-family:'Space Grotesk',sans-serif;font-weight:600;font-size:17px;letter-spacing:-0.025em;color:#FFFFFF;">MaxiCare</span>
+        <span style="font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:0.18em;text-transform:uppercase;color:#8B84A0;">Clínica dental</span>
+      </span>
+    </div>
+
+    <nav aria-label="Secciones" style="position:relative;flex:1;padding:18px 14px;display:flex;flex-direction:column;gap:3px;overflow-y:auto;">
+      <span style="font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:0.2em;text-transform:uppercase;color:#6E6880;padding:6px 10px 10px;">Operación</span>
+
+      <button type="button" onClick="{{ goHome }}" style="position:relative;display:flex;align-items:center;gap:12px;width:100%;text-align:left;border:none;cursor:pointer;padding:11px 12px;min-height:44px;font-family:'Sora',sans-serif;font-size:14.5px;font-weight:400;letter-spacing:-0.008em;transition:background 180ms ease,color 180ms ease;background:{{ bgHome }};color:{{ fgHome }};" style-hover="background:rgba(255,255,255,0.08);color:#FFFFFF;">
+        <span aria-hidden="true" style="position:absolute;left:0;top:50%;transform:translateY(-50%);width:3px;height:{{ barHome }};background:#A78BFA;transition:height 220ms cubic-bezier(.22,1,.36,1);"></span>
+        <svg aria-hidden="true" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="square"><path d="M4 11 12 4l8 7"></path><path d="M6.5 10v10h11V10"></path></svg>
+        Inicio
+      </button>
+
+      <button type="button" onClick="{{ goSin }}" style="position:relative;display:flex;align-items:center;gap:12px;width:100%;text-align:left;border:none;cursor:pointer;padding:11px 12px;min-height:44px;font-family:'Sora',sans-serif;font-size:14.5px;font-weight:400;letter-spacing:-0.008em;transition:background 180ms ease,color 180ms ease;background:{{ bgSin }};color:{{ fgSin }};" style-hover="background:rgba(255,255,255,0.08);color:#FFFFFF;">
+        <span aria-hidden="true" style="position:absolute;left:0;top:50%;transform:translateY(-50%);width:3px;height:{{ barSin }};background:#A78BFA;transition:height 220ms cubic-bezier(.22,1,.36,1);"></span>
+        <svg aria-hidden="true" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="square"><path d="M4 5h16v11H9l-5 4z"></path></svg>
+        Sin resolver
+        <span style="margin-left:auto;font-family:'JetBrains Mono',monospace;font-size:10.5px;background:#7C3AED;color:#FFFFFF;padding:3px 7px;">38</span>
+      </button>
+
+      <button type="button" onClick="{{ goAgenda }}" style="position:relative;display:flex;align-items:center;gap:12px;width:100%;text-align:left;border:none;cursor:pointer;padding:11px 12px;min-height:44px;font-family:'Sora',sans-serif;font-size:14.5px;font-weight:400;letter-spacing:-0.008em;transition:background 180ms ease,color 180ms ease;background:{{ bgAgenda }};color:{{ fgAgenda }};" style-hover="background:rgba(255,255,255,0.08);color:#FFFFFF;">
+        <span aria-hidden="true" style="position:absolute;left:0;top:50%;transform:translateY(-50%);width:3px;height:{{ barAgenda }};background:#A78BFA;transition:height 220ms cubic-bezier(.22,1,.36,1);"></span>
+        <svg aria-hidden="true" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="square"><rect x="4" y="5" width="16" height="15"></rect><path d="M4 10h16M9 3v4M15 3v4"></path></svg>
+        Agenda
+      </button>
+
+      <button type="button" onClick="{{ goLeads }}" style="position:relative;display:flex;align-items:center;gap:12px;width:100%;text-align:left;border:none;cursor:pointer;padding:11px 12px;min-height:44px;font-family:'Sora',sans-serif;font-size:14.5px;font-weight:400;letter-spacing:-0.008em;transition:background 180ms ease,color 180ms ease;background:{{ bgLeads }};color:{{ fgLeads }};" style-hover="background:rgba(255,255,255,0.08);color:#FFFFFF;">
+        <span aria-hidden="true" style="position:absolute;left:0;top:50%;transform:translateY(-50%);width:3px;height:{{ barLeads }};background:#A78BFA;transition:height 220ms cubic-bezier(.22,1,.36,1);"></span>
+        <svg aria-hidden="true" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="square"><circle cx="9" cy="8" r="3.4"></circle><path d="M3.6 20c0-3.2 2.4-5.4 5.4-5.4s5.4 2.2 5.4 5.4"></path><path d="M16 7.2a3.2 3.2 0 0 1 0 6M18 20c0-2.6-1-4.4-2.6-5.2"></path></svg>
+        Leads
+        <span style="margin-left:auto;font-family:'JetBrains Mono',monospace;font-size:10px;color:#6E6880;">F6</span>
+      </button>
+
+      <button type="button" onClick="{{ goTrat }}" style="position:relative;display:flex;align-items:center;gap:12px;width:100%;text-align:left;border:none;cursor:pointer;padding:11px 12px;min-height:44px;font-family:'Sora',sans-serif;font-size:14.5px;font-weight:400;letter-spacing:-0.008em;transition:background 180ms ease,color 180ms ease;background:{{ bgTrat }};color:{{ fgTrat }};" style-hover="background:rgba(255,255,255,0.08);color:#FFFFFF;">
+        <span aria-hidden="true" style="position:absolute;left:0;top:50%;transform:translateY(-50%);width:3px;height:{{ barTrat }};background:#A78BFA;transition:height 220ms cubic-bezier(.22,1,.36,1);"></span>
+        <svg aria-hidden="true" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="square"><path d="M12 20V9"></path><path d="M7 20c-2 0-3-2.6-3-6.5S6 4 9 5.4L12 7l3-1.6C18 4 20 9.6 20 13.5S19 20 17 20"></path></svg>
+        Tratamientos
+      </button>
+
+      <button type="button" onClick="{{ goMetricas }}" style="position:relative;display:flex;align-items:center;gap:12px;width:100%;text-align:left;border:none;cursor:pointer;padding:11px 12px;min-height:44px;font-family:'Sora',sans-serif;font-size:14.5px;font-weight:400;letter-spacing:-0.008em;transition:background 180ms ease,color 180ms ease;background:{{ bgMetricas }};color:{{ fgMetricas }};" style-hover="background:rgba(255,255,255,0.08);color:#FFFFFF;">
+        <span aria-hidden="true" style="position:absolute;left:0;top:50%;transform:translateY(-50%);width:3px;height:{{ barMetricas }};background:#A78BFA;transition:height 220ms cubic-bezier(.22,1,.36,1);"></span>
+        <svg aria-hidden="true" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="square"><path d="M4 20h16"></path><rect x="5" y="12" width="3.6" height="5"></rect><rect x="10.2" y="8" width="3.6" height="9"></rect><rect x="15.4" y="4.6" width="3.6" height="12.4"></rect></svg>
+        Métricas
+        <span style="margin-left:auto;font-family:'JetBrains Mono',monospace;font-size:10px;color:#6E6880;">F9</span>
+      </button>
+
+      <button type="button" onClick="{{ goEstado }}" style="position:relative;display:flex;align-items:center;gap:12px;width:100%;text-align:left;border:none;cursor:pointer;padding:11px 12px;min-height:44px;font-family:'Sora',sans-serif;font-size:14.5px;font-weight:400;letter-spacing:-0.008em;transition:background 180ms ease,color 180ms ease;background:{{ bgEstado }};color:{{ fgEstado }};" style-hover="background:rgba(255,255,255,0.08);color:#FFFFFF;">
+        <span aria-hidden="true" style="position:absolute;left:0;top:50%;transform:translateY(-50%);width:3px;height:{{ barEstado }};background:#A78BFA;transition:height 220ms cubic-bezier(.22,1,.36,1);"></span>
+        <svg aria-hidden="true" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="square"><path d="M3 12h4l2.5-6 4 13L16 12h5"></path></svg>
+        Estado del sistema
+      </button>
+
+      <span style="font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:0.2em;text-transform:uppercase;color:#6E6880;padding:22px 10px 10px;">Ajustes</span>
+
+      <button type="button" onClick="{{ goConfig }}" style="position:relative;display:flex;align-items:center;gap:12px;width:100%;text-align:left;border:none;cursor:pointer;padding:11px 12px;min-height:44px;font-family:'Sora',sans-serif;font-size:14.5px;font-weight:400;letter-spacing:-0.008em;transition:background 180ms ease,color 180ms ease;background:{{ bgConfig }};color:{{ fgConfig }};" style-hover="background:rgba(255,255,255,0.08);color:#FFFFFF;">
+        <span aria-hidden="true" style="position:absolute;left:0;top:50%;transform:translateY(-50%);width:3px;height:{{ barConfig }};background:#A78BFA;transition:height 220ms cubic-bezier(.22,1,.36,1);"></span>
+        <svg aria-hidden="true" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="square"><circle cx="12" cy="12" r="3.2"></circle><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1"></path></svg>
+        Configuración
+      </button>
+
+      <button type="button" onClick="{{ goPruebas }}" style="position:relative;display:flex;align-items:center;gap:12px;width:100%;text-align:left;border:none;cursor:pointer;padding:11px 12px;min-height:44px;font-family:'Sora',sans-serif;font-size:14.5px;font-weight:400;letter-spacing:-0.008em;transition:background 180ms ease,color 180ms ease;background:{{ bgPruebas }};color:{{ fgPruebas }};" style-hover="background:rgba(255,255,255,0.08);color:#FFFFFF;">
+        <span aria-hidden="true" style="position:absolute;left:0;top:50%;transform:translateY(-50%);width:3px;height:{{ barPruebas }};background:#A78BFA;transition:height 220ms cubic-bezier(.22,1,.36,1);"></span>
+        <svg aria-hidden="true" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="square"><path d="M10 3v6.2L4.8 18c-.8 1.4.2 3 1.7 3h11c1.5 0 2.5-1.6 1.7-3L14 9.2V3"></path><path d="M8.6 3h6.8"></path></svg>
+        Pruebas
+        <span style="margin-left:auto;font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:0.08em;background:rgba(253,224,71,0.16);color:#FDE047;padding:3px 7px;">TEST</span>
+      </button>
+    </nav>
+
+    <div style="position:relative;padding:16px 18px 20px;border-top:1px solid rgba(255,255,255,0.1);display:flex;flex-direction:column;gap:14px;">
+      <div style="display:flex;align-items:center;gap:11px;">
+        <span aria-hidden="true" style="width:34px;height:34px;flex:none;background:#EDE9FE;color:#4C1D95;display:flex;align-items:center;justify-content:center;font-family:'Space Grotesk',sans-serif;font-weight:600;font-size:14px;">J</span>
+        <span style="display:flex;flex-direction:column;gap:2px;min-width:0;flex:1;">
+          <span style="font-size:13.5px;font-weight:500;color:#FFFFFF;">Jean</span>
+          <span style="font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:0.14em;text-transform:uppercase;color:#8B84A0;">Administrador</span>
+        </span>
+        <button type="button" aria-label="Cerrar sesión" style="width:34px;height:34px;flex:none;background:transparent;border:1px solid rgba(255,255,255,0.16);color:#C4B5FD;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:border-color 160ms ease,background 160ms ease;" style-hover="border-color:#A78BFA;background:rgba(255,255,255,0.06);">
+          <svg aria-hidden="true" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="square"><path d="M14 4h6v16h-6"></path><path d="M10 8l-4 4 4 4M6 12h9"></path></svg>
+        </button>
+      </div>
+      <a href="https://sinpiloto.co" target="_blank" rel="noopener" style="display:flex;align-items:center;gap:8px;font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:0.16em;text-transform:uppercase;color:#6E6880;" style-hover="color:#C4B5FD;">
+        Operado por
+        <img src="./assets/sinpiloto-logo-dark.svg" alt="Sinpiloto" style="height:13px;width:auto;display:block;opacity:0.85;">
+      </a>
+    </div>
+  </aside>
+  </sc-if>
+
+  <sc-if value="{{ isMobile }}" hint-placeholder-val="{{ false }}">
+  <div style="position:fixed;top:0;left:0;right:0;z-index:40;background:rgba(11,9,18,0.94);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);color:#FFFFFF;display:flex;align-items:center;gap:12px;padding:12px 16px;border-bottom:1px solid rgba(255,255,255,0.12);">
+    <button type="button" onClick="{{ openMenu }}" aria-label="Abrir menú" style="width:44px;height:44px;flex:none;background:transparent;border:1px solid rgba(255,255,255,0.2);color:#FFFFFF;cursor:pointer;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:5px;">
+      <span style="width:18px;height:2px;background:#FFFFFF;display:block;"></span>
+      <span style="width:18px;height:2px;background:#FFFFFF;display:block;"></span>
+      <span style="width:18px;height:2px;background:#FFFFFF;display:block;"></span>
+    </button>
+    <span style="display:flex;flex-direction:column;gap:2px;min-width:0;flex:1;">
+      <span style="font-family:'Space Grotesk',sans-serif;font-weight:600;font-size:15px;letter-spacing:-0.02em;">MaxiCare</span>
+      <span style="font-family:'JetBrains Mono',monospace;font-size:9px;letter-spacing:0.16em;text-transform:uppercase;color:#8B84A0;">{{ routeLabel }}</span>
+    </span>
+    <span aria-hidden="true" style="width:34px;height:34px;flex:none;background:#EDE9FE;color:#4C1D95;display:flex;align-items:center;justify-content:center;font-family:'Space Grotesk',sans-serif;font-weight:600;font-size:13px;">J</span>
+  </div>
+  </sc-if>
+
+  <sc-if value="{{ menuOpen }}" hint-placeholder-val="{{ false }}">
+  <div role="dialog" aria-modal="true" aria-label="Menú" style="position:fixed;inset:0;z-index:60;background:rgba(11,9,18,0.6);animation:mcFade 180ms ease both;" onClick="{{ closeMenu }}">
+    <div style="width:min(310px,86vw);height:100%;background:#0B0912;color:#EDEAF4;display:flex;flex-direction:column;animation:mcSlide 260ms cubic-bezier(.22,1,.36,1) both;">
+      <div style="padding:18px 18px 16px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid rgba(255,255,255,0.1);">
+        <span style="font-family:'Space Grotesk',sans-serif;font-weight:600;font-size:17px;letter-spacing:-0.025em;color:#FFFFFF;">MaxiCare</span>
+        <button type="button" onClick="{{ closeMenu }}" aria-label="Cerrar menú" style="width:44px;height:44px;background:transparent;border:1px solid rgba(255,255,255,0.2);color:#FFFFFF;font-size:20px;line-height:1;cursor:pointer;">×</button>
+      </div>
+      <nav aria-label="Secciones" style="flex:1;padding:14px 12px;display:flex;flex-direction:column;gap:2px;overflow-y:auto;">
+        <sc-for list="{{ navItems }}" as="item" hint-placeholder-count="9">
+          <button type="button" onClick="{{ item.go }}" style="display:flex;align-items:center;gap:12px;width:100%;text-align:left;border:none;cursor:pointer;padding:14px 12px;min-height:48px;font-family:'Sora',sans-serif;font-size:16px;background:{{ item.bg }};color:{{ item.fg }};">
+            <span aria-hidden="true" style="width:8px;height:8px;flex:none;background:{{ item.dot }};display:block;"></span>
+            {{ item.label }}
+          </button>
+        </sc-for>
+      </nav>
+      <div style="padding:16px 18px 22px;border-top:1px solid rgba(255,255,255,0.1);display:flex;align-items:center;gap:8px;font-family:'JetBrains Mono',monospace;font-size:9.5px;letter-spacing:0.16em;text-transform:uppercase;color:#6E6880;">
+        Operado por
+        <img src="./assets/sinpiloto-logo-dark.svg" alt="Sinpiloto" style="height:13px;width:auto;display:block;opacity:0.85;">
+      </div>
+    </div>
+  </div>
+  </sc-if>
+
+  <main style="flex:1;min-width:0;display:flex;flex-direction:column;padding-top:{{ mainTopPad }};">
+
+    <sc-if value="{{ isHome }}" hint-placeholder-val="{{ true }}">
+    <div style="display:flex;flex-direction:column;">
+
+      <header style="position:relative;overflow:hidden;background:#FFFFFF;border-bottom:1px solid #DCD8E6;">
+        <div aria-hidden="true" style="position:absolute;inset:0;background-image:radial-gradient(#D6D0E4 1px,transparent 1px);background-size:96px 84px;opacity:0.55;"></div>
+        <div style="position:relative;max-width:1240px;margin:0 auto;width:100%;padding:clamp(24px,3.4vw,44px) clamp(18px,3.4vw,44px) clamp(22px,2.6vw,34px);display:flex;flex-wrap:wrap;align-items:flex-end;gap:clamp(18px,3vw,44px);animation:mcRise 460ms ease both;">
+          <div style="flex:1 1 380px;min-width:0;display:flex;flex-direction:column;gap:12px;">
+            <div style="display:flex;align-items:center;gap:10px;">
+              <span aria-hidden="true" style="position:relative;width:9px;height:9px;flex:none;background:#16A34A;display:block;">
+                <span style="position:absolute;inset:0;background:#16A34A;animation:mcPulse 2.4s ease-out infinite;display:block;"></span>
+              </span>
+              <span style="font-family:'JetBrains Mono',monospace;font-size:11px;letter-spacing:0.16em;text-transform:uppercase;color:#6E6880;">Asistente activa · Lunes 22 de septiembre</span>
+            </div>
+            <h1 style="margin:0;font-family:'Space Grotesk',sans-serif;font-weight:600;font-size:clamp(27px,3.4vw,44px);line-height:1.06;letter-spacing:-0.032em;color:#16111F;text-wrap:balance;">Buenos días, Jean. <span style="color:#6D28D9;">Hoy hay 3 cosas que mirar.</span></h1>
+            <p style="margin:0;font-size:clamp(14.5px,1.2vw,16.5px);font-weight:300;line-height:1.6;color:#4A4458;max-width:56ch;text-wrap:pretty;">Resumen de las últimas 24 horas. La asistente atendió sola el 87 % de las conversaciones; lo que no pudo resolver está abajo.</p>
+          </div>
+          <div style="flex:0 1 auto;display:flex;flex-wrap:wrap;gap:10px;">
+            <button type="button" onClick="{{ goSin }}" style="background:#6D28D9;color:#FFFFFF;border:none;border-radius:2px;font-family:'Space Grotesk',sans-serif;font-weight:500;font-size:15px;letter-spacing:-0.012em;padding:15px 20px;min-height:48px;display:inline-flex;align-items:center;gap:12px;cursor:pointer;transition:background 160ms ease,transform 160ms ease;" style-hover="background:#4C1D95;transform:translateY(-1px);">
+              Revisar sin resolver
+              <span aria-hidden="true" style="display:flex;align-items:center;">
+                <span style="width:16px;height:2px;background:#FFFFFF;display:block;"></span>
+                <span style="width:7px;height:7px;border-top:2px solid #FFFFFF;border-right:2px solid #FFFFFF;transform:rotate(45deg);display:block;margin-left:-5px;"></span>
+              </span>
+            </button>
+            <button type="button" onClick="{{ goAgenda }}" style="background:transparent;color:#16111F;border:1px solid #C9C2D8;border-radius:2px;font-family:'Space Grotesk',sans-serif;font-weight:500;font-size:15px;padding:15px 20px;min-height:48px;cursor:pointer;transition:border-color 160ms ease,background 160ms ease;" style-hover="border-color:#6D28D9;background:#F4F1F9;">Ver agenda</button>
+          </div>
+        </div>
+      </header>
+
+      <div style="max-width:1240px;margin:0 auto;width:100%;padding:clamp(20px,2.6vw,34px) clamp(18px,3.4vw,44px) clamp(40px,5vw,72px);display:flex;flex-direction:column;gap:clamp(18px,2.4vw,30px);">
+
+        <section aria-label="Indicadores de hoy" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,208px),1fr));gap:clamp(12px,1.4vw,18px);">
+          <article style="background:#FFFFFF;border:1px solid #DCD8E6;padding:18px 18px 16px;display:flex;flex-direction:column;gap:12px;animation:mcRise 440ms ease both 60ms;transition:border-color 180ms ease,transform 180ms ease;" style-hover="border-color:#7C3AED;transform:translateY(-2px);">
+            <span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;letter-spacing:0.15em;text-transform:uppercase;color:#6E6880;">Conversaciones</span>
+            <span style="font-family:'Space Grotesk',sans-serif;font-weight:600;font-size:clamp(30px,3.2vw,40px);line-height:1;letter-spacing:-0.03em;color:#16111F;animation:mcTick 520ms ease both 160ms;">284</span>
+            <span aria-hidden="true" style="height:3px;background:#EDE9FE;display:block;position:relative;overflow:hidden;">
+              <span style="position:absolute;inset:0;width:87%;background:#7C3AED;display:block;transform-origin:left;animation:mcGrow 900ms cubic-bezier(.22,1,.36,1) both 260ms;"></span>
+            </span>
+            <span style="font-size:13px;font-weight:300;color:#4A4458;">87 % resueltas sin intervención</span>
+          </article>
+          <article style="background:#FFFFFF;border:1px solid #DCD8E6;padding:18px 18px 16px;display:flex;flex-direction:column;gap:12px;animation:mcRise 440ms ease both 120ms;transition:border-color 180ms ease,transform 180ms ease;" style-hover="border-color:#7C3AED;transform:translateY(-2px);">
+            <span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;letter-spacing:0.15em;text-transform:uppercase;color:#6E6880;">Citas agendadas</span>
+            <span style="font-family:'Space Grotesk',sans-serif;font-weight:600;font-size:clamp(30px,3.2vw,40px);line-height:1;letter-spacing:-0.03em;color:#16111F;animation:mcTick 520ms ease both 220ms;">41</span>
+            <span aria-hidden="true" style="height:3px;background:#EDE9FE;display:block;position:relative;overflow:hidden;">
+              <span style="position:absolute;inset:0;width:64%;background:#7C3AED;display:block;transform-origin:left;animation:mcGrow 900ms cubic-bezier(.22,1,.36,1) both 320ms;"></span>
+            </span>
+            <span style="font-size:13px;font-weight:300;color:#4A4458;">+9 frente a la semana pasada</span>
+          </article>
+          <article style="background:#FFFFFF;border:1px solid #DCD8E6;padding:18px 18px 16px;display:flex;flex-direction:column;gap:12px;animation:mcRise 440ms ease both 180ms;transition:border-color 180ms ease,transform 180ms ease;" style-hover="border-color:#7C3AED;transform:translateY(-2px);">
+            <span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;letter-spacing:0.15em;text-transform:uppercase;color:#6E6880;">Leads nuevos</span>
+            <span style="font-family:'Space Grotesk',sans-serif;font-weight:600;font-size:clamp(30px,3.2vw,40px);line-height:1;letter-spacing:-0.03em;color:#16111F;animation:mcTick 520ms ease both 280ms;">17</span>
+            <span aria-hidden="true" style="height:3px;background:#EDE9FE;display:block;position:relative;overflow:hidden;">
+              <span style="position:absolute;inset:0;width:48%;background:#7C3AED;display:block;transform-origin:left;animation:mcGrow 900ms cubic-bezier(.22,1,.36,1) both 380ms;"></span>
+            </span>
+            <span style="font-size:13px;font-weight:300;color:#4A4458;">8 pendientes de contactar</span>
+          </article>
+          <article style="background:#0B0912;border:1px solid #0B0912;padding:18px 18px 16px;display:flex;flex-direction:column;gap:12px;color:#EDEAF4;position:relative;overflow:hidden;animation:mcRise 440ms ease both 240ms;transition:transform 180ms ease;" style-hover="transform:translateY(-2px);">
+            <span aria-hidden="true" style="position:absolute;top:-40%;right:-30%;width:200px;height:200px;background:radial-gradient(closest-side,rgba(124,58,237,0.6),rgba(124,58,237,0) 70%);filter:blur(24px);animation:mcDriftB 40s ease-in-out infinite;"></span>
+            <span style="position:relative;font-family:'JetBrains Mono',monospace;font-size:10.5px;letter-spacing:0.15em;text-transform:uppercase;color:#C4B5FD;">Sin resolver</span>
+            <span style="position:relative;font-family:'Space Grotesk',sans-serif;font-weight:600;font-size:clamp(30px,3.2vw,40px);line-height:1;letter-spacing:-0.03em;color:#FFFFFF;animation:mcTick 520ms ease both 340ms;">38</span>
+            <span aria-hidden="true" style="position:relative;height:3px;background:rgba(255,255,255,0.14);display:block;overflow:hidden;">
+              <span style="position:absolute;inset:0;width:36%;background:#A78BFA;display:block;transform-origin:left;animation:mcGrow 900ms cubic-bezier(.22,1,.36,1) both 440ms;"></span>
+            </span>
+            <span style="position:relative;font-size:13px;font-weight:300;color:#B8B2C8;">13 % de las conversaciones · 30 días</span>
+          </article>
+        </section>
+
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,330px),1fr));gap:clamp(12px,1.4vw,18px);align-items:start;">
+
+          <section aria-labelledby="mc-hoy" style="background:#FFFFFF;border:1px solid #DCD8E6;display:flex;flex-direction:column;animation:mcRise 460ms ease both 300ms;">
+            <div aria-hidden="true" style="height:4px;background:#7C3AED;"></div>
+            <div style="padding:20px clamp(16px,2vw,24px) 6px;display:flex;align-items:baseline;justify-content:space-between;gap:12px;">
+              <h2 id="mc-hoy" style="margin:0;font-family:'Space Grotesk',sans-serif;font-weight:600;font-size:clamp(18px,1.7vw,22px);letter-spacing:-0.022em;color:#16111F;">La agenda de hoy</h2>
+              <span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;letter-spacing:0.14em;text-transform:uppercase;color:#6E6880;white-space:nowrap;">6 citas</span>
+            </div>
+            <ul style="margin:0;padding:12px clamp(16px,2vw,24px) 22px;list-style:none;display:flex;flex-direction:column;">
+              <li style="display:flex;align-items:center;gap:14px;padding:13px 0;border-bottom:1px solid #ECE8F4;transition:padding-left 180ms ease;" style-hover="padding-left:6px;">
+                <span style="font-family:'JetBrains Mono',monospace;font-size:12.5px;color:#4C1D95;flex:none;width:52px;">08:30</span>
+                <span style="flex:1;min-width:0;display:flex;flex-direction:column;gap:2px;">
+                  <span style="font-size:14.5px;font-weight:500;color:#16111F;">Laura Medina · Control de ortodoncia</span>
+                  <span style="font-size:12.5px;font-weight:300;color:#6E6880;">Confirmada por la asistente</span>
+                </span>
+                <span style="width:8px;height:8px;background:#16A34A;flex:none;display:block;"></span>
+              </li>
+              <li style="display:flex;align-items:center;gap:14px;padding:13px 0;border-bottom:1px solid #ECE8F4;transition:padding-left 180ms ease;" style-hover="padding-left:6px;">
+                <span style="font-family:'JetBrains Mono',monospace;font-size:12.5px;color:#4C1D95;flex:none;width:52px;">09:15</span>
+                <span style="flex:1;min-width:0;display:flex;flex-direction:column;gap:2px;">
+                  <span style="font-size:14.5px;font-weight:500;color:#16111F;">Andrés Rincón · Valoración implante</span>
+                  <span style="font-size:12.5px;font-weight:300;color:#6E6880;">Primera vez · llegó por WhatsApp</span>
+                </span>
+                <span style="width:8px;height:8px;background:#16A34A;flex:none;display:block;"></span>
+              </li>
+              <li style="display:flex;align-items:center;gap:14px;padding:13px 0;border-bottom:1px solid #ECE8F4;transition:padding-left 180ms ease;" style-hover="padding-left:6px;">
+                <span style="font-family:'JetBrains Mono',monospace;font-size:12.5px;color:#4C1D95;flex:none;width:52px;">10:00</span>
+                <span style="flex:1;min-width:0;display:flex;flex-direction:column;gap:2px;">
+                  <span style="font-size:14.5px;font-weight:500;color:#16111F;">Paula Serrano · Limpieza</span>
+                  <span style="font-size:12.5px;font-weight:300;color:#B45309;">Sin confirmar · se reenvió recordatorio</span>
+                </span>
+                <span style="width:8px;height:8px;background:#F59E0B;flex:none;display:block;"></span>
+              </li>
+              <li style="display:flex;align-items:center;gap:14px;padding:13px 0;transition:padding-left 180ms ease;" style-hover="padding-left:6px;">
+                <span style="font-family:'JetBrains Mono',monospace;font-size:12.5px;color:#4C1D95;flex:none;width:52px;">11:30</span>
+                <span style="flex:1;min-width:0;display:flex;flex-direction:column;gap:2px;">
+                  <span style="font-size:14.5px;font-weight:500;color:#16111F;">Camilo Ortiz · Endodoncia (sesión 2)</span>
+                  <span style="font-size:12.5px;font-weight:300;color:#6E6880;">Confirmada ayer</span>
+                </span>
+                <span style="width:8px;height:8px;background:#16A34A;flex:none;display:block;"></span>
+              </li>
+            </ul>
+          </section>
+
+          <section aria-labelledby="mc-atencion" style="background:#FFFFFF;border:1px solid #DCD8E6;display:flex;flex-direction:column;animation:mcRise 460ms ease both 360ms;">
+            <div aria-hidden="true" style="height:4px;background:#16111F;"></div>
+            <div style="padding:20px clamp(16px,2vw,24px) 6px;display:flex;align-items:baseline;justify-content:space-between;gap:12px;">
+              <h2 id="mc-atencion" style="margin:0;font-family:'Space Grotesk',sans-serif;font-weight:600;font-size:clamp(18px,1.7vw,22px);letter-spacing:-0.022em;color:#16111F;">Qué necesita su atención</h2>
+              <button type="button" onClick="{{ goSin }}" style="background:transparent;border:none;cursor:pointer;font-family:'JetBrains Mono',monospace;font-size:10.5px;letter-spacing:0.14em;text-transform:uppercase;color:#6D28D9;padding:4px 0;white-space:nowrap;" style-hover="color:#4C1D95;">Ver todo</button>
+            </div>
+            <ul style="margin:0;padding:12px clamp(16px,2vw,24px) 22px;list-style:none;display:flex;flex-direction:column;gap:2px;">
+              <li style="display:flex;gap:14px;padding:14px 0;border-bottom:1px solid #ECE8F4;">
+                <span style="font-family:'Space Grotesk',sans-serif;font-weight:600;font-size:22px;letter-spacing:-0.02em;color:#6D28D9;flex:none;width:36px;">23</span>
+                <span style="flex:1;min-width:0;display:flex;flex-direction:column;gap:3px;">
+                  <span style="font-size:14.5px;font-weight:500;color:#16111F;text-wrap:pretty;">Hubo que pasarle la conversación al doctor</span>
+                  <span style="font-size:12.5px;font-weight:300;line-height:1.5;color:#4A4458;text-wrap:pretty;">La asistente no resolvió consultas clínicas y derivó al doctor en todos los casos.</span>
+                </span>
+              </li>
+              <li style="display:flex;gap:14px;padding:14px 0;border-bottom:1px solid #ECE8F4;">
+                <span style="font-family:'Space Grotesk',sans-serif;font-weight:600;font-size:22px;letter-spacing:-0.02em;color:#6D28D9;flex:none;width:36px;">9</span>
+                <span style="flex:1;min-width:0;display:flex;flex-direction:column;gap:3px;">
+                  <span style="font-size:14.5px;font-weight:500;color:#16111F;text-wrap:pretty;">Daniela iba a decir algo que no debía</span>
+                  <span style="font-size:12.5px;font-weight:300;line-height:1.5;color:#4A4458;text-wrap:pretty;">Casos de uso indebido detenidos antes de responder.</span>
+                </span>
+              </li>
+              <li style="display:flex;gap:14px;padding:14px 0;">
+                <span style="font-family:'Space Grotesk',sans-serif;font-weight:600;font-size:22px;letter-spacing:-0.02em;color:#6D28D9;flex:none;width:36px;">6</span>
+                <span style="flex:1;min-width:0;display:flex;flex-direction:column;gap:3px;">
+                  <span style="font-size:14.5px;font-weight:500;color:#16111F;text-wrap:pretty;">Preguntas de precio sin respuesta clara</span>
+                  <span style="font-size:12.5px;font-weight:300;line-height:1.5;color:#4A4458;text-wrap:pretty;">Faltan tarifas de blanqueamiento y diseño de sonrisa en la base.</span>
+                </span>
+              </li>
+            </ul>
+          </section>
+        </div>
+
+        <section aria-labelledby="mc-volumen" style="background:#FFFFFF;border:1px solid #DCD8E6;padding:clamp(18px,2.2vw,26px);display:flex;flex-wrap:wrap;gap:clamp(18px,3vw,40px);align-items:center;animation:mcRise 460ms ease both 420ms;">
+          <div style="flex:1 1 260px;min-width:0;display:flex;flex-direction:column;gap:8px;">
+            <h2 id="mc-volumen" style="margin:0;font-family:'Space Grotesk',sans-serif;font-weight:600;font-size:clamp(17px,1.6vw,21px);letter-spacing:-0.022em;color:#16111F;">Volumen de conversaciones · 14 días</h2>
+            <p style="margin:0;font-size:13.5px;font-weight:300;line-height:1.55;color:#4A4458;max-width:46ch;text-wrap:pretty;">El pico del martes coincidió con la campaña de ortodoncia. La asistente sostuvo el volumen sin subir los casos sin resolver.</p>
+          </div>
+          <div style="flex:1 1 300px;min-width:0;">
+            <svg viewBox="0 0 320 90" width="100%" height="90" role="img" aria-label="Gráfico de línea del volumen diario de conversaciones en 14 días, con un pico a mitad de periodo." style="display:block;overflow:visible;">
+              <path d="M0 70 L24 62 L48 66 L72 44 L96 50 L120 30 L144 36 L168 22 L192 40 L216 34 L240 46 L264 28 L288 38 L312 24" fill="none" stroke="#7C3AED" stroke-width="2.2" stroke-linecap="square" stroke-dasharray="260" style="animation:mcDraw 1600ms cubic-bezier(.4,0,.2,1) both 300ms;"></path>
+              <circle cx="312" cy="24" r="4" fill="#6D28D9" style="animation:mcFade 400ms ease both 1700ms;"></circle>
+              <line x1="0" y1="86" x2="320" y2="86" stroke="#DCD8E6" stroke-width="1"></line>
+            </svg>
+          </div>
+        </section>
+
+      </div>
+    </div>
+    </sc-if>
+
+    <sc-if value="{{ isSin }}" hint-placeholder-val="{{ false }}">
+    <div style="display:flex;flex-direction:column;">
+
+      <header style="position:sticky;top:{{ stickyTop }};z-index:20;background:rgba(247,246,250,0.92);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);border-bottom:1px solid #DCD8E6;">
+        <div style="max-width:1240px;margin:0 auto;width:100%;padding:clamp(18px,2.4vw,30px) clamp(18px,3.4vw,44px) 0;display:flex;flex-wrap:wrap;align-items:flex-end;gap:16px;">
+          <div style="flex:1 1 320px;min-width:0;display:flex;flex-direction:column;gap:8px;">
+            <span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;letter-spacing:0.16em;text-transform:uppercase;color:#6E6880;">Últimos 30 días · esta pantalla solo informa</span>
+            <h1 style="margin:0;font-family:'Space Grotesk',sans-serif;font-weight:600;font-size:clamp(24px,2.8vw,34px);line-height:1.08;letter-spacing:-0.03em;color:#16111F;">Sin resolver</h1>
+          </div>
+          <div style="display:flex;flex-wrap:wrap;gap:8px;padding-bottom:4px;">
+            <button type="button" style="background:#16111F;color:#FFFFFF;border:1px solid #16111F;font-family:'JetBrains Mono',monospace;font-size:10.5px;letter-spacing:0.12em;text-transform:uppercase;padding:9px 13px;min-height:36px;cursor:pointer;transition:background 160ms ease;" style-hover="background:#6D28D9;border-color:#6D28D9;">Todo · 38</button>
+            <button type="button" style="background:#FFFFFF;color:#4A4458;border:1px solid #DCD8E6;font-family:'JetBrains Mono',monospace;font-size:10.5px;letter-spacing:0.12em;text-transform:uppercase;padding:9px 13px;min-height:36px;cursor:pointer;transition:border-color 160ms ease,color 160ms ease;" style-hover="border-color:#7C3AED;color:#16111F;">Derivaciones · 29</button>
+            <button type="button" style="background:#FFFFFF;color:#4A4458;border:1px solid #DCD8E6;font-family:'JetBrains Mono',monospace;font-size:10.5px;letter-spacing:0.12em;text-transform:uppercase;padding:9px 13px;min-height:36px;cursor:pointer;transition:border-color 160ms ease,color 160ms ease;" style-hover="border-color:#7C3AED;color:#16111F;">Uso indebido · 9</button>
+          </div>
+        </div>
+        <div style="max-width:1240px;margin:0 auto;width:100%;padding:14px clamp(18px,3.4vw,44px) 14px;">
+          <div aria-hidden="true" style="height:2px;background:#ECE8F4;position:relative;overflow:hidden;">
+            <span style="position:absolute;inset:0;width:34%;background:#7C3AED;display:block;transform-origin:left;animation:mcGrow 1000ms cubic-bezier(.22,1,.36,1) both 200ms;"></span>
+          </div>
+        </div>
+      </header>
+
+      <div style="max-width:1240px;margin:0 auto;width:100%;padding:clamp(18px,2.4vw,32px) clamp(18px,3.4vw,44px) clamp(40px,5vw,72px);display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,300px),1fr));gap:clamp(16px,2.2vw,32px);align-items:start;">
+
+        <aside style="position:sticky;top:{{ asideTop }};display:flex;flex-direction:column;gap:14px;animation:mcRise 440ms ease both 80ms;max-width:420px;">
+          <div style="background:#0B0912;color:#EDEAF4;padding:clamp(18px,2vw,26px);position:relative;overflow:hidden;display:flex;flex-direction:column;gap:14px;">
+            <span aria-hidden="true" style="position:absolute;top:-30%;left:-20%;width:260px;height:260px;background:radial-gradient(closest-side,rgba(124,58,237,0.55),rgba(124,58,237,0) 72%);filter:blur(26px);animation:mcDriftA 38s ease-in-out infinite;"></span>
+            <span style="position:relative;font-family:'JetBrains Mono',monospace;font-size:10.5px;letter-spacing:0.16em;text-transform:uppercase;color:#C4B5FD;">16 sept — 21 sept</span>
+            <span style="position:relative;display:flex;align-items:baseline;gap:10px;">
+              <span style="font-family:'Space Grotesk',sans-serif;font-weight:600;font-size:clamp(40px,5vw,60px);line-height:0.9;letter-spacing:-0.035em;color:#FFFFFF;animation:mcTick 560ms ease both 180ms;">38</span>
+              <span style="font-size:14px;font-weight:300;color:#B8B2C8;">casos sin resolver</span>
+            </span>
+            <p style="position:relative;margin:0;font-size:13.5px;font-weight:300;line-height:1.55;color:#B8B2C8;text-wrap:pretty;">Agrupados por lo que pasó. Nada aquí exige una acción inmediata: sirve para decidir qué ajustar en la asistente.</p>
+            <div style="position:relative;display:flex;flex-direction:column;gap:10px;padding-top:6px;border-top:1px solid rgba(255,255,255,0.12);">
+              <span style="display:flex;align-items:center;gap:10px;font-size:13px;color:#EDEAF4;">
+                <span aria-hidden="true" style="width:9px;height:9px;background:#A78BFA;flex:none;display:block;"></span>
+                Derivación al doctor · 29
+              </span>
+              <span style="display:flex;align-items:center;gap:10px;font-size:13px;color:#EDEAF4;">
+                <span aria-hidden="true" style="width:9px;height:9px;background:#F59E0B;flex:none;display:block;"></span>
+                Uso indebido detenido · 9
+              </span>
+            </div>
+          </div>
+          <div style="background:#FFFFFF;border:1px solid #DCD8E6;padding:16px 18px;display:flex;flex-direction:column;gap:6px;">
+            <span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;letter-spacing:0.15em;text-transform:uppercase;color:#6E6880;">Tendencia</span>
+            <span style="font-size:13.5px;font-weight:300;line-height:1.55;color:#4A4458;text-wrap:pretty;">Los casos sin resolver bajaron 12 % frente al periodo anterior, pero la derivación clínica sigue siendo el motivo dominante.</span>
+          </div>
+        </aside>
+
+        <section aria-label="Casos agrupados" style="display:flex;flex-direction:column;gap:clamp(12px,1.4vw,18px);min-width:0;">
+
+          <article style="background:#FFFFFF;border:1px solid #DCD8E6;border-left:3px solid #7C3AED;display:flex;flex-direction:column;animation:mcRise 460ms ease both 140ms;transition:box-shadow 200ms ease,transform 200ms ease;" style-hover="box-shadow:0 12px 32px rgba(22,17,31,0.09);transform:translateY(-2px);">
+            <div style="padding:clamp(16px,1.9vw,22px) clamp(16px,2vw,24px) 0;display:flex;flex-wrap:wrap;align-items:baseline;justify-content:space-between;gap:8px 16px;">
+              <h2 style="margin:0;font-family:'Space Grotesk',sans-serif;font-weight:600;font-size:clamp(17px,1.6vw,21px);line-height:1.2;letter-spacing:-0.022em;color:#16111F;text-wrap:pretty;">Hubo que pasarle la conversación al doctor</h2>
+              <span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;letter-spacing:0.1em;color:#6E6880;white-space:nowrap;">23 veces · 16—21 sept</span>
+            </div>
+            <div style="padding:clamp(14px,1.6vw,18px) clamp(16px,2vw,24px) clamp(16px,1.8vw,20px);display:flex;flex-direction:column;gap:14px;">
+              <div style="display:flex;flex-direction:column;gap:5px;">
+                <span style="font-family:'JetBrains Mono',monospace;font-size:10px;letter-spacing:0.18em;text-transform:uppercase;color:#6D28D9;">Qué pasó</span>
+                <p style="margin:0;font-size:14.5px;font-weight:300;line-height:1.6;color:#2B2438;text-wrap:pretty;">Hubo 1 solicitud de relevo a una persona y en ese caso el paciente se molestó con el doctor.</p>
+              </div>
+              <div style="display:flex;flex-direction:column;gap:5px;">
+                <span style="font-family:'JetBrains Mono',monospace;font-size:10px;letter-spacing:0.18em;text-transform:uppercase;color:#6E6880;">Por qué</span>
+                <p style="margin:0;font-size:14.5px;font-weight:300;line-height:1.6;color:#4A4458;text-wrap:pretty;">No hay mensajes del paciente, así que no se puede determinar qué provocó la molestia.</p>
+              </div>
+              <div style="display:flex;flex-direction:column;gap:5px;background:#F4F1F9;padding:14px 16px;border-left:2px solid #7C3AED;">
+                <span style="font-family:'JetBrains Mono',monospace;font-size:10px;letter-spacing:0.18em;text-transform:uppercase;color:#4C1D95;">Recomiendo</span>
+                <p style="margin:0;font-size:14.5px;font-weight:400;line-height:1.6;color:#16111F;text-wrap:pretty;">Revisar manualmente ese caso y registrar el motivo concreto para decidir si hace falta ajustar la atención o el relevo.</p>
+              </div>
+              <div style="display:flex;flex-wrap:wrap;align-items:center;gap:10px 18px;padding-top:4px;border-top:1px solid #ECE8F4;">
+                <span style="font-family:'JetBrains Mono',monospace;font-size:11px;color:#6E6880;padding-top:12px;">Se interrumpió al doctor 23 de 23 veces</span>
+                <details data-mc-det="true" style="padding-top:12px;">
+                  <summary style="display:flex;align-items:center;gap:8px;font-family:'JetBrains Mono',monospace;font-size:11px;letter-spacing:0.1em;text-transform:uppercase;color:#6D28D9;min-height:24px;">
+                    <span data-mc-sign="true" aria-hidden="true" style="width:0;height:0;border-left:6px solid currentColor;border-top:4px solid transparent;border-bottom:4px solid transparent;display:block;transition:transform 180ms ease;"></span>
+                    Detalle técnico
+                  </summary>
+                  <div style="padding-top:12px;font-family:'JetBrains Mono',monospace;font-size:12px;line-height:1.7;color:#4A4458;animation:mcRise 220ms ease both;">
+                    handoff_reason: clinical_query · confidence &lt; 0.42<br>
+                    intents: dolor_postoperatorio, revision_urgente<br>
+                    sesiones: 23 · mediana de turnos antes del relevo: 4
+                  </div>
+                </details>
+              </div>
+            </div>
+          </article>
+
+          <article style="background:#FFFFFF;border:1px solid #DCD8E6;border-left:3px solid #F59E0B;display:flex;flex-direction:column;animation:mcRise 460ms ease both 200ms;transition:box-shadow 200ms ease,transform 200ms ease;" style-hover="box-shadow:0 12px 32px rgba(22,17,31,0.09);transform:translateY(-2px);">
+            <div style="padding:clamp(16px,1.9vw,22px) clamp(16px,2vw,24px) 0;display:flex;flex-wrap:wrap;align-items:baseline;justify-content:space-between;gap:8px 16px;">
+              <h2 style="margin:0;font-family:'Space Grotesk',sans-serif;font-weight:600;font-size:clamp(17px,1.6vw,21px);line-height:1.2;letter-spacing:-0.022em;color:#16111F;text-wrap:pretty;">Daniela iba a decir algo que no debía</h2>
+              <span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;letter-spacing:0.1em;color:#6E6880;white-space:nowrap;">9 veces · 17—21 sept</span>
+            </div>
+            <div style="padding:clamp(14px,1.6vw,18px) clamp(16px,2vw,24px) clamp(16px,1.8vw,20px);display:flex;flex-direction:column;gap:14px;">
+              <div style="display:flex;flex-direction:column;gap:5px;">
+                <span style="font-family:'JetBrains Mono',monospace;font-size:10px;letter-spacing:0.18em;text-transform:uppercase;color:#B45309;">Qué pasó</span>
+                <p style="margin:0;font-size:14.5px;font-weight:300;line-height:1.6;color:#2B2438;text-wrap:pretty;">Se registró 1 caso de uso indebido general; en ese caso el paciente se molestó con el doctor. No hay texto del paciente para revisar.</p>
+              </div>
+              <div style="display:flex;flex-direction:column;gap:5px;">
+                <span style="font-family:'JetBrains Mono',monospace;font-size:10px;letter-spacing:0.18em;text-transform:uppercase;color:#6E6880;">Por qué</span>
+                <p style="margin:0;font-size:14.5px;font-weight:300;line-height:1.6;color:#4A4458;text-wrap:pretty;">No se puede determinar la causa concreta porque no quedó registrada la consulta.</p>
+              </div>
+              <div style="display:flex;flex-direction:column;gap:5px;background:#FEF6E7;padding:14px 16px;border-left:2px solid #F59E0B;">
+                <span style="font-family:'JetBrains Mono',monospace;font-size:10px;letter-spacing:0.18em;text-transform:uppercase;color:#B45309;">Recomiendo</span>
+                <p style="margin:0;font-size:14.5px;font-weight:400;line-height:1.6;color:#16111F;text-wrap:pretty;">Revisar el contexto de este caso y registrar qué solicitó el paciente, para decidir si fue un incidente aislado o una situación recurrente.</p>
+              </div>
+              <div style="display:flex;flex-wrap:wrap;align-items:center;gap:10px 18px;padding-top:4px;border-top:1px solid #ECE8F4;">
+                <span style="font-family:'JetBrains Mono',monospace;font-size:11px;color:#6E6880;padding-top:12px;">Se interrumpió al doctor 3 de 9 veces</span>
+                <details data-mc-det="true" style="padding-top:12px;">
+                  <summary style="display:flex;align-items:center;gap:8px;font-family:'JetBrains Mono',monospace;font-size:11px;letter-spacing:0.1em;text-transform:uppercase;color:#6D28D9;min-height:24px;">
+                    <span data-mc-sign="true" aria-hidden="true" style="width:0;height:0;border-left:6px solid currentColor;border-top:4px solid transparent;border-bottom:4px solid transparent;display:block;transition:transform 180ms ease;"></span>
+                    Detalle técnico
+                  </summary>
+                  <div style="padding-top:12px;font-family:'JetBrains Mono',monospace;font-size:12px;line-height:1.7;color:#4A4458;animation:mcRise 220ms ease both;">
+                    guardrail: policy_block · categoría: fuera_de_alcance<br>
+                    transcripción retenida: no (política de datos)<br>
+                    sesiones: 9 · bloqueadas antes de responder: 9
+                  </div>
+                </details>
+              </div>
+            </div>
+          </article>
+
+          <article style="background:#FFFFFF;border:1px solid #DCD8E6;border-left:3px solid #7C3AED;display:flex;flex-direction:column;animation:mcRise 460ms ease both 260ms;transition:box-shadow 200ms ease,transform 200ms ease;" style-hover="box-shadow:0 12px 32px rgba(22,17,31,0.09);transform:translateY(-2px);">
+            <div style="padding:clamp(16px,1.9vw,22px) clamp(16px,2vw,24px) 0;display:flex;flex-wrap:wrap;align-items:baseline;justify-content:space-between;gap:8px 16px;">
+              <h2 style="margin:0;font-family:'Space Grotesk',sans-serif;font-weight:600;font-size:clamp(17px,1.6vw,21px);line-height:1.2;letter-spacing:-0.022em;color:#16111F;text-wrap:pretty;">Consultas clínicas que la asistente no puede responder</h2>
+              <span style="font-family:'JetBrains Mono',monospace;font-size:10.5px;letter-spacing:0.1em;color:#6E6880;white-space:nowrap;">6 veces · 16—17 sept</span>
+            </div>
+            <div style="padding:clamp(14px,1.6vw,18px) clamp(16px,2vw,24px) clamp(16px,1.8vw,20px);display:flex;flex-direction:column;gap:14px;">
+              <div style="display:flex;flex-direction:column;gap:5px;">
+                <span style="font-family:'JetBrains Mono',monospace;font-size:10px;letter-spacing:0.18em;text-transform:uppercase;color:#6D28D9;">Qué pasó</span>
+                <p style="margin:0;font-size:14.5px;font-weight:300;line-height:1.6;color:#2B2438;text-wrap:pretty;">En 3 ocasiones los pacientes necesitaron intervención humana y en las 3 se molestó al doctor. Preguntaron por un procedimiento ante dolor y ardor, cuándo podían ser revisados y mencionaron a una paciente por su nombre.</p>
+              </div>
+              <div style="display:flex;flex-direction:column;gap:5px;">
+                <span style="font-family:'JetBrains Mono',monospace;font-size:10px;letter-spacing:0.18em;text-transform:uppercase;color:#6E6880;">Por qué</span>
+                <p style="margin:0;font-size:14.5px;font-weight:300;line-height:1.6;color:#4A4458;text-wrap:pretty;">La asistente no resolvió consultas clínicas ni pudo gestionar claramente una revisión o identificar el contexto de la persona mencionada.</p>
+              </div>
+              <div style="display:flex;flex-direction:column;gap:5px;background:#F4F1F9;padding:14px 16px;border-left:2px solid #7C3AED;">
+                <span style="font-family:'JetBrains Mono',monospace;font-size:10px;letter-spacing:0.18em;text-transform:uppercase;color:#4C1D95;">Recomiendo</span>
+                <p style="margin:0;font-size:14.5px;font-weight:400;line-height:1.6;color:#16111F;text-wrap:pretty;">Revisar cómo se atienden consultas sobre dolor y ardor, solicitudes de cita y mensajes que solo incluyen un nombre, procurando que la derivación no genere molestias al doctor.</p>
+              </div>
+              <div style="display:flex;flex-wrap:wrap;align-items:center;gap:10px 18px;padding-top:4px;border-top:1px solid #ECE8F4;">
+                <span style="font-family:'JetBrains Mono',monospace;font-size:11px;color:#6E6880;padding-top:12px;">Se interrumpió al doctor 6 de 6 veces</span>
+                <details data-mc-det="true" style="padding-top:12px;">
+                  <summary style="display:flex;align-items:center;gap:8px;font-family:'JetBrains Mono',monospace;font-size:11px;letter-spacing:0.1em;text-transform:uppercase;color:#6D28D9;min-height:24px;">
+                    <span data-mc-sign="true" aria-hidden="true" style="width:0;height:0;border-left:6px solid currentColor;border-top:4px solid transparent;border-bottom:4px solid transparent;display:block;transition:transform 180ms ease;"></span>
+                    Detalle técnico
+                  </summary>
+                  <div style="padding-top:12px;font-family:'JetBrains Mono',monospace;font-size:12px;line-height:1.7;color:#4A4458;animation:mcRise 220ms ease both;">
+                    intents sin cobertura: sintoma_dolor, agenda_revision, referencia_persona<br>
+                    fuente de conocimiento consultada: base_clinica_v3 (sin coincidencia)<br>
+                    sesiones: 6 · tiempo medio hasta el relevo: 2 min 14 s
+                  </div>
+                </details>
+              </div>
+            </div>
+          </article>
+
+        </section>
+      </div>
+    </div>
+    </sc-if>
+
+    <sc-if value="{{ isStub }}" hint-placeholder-val="{{ false }}">
+    <div style="flex:1;display:flex;align-items:center;justify-content:center;padding:clamp(40px,8vw,90px) clamp(18px,4vw,44px);">
+      <div style="max-width:520px;width:100%;display:flex;flex-direction:column;gap:16px;animation:mcRise 440ms ease both;">
+        <span aria-hidden="true" style="width:44px;height:44px;background:#EDE9FE;display:flex;align-items:center;justify-content:center;">
+          <span style="width:14px;height:14px;border:2px solid #6D28D9;display:block;"></span>
+        </span>
+        <h1 style="margin:0;font-family:'Space Grotesk',sans-serif;font-weight:600;font-size:clamp(24px,3vw,34px);line-height:1.08;letter-spacing:-0.03em;color:#16111F;">{{ routeLabel }}</h1>
+        <p style="margin:0;font-size:15.5px;font-weight:300;line-height:1.6;color:#4A4458;text-wrap:pretty;">Esta sección todavía no está diseñada. Dígame qué debe mostrar y la construyo con el mismo sistema: cabecera con contexto, tarjetas con borde de acento y detalle técnico plegable.</p>
+        <button type="button" onClick="{{ goHome }}" style="align-self:flex-start;background:#6D28D9;color:#FFFFFF;border:none;font-family:'Space Grotesk',sans-serif;font-weight:500;font-size:15px;padding:14px 20px;min-height:48px;cursor:pointer;transition:background 160ms ease;" style-hover="background:#4C1D95;">Volver a Inicio</button>
+      </div>
+    </div>
+    </sc-if>
+
+  </main>
+</div>
+
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;$preview&quot;:{&quot;width&quot;:1440,&quot;height&quot;:900}}">
+class Component extends DCLogic {
+  state = { route: 'home', menuOpen: false, w: typeof window !== 'undefined' ? window.innerWidth : 1440 };
+
+  componentDidMount() {
+    this._onResize = () => {
+      if (window.innerWidth !== this.state.w) this.setState({ w: window.innerWidth });
+    };
+    window.addEventListener('resize', this._onResize);
+    this._onResize();
+    requestAnimationFrame(this._onResize);
+    this._ro = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(this._onResize) : null;
+    if (this._ro) this._ro.observe(document.documentElement);
+  }
+  componentWillUnmount() {
+    window.removeEventListener('resize', this._onResize);
+    if (this._ro) this._ro.disconnect();
+  }
+
+  go(route) { return () => this.setState({ route, menuOpen: false }); }
+
+  renderVals() {
+    const r = this.state.route;
+    const isDesktop = this.state.w >= 900;
+    const labels = {
+      home: 'Inicio', sin: 'Sin resolver', agenda: 'Agenda', leads: 'Leads',
+      trat: 'Tratamientos', metricas: 'Métricas', estado: 'Estado del sistema',
+      config: 'Configuración', pruebas: 'Pruebas'
+    };
+    const keys = Object.keys(labels);
+    const v = {};
+    keys.forEach(k => {
+      const on = r === k;
+      v['bg' + k.charAt(0).toUpperCase() + k.slice(1)] = on ? 'rgba(124,58,237,0.18)' : 'transparent';
+      v['fg' + k.charAt(0).toUpperCase() + k.slice(1)] = on ? '#FFFFFF' : '#B8B2C8';
+      v['bar' + k.charAt(0).toUpperCase() + k.slice(1)] = on ? '60%' : '0%';
+    });
+    return Object.assign(v, {
+      isDesktop,
+      isMobile: !isDesktop,
+      menuOpen: this.state.menuOpen && !isDesktop,
+      openMenu: () => this.setState({ menuOpen: true }),
+      closeMenu: () => this.setState({ menuOpen: false }),
+      isHome: r === 'home',
+      isSin: r === 'sin',
+      isStub: r !== 'home' && r !== 'sin',
+      routeLabel: labels[r] || '',
+      mainTopPad: isDesktop ? '0px' : '69px',
+      stickyTop: isDesktop ? '0px' : '69px',
+      asideTop: isDesktop ? '150px' : '0px',
+      goHome: this.go('home'), goSin: this.go('sin'), goAgenda: this.go('agenda'),
+      goLeads: this.go('leads'), goTrat: this.go('trat'), goMetricas: this.go('metricas'),
+      goEstado: this.go('estado'), goConfig: this.go('config'), goPruebas: this.go('pruebas'),
+      navItems: keys.map(k => ({
+        label: labels[k],
+        go: this.go(k),
+        bg: r === k ? 'rgba(124,58,237,0.2)' : 'transparent',
+        fg: r === k ? '#FFFFFF' : '#B8B2C8',
+        dot: r === k ? '#A78BFA' : 'rgba(255,255,255,0.22)'
+      }))
+    });
+  }
+}
+</script>
+</body>
+</html>

@@ -299,3 +299,43 @@ export async function marcarAsistencia(
     body: JSON.stringify({ asistio: valor }),
   })
 }
+
+// ------------------------------------------------------------------------------------------
+// La portada
+// ------------------------------------------------------------------------------------------
+
+/** Lo que pinta la portada.
+ *
+ *  Las cifras llegan CRUDAS y los porcentajes se calculan aquí: así `llegaron` viaja con
+ *  `marcadas` y `cumplibles` al lado, que es lo que permite escribir «8 de 12 marcadas» en
+ *  vez de un 67 % que no dice sobre cuántas citas se calculó.
+ *
+ *  `linea_base` es la clínica ANTES de Daniela, medida por MaxiCare. Viene del servidor y no
+ *  de una constante de este archivo porque es un dato medido, no de presentación.
+ *
+ *  La unidad de `escribieron` y `con_cita` es el TELÉFONO, no la conversación: una
+ *  conversación caduca a las 24 h, así que contar filas inflaría el denominador.
+ *
+ *  La respuesta trae más claves de las que se declaran aquí (`desde`, por ejemplo); esta es
+ *  la convención del archivo (ver `CitaDeAgenda`): solo lo que la pantalla pinta. */
+export type ResumenInicio = {
+  usuario: string
+  dias: number
+  escribieron: number
+  con_cita: number
+  asistencia: { llegaron: number; marcadas: number; cumplibles: number }
+  sin_contestar: number
+  relevo: { minutos: number; conversaciones: number }
+  linea_base: { conversaciones_mes: number; citas_mes: number; sin_responder_pct: number }
+  volumen: { dia: string; conversaciones: number }[]
+  agenda_hoy: CitaDeAgenda[]
+  /** Los tres casos más frecuentes, el mismo tipo que pinta la pantalla de Sin resolver. */
+  atencion: CasoSinResolver[]
+}
+
+/** La portada. De SOLO LECTURA, y ahí está la diferencia con `leerAgenda`: aquella
+ *  reconcilia contra Google Calendar al abrirse. Esta es la primera pantalla de cada sesión,
+ *  así que reconciliar aquí serían llamadas a Google en cada ingreso al panel. */
+export async function leerInicio(): Promise<ResumenInicio> {
+  return pedir<ResumenInicio>('/api/inicio')
+}

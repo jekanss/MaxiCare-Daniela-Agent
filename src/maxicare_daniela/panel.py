@@ -17,7 +17,7 @@ from __future__ import annotations
 import re
 import uuid
 from collections.abc import Sequence
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, get_args
 
 from .calendario import ZONA_BOGOTA
@@ -489,3 +489,155 @@ def citas_sin_marcar(
             (desde, hasta, max(1, min(limite, 200))),
         )
         return [_fila_a_cita(f) for f in cur.fetchall()]
+
+
+# ------------------------------------------------------------------------------------------
+# La portada: los cinco números
+# ------------------------------------------------------------------------------------------
+
+
+#: La clínica ANTES de Daniela, medida por MaxiCare sobre un mes de su propio WhatsApp y
+#: congelada en `docs/agentes/brief-agentes.json` -> `exito`.
+#:
+#: Viaja con cada respuesta a propósito. Un número sin su anterior no dice nada: «6 personas
+#: escribieron» no es bueno ni malo hasta que al lado pone que antes eran 97 al mes y que de
+#: esas 97 solo 2 acababan con cita. Y vive aquí y no en el frontend porque es un dato
+#: MEDIDO, no una constante de presentación: si alguna vez se corrige, se corrige en el sitio
+#: donde se puede escribir por qué.
+LINEA_BASE = {
+    "conversaciones_mes": 97,
+    "citas_mes": 2,
+    "sin_responder_pct": 50,
+}
+
+#: Cuánto tiene que llevar un mensaje sin respuesta para contarlo como desatendido. Cinco
+#: minutos: por debajo de eso lo más probable es que el turno siga vivo dentro de la ventana
+#: de silencio del búfer (`atencion._Bufer`), y contarlo sería llamar «sin contestar» a un
+#: mensaje que se está contestando ahora mismo.
+#:
+#: Va interpolado en el SQL y NO como parámetro porque Postgres no acepta un placeholder
+#: dentro de un literal `interval`. Es una constante de este archivo, nunca una entrada: si
+#: algún día viene de fuera, se pasa como `%s * interval '1 minute'`.
+MINUTOS_SIN_CONTESTAR = 5
+
+
+def resumen_inicio(conn, *, ahora: datetime, dias: int = 30) -> dict[str, Any]:
+    """Los cinco números de la portada, más el volumen por día y la agenda de hoy.
+
+    SOLO LECTURA, y esa es la diferencia que más importa con `/api/agenda`: aquella
+    reconcilia contra Google Calendar al abrirse --puede mover una cita, soltar un cupo y
+    reprogramar un recordatorio-- y se quiso así porque abrir la Agenda es el mejor
+    disparador que esa reconciliación tiene. Esta pantalla es la PRIMERA de cada sesión: si
+    reconciliara, cada ingreso al panel serían escrituras en Neon y llamadas a la API de
+    Google, varias veces al día y por cada persona que entre.
+
+    `ahora` no tiene default a propósito. Un `now()` dentro de la consulta convierte
+    cualquier prueba en una que envejece, y en este proyecto eso ya ha amanecido en rojo
+    tres veces (`.claude/rules/pruebas.md`). Quien llama decide qué instante es el presente.
+
+    La unidad es el TELÉFONO y no la conversación. Una conversación caduca por inactividad
+    de 24 h (`persistencia.conversacion_viva`), así que una negociación de tres días son
+    tres filas y una sola persona: contar filas inflaría el denominador de todas las tasas.
+
+    Devuelve las cifras CRUDAS, nunca porcentajes. Quién se divide entre quién lo decide la
+    pantalla, y así el numerador y el denominador viajan los dos -- que es lo que permite
+    escribir «llegaron 8 de 12» en vez de un 67 % que no dice sobre cuántas citas se calculó.
+    """
+    desde = ahora - timedelta(days=dias)
+    inicio_del_dia = ahora.astimezone(ZONA_BOGOTA).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+
+    with conn.cursor() as cur:
+        # 1. Escribieron: personas distintas, no conversaciones.
+        cur.execute(
+            "SELECT count(DISTINCT telefono) FROM mensajes_entrantes WHERE recibido_en >= %s",
+            (desde,),
+        )
+        escribieron = cur.fetchone()[0]
+
+        # 2. Quedaron con cita: personas distintas con una cita viva creada en el periodo.
+        cur.execute(
+            "SELECT count(DISTINCT telefono) FROM citas"
+            " WHERE creada_en >= %s AND estado <> 'cancelada'",
+            (desde,),
+        )
+        con_cita = cur.fetchone()[0]
+
+        # 3. Llegaron. Solo citas cuya hora YA pasó: una cita de mañana no es una
+        #    inasistencia, y contarla haría bajar el número cada vez que Daniela agenda a
+        #    alguien. Las tres cifras salen juntas porque `llegaron` sin `marcadas` miente
+        #    en cuanto la recepción se retrasa una semana en marcar.
+        cur.execute(
+            "SELECT count(*) FILTER (WHERE asistio IS TRUE),"
+            "       count(*) FILTER (WHERE asistio IS NOT NULL),"
+            "       count(*)"
+            "  FROM citas"
+            " WHERE inicio >= %s AND inicio < %s AND estado <> 'cancelada'",
+            (desde, ahora),
+        )
+        llegaron, marcadas, cumplibles = cur.fetchone()
+
+        # 4. Sin contestar. El `NOT LIKE 'relevo:%%'` saca los mensajes que atendió un doctor
+        #    durante un relevo: llevan ese prefijo sin ser un fallo (no negociable 15), y
+        #    contarlos convertiría cada relevo en un paciente desatendido. Un
+        #    `fallo_respuesta` que NO sea de relevo sí cuenta: al paciente no le llegó nada, y
+        #    que el motivo esté anotado no cambia lo que le pasó a él.
+        cur.execute(
+            "SELECT count(*) FROM mensajes_entrantes"
+            " WHERE recibido_en >= %s"
+            f"   AND recibido_en < %s - interval '{MINUTOS_SIN_CONTESTAR} minutes'"
+            "   AND respondido_en IS NULL"
+            "   AND (fallo_respuesta IS NULL OR fallo_respuesta NOT LIKE 'relevo:%%')",
+            (desde, ahora),
+        )
+        sin_contestar = cur.fetchone()[0]
+
+        # 5. El tiempo del doctor. `relevo.cerrar` pone `tomada_por = NULL` pero no toca
+        #    `tomada_en`, así que la duración sobrevive al cierre; un relevo todavía abierto
+        #    cuenta hasta `ahora`.
+        #
+        #    SUBCUENTA, y hay que saberlo: `activar_relevo` limpia `relevo_cerrado_en` al
+        #    reactivar, así que un segundo relevo en la misma conversación borra el rastro
+        #    del primero. Se prefiere un número bajo y honesto a uno inventado.
+        cur.execute(
+            "SELECT coalesce(sum(EXTRACT(EPOCH FROM"
+            "         (coalesce(relevo_cerrado_en, %s) - tomada_en))) / 60, 0)::int,"
+            "       count(*)"
+            "  FROM conversaciones WHERE tomada_en >= %s",
+            (ahora, desde),
+        )
+        minutos_doctor, conversaciones_con_relevo = cur.fetchone()
+
+        # El volumen por día, en hora de Bogotá. Sin `AT TIME ZONE` el corte del día lo pone
+        # el reloj del servidor y las barras se desplazan respecto de lo que vivió la clínica.
+        cur.execute(
+            "SELECT date(creada_en AT TIME ZONE 'America/Bogota') AS dia, count(*)"
+            "  FROM conversaciones"
+            " WHERE creada_en >= %s AND canal = 'whatsapp'"
+            " GROUP BY 1 ORDER BY 1",
+            (desde,),
+        )
+        volumen = [{"dia": d.isoformat(), "conversaciones": n} for d, n in cur.fetchall()]
+
+    return {
+        "desde": desde.isoformat(),
+        "dias": dias,
+        "escribieron": escribieron,
+        "con_cita": con_cita,
+        "asistencia": {
+            "llegaron": llegaron,
+            "marcadas": marcadas,
+            "cumplibles": cumplibles,
+        },
+        "sin_contestar": sin_contestar,
+        "relevo": {
+            "minutos": minutos_doctor,
+            "conversaciones": conversaciones_con_relevo,
+        },
+        "linea_base": LINEA_BASE,
+        "volumen": volumen,
+        "agenda_hoy": citas_del_dia(
+            conn, desde=inicio_del_dia, hasta=inicio_del_dia + timedelta(days=1)
+        ),
+    }

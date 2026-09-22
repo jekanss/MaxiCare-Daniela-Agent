@@ -2103,6 +2103,33 @@ async def api_sin_resolver(quien: dict = Depends(usuario_actual)) -> dict:
     return {"casos": casos, "es_admin": quien["rol"] == "admin"}
 
 
+@app.get("/api/inicio")
+async def api_inicio(quien: dict = Depends(usuario_actual)) -> dict:
+    """La portada. SOLO LECTURA: ni una escritura, ni una llamada a Google.
+
+    Es la diferencia deliberada con `/api/agenda`, que reconcilia contra Calendar al
+    abrirse. Esta es la primera pantalla de cada sesión, así que reconciliar aquí
+    convertiría cada ingreso al panel en escrituras en Neon y llamadas a la API de Google.
+    Quien quiera el día contrastado entra a Agenda, que es donde vive esa promesa.
+
+    El reloj sale de `_ahora_en_bogota()` y nunca de un `datetime.now()` escrito aquí: esa
+    función es la costura que deja clavar el presente desde una prueba, y `api_agenda` ya la
+    usa por el mismo motivo. Una fecha suelta en este proyecto ha amanecido en rojo tres
+    veces (`.claude/rules/pruebas.md`).
+
+    Los tres casos de «necesita su atención» se piden aquí y no dentro de `resumen_inicio`
+    por lo mismo que los pide así `/api/sin-resolver`: `casos_recientes` ya filtra los
+    teléfonos en el servidor y no hay nada que componer, solo dos lecturas que caben en la
+    misma conexión.
+    """
+    with persistencia.conectar(config.database_url) as conn:
+        resumen = panel.resumen_inicio(conn, ahora=_ahora_en_bogota())
+        casos = persistencia.casos_recientes(conn)
+    resumen["atencion"] = casos[:3]
+    resumen["usuario"] = quien["nombre"]
+    return resumen
+
+
 # ------------------------------------------------------------------------------------------
 # Panel: la agenda del día y la marca de asistencia
 # ------------------------------------------------------------------------------------------

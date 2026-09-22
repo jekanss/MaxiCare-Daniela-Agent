@@ -1407,3 +1407,277 @@ def test_el_historial_del_panel_no_le_mezcla_las_marcas_de_asistencia(monkeypatc
         )
     finally:
         runtime.app.dependency_overrides.clear()
+
+
+# ==========================================================================================
+# La portada: los cinco números
+#
+# Todas miden un DELTA --antes de insertar y después-- y nunca un total absoluto. El esquema
+# `pruebas` no se borra entre pruebas ni entre corridas, y otros seis archivos de Neon
+# (`test_tools_neon`, `test_relevo_neon`, `test_seguimientos_neon`, `test_reseteo_neon`,
+# `test_reactivacion_neon`, `test_ingesta_neon`) insertan en `mensajes_entrantes`,
+# `conversaciones` y `citas` ahí mismo. `resumen_inicio` cuenta la tabla ENTERA, así que un
+# `== 1` mediría la basura acumulada de todo el proyecto y amanecería en rojo sin que nadie
+# tocara nada. El delta solo mide lo que esta prueba escribió.
+# ==========================================================================================
+
+#: El presente clavado de estas tres. Las filas se insertan RELATIVAS a él, así que ni la
+#: ventana de 30 días ni el corte del pasado dependen del reloj de verdad: es la regla de
+#: `.claude/rules/pruebas.md`, y la razón por la que esta fecha no envejece.
+_AHORA_PORTADA = datetime(2026, 9, 22, 15, 0, tzinfo=ZONA_BOGOTA)
+
+
+@pytest.mark.neon
+def test_resumen_inicio_cuenta_personas_y_no_conversaciones(conn):
+    """Tres mensajes del MISMO teléfono son UNA persona.
+
+    Una conversación caduca por inactividad de 24 h (`persistencia.conversacion_viva`), así
+    que una negociación de tres días son tres filas en `conversaciones` y una sola persona.
+    Contar filas inflaría el denominador de todas las tasas y haría parecer a Daniela peor
+    de lo que es.
+    """
+    antes = panel.resumen_inicio(conn, ahora=_AHORA_PORTADA)
+
+    telefono = f"57300{uuid.uuid4().hex[:7]}"
+    with conn.cursor() as cur:
+        conv = uuid.uuid4()
+        cur.execute(
+            "INSERT INTO conversaciones (id, telefono, canal, creada_en)"
+            " VALUES (%s,%s,'whatsapp',%s)",
+            (conv, telefono, _AHORA_PORTADA - timedelta(days=2)),
+        )
+        for i in range(3):
+            cur.execute(
+                "INSERT INTO mensajes_entrantes (wamid, telefono, tipo, texto, recibido_en,"
+                " conversacion_id, respondido_en)"
+                " VALUES (%s,%s,'text','hola',%s,%s,%s)",
+                (
+                    f"wamid-{uuid.uuid4().hex}",
+                    telefono,
+                    _AHORA_PORTADA - timedelta(days=i),
+                    conv,
+                    _AHORA_PORTADA - timedelta(days=i),
+                ),
+            )
+    conn.commit()
+
+    despues = panel.resumen_inicio(conn, ahora=_AHORA_PORTADA)
+
+    assert despues["escribieron"] - antes["escribieron"] == 1, "tres mensajes, una persona"
+    assert despues["sin_contestar"] == antes["sin_contestar"], "los tres tienen respuesta"
+    assert despues["linea_base"]["citas_mes"] == 2, "la línea base viaja con cada respuesta"
+
+
+@pytest.mark.neon
+def test_resumen_inicio_solo_mira_citas_cuya_hora_ya_paso(conn):
+    """Una cita de mañana no es una inasistencia: es una cita de mañana.
+
+    Contarla en el denominador de «llegaron» convertiría el futuro en un fracaso y haría
+    bajar el número cada vez que Daniela agenda a alguien, que es justo lo contrario de lo
+    que la pantalla quiere decir.
+    """
+    antes = panel.resumen_inicio(conn, ahora=_AHORA_PORTADA)
+
+    telefono = f"57301{uuid.uuid4().hex[:7]}"
+    with conn.cursor() as cur:
+        conv = uuid.uuid4()
+        cur.execute(
+            "INSERT INTO conversaciones (id, telefono, canal, creada_en)"
+            " VALUES (%s,%s,'whatsapp',%s)",
+            (conv, telefono, _AHORA_PORTADA - timedelta(days=3)),
+        )
+        for cuando, asistio in (
+            (_AHORA_PORTADA - timedelta(days=2), True),   # vino
+            (_AHORA_PORTADA - timedelta(days=1), None),   # pasó y nadie marcó
+            (_AHORA_PORTADA + timedelta(days=1), None),   # mañana: no cuenta
+        ):
+            cur.execute(
+                "INSERT INTO citas (id, conversacion_id, nombre_completo, telefono,"
+                " tratamiento, inicio, duracion_minutos, estado, asistio, creada_en)"
+                " VALUES (%s,%s,'Prueba',%s,'valoracion',%s,60,'confirmada',%s,%s)",
+                (
+                    uuid.uuid4(), conv, telefono, cuando, asistio,
+                    _AHORA_PORTADA - timedelta(days=3),
+                ),
+            )
+    conn.commit()
+
+    despues = panel.resumen_inicio(conn, ahora=_AHORA_PORTADA)
+
+    assert despues["con_cita"] - antes["con_cita"] == 1, "tres citas del mismo teléfono, una persona"
+
+    delta = {
+        clave: despues["asistencia"][clave] - antes["asistencia"][clave]
+        for clave in ("llegaron", "marcadas", "cumplibles")
+    }
+    assert delta == {"llegaron": 1, "marcadas": 1, "cumplibles": 2}, (
+        "la de mañana no entra en ninguna de las tres: no ha ocurrido"
+    )
+
+
+@pytest.mark.neon
+def test_resumen_inicio_no_cuenta_como_sin_contestar_lo_que_atendio_un_doctor(conn):
+    """Un mensaje que llegó durante un relevo lleva `fallo_respuesta` con prefijo `relevo:`
+    sin ser un fallo (no negociable 15). Contarlo convertiría cada relevo --que es el
+    sistema funcionando-- en un paciente desatendido.
+    """
+    antes = panel.resumen_inicio(conn, ahora=_AHORA_PORTADA)
+
+    telefono = f"57302{uuid.uuid4().hex[:7]}"
+    with conn.cursor() as cur:
+        conv = uuid.uuid4()
+        cur.execute(
+            "INSERT INTO conversaciones (id, telefono, canal, creada_en, tomada_en,"
+            " relevo_cerrado_en) VALUES (%s,%s,'whatsapp',%s,%s,%s)",
+            (
+                conv, telefono,
+                _AHORA_PORTADA - timedelta(days=1),
+                _AHORA_PORTADA - timedelta(minutes=30),
+                _AHORA_PORTADA - timedelta(minutes=10),
+            ),
+        )
+        for fallo in ("relevo: lo atiende el doctor", None):
+            cur.execute(
+                "INSERT INTO mensajes_entrantes (wamid, telefono, tipo, texto, recibido_en,"
+                " conversacion_id, fallo_respuesta)"
+                " VALUES (%s,%s,'text','hola',%s,%s,%s)",
+                (
+                    f"wamid-{uuid.uuid4().hex}", telefono,
+                    _AHORA_PORTADA - timedelta(hours=1), conv, fallo,
+                ),
+            )
+    conn.commit()
+
+    despues = panel.resumen_inicio(conn, ahora=_AHORA_PORTADA)
+
+    assert despues["sin_contestar"] - antes["sin_contestar"] == 1, "solo el que NO fue de relevo"
+    assert despues["relevo"]["minutos"] - antes["relevo"]["minutos"] == 20
+    assert despues["relevo"]["conversaciones"] - antes["relevo"]["conversaciones"] == 1
+
+
+# ------------------------------------------------------------------------------------------
+# `/api/inicio` -- offline. Estas dos SÍ las corre `uv run pytest -q`.
+# ------------------------------------------------------------------------------------------
+
+
+class _CursorQueDelata:
+    """Devuelve filas de ceros con la forma que espera cada consulta y apunta el VERBO de
+    cada sentencia. Las respuestas se sirven en el orden en que `resumen_inicio` pregunta."""
+
+    def __init__(self, verbos: list[str]) -> None:
+        self._verbos = verbos
+        self._respuestas = [(0,), (0,), (0, 0, 0), (0,), (0, 0)]
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+    def execute(self, sql, params=None):
+        self._verbos.append(sql.strip().split()[0].upper())
+
+    def fetchone(self):
+        return self._respuestas.pop(0) if self._respuestas else (0,)
+
+    def fetchall(self):
+        return []
+
+
+class _ConexionDeSoloLectura:
+    """Una conexión que apunta todo lo que se le pide. No dobla `resumen_inicio`: el SQL de
+    verdad corre encima de ella, que es lo que hace que esta prueba vigile algo."""
+
+    def __init__(self) -> None:
+        self.verbos: list[str] = []
+        self.commits = 0
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+    def cursor(self):
+        return _CursorQueDelata(self.verbos)
+
+    def commit(self):
+        self.commits += 1
+
+
+def test_api_inicio_no_toca_el_calendario(monkeypatch):
+    """La invariante que sostiene toda la decisión: esta pantalla es la PRIMERA de cada
+    sesión, así que un solo `calendario.*` en este camino son llamadas a Google en cada
+    ingreso al panel, varias veces al día y por cada persona que entre.
+
+    Entra CON sesión, por `dependency_overrides`, y eso no es un detalle: comprobar el 401
+    de un anónimo dejaría el cuerpo del endpoint sin ejecutar y la prueba pasaría sin
+    ejercer nada. Verde por el motivo equivocado es el fallo que este proyecto ya pagó.
+    """
+    llamadas: list[str] = []
+
+    class CalendarioEspia:
+        def __getattr__(self, nombre):
+            llamadas.append(nombre)
+            raise AssertionError(f"/api/inicio llamó al calendario: {nombre}")
+
+    # El objetivo es `runtime._calendario`, la instancia global que se construye al arrancar.
+    # `runtime.calendario` NO existe: el módulo hace `from .calendario import (...)` y solo
+    # trae nombres sueltos, así que un espía puesto ahí con `raising=False` no vigilaría nada
+    # y esta prueba pasaría vacía.
+    monkeypatch.setattr(runtime, "_calendario", CalendarioEspia())
+    monkeypatch.setattr(
+        runtime.panel,
+        "resumen_inicio",
+        lambda conn, **kw: {
+            "escribieron": 0,
+            "con_cita": 0,
+            "asistencia": {"llegaron": 0, "marcadas": 0, "cumplibles": 0},
+            "sin_contestar": 0,
+            "relevo": {"minutos": 0, "conversaciones": 0},
+            "linea_base": panel.LINEA_BASE,
+            "volumen": [],
+            "agenda_hoy": [],
+        },
+    )
+    monkeypatch.setattr(runtime.persistencia, "casos_recientes", lambda conn: [])
+    monkeypatch.setattr(
+        runtime.persistencia, "conectar", lambda url: _ConexionFalsaSinResolver()
+    )
+
+    runtime.app.dependency_overrides[runtime.usuario_actual] = _como("doctor")
+    try:
+        r = TestClient(runtime.app).get("/api/inicio")
+        assert r.status_code == 200, r.text
+        assert r.json()["usuario"] == "Prueba", "el saludo sale del servidor, no del front"
+    finally:
+        runtime.app.dependency_overrides.clear()
+
+    assert llamadas == [], "la portada no reconcilia contra Google: eso es de /api/agenda"
+
+
+def test_api_inicio_es_de_solo_lectura(monkeypatch):
+    """Ni un INSERT, ni un UPDATE, ni un `commit`. `GET /api/agenda` escribe a propósito y
+    está documentado; este no, y la diferencia tiene que quedar vigilada.
+
+    `resumen_inicio` NO se dobla aquí: el SQL de verdad se ejecuta contra una conexión que
+    apunta el verbo de cada sentencia, así que la prueba cubre también lo que haga la
+    función el día que alguien le añada una consulta.
+    """
+    conexion = _ConexionDeSoloLectura()
+    monkeypatch.setattr(runtime.persistencia, "conectar", lambda url: conexion)
+    monkeypatch.setattr(runtime.persistencia, "casos_recientes", lambda conn: [])
+
+    runtime.app.dependency_overrides[runtime.usuario_actual] = _como("recepcion")
+    try:
+        r = TestClient(runtime.app).get("/api/inicio")
+        assert r.status_code == 200, r.text
+    finally:
+        runtime.app.dependency_overrides.clear()
+
+    assert len(conexion.verbos) >= 6, (
+        "el camino no llegó a consultar: una prueba sobre lo que NO pasa tiene que "
+        "comprobar además que el camino corrió"
+    )
+    assert set(conexion.verbos) == {"SELECT"}, f"la portada escribió: {conexion.verbos}"
+    assert conexion.commits == 0
