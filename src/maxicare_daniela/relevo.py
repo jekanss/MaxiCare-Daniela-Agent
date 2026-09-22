@@ -358,6 +358,29 @@ def _registrar_relevo(database_url: str) -> None:
         persistencia.registrar_caso(conn, huella="humano:relevo", tipo="HUMANO", escalo=1)
 
 
+def _guardar_del_doctor(
+    database_url: str,
+    *,
+    telefono: str,
+    conversacion_id: str | None,
+    autor: str,
+    texto: str,
+    wamid: str | None = None,
+    fallo: str | None = None,
+) -> None:
+    with persistencia.conectar(database_url) as conn:
+        persistencia.guardar_mensaje_del_doctor(
+            conn,
+            telefono=telefono,
+            conversacion_id=conversacion_id,
+            autor=autor,
+            origen="telegram",
+            texto=texto,
+            wamid=wamid,
+            fallo=fallo,
+        )
+
+
 def _transcripcion(database_url: str, telefono: str) -> list:
     with persistencia.conectar(database_url) as conn:
         return persistencia.transcripcion(conn, telefono)
@@ -848,6 +871,51 @@ async def cerrar_por_tema_cerrado(
     )
 
 
+def _lo_dicho(texto: str | None, adjunto) -> str:
+    """Lo que se guarda en el hilo cuando el doctor manda algo.
+
+    Un adjunto SIN pie no tiene texto, y dejarlo fuera abriria en el hilo del panel el mismo
+    hueco que esta migracion vino a tapar: el doctor mando algo y ahi no aparece nada. Una
+    linea generica es peor que el texto de verdad y mucho mejor que el silencio.
+    """
+    limpio = (texto or "").strip()
+    if limpio:
+        return limpio
+    return "(el doctor envio un archivo)"
+
+
+async def _anotar_lo_que_dijo_el_doctor(
+    database_url: str,
+    relevo: dict[str, Any],
+    texto: str,
+    *,
+    wamid: str | None = None,
+    fallo: str | None = None,
+) -> None:
+    """La fila de la 026. Nunca propaga: si revienta se pierde una fila, no un mensaje.
+
+    Mismo criterio que `atencion._anotar_resultado` y que el no negociable 22. El mensaje al
+    paciente YA salio cuando esto corre --o ya se sabe que no salio--, asi que no hay nada que
+    esta funcion pueda arreglar fallando hacia arriba, y si mucho que romper.
+    """
+    try:
+        await asyncio.to_thread(
+            _guardar_del_doctor,
+            database_url,
+            telefono=relevo["telefono"],
+            conversacion_id=relevo["id_conversacion"],
+            autor=relevo.get("doctor") or "un doctor",
+            texto=texto,
+            wamid=wamid,
+            fallo=fallo,
+        )
+    except Exception:  # noqa: BLE001 -- ver docstring
+        log.exception(
+            "no se pudo anotar en el hilo lo que el doctor le dijo a +%s",
+            relevo.get("telefono"),
+        )
+
+
 async def relevar_mensaje(
     mensaje: dict[str, Any],
     *,
@@ -952,12 +1020,13 @@ async def relevar_mensaje(
         return
 
     telefono = relevo["telefono"]
+    wamid: str | None = None
     try:
         if adjunto is not None:
             file_id, tipo_telegram, nombre = adjunto
             archivo = await telegram.descargar_archivo(file_id, nombre=nombre)
             media_id = await whatsapp.subir_media(archivo)
-            await whatsapp.enviar_archivo(
+            wamid = await whatsapp.enviar_archivo(
                 telefono,
                 media_id,
                 tipo=_TIPO_WHATSAPP_DE_TELEGRAM.get(tipo_telegram, "document"),
@@ -967,7 +1036,7 @@ async def relevar_mensaje(
         else:
             # LITERAL. Sin firma, sin prefijo y sin «te escribe el doctor»: quedó decidido que
             # el paciente no se entera de que cambió el interlocutor.
-            await whatsapp.enviar_texto(telefono, texto)
+            wamid = await whatsapp.enviar_texto(telefono, texto)
     except Exception as e:  # noqa: BLE001 -- `ErrorDeCanal`, timeouts, un 429 de Meta
         log.exception("no se pudo relevar el mensaje %s hacia +%s", mensaje_id, telefono)
         await _avisar_en_tema(
@@ -976,7 +1045,14 @@ async def relevar_mensaje(
             f"⚠️ <b>Esto NO le llegó al paciente.</b>\n{_escapar(str(e))[:400]}\n\n"
             "Vuelve a mandarlo.",
         )
+        await _anotar_lo_que_dijo_el_doctor(
+            database_url, relevo, _lo_dicho(texto, adjunto), fallo=str(e)[:400]
+        )
         return
+
+    await _anotar_lo_que_dijo_el_doctor(
+        database_url, relevo, _lo_dicho(texto, adjunto), wamid=wamid
+    )
 
     try:
         await asyncio.to_thread(_tocar, database_url, relevo["id_conversacion"])

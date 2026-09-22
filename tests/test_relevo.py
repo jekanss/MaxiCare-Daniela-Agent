@@ -26,6 +26,12 @@ avisos: list[tuple[str, str]] = []
 
 #: Cada vez que un relevo activado queda contado en el informe de «sin resolver».
 relevos_contados: list[str] = []
+
+#: Las filas de la migración 026: lo que el doctor le escribió al paciente. Espía y no
+#: `lambda` vacío porque cuatro pruebas comprueban QUÉ se guarda -- y porque el `try` que
+#: envuelve la escritura se traga todo, así que sin doblarla el archivo entero pasaría con
+#: cero filas guardadas y nadie se enteraría. Verde por el motivo equivocado.
+guardados_del_doctor: list[dict] = []
 TEL = "573001110101"
 TEMA = 777
 #: El hilo que ya estaba atado al telefono antes de este relevo. Distinto de `TEMA`, que
@@ -226,6 +232,12 @@ def _sin_base(monkeypatch):
     monkeypatch.setattr(relevo, "_guardar_tema_abierto", lambda url, tel, tema: None)
     monkeypatch.setattr(relevo, "_marcar_abierto", lambda url, tel, abierto: None)
     monkeypatch.setattr(relevo, "_tocar", lambda url, conv: None)
+    guardados_del_doctor.clear()
+    monkeypatch.setattr(
+        relevo,
+        "_guardar_del_doctor",
+        lambda url, **campos: guardados_del_doctor.append(campos),
+    )
     monkeypatch.setattr(relevo, "_marcar_escalamiento", lambda url, mid: None)
     # El caso «humano:relevo» del informe. Es la unica escritura de `casos_sin_resolver` que
     # no sale de un turno, asi que tampoco sale de `atencion._anotar_resultado`.
@@ -635,6 +647,84 @@ def test_una_nota_de_voz_sale_como_audio():
     asyncio.run(relevo.relevar_mensaje(mensaje, telegram=tg, whatsapp=wa, database_url=URL))
 
     assert wa.archivos[0][2] == "audio"
+
+
+def test_lo_que_escribe_el_doctor_queda_guardado_en_el_hilo():
+    """Hasta la migración 026 esto se perdía. El doctor hablaba media hora con el paciente y
+    en el panel ese tramo salía vacío -- sin un error en ningún log, así que parecía que
+    nadie había hablado."""
+    tg, wa = TelegramFalso(), WhatsAppFalso()
+
+    asyncio.run(
+        relevo.relevar_mensaje(
+            _mensaje_del_doctor(), telegram=tg, whatsapp=wa, database_url=URL
+        )
+    )
+
+    assert len(guardados_del_doctor) == 1
+    fila = guardados_del_doctor[0]
+    assert fila["telefono"] == TEL
+    assert fila["conversacion_id"] == CONV
+    assert fila["autor"] == "Dra. Ruiz", "la fila no dice quién habló"
+    assert fila["texto"] == "Hola, soy el doctor. Ven manana a las 8."
+    assert fila["wamid"] == "wamid.1", "sin el wamid la fila no prueba que saliera"
+    assert fila["fallo"] is None
+
+
+def test_un_mensaje_que_no_salio_deja_fila_con_el_motivo():
+    """La fila se escribe IGUAL cuando el envío falla, con `wamid` en NULL y el motivo dentro.
+
+    Una fila que dice «se intentó y no se pudo» vale más que ninguna fila: el precedente
+    exacto es `mensajes_entrantes.fallo`. Sin ella, el hilo del panel mostraría el mismo
+    silencio para «no lo escribió» y para «lo escribió y Meta lo rechazó».
+    """
+    tg, wa = TelegramFalso(), WhatsAppFalso(revienta=True)
+
+    asyncio.run(
+        relevo.relevar_mensaje(
+            _mensaje_del_doctor(), telegram=tg, whatsapp=wa, database_url=URL
+        )
+    )
+
+    assert wa.textos == [], "el doble no reventó: esta prueba no recorrió el camino del fallo"
+    assert len(guardados_del_doctor) == 1, "el camino del fallo no dejó fila"
+    fila = guardados_del_doctor[0]
+    assert fila["wamid"] is None
+    assert fila["fallo"], "sin motivo, la fila no distingue «no salió» de «no se sabe»"
+
+
+def test_un_adjunto_sin_pie_deja_una_linea_y_no_un_hueco():
+    """Un adjunto sin texto no tiene nada que guardar, y dejarlo fuera abriría en el hilo del
+    panel el mismo hueco que la 026 vino a tapar."""
+    tg, wa = TelegramFalso(), WhatsAppFalso()
+    mensaje = _mensaje_del_doctor(text=None, voice={"file_id": "v1"})
+
+    asyncio.run(relevo.relevar_mensaje(mensaje, telegram=tg, whatsapp=wa, database_url=URL))
+
+    assert wa.archivos, "el doble no mandó el audio: la prueba no probó nada"
+    assert guardados_del_doctor[0]["texto"] == "(el doctor envio un archivo)"
+    assert guardados_del_doctor[0]["wamid"] == "wamid.archivo"
+
+
+def test_si_el_registro_revienta_el_mensaje_al_paciente_sale_igual(monkeypatch):
+    """No negociable 22 aplicado a la 026: si la contabilidad revienta se pierde una fila,
+    nunca un mensaje al paciente. Y tampoco el acuse: el doctor tiene que seguir sabiendo
+    que lo suyo salió."""
+
+    def _revienta(url, **campos):
+        raise RuntimeError("Neon tuvo un mal minuto")
+
+    monkeypatch.setattr(relevo, "_guardar_del_doctor", _revienta)
+    tg, wa = TelegramFalso(), WhatsAppFalso()
+
+    asyncio.run(
+        relevo.relevar_mensaje(
+            _mensaje_del_doctor(), telegram=tg, whatsapp=wa, database_url=URL
+        )
+    )
+
+    assert wa.textos == [(TEL, "Hola, soy el doctor. Ven manana a las 8.")]
+    assert tg.reacciones == [300], "el doctor se quedó sin acuse por un fallo de contabilidad"
 
 
 def test_sin_relevo_vivo_no_se_reenvia_nada_y_se_dice(monkeypatch):
@@ -1274,7 +1364,7 @@ def test_la_transcripcion_no_le_vuelca_al_doctor_el_JSON_de_Daniela(monkeypatch)
         }
     )
 
-    frase = persistencia._texto_de_daniela(crudo)
+    frase = persistencia.texto_de_daniela(crudo)
 
     assert frase == "Ya nos llego el archivo y el doctor lo revisara."
     for campo in (
@@ -1292,14 +1382,14 @@ def test_una_respuesta_en_texto_plano_sigue_saliendo_entera():
     en texto plano-- y una transcripcion con huecos es peor que una con una linea de mas."""
     crudo = json.dumps({"role": "assistant", "content": "Con gusto, te espero el martes."})
 
-    assert persistencia._texto_de_daniela(crudo) == "Con gusto, te espero el martes."
+    assert persistencia.texto_de_daniela(crudo) == "Con gusto, te espero el martes."
 
 
 def test_un_dict_que_no_es_respuesta_de_daniela_no_se_vuelca_crudo():
     """El arreglo no puede consistir en 'si parsea, imprimelo': eso es el bug otra vez."""
     crudo = json.dumps({"role": "assistant", "content": json.dumps({"otra_cosa": 1})})
 
-    assert persistencia._texto_de_daniela(crudo) is None
+    assert persistencia.texto_de_daniela(crudo) is None
 
 
 def test_el_boton_de_salida_queda_anclado():

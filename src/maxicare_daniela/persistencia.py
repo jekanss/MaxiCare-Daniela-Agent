@@ -791,7 +791,7 @@ def transcripcion(conn, telefono: str, *, limite: int = 40) -> list[tuple[str, s
             parametros,
         )
         for crudo, cuando in cur.fetchall():
-            texto = _texto_de_daniela(crudo)
+            texto = texto_de_daniela(crudo)
             if texto:
                 lineas.append(("daniela", texto, cuando))
 
@@ -801,7 +801,7 @@ def transcripcion(conn, telefono: str, *, limite: int = 40) -> list[tuple[str, s
     return lineas[-limite:]
 
 
-def _texto_de_daniela(crudo: str) -> str | None:
+def texto_de_daniela(crudo: str) -> str | None:
     """Saca la frase de un item del historial del SDK, o `None` si ese item no es una frase.
 
     **Un item NO es un mensaje** (lo dice la migración 010): una llamada a tool y su
@@ -867,6 +867,66 @@ def _solo_la_frase(contenido: str) -> str | None:
         # Un dict que no es una `RespuestaDaniela`: volcar su JSON sería repetir el bug.
         return None
     return limpio
+
+
+def guardar_mensaje_del_doctor(
+    conn,
+    *,
+    telefono: str,
+    conversacion_id: str | None,
+    autor: str,
+    origen: str,
+    texto: str,
+    wamid: str | None = None,
+    fallo: str | None = None,
+) -> None:
+    """Deja constancia de lo que un humano le escribió al paciente. Migración 026.
+
+    Se llama DESPUÉS de enviar, nunca antes, y se llama TAMBIÉN cuando el envío falló --con
+    `wamid` en NULL y el motivo en `fallo`--. Guardar primero dejaría constancia de un mensaje
+    que el paciente no recibió, y el doctor lo daría por entregado; al revés, lo peor que pasa
+    es que lo repita. Una fila que dice «se intentó y no se pudo» vale más que ninguna fila: el
+    precedente exacto es `mensajes_entrantes.fallo`.
+
+    **Quien la llama la envuelve en un `try` que se lo traga todo.** Si el registro revienta se
+    pierde una fila, nunca un mensaje al paciente -- mismo criterio que
+    `atencion._anotar_resultado` y que el no negociable 22.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO mensajes_del_doctor
+                   (telefono, conversacion_id, autor, origen, texto, wamid, fallo)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            """,
+            (telefono, conversacion_id, autor, origen, texto, wamid, fallo),
+        )
+    conn.commit()
+
+
+def mensajes_del_doctor(conn, telefono: str, *, limite: int = 60) -> list[dict[str, Any]]:
+    """Lo que los humanos le escribieron a ese número, lo más viejo primero.
+
+    El corte va por el FINAL --los últimos `limite`-- por lo mismo que en `transcripcion`: lo
+    que hace falta para entender qué está pasando es lo último que se dijeron, no cómo empezó
+    todo hace dos meses. Por eso la consulta ordena DESC, corta, y se invierte en Python.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT texto, autor, origen, enviado_en, fallo
+              FROM mensajes_del_doctor
+             WHERE telefono = %s
+             ORDER BY enviado_en DESC
+             LIMIT %s
+            """,
+            (telefono, limite),
+        )
+        filas = cur.fetchall()
+    return [
+        {"texto": f[0], "autor": f[1], "origen": f[2], "cuando": f[3], "fallo": f[4]}
+        for f in reversed(filas)
+    ]
 
 
 def telefono_de_conversacion(conn, id_conversacion: str) -> str | None:
