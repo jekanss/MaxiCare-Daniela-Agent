@@ -79,6 +79,7 @@ def config_falso(**cambios) -> Config:
         modelo_daniela="modelo-de-prueba",
         modelo_lector="modelo-de-prueba",
         modelo_evaluador="modelo-de-prueba",
+        modelo_transcriptor="modelo-de-prueba",
         secreto_sesion="",
         permitir_cookie_insegura=False,
         daniela_responde=True,
@@ -1227,16 +1228,189 @@ def test_una_conversacion_sin_configuracion_operativa_usa_los_defaults(monkeypat
     assert turnos.ctx.tema_general == 0
 
 
-@pytest.mark.parametrize("tipo", ["image", "document", "audio"])
+@pytest.mark.parametrize("tipo", ["image", "document", "video", "sticker"])
 def test_ningun_tipo_de_archivo_se_queda_sin_nombre_en_castellano(monkeypatch, tipo):
     """«Mandó un image» no lo lee nadie, y al modelo le pasa igual: el nombre en castellano
-    es lo que le permite decir «recibí tu radiografía» sin saber qué hay dentro."""
+    es lo que le permite decir «recibí tu radiografía» sin saber qué hay dentro.
+
+    `audio` estaba en esta lista y salió el 21/09/2026, cuando las notas de voz pasaron a
+    transcribirse: su rama ya no dice «el paciente mandó un audio», dice lo que el paciente
+    dijo. La propiedad que esta prueba defiende --que ningún tipo llega al modelo como una
+    etiqueta técnica-- la sostiene para el audio
+    `test_una_nota_de_voz_que_NO_se_entendio_pide_que_lo_escriba`, que comprueba que la rama
+    sin transcripción también habla en castellano.
+    """
     _, turnos = preparar(monkeypatch)
 
     atender(mensaje_texto(tipo=tipo, texto=None, media_id="media-1"))
 
     assert ingesta.NOMBRE_HUMANO[tipo] in turnos.entrada
     assert turnos.llamadas[-1]["hubo_adjunto"] is True
+
+
+# ==========================================================================================
+# Las notas de voz
+# ==========================================================================================
+#
+# Lo que estas pruebas defienden no es que la transcripción funcione --eso es de
+# `test_transcripcion.py` y del entregable-- sino que lo transcrito llegue al turno COMO
+# TEXTO DEL PACIENTE, que es lo que no ocurría. Las cinco notas de voz que vio el sistema en
+# su vida terminaron con «Ya recibimos tu audio» y un escalamiento.
+
+
+def _nota_de_voz(**cambios) -> ingesta.MensajeEntrante:
+    campos = dict(tipo="audio", texto=None, media_id="media-voz")
+    campos.update(cambios)
+    return mensaje_texto(**campos)
+
+
+def _tarea_que_devuelve(valor):
+    """Una `Task` ya terminada con ese valor, que es lo que `atender` recibe de `ingesta`."""
+
+    async def _listo():
+        return valor
+
+    return asyncio.ensure_future(_listo())
+
+
+def test_lo_que_el_paciente_DIJO_llega_al_turno_como_texto_suyo(monkeypatch):
+    """La prueba de la que va todo esto.
+
+    Antes, una nota de voz le llegaba al modelo como «[El paciente acaba de enviar una nota
+    de voz. Nadie lo ha revisado todavía y tú no puedes verlo]», y el modelo hacía lo que esa
+    frase le pedía: confirmar que llegó y escalar.
+    """
+    _, turnos = preparar(monkeypatch)
+
+    async def correr():
+        return await _atender(
+            _nota_de_voz(), transcripcion=_tarea_que_devuelve("¿Cuánto cuesta la limpieza?")
+        )
+
+    asyncio.run(correr())
+
+    assert "¿Cuánto cuesta la limpieza?" in turnos.entrada
+    assert "no puedes verlo" not in turnos.entrada
+    assert "el doctor lo va a revisar" not in turnos.entrada
+
+
+def test_la_transcripcion_va_marcada_como_transcripcion_y_no_como_algo_que_escribio(
+    monkeypatch,
+):
+    """El modelo tiene que poder distinguir «lo dijo» de «lo escribió», porque una
+    transcripción trae palabras mal entendidas y lo correcto ante una rara es preguntar.
+
+    Medido sobre audios reales: «habla con el vuelto queguasca» salió de alguien que decía
+    otra cosa. Sin la marca, Daniela contestaría a eso con toda naturalidad.
+    """
+    _, turnos = preparar(monkeypatch)
+
+    async def correr():
+        return await _atender(_nota_de_voz(), transcripcion=_tarea_que_devuelve("hola"))
+
+    asyncio.run(correr())
+
+    assert "transcrito automáticamente" in turnos.entrada
+    assert "pregúntaselo en vez de suponerlo" in turnos.entrada
+
+
+def test_una_nota_de_voz_que_NO_se_entendio_pide_que_lo_escriba(monkeypatch):
+    """Y NO escala. Es la decisión de MaxiCare del 21/09/2026, y tiene su razón: el paciente
+    lo resuelve solo en un segundo, y el audio ya está en el hilo del doctor -- avisarle
+    sería interrumpirlo por algo que ya tiene delante."""
+    _, turnos = preparar(monkeypatch)
+
+    async def correr():
+        return await _atender(_nota_de_voz(), transcripcion=_tarea_que_devuelve(None))
+
+    asyncio.run(correr())
+
+    assert "nota de voz" in turnos.entrada
+    assert "que te lo escriba" in turnos.entrada
+    assert "no hace falta avisarle" in turnos.entrada
+
+
+def test_un_SINTOMA_dicho_en_voz_alta_enciende_el_prefiltro_clinico(monkeypatch):
+    """LA PRUEBA QUE NO SE PUEDE RELAJAR de este cambio.
+
+    `menciona_sintomas` se calculaba sobre `m.texto`, que en una nota de voz es `None`. Sin
+    meter la transcripción ahí, «me duele muchísimo la muela y me sangra la encía» DICHO en
+    voz alta daba `False`, y el prefiltro de `sin_lectura_clinica` quedaba colgando solo de
+    `hubo_adjunto` -- que hoy lo salva por accidente, porque un audio es un archivo.
+
+    Un accidente no es una garantía: el día que alguien decida que una nota de voz transcrita
+    ya no es un adjunto, el único control que impide que Daniela le diga a un paciente qué
+    tiene se apagaría justo en el mensaje donde alguien describió su dolor.
+    """
+    _, turnos = preparar(monkeypatch)
+
+    async def correr():
+        return await _atender(
+            _nota_de_voz(),
+            transcripcion=_tarea_que_devuelve("me duele muchísimo la muela y me sangra"),
+        )
+
+    asyncio.run(correr())
+
+    assert turnos.llamadas[-1]["menciona_sintomas"] is True
+    assert turnos.llamadas[-1]["hubo_adjunto"] is True, (
+        "sigue siendo un archivo que fue al doctor: las dos señales, no una"
+    )
+
+
+def test_la_nota_de_voz_sigue_contando_como_adjunto(monkeypatch):
+    """Transcribirla no la convierte en un mensaje de texto a efectos del muro clínico.
+
+    `hubo_adjunto` es la mitad determinista de `vale_la_pena_revisar_lo_clinico`, y dejarlo
+    en `False` sería estrictamente MENOS vigilante que antes de este cambio.
+    """
+    _, turnos = preparar(monkeypatch)
+
+    async def correr():
+        return await _atender(
+            _nota_de_voz(), transcripcion=_tarea_que_devuelve("quiero agendar")
+        )
+
+    asyncio.run(correr())
+
+    assert turnos.llamadas[-1]["hubo_adjunto"] is True
+
+
+def test_lo_que_dijo_en_el_audio_es_su_frase_para_el_informe(monkeypatch):
+    """`frase_para_el_informe` leía `m.texto`, que en un audio es `None`.
+
+    Sin esto, el informe de «sin resolver» agruparía todas las notas de voz bajo un caso sin
+    frase: se perdería justo la pregunta que Daniela no supo contestar, y solo porque el
+    paciente la dijo en vez de escribirla.
+    """
+    base, _ = preparar(monkeypatch, turnos=Turnos(antes=_consulto))
+    dicho = "¿ustedes hacen bichectomía?"
+
+    async def correr():
+        return await _atender(_nota_de_voz(), transcripcion=_tarea_que_devuelve(dicho))
+
+    asyncio.run(correr())
+
+    assert [c["ejemplo"] for c in base.casos] == [dicho], (
+        "el informe se quedó sin la frase, o se le coló el aviso del sistema"
+    )
+
+
+def test_el_texto_que_viene_JUNTO_al_audio_no_se_pierde(monkeypatch):
+    """WhatsApp deja ponerle pie a una nota de voz. Quedarse solo con lo dicho tiraría la
+    mitad del mensaje."""
+    _, turnos = preparar(monkeypatch)
+
+    async def correr():
+        return await _atender(
+            _nota_de_voz(texto="perdón, es que no puedo escribir"),
+            transcripcion=_tarea_que_devuelve("quiero una cita el martes"),
+        )
+
+    asyncio.run(correr())
+
+    assert "quiero una cita el martes" in turnos.entrada
+    assert "perdón, es que no puedo escribir" in turnos.entrada
 
 
 # ==========================================================================================

@@ -57,12 +57,26 @@ sitio equivocado, no de que las pruebas sobren. Y el sitio correcto se lee solo:
 es donde el proyecto decide si un mensaje se atiende — el dedupe de Meta, `/clearstate` — así
 que una tercera razón para no atender pertenece a esa lista.
 
-## Los dos frenos de mano son DOS a propósito
+## Los frenos de mano son TRES a propósito, y ninguno cuelga de otro
 
 | Variable | Qué apaga | Qué NO apaga |
 |---|---|---|
 | `MAXICARE_DANIELA_RESPONDE=0` | la respuesta al paciente | el archivo y la lectura al doctor |
 | `MAXICARE_LEER_ARCHIVOS=0` | la llamada al modelo que lee archivos | la entrega del archivo al doctor |
+| `MAXICARE_TRANSCRIBIR_AUDIO=0` | la llamada que pasa una nota de voz a texto | la entrega del audio al doctor |
+
+**El tercero llegó el 21/09/2026 con `transcripcion.py`, y la tentación de colgarlo del
+segundo era grande**: los dos significan «no pagues un modelo por un archivo». Sería el error
+simétrico del que el segundo ya evita. `MAXICARE_LEER_ARCHIVOS` apaga algo que es del DOCTOR
+y promete por escrito no tocar lo del paciente; la transcripción es lo contrario —es lo que
+hace que a un paciente se le entienda—, así que encadenarlos haría que apagar «el lector se
+está comiendo el saldo» degrade en silencio la atención de quien manda notas de voz. Tampoco
+cuelga de `MAXICARE_DANIELA_RESPONDE`, por la misma razón que no cuelga el lector: la
+transcripción también baja al hilo del doctor, así que callar a Daniela no puede quitarle al
+doctor un texto que ya tenía.
+
+Con el tercero en 0 el paciente no se queda sin respuesta: Daniela le pide que lo escriba,
+que es una salida que él puede tomar solo.
 
 La tentación es colgar el lector del primero: el lector es el consumidor más caro del sistema y
 `procesar_mensaje` corre ANTES que `atender`, donde vive la única comprobación de
@@ -78,6 +92,26 @@ en el momento en que alguien lo acciona, que es cuando más está mirando el sis
 Son dos emergencias distintas — «Daniela dice tonterías» y «el lector se está comiendo el
 saldo» — y encadenarlas dejaría sin apagar por separado lo que hay que poder apagar por
 separado.
+
+## La cuota de audio cuenta APARTE de la de archivos
+
+`cuotas.puede_transcribir` es hermana de `puede_leer_archivos` y usa la misma
+`persistencia.archivos_del_dia` —que recibe los `tipos` por parámetro— pero con su propio
+techo, `CUOTA_AUDIOS_DIA`. No es duplicación por descuido: son gastos de órdenes de magnitud
+distintos —el lector es el modelo flagship con una imagen dentro; una transcripción son
+céntimos por minuto de audio— y con un contador compartido, veinte notas de voz se comerían la
+cuota de la serie periapical que viene detrás. Ese caso clínico es justo el que hizo subir
+`CUOTA_ARCHIVOS_DIA` de 12 a 30.
+
+**Corta en SILENCIO, como la de archivos y al revés que la de mensajes**: sin frase al
+paciente y sin Telegram al doctor. La de mensajes avisa porque quien se pasa deja de recibir
+respuesta; aquí el paciente sigue recibiéndola —Daniela le pide que lo escriba— así que una
+frase de cuota sería asustar a alguien por algo que se arregla escribiendo. Por eso tampoco
+hizo falta ampliar el `CHECK` de `cuotas_avisadas.clase`: esa tabla solo la escribe la cuota
+de mensajes, y `'archivos'` lleva desde la 022 sin que nadie lo use.
+
+El comentario de `archivos_del_dia` decía que el audio «no llega al modelo». Era cierto hasta
+esa fecha y ya no lo es; está corregido donde está.
 
 ## El tope de descarga NO baja de lo que hoy funciona
 
@@ -138,6 +172,11 @@ informe y haría que «cuántas corridas hubo» dejara de significar nada.
   `scripts/inicializar_base.py` (bloque 9), que `desplegar.sh` corre antes de levantar.
 - **El tope de descarga contra Meta de verdad.** El `file_size` lo declara la Graph API y
   offline va doblado.
+- **Que la API de audio siga aceptando el ogg/opus de WhatsApp, y que el modelo SIRVA.** Mismo
+  agujero que el anterior, con un filo más: un `200` con basura dentro pasa cualquier
+  comprobación automática, y tres de los cuatro modelos de la cuenta devuelven exactamente
+  eso. Lo mira `scripts/probar_transcripcion.py`, que imprime las frases para que las lea una
+  persona en vez de contar códigos de estado.
 - **El rate limit del borde.** Los middlewares de Traefik viven en las labels del
   `docker-compose.yml`, pero `rateLimit` cuenta por IP de ORIGEN y detrás del túnel de
   Cloudflare todas las peticiones llegan con la IP del proxy. Para que sirva, Traefik tiene que

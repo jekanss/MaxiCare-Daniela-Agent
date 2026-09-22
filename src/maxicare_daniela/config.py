@@ -260,6 +260,19 @@ TOPE_BUFER_SEGUNDOS = 45
 #: propósito: la ventana ya le dio sus 20 segundos, esto es la cola.
 MARGEN_LECTURA_SEGUNDOS = 3.0
 
+#: Lo mismo para la transcripción de una nota de voz, y es MÁS LARGO a propósito.
+#:
+#: No es que la transcripción sea lenta --se midieron 0,86 a 1,64 segundos para audios de 10
+#: a 17 segundos, así que con los 20 de la ventana por delante siempre habrá terminado--. Es
+#: que lo que se pierde al agotarlo es de otra naturaleza: **una lectura que no llega es
+#: información de más, y el doctor la recibe igual por su lado; una transcripción que no
+#: llega es EL MENSAJE DEL PACIENTE.** Con los 3 segundos del lector, un mal minuto de la API
+#: devuelve a Daniela a «ya recibimos tu audio», que es justo lo que esto vino a quitar.
+#:
+#: Ocho segundos no cuestan nada cuando la tarea ya terminó --que es el caso normal-- y son
+#: lo único que separa un hipo de la API de un paciente sin respuesta.
+MARGEN_TRANSCRIPCION_SEGUNDOS = 8.0
+
 
 # ==========================================================================================
 # El perímetro: que un desconocido no pueda quemar el saldo
@@ -307,6 +320,19 @@ CUOTA_ARCHIVOS_DIA = 30
 #: techo absoluto de llamadas concurrentes al modelo caro, que además es lo que impide que N
 #: archivos grandes estén a la vez en memoria en un contenedor de un solo worker.
 LECTORES_CONCURRENTES = 3
+
+#: Notas de voz de un mismo teléfono en un día antes de dejar de TRANSCRIBIRLAS. El audio le
+#: sigue llegando al doctor siempre, igual que un archivo: lo que se apaga es la llamada.
+#:
+#: **Cuenta aparte de `CUOTA_ARCHIVOS_DIA` y no es una duplicación por descuido.** Son dos
+#: gastos de órdenes de magnitud distintos --el lector es el modelo flagship con una imagen
+#: dentro; esto son céntimos por minuto de audio-- y compartir contador significaría que
+#: veinte notas de voz se comen la cuota de la serie periapical que va detrás. Ese caso es
+#: justo el que hizo subir la de archivos de 12 a 30.
+#:
+#: 40 al día: quien manda notas de voz manda MUCHAS, porque es más cómodo que escribir, y
+#: mordérselas devuelve al paciente exactamente al agujero que esto vino a tapar.
+CUOTA_AUDIOS_DIA = 40
 
 #: Dólares al día a partir de los cuales el General recibe UN aviso. No corta nada: avisa.
 #: Cortar por gasto dejaría a los pacientes sin respuesta por una cifra, y esa decisión es de
@@ -462,6 +488,25 @@ MODELO_LECTOR = "gpt-5.6-sol"
 #: Una pregunta cerrada por llamada. Pagar el tier de Daniela aquí sería 10× por lo mismo.
 MODELO_EVALUADOR = "gpt-5.6-luna"
 
+#: El que pasa una nota de voz a texto. **De los cuatro que tiene la cuenta, es el único que
+#: sirve**, y eso no se deduce del nombre ni del precio: se midió el 21/09/2026 contra las
+#: cinco notas de voz reales que había en `mensajes_entrantes`, todas `audio/ogg; codecs=opus`
+#: grabadas con el WhatsApp de un teléfono de verdad.
+#:
+#:     gpt-transcribe          «¿con quién hablo yo, una doctora o un doctor?...»   correcto
+#:     gpt-4o-transcribe       «Con xenáula se una doctora, onde totenui...»        inservible
+#:     gpt-4o-mini-transcribe  «Ya conchena una doctora un doctor...»               inservible
+#:     whisper-1               correcto, pero se come frases enteras
+#:
+#: Los dos del medio no es que acierten menos: devuelven algo que PARECE español y no lo es.
+#: Eso es peor que no transcribir, porque Daniela contestaría a una frase inventada con toda
+#: naturalidad. Quien cambie este identificador vuelve a correr
+#: `scripts/probar_transcripcion.py` y mira las frases, no el código de estado.
+#:
+#: **Factura por DURACIÓN y no por tokens** (`UsageDuration(seconds=10.0)`), así que no tiene
+#: sitio en `PRECIOS_POR_MILLON` y su gasto se anota con costo 0 -- ver `consumo.py`.
+MODELO_TRANSCRIPTOR = "gpt-transcribe"
+
 #: La política de tratamiento de datos, en constantes de módulo y no solo en los defaults del
 #: dataclass, por la misma razón que los modelos: son el valor que `desde_entorno` usa cuando
 #: la variable no está, y repetir el literal en los dos sitios es dejar que se separen.
@@ -501,6 +546,7 @@ class Config:
     modelo_daniela: str
     modelo_lector: str
     modelo_evaluador: str
+    modelo_transcriptor: str
 
     #: Con este secreto se firma la cookie de sesión de la interfaz web. Rotarlo cierra
     #: todas las sesiones abiertas de golpe -- ver `autenticacion.py`.
@@ -637,6 +683,7 @@ class Config:
 
     cuota_mensajes_hora: int = CUOTA_MENSAJES_HORA
     cuota_archivos_dia: int = CUOTA_ARCHIVOS_DIA
+    cuota_audios_dia: int = CUOTA_AUDIOS_DIA
     lectores_concurrentes: int = LECTORES_CONCURRENTES
     alerta_gasto_diario_usd: float = ALERTA_GASTO_DIARIO_USD
     tope_entrada_caracteres: int = TOPE_ENTRADA_CARACTERES
@@ -656,6 +703,26 @@ class Config:
     #:
     #: `!= "0"`, como `daniela_responde`: el default es leer, y hace falta un 0 explícito.
     leer_archivos: bool = True
+
+    #: El TERCER freno de mano, y es tercero a propósito: no cuelga de ninguno de los otros
+    #: dos.
+    #:
+    #: Con `MAXICARE_TRANSCRIBIR_AUDIO=0` la nota de voz le llega al doctor igual --como
+    #: siempre-- y Daniela vuelve a lo de antes: avisa de que llegó y le pide al paciente que
+    #: lo escriba.
+    #:
+    #: **La tentación era colgarlo de `leer_archivos`**, que ya significa «no pagues modelos
+    #: por archivos». Sería el error simétrico del que ese interruptor ya evita. `leer_archivos`
+    #: apaga algo que es del DOCTOR y promete por escrito no tocar lo del paciente; esto apaga
+    #: algo que es del PACIENTE. Encadenarlos haría que apagar «el lector se está comiendo el
+    #: saldo» degrade en silencio la atención de quien manda notas de voz, que es la mitad de
+    #: los pacientes de esta clínica. Son tres emergencias distintas y por eso son tres
+    #: interruptores.
+    #:
+    #: Tampoco cuelga de `daniela_responde`, por la misma razón que no cuelga el lector: la
+    #: transcripción también baja al hilo del doctor, así que callar a Daniela no puede
+    #: quitarle al doctor un texto que ya tenía.
+    transcribir_audio: bool = True
 
     #: A `1`, las cuotas CUENTAN y AVISAN pero no cortan a nadie.
     #:
@@ -718,6 +785,9 @@ class Config:
             modelo_daniela=_opcional("MAXICARE_MODELO_DANIELA", MODELO_DANIELA),
             modelo_lector=_opcional("MAXICARE_MODELO_LECTOR", MODELO_LECTOR),
             modelo_evaluador=_opcional("MAXICARE_MODELO_EVALUADOR", MODELO_EVALUADOR),
+            modelo_transcriptor=_opcional(
+                "MAXICARE_MODELO_TRANSCRIPTOR", MODELO_TRANSCRIPTOR
+            ),
             # Opcional aquí y comprobado al arrancar el servidor web, no requerida: los
             # scripts de la fase 3 y 4 y las pruebas construyen un `Config` sin tener ni
             # necesitar un secreto de sesión, y hacerla obligatoria los rompería a todos por
@@ -735,6 +805,7 @@ class Config:
             # anterior a esta fase arranca protegido sin tocar nada.
             cuota_mensajes_hora=_entero("MAXICARE_CUOTA_MENSAJES_HORA", CUOTA_MENSAJES_HORA),
             cuota_archivos_dia=_entero("MAXICARE_CUOTA_ARCHIVOS_DIA", CUOTA_ARCHIVOS_DIA),
+            cuota_audios_dia=_entero("MAXICARE_CUOTA_AUDIOS_DIA", CUOTA_AUDIOS_DIA),
             lectores_concurrentes=_entero(
                 "MAXICARE_LECTORES_CONCURRENTES", LECTORES_CONCURRENTES
             ),
@@ -750,6 +821,11 @@ class Config:
             # forma deja las cuotas cortando, que es el fallo seguro.
             cuota_modo_observacion=_opcional("MAXICARE_CUOTA_MODO_OBSERVACION", "0") == "1",
             leer_archivos=_opcional("MAXICARE_LEER_ARCHIVOS", "1") != "0",
+            # `!= "0"` como los otros dos frenos: el default es transcribir. Un `.env` con la
+            # clave escrita de otra forma deja a los pacientes atendidos, que es el lado
+            # barato de equivocarse -- lo caro sería una clínica muda ante las notas de voz
+            # sin que nadie lo hubiera pedido.
+            transcribir_audio=_opcional("MAXICARE_TRANSCRIBIR_AUDIO", "1") != "0",
             # `or` y no un default en `_lista`: la lista vacía aquí NO tiene significado
             # propio --a diferencia de `telefonos_prueba`, donde vacía es la política-- así
             # que un `.env` sin la clave cae a los números del código.

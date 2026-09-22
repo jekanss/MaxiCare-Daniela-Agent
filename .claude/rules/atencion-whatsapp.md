@@ -244,6 +244,60 @@ pueden mover.
   ido delante, Daniela habría contestado el texto sin saber todavía que había una foto. Lo que
   no llegue a tiempo se descarta con un `log.info`, nunca con una excepción que tumbe el turno.
 
+## Las notas de voz: el segundo carril, y no es el muro
+
+Desde el 21/09/2026 una nota de voz se transcribe y entra al turno **como texto del paciente**.
+Antes no: `audio` estaba en `TIPOS_CON_ARCHIVO` y no en `TIPOS_QUE_SE_LEEN`, así que a Daniela
+le llegaba «nadie lo ha revisado y tú no puedes verlo» y ella hacía lo que esa frase pide.
+Medido: las cinco notas de voz que vio el sistema en su vida cerraron con
+`motivo = 'archivo_recibido'` y «Ya recibimos tu audio.»
+
+```
+procesar_mensaje ─┬─ descarga  ──→ Telegram del doctor       ← INTOCABLE (fase 2)
+                  ├─ Task lector        image/document  ──→ margen 3 s
+                  └─ Task transcriptor  audio/voice     ──→ margen 8 s
+```
+
+- **Es un carril aparte, no el del lector reaprovechado**, y la diferencia es de qué promete
+  cada uno. Una lectura es información DE MÁS: si no llega, el doctor la recibe igual por su
+  lado y Daniela dice con razón que no sabe qué contiene. Una transcripción **es el mensaje
+  del paciente**: si no llega, hay alguien preguntando algo a quien nadie contestó. De ahí
+  salen los dos márgenes distintos y los dos diccionarios distintos en `_Bufer`.
+- **Esto NO es una grieta en el muro de `lectura.py`.** El muro existe porque del análisis de
+  una radiografía sale contenido clínico que el paciente no puede recibir; de una nota de voz
+  salen las palabras que el propio paciente acaba de decir. Por eso `transcribir_y_repartir`
+  no reparte nada: **lo que ve el doctor y lo que ve Daniela son lo mismo**, y esconderle a
+  Daniela la mitad de lo que le dijeron no protegería a nadie.
+- **Los dos carriles son DISJUNTOS**, y de eso depende que `atender` pueda esperar los dos
+  plazos uno detrás de otro sin que cueste nada: uno de los dos diccionarios está siempre
+  vacío. Hay prueba (`test_los_dos_carriles_son_DISJUNTOS`).
+- **`.oga` es un `400` de la API, y es lo que produce el proyecto.**
+  `canales._nombre_sugerido` usa `mimetypes.guess_extension("audio/ogg")`, que devuelve
+  `.oga`; la API contesta `Unsupported file format oga` en el 100 % de los casos. El nombre se
+  fuerza a `.ogg` en `transcripcion._nombre_para_la_api`, o sea en el borde que habla con la
+  API y no en el helper de Telegram, que existe para otra cosa. Pasarle `archivo.nombre` —lo
+  natural, y lo que parece más correcto— no transcribe ni un audio **y no deja nada rojo en
+  ningún sitio**: el error se lo traga `transcribir` y Daniela vuelve a «no te entendí».
+  `test_el_nombre_que_se_le_manda_a_la_API_NUNCA_es_el_del_archivo` es lo único que lo impide.
+- **Sin transcripción se pide por escrito y NO se escala.** El paciente lo resuelve en un
+  segundo y el audio ya está en el hilo del doctor: avisarle sería interrumpirlo por algo que
+  ya tiene delante. El `archivo_recibido` de `contratos.MotivoEscalamiento` sigue vivo y lo
+  sigue usando la radiografía.
+- **La transcripción alimenta `menciona_sintomas`, y esa es la costura clínica.** `m.texto` es
+  `None` en un audio, así que «me duele muchísimo y me sangra la encía» DICHO en voz alta daba
+  `False` y el prefiltro de `sin_lectura_clinica` quedaba colgando solo de `hubo_adjunto` —que
+  hoy lo salva por accidente, porque un audio es un archivo—. Van **las dos**: la transcripción
+  entra en la comprobación y `adjunto_del_mensaje` se queda en `True`. Estrictamente más
+  vigilante que antes, nunca menos.
+- **Y cuenta como su frase para el informe.** `frase_para_el_informe` leía `m.texto`; sin
+  esto, todas las notas de voz se agruparían bajo un caso sin frase y se perdería justo la
+  pregunta que Daniela no supo contestar, solo porque el paciente la dijo en vez de escribirla.
+- **El barrido de arranque las degrada, y está dicho en el código.** Los bytes del audio viven
+  en memoria, así que un proceso que muere se los lleva; el rescate no vuelve a canjear el
+  `media_id` contra Meta. El paciente rescatado recibe «no te entendí, ¿me lo escribes?». Es
+  una degradación, no una pérdida: él puede resolverlo, no se escala, y el doctor ya tiene el
+  audio y su texto.
+
 ## Al General solo va lo que le pide algo al doctor
 
 El General era un vertedero: cada texto que entraba sonaba ahí. Con un solo paciente activo

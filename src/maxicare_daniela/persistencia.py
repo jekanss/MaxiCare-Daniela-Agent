@@ -4133,9 +4133,16 @@ def archivos_del_dia(conn, telefono: str, tipos: Sequence[str]) -> int:
     el lector aprenda un tipo nuevo, la cuota siga contando los de antes -- y nadie lo notaria,
     porque el fallo es que un freno deja de frenar.
 
-    No cuenta `audio`, `voice`, `video` ni `sticker` aunque tambien se descarguen: esos no
-    llegan al modelo, asi que no son gasto de tokens. A ellos los acotan el tope de bytes y el
-    semaforo, que es donde esta su riesgo (la RAM), no aqui.
+    No cuenta `video` ni `sticker` aunque tambien se descarguen: esos no llegan a ningun
+    modelo, asi que no son gasto. A ellos los acotan el tope de bytes y el semaforo, que es
+    donde esta su riesgo (la RAM), no aqui.
+
+    **`audio` y `voice` SI llegan a un modelo desde el 21/09/2026** --`transcripcion.py`-- y
+    esta funcion los cuenta cuando quien llama se los pasa en `tipos`. No van sumados con los
+    del lector sino en su propia cuota (`cuotas.puede_transcribir`), y el porque esta ahi: son
+    ordenes de magnitud de gasto distintos y un contador compartido haria que las notas de voz
+    se comieran la cuota de las radiografias. Hasta esa fecha esta linea decia que el audio no
+    llegaba al modelo, y era verdad.
     """
     if not tipos:
         return 0

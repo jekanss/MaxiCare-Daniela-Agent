@@ -24,6 +24,7 @@ from datetime import datetime, timezone
 
 from . import lectura as lectura_mod
 from . import persistencia
+from . import transcripcion as transcripcion_mod
 # Solo por el teclado del botón. `relevo` importa `lectura`, `persistencia` y `canales`, y
 # NUNCA `ingesta`: no hay ciclo, y `tests/test_estructura.py` vigila que siga sin haberlo.
 from . import relevo as relevo_mod
@@ -257,6 +258,11 @@ class Resultado:
     #: ventana del búfer. Es una `Task` y no un valor a propósito: esperarla aquí pondría
     #: una llamada al modelo delante de la entrega del archivo al doctor.
     lectura: asyncio.Task | None = None
+    #: La tarea del transcriptor, si el mensaje era una nota de voz. Campo aparte y no
+    #: reaprovechando `lectura`, aunque el carril sea el mismo: lo que devuelve cada una
+    #: promete cosas distintas --una es información de más, la otra ES el mensaje del
+    #: paciente-- y `atencion` les da márgenes distintos por eso. Ver `transcripcion.py`.
+    transcripcion: asyncio.Task | None = None
 
 
 def _soltar_tema(tarea: asyncio.Task) -> None:
@@ -356,6 +362,7 @@ async def procesar_mensaje(
     database_url: str,
     tema_general: int | None = None,
     leer_archivos: bool = True,
+    transcribir: bool = True,
 ) -> Resultado:
     """Recibe → deduplica → descarga → reenvía → registra.
 
@@ -372,6 +379,7 @@ async def procesar_mensaje(
         return Resultado(m.wamid, nuevo=False, reenviado=False)
 
     tarea: asyncio.Task | None = None
+    tarea_voz: asyncio.Task | None = None
     try:
         if m.trae_archivo:
             # Primero los bytes. Todo lo demás puede esperar; esto no.
@@ -477,6 +485,41 @@ async def procesar_mensaje(
                 # medias en cuanto el turno de Daniela suelte la suya.
                 _lectores_vivos.add(tarea)
                 tarea.add_done_callback(_lectores_vivos.discard)
+
+            # Una nota de voz va por el MISMO carril y nunca por los dos: `TIPOS_QUE_SE_LEEN`
+            # y `TIPOS_QUE_SE_TRANSCRIBEN` son disjuntos, así que de aquí sale como mucho una
+            # de las dos tareas.
+            #
+            # `transcribir` lo calcula `runtime` y vale dos cosas a la vez, igual que
+            # `leer_archivos`: el interruptor (`MAXICARE_TRANSCRIBIR_AUDIO`) y la cuota de
+            # audios del número. Y como allí, **el audio YA está entregado** cuando se llega
+            # aquí: lo que se salta es entenderlo, nunca entregarlo.
+            if transcribir and transcripcion_mod.vale_la_pena_transcribir(
+                m.tipo, archivo.tamano
+            ):
+
+                async def _transcribir_con_grupo() -> str | None:
+                    grupo = await asyncio.to_thread(
+                        _conversacion_viva, database_url, m.telefono
+                    )
+                    return await transcripcion_mod.transcribir_y_repartir(
+                        archivo,
+                        telegram=telegram,
+                        tema_id=destino,
+                        # Misma regla que el archivo y que la lectura: la transcripción
+                        # acompaña al audio y suena exactamente donde sonó él.
+                        silencioso=bool(tema) and not en_relevo,
+                        database_url=database_url,
+                        telefono=m.telefono,
+                        id_conversacion=grupo,
+                    )
+
+                tarea_voz = asyncio.create_task(_transcribir_con_grupo())
+                # Lo mismo que con el lector, y aquí importa MÁS: si el recolector se lleva
+                # esta tarea a medias, lo que se pierde no es una ficha para el doctor sino
+                # lo que el paciente acaba de decir.
+                _lectores_vivos.add(tarea_voz)
+                tarea_voz.add_done_callback(_lectores_vivos.discard)
             # `not en_relevo`: durante un relevo el doctor YA tiene el archivo sonándole en
             # el hilo donde está conversando. El aviso al General sería el mismo timbrazo por
             # segunda vez, en el sitio donde menos falta hace.
@@ -552,7 +595,11 @@ async def procesar_mensaje(
     else:
         log.info("%s entregado a los doctores (telegram message_id=%s)", m.wamid, telegram_id)
     return Resultado(
-        m.wamid, nuevo=True, reenviado=telegram_id is not None, lectura=tarea
+        m.wamid,
+        nuevo=True,
+        reenviado=telegram_id is not None,
+        lectura=tarea,
+        transcripcion=tarea_voz,
     )
 
 

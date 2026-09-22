@@ -1490,3 +1490,179 @@ def test_otro_rechazo_de_telegram_sigue_siendo_un_fallo_y_no_borra_el_hilo(monke
     assert olvidados == [], "un error de permisos NO puede borrar el hilo del paciente"
     assert len(fallos) == 1 and "not enough rights" in fallos[0]
     assert res.reenviado is False
+
+
+# ==========================================================================================
+# Las notas de voz
+# ==========================================================================================
+#
+# El carril del transcriptor es el mismo del lector y hereda su garantia: **el audio le llega
+# al doctor pase lo que pase**. Lo que estas pruebas fijan es que siga siendo cierto ahora que
+# hay una segunda tarea colgando del mismo sitio.
+
+
+class WhatsAppConAudio:
+    def __init__(self, *, tamano: int = 20_000) -> None:
+        self.tamano = tamano
+
+    async def descargar_media(self, media_id, *, nombre_original=None):
+        from maxicare_daniela.canales import ArchivoDescargado
+
+        # `.oga` y no `.ogg`: es lo que produce `canales._nombre_sugerido` de verdad, y que
+        # este doble mienta ahi seria taparle los ojos a la prueba justo en la trampa.
+        return ArchivoDescargado(
+            contenido=b"x" * self.tamano, mime="audio/ogg", nombre="12345.oga"
+        )
+
+
+def _nota_de_voz(**cambios):
+    from maxicare_daniela.ingesta import MensajeEntrante
+
+    campos = dict(
+        wamid="wamid-voz-1",
+        telefono="573001112233",
+        nombre_perfil="Ana Perez",
+        tipo="audio",
+        media_id="media-voz",
+        mime="audio/ogg; codecs=opus",
+    )
+    campos.update(cambios)
+    return MensajeEntrante(**campos)
+
+
+def test_el_transcriptor_no_retrasa_la_entrega_del_audio(monkeypatch):
+    """Espejo de `test_el_lector_no_retrasa_la_entrega_del_archivo`, y hace falta por
+    separado: son dos `create_task` distintos y el segundo se puede encadenar mal sin que el
+    primero se entere."""
+    import asyncio
+    import time
+
+    from maxicare_daniela import ingesta, lectura, transcripcion
+
+    _sin_base(monkeypatch)
+    monkeypatch.setattr(lectura, "asegurar_tema", _devuelve_async(TEMA_DE_ANA))
+
+    async def transcriptor_lento(*a, **kw):
+        await asyncio.sleep(1.0)
+        return None
+
+    monkeypatch.setattr(transcripcion, "transcribir_y_repartir", transcriptor_lento)
+    tg = TelegramConTemas()
+
+    async def corrida():
+        arranque = time.monotonic()
+        resultado = await ingesta.procesar_mensaje(
+            _nota_de_voz(),
+            whatsapp=WhatsAppConAudio(),
+            telegram=tg,
+            database_url="postgresql://x",
+            tema_general=TEMA_GENERAL,
+        )
+        tardo = time.monotonic() - arranque
+        if resultado.transcripcion is not None:
+            resultado.transcripcion.cancel()
+        return resultado, tardo
+
+    resultado, tardo = asyncio.run(corrida())
+
+    assert resultado.reenviado is True
+    assert tg.archivos, "el audio no llego a Telegram"
+    assert tardo < 0.3, f"la entrega del audio espero al transcriptor: tardo {tardo:.2f} s"
+    assert resultado.transcripcion is not None, "no se arranco el transcriptor"
+
+
+def test_con_el_interruptor_apagado_el_audio_LLEGA_IGUAL_al_doctor(monkeypatch):
+    """`MAXICARE_TRANSCRIBIR_AUDIO=0` y la cuota diaria entran los dos por este parametro.
+
+    Lo que se apaga es entender el audio, nunca entregarlo: esa es la garantia de la fase 2 y
+    no la toca ningun freno de este perimetro.
+    """
+    import asyncio
+
+    from maxicare_daniela import ingesta, lectura, transcripcion
+
+    _sin_base(monkeypatch)
+    monkeypatch.setattr(lectura, "asegurar_tema", _devuelve_async(TEMA_DE_ANA))
+
+    llamadas = []
+
+    async def no_deberia_correr(*a, **kw):
+        llamadas.append(True)
+        return None
+
+    monkeypatch.setattr(transcripcion, "transcribir_y_repartir", no_deberia_correr)
+    tg = TelegramConTemas()
+
+    resultado = asyncio.run(
+        ingesta.procesar_mensaje(
+            _nota_de_voz(),
+            whatsapp=WhatsAppConAudio(),
+            telegram=tg,
+            database_url="postgresql://x",
+            tema_general=TEMA_GENERAL,
+            transcribir=False,
+        )
+    )
+
+    assert resultado.reenviado is True, "el audio tiene que llegar al doctor igual"
+    assert tg.archivos, "el audio no llego a Telegram"
+    assert resultado.transcripcion is None
+    assert llamadas == []
+
+
+def test_un_audio_enorme_se_entrega_pero_no_se_transcribe(monkeypatch):
+    """El tope de bytes. Mismo criterio que el del lector: el archivo sigue su camino y lo
+    unico que se salta es la llamada."""
+    import asyncio
+
+    from maxicare_daniela import ingesta, lectura, transcripcion
+
+    _sin_base(monkeypatch)
+    monkeypatch.setattr(lectura, "asegurar_tema", _devuelve_async(TEMA_DE_ANA))
+    monkeypatch.setattr(
+        transcripcion, "transcribir_y_repartir", _devuelve_async("no deberia salir")
+    )
+    tg = TelegramConTemas()
+
+    resultado = asyncio.run(
+        ingesta.procesar_mensaje(
+            _nota_de_voz(),
+            whatsapp=WhatsAppConAudio(
+                tamano=transcripcion.TOPE_BYTES_TRANSCRIPCION + 1
+            ),
+            telegram=tg,
+            database_url="postgresql://x",
+            tema_general=TEMA_GENERAL,
+        )
+    )
+
+    assert resultado.reenviado is True
+    assert resultado.transcripcion is None
+
+
+def test_una_FOTO_no_arranca_el_transcriptor(monkeypatch):
+    """Los dos carriles son disjuntos, y de eso depende que `atencion` pueda esperar los dos
+    plazos uno detras de otro sin que cueste nada."""
+    import asyncio
+
+    from maxicare_daniela import ingesta, lectura, transcripcion
+
+    _sin_base(monkeypatch)
+    monkeypatch.setattr(lectura, "asegurar_tema", _devuelve_async(TEMA_DE_ANA))
+    monkeypatch.setattr(lectura, "leer_y_repartir", _devuelve_async(None))
+    monkeypatch.setattr(
+        transcripcion, "transcribir_y_repartir", _devuelve_async("no deberia salir")
+    )
+
+    resultado = asyncio.run(
+        ingesta.procesar_mensaje(
+            _mensaje_con_foto(),
+            whatsapp=WhatsAppConArchivo(),
+            telegram=TelegramConTemas(),
+            database_url="postgresql://x",
+            tema_general=TEMA_GENERAL,
+        )
+    )
+
+    assert resultado.lectura is not None
+    assert resultado.transcripcion is None

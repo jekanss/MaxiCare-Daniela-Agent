@@ -78,10 +78,12 @@ from typing import Any, Awaitable, Callable
 from . import conversacion, guardrails, ingesta
 from . import lectura as lectura_mod
 from . import persistencia, seguimientos, sin_resolver
+from . import transcripcion as transcripcion_mod
 from .calendario import CalendarioCaido, CalendarioDoble, Jornada, calendario_desde_config
 from .canales import Telegram, WhatsApp
 from .config import (
     MARGEN_LECTURA_SEGUNDOS,
+    MARGEN_TRANSCRIPCION_SEGUNDOS,
     RETARDO_RESPUESTA_SEGUNDOS,
     TOPE_BUFER_SEGUNDOS,
     TOPE_ENTRADA_CARACTERES,
@@ -201,6 +203,10 @@ class _Bufer:
     #: La tarea del lector de cada mensaje que traía archivo, por `wamid`. No todas las
     #: entradas del grupo tienen una: un texto suelto no tiene nada que leer.
     lecturas: dict[str, asyncio.Task]
+    #: Lo mismo para las notas de voz. Diccionario aparte porque se recoge con un margen
+    #: distinto y más largo: lo que devuelve NO es información de más, es el mensaje del
+    #: paciente. Ver `config.MARGEN_TRANSCRIPCION_SEGUNDOS`.
+    transcripciones: dict[str, asyncio.Task]
 
 
 #: El búfer por teléfono. A diferencia de los otros dos diccionarios, este NO necesita poda:
@@ -733,13 +739,22 @@ def _calendario_por_defecto(config: Config) -> Any:
     return calendario
 
 
-async def _recoger_lecturas(
-    tareas: dict[str, asyncio.Task], margen: float | None = None
-) -> dict[str, LecturaNoClinica]:
-    """Lo que el lector alcanzó a producir. Lo que no, no llegó.
+async def _recoger(
+    tareas: dict[str, asyncio.Task],
+    margen: float | None = None,
+    *,
+    que: str = "la lectura",
+) -> dict:
+    """Lo que las tareas de fondo alcanzaron a producir. Lo que no, no llegó.
+
+    Sirve a los DOS carriles --el lector y el transcriptor-- porque lo único que hace es
+    esperar un diccionario de tareas con un plazo compartido. `que` es solo para el log: el
+    día que un turno salga sin lo que esperaba, la línea tiene que decir qué faltó.
 
     `margen` es corto a propósito: la ventana ya le dio al lector sus 20 segundos. Esto es
-    la cola, no la espera.
+    la cola, no la espera. **Para la transcripción no es corto, y la razón está en
+    `config.MARGEN_TRANSCRIPCION_SEGUNDOS`: lo que se pierde ahí no es información de más,
+    es el mensaje del paciente.**
 
     Y es un plazo COMPARTIDO, no uno por archivo. Los lectores corrieron todos a la vez
     durante la ventana, así que a todos les queda lo mismo por terminar; dárselo a cada uno
@@ -754,7 +769,7 @@ async def _recoger_lecturas(
     """
     margen = MARGEN_LECTURA_SEGUNDOS if margen is None else margen
     fin = time.monotonic() + margen
-    recogidas: dict[str, LecturaNoClinica] = {}
+    recogidas: dict = {}
     for wamid, tarea in tareas.items():
         try:
             # `shield` para que el timeout NO cancele la tarea: el lector sigue corriendo y
@@ -764,25 +779,52 @@ async def _recoger_lecturas(
                 asyncio.shield(tarea), timeout=max(0.0, fin - time.monotonic())
             )
         except TimeoutError:
-            log.info("la lectura de %s no llegó a tiempo; el turno sale sin ella", wamid)
+            log.info("%s de %s no llegó a tiempo; el turno sale sin ella", que, wamid)
             continue
         except Exception:  # noqa: BLE001 -- ninguna puede tumbar el turno
             # Hoy no debería verse: `leer_y_repartir` se traga lo suyo y devuelve `None`. Si
             # aparece es que algo cambió, y un `log.info` sin traza diciendo «no llegó a
             # tiempo» sería la pista equivocada.
-            log.exception("la lectura de %s falló de una forma inesperada", wamid)
+            log.exception("%s de %s falló de una forma inesperada", que, wamid)
             continue
         if valor is not None:
             recogidas[wamid] = valor
     return recogidas
 
 
+async def _recoger_lecturas(
+    tareas: dict[str, asyncio.Task], margen: float | None = None
+) -> dict[str, LecturaNoClinica]:
+    """Lo que el lector alcanzó a producir. Ver `_recoger`."""
+    return await _recoger(tareas, margen, que="la lectura")
+
+
+async def _recoger_transcripciones(
+    tareas: dict[str, asyncio.Task], margen: float | None = None
+) -> dict[str, str]:
+    """Lo que el transcriptor alcanzó a producir. Ver `_recoger`.
+
+    El default se resuelve en la llamada y no en la firma por lo mismo que en
+    `_recoger_lecturas`: un default en la firma se evalúa al definir la función, y un
+    `monkeypatch` del módulo no lo cambiaría.
+    """
+    margen = MARGEN_TRANSCRIPCION_SEGUNDOS if margen is None else margen
+    return await _recoger(tareas, margen, que="la transcripción")
+
+
 def _entrada_para_el_modelo(
-    mensaje: MensajeEntrante, lectura: LecturaNoClinica | None = None
+    mensaje: MensajeEntrante,
+    lectura: LecturaNoClinica | None = None,
+    transcripcion: str | None = None,
 ) -> str:
     """El texto del paciente, o --si vino un archivo-- QUÉ llegó. Nunca qué muestra.
 
-    Sin `lectura` --un audio, un sticker, o un lector que no llegó a tiempo-- nadie ha visto
+    **Una nota de voz es la excepción, y es de naturaleza, no de grado.** Una radiografía hay
+    que interpretarla y eso es del doctor; una nota de voz solo hay que oírla, y lo que sale
+    son las palabras del paciente, ni más ni menos. Por eso su rama sí trae contenido
+    mientras las otras dos solo dicen que llegó algo. Ver `transcripcion.py`.
+
+    Sin `lectura` --un sticker, un video, o un lector que no llegó a tiempo-- nadie ha visto
     el contenido, y el prompt tiene que decirlo con todas las letras. Si aquí se colara una
     interpretación --«parece una radiografía con una caries»--, `sin_lectura_clinica` no
     tendría nada que bloquear: la invención vendría de dentro del sistema, ya con aspecto de
@@ -797,6 +839,40 @@ def _entrada_para_el_modelo(
     Es la misma regla que `ingesta.componer_aviso` respeta con los doctores, y se escribe
     igual a propósito.
     """
+    if mensaje.tipo in transcripcion_mod.TIPOS_QUE_SE_TRANSCRIBEN and mensaje.trae_archivo:
+        # Los corchetes son la convención de todo este módulo: lo que va dentro lo escribe el
+        # SISTEMA, lo de fuera es del paciente. Aquí eso no es cosmético -- es lo que separa
+        # «el paciente dijo esto» de «el sistema cree esto», y lo ve también el evaluador de
+        # `uso_indebido`, que recibe EXACTAMENTE esta misma cadena.
+        if transcripcion:
+            aviso = (
+                "[El paciente mandó una nota de voz. Esto es lo que dijo, transcrito "
+                "automáticamente. La transcripción puede traer palabras mal entendidas: si "
+                "algo no cuadra, pregúntaselo en vez de suponerlo.]\n"
+                f"«{transcripcion}»"
+            )
+            if mensaje.texto:
+                aviso += f"\nY escribió junto al audio: {mensaje.texto}"
+            return aviso
+
+        # Sin transcripción NO se escala, y esa última frase es lo que lo impide. Hasta el
+        # 21/09/2026 esta rama caía en el aviso genérico de archivo --«el doctor lo va a
+        # revisar»-- y el modelo hacía lo que esa frase le pedía: escalaba. Las cinco notas
+        # de voz que vio el sistema en su vida terminaron con `motivo = 'archivo_recibido'`.
+        #
+        # Pedirle que lo escriba es mejor que avisar al doctor por dos razones: el paciente
+        # puede resolverlo solo en un segundo, y el audio YA está en el hilo del doctor, así
+        # que el aviso sería interrumpirlo por algo que ya tiene delante.
+        aviso = (
+            "[El paciente mandó una nota de voz y no se pudo entender lo que decía. "
+            "Discúlpate en una línea y pídele que te lo escriba. El doctor ya tiene el "
+            "audio: no hace falta avisarle, y no sabes de qué hablaba, así que no lo "
+            "supongas.]"
+        )
+        if mensaje.texto:
+            aviso += f"\nEl paciente escribió junto al audio: {mensaje.texto}"
+        return aviso
+
     if mensaje.trae_archivo:
         que = ingesta.NOMBRE_HUMANO.get(mensaje.tipo, f"algo de tipo «{mensaje.tipo}»")
         if lectura is not None:
@@ -859,6 +935,7 @@ def _entrada_del_grupo(
     mensajes: list[MensajeEntrante],
     leidas: dict[str, LecturaNoClinica] | None = None,
     *,
+    transcritas: dict[str, str] | None = None,
     tope: int = TOPE_ENTRADA_CARACTERES,
 ) -> str:
     """Los mensajes del grupo como UNA sola entrada para el modelo.
@@ -873,11 +950,24 @@ def _entrada_del_grupo(
     entrada dijera que el mensaje de TEXTO trae una remisión, que es falso.
     """
     leidas = leidas or {}
+    transcritas = transcritas or {}
+    # Misma regla que las lecturas y por el mismo motivo: por `wamid` y nunca por posición. La
+    # nota de voz y el «perdón, quise decir el martes» que viene detrás son dos mensajes del
+    # mismo grupo, y atar la transcripción al segundo pondría en boca del paciente, escrito,
+    # algo que dijo en el otro.
     if len(mensajes) == 1:
         return _acotar(
-            _entrada_para_el_modelo(mensajes[0], leidas.get(mensajes[0].wamid)), tope
+            _entrada_para_el_modelo(
+                mensajes[0],
+                leidas.get(mensajes[0].wamid),
+                transcritas.get(mensajes[0].wamid),
+            ),
+            tope,
         )
-    partes = [_entrada_para_el_modelo(m, leidas.get(m.wamid)) for m in mensajes]
+    partes = [
+        _entrada_para_el_modelo(m, leidas.get(m.wamid), transcritas.get(m.wamid))
+        for m in mensajes
+    ]
     return _acotar(
         "[El paciente escribió esto en varios mensajes seguidos, como se escribe en "
         "WhatsApp. Es una sola idea partida en trozos: léela entera y contéstale UNA vez, "
@@ -961,6 +1051,7 @@ async def atender(
     ventana: float | None = None,
     tope: float | None = None,
     lectura: asyncio.Task | None = None,
+    transcripcion: asyncio.Task | None = None,
     sesion_de: Callable[[str], Any] | None = None,
 ) -> Atendido:
     """Atiende un mensaje de WhatsApp de principio a fin y deja constancia de qué pasó.
@@ -989,6 +1080,11 @@ async def atender(
     llega YA CORRIENDO: no se espera aquí antes de la ventana, se recoge después de que
     cierre y solo si ya terminó. Lo que no llegue, se descarta -- el doctor lo recibe igual
     por su lado, que es el camino que no se puede retrasar.
+
+    `transcripcion` es lo mismo para una nota de voz, con UNA diferencia que está en el
+    margen y no aquí: lo que devuelve no es información de más, es lo que el paciente dijo.
+    Ver `_recoger_transcripciones`. Nunca llegan las dos: `lectura.TIPOS_QUE_SE_LEEN` y
+    `transcripcion.TIPOS_QUE_SE_TRANSCRIBEN` son disjuntos.
 
     Nunca propaga. Quien llama es un BackgroundTask de FastAPI, donde una excepción se pierde
     en el log del servidor sin dejar rastro consultable.
@@ -1048,6 +1144,8 @@ async def atender(
         esperando.ultimo = ahora
         if lectura is not None:
             esperando.lecturas[mensaje.wamid] = lectura
+        if transcripcion is not None:
+            esperando.transcripciones[mensaje.wamid] = transcripcion
         esperando.despierta.set()
         log.info(
             "%s se suma al grupo de %s (van %d); no abre turno propio",
@@ -1065,6 +1163,9 @@ async def atender(
         ultimo=ahora,
         despierta=asyncio.Event(),
         lecturas={mensaje.wamid: lectura} if lectura is not None else {},
+        transcripciones=(
+            {mensaje.wamid: transcripcion} if transcripcion is not None else {}
+        ),
     )
     _buferes[mensaje.telefono] = bufer
     try:
@@ -1087,18 +1188,32 @@ async def atender(
     # foto. Eso está medido: el 12/09, un documento recibido a las 19:03:28 se entregó
     # después de un texto recibido a las 19:03:29.
     leidas = await _recoger_lecturas(bufer.lecturas)
+    # Y las transcripciones, con su propio plazo. Las dos esperas son secuenciales y eso no
+    # cuesta nada en el caso real: un mensaje trae una foto o una nota de voz, nunca las dos,
+    # así que uno de los dos diccionarios está siempre vacío y su `for` no espera a nadie.
+    transcritas = await _recoger_transcripciones(bufer.transcripciones)
 
     mensajes = bufer.mensajes
     wamids = [m.wamid for m in mensajes]
     if len(mensajes) > 1:
         log.info("%s: %d mensajes en un solo turno", mensaje.telefono, len(mensajes))
-    texto = _entrada_del_grupo(mensajes, leidas, tope=config.tope_entrada_caracteres)
+    texto = _entrada_del_grupo(
+        mensajes, leidas, transcritas=transcritas, tope=config.tope_entrada_caracteres
+    )
     # Y aparte, lo que el paciente escribió de verdad. NO es `texto`: esa es la entrada que
     # se le arma al modelo, con la cabecera de «esto vino en varios mensajes» y, si hubo
     # archivo, un aviso que lleva el NOMBRE del archivo dentro. Eso acaba en la pantalla de
     # la clínica y en el informe, donde no pinta nada -- y un nombre de archivo puede ser una
     # cédula (regla dura 4). Ver `sin_resolver.frase_para_el_informe`.
-    frase_del_paciente = sin_resolver.frase_para_el_informe([m.texto for m in mensajes])
+    #
+    # Lo que dijo en una nota de voz SÍ cuenta como lo que escribió de verdad: son sus
+    # palabras, no un nombre de archivo ni una etiqueta del sistema. Sin esto, el informe de
+    # «sin resolver» agruparía todas las notas de voz bajo un caso sin frase, que es
+    # exactamente el ruido que ese informe existe para no tener -- y se perdería la pregunta
+    # que Daniela no supo contestar solo porque el paciente la dijo en vez de escribirla.
+    frase_del_paciente = sin_resolver.frase_para_el_informe(
+        [m.texto or transcritas.get(m.wamid) for m in mensajes]
+    )
 
     # El candado se coge ANTES de leer la base, y ese orden es el arreglo entero.
     #
@@ -1272,8 +1387,25 @@ async def atender(
                 # `sin_lectura_clinica` se quedaría sin nada que vigilar precisamente en el
                 # turno que sí habla de la imagen.
                 adjunto_del_mensaje=any(m.trae_archivo for m in mensajes),
+                # **La transcripción cuenta como texto del paciente, y sin esto se abría un
+                # agujero clínico.** `m.texto` es `None` en una nota de voz, así que «me duele
+                # muchísimo y me sangra la encía» DICHO en voz alta daba `False` aquí, y el
+                # prefiltro de `sin_lectura_clinica`
+                # (`guardrails.vale_la_pena_revisar_lo_clinico`) se quedaba colgando solo de
+                # `adjunto_del_mensaje`. Eso hoy salva el caso por accidente --un audio es un
+                # archivo-- y el accidente no es una garantía: el día que alguien decida que
+                # una nota de voz transcrita ya no es un adjunto, el único control que impide
+                # que Daniela le diga a un paciente qué tiene se apaga justo en el mensaje en
+                # el que alguien describió su dolor.
+                #
+                # Por eso van las dos cosas: la transcripción entra aquí Y
+                # `adjunto_del_mensaje` se queda en `True`. Estrictamente más vigilante que
+                # antes, nunca menos.
                 sintomas_del_mensaje=any(
-                    guardrails.menciona_sintomas(m.texto or "") for m in mensajes
+                    guardrails.menciona_sintomas(
+                        f"{m.texto or ''} {transcritas.get(m.wamid, '')}"
+                    )
+                    for m in mensajes
                 ),
             ),
         )

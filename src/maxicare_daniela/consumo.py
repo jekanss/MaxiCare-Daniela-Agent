@@ -128,6 +128,61 @@ async def anotar(
         log.exception("no se pudo anotar el consumo de %s; el turno sigue", agente)
 
 
+async def anotar_transcripcion(
+    respuesta,
+    *,
+    modelo: str,
+    database_url: str,
+    id_conversacion: str | None = None,
+    telefono: str | None = None,
+) -> None:
+    """Apunta una transcripción. Como `anotar`, no propaga nunca.
+
+    Existe aparte porque una transcripción **no es una corrida del SDK**: no tiene `usage` con
+    tokens de entrada y salida, así que `_cifras` devolvería `None` y la fila no se escribiría.
+
+    -------------------------------------------------------------------------------------
+    Por qué el costo va en 0 y eso no es un descuido
+    -------------------------------------------------------------------------------------
+
+    `gpt-transcribe` factura por DURACIÓN, no por tokens: lo que devuelve es
+    `UsageDuration(seconds=10.0, type='duration')`. No hay forma honesta de meter eso en
+    `PRECIOS_POR_MILLON`, que es una tabla de dólares por millón de tokens.
+
+    El precio por minuto **no está en el catálogo de la API** y no se inventa: la regla dura 3
+    del proyecto dice que lo que no se sabe se marca, nunca se rellena con un valor plausible.
+    Así que se escribe la fila con `llamadas=1` y tokens en cero, que es exactamente el
+    comportamiento que `config.PRECIOS_POR_MILLON` ya declara para un modelo que no está en la
+    tabla: «perder la cifra en dólares es aceptable, perder el rastro de que hubo consumo no
+    lo es».
+
+    Los segundos de audio van al log y no a una columna: añadir una columna para un número
+    que todavía no se puede multiplicar por nada sería construir la mitad de una medición. El
+    día que se sepa el precio, aquí hay un sitio evidente donde ponerlo y `docs/` una consulta
+    que decir cuántas llamadas hubo.
+    """
+    segundos = getattr(getattr(respuesta, "usage", None), "seconds", None)
+    try:
+        await asyncio.to_thread(
+            _escribir,
+            database_url,
+            agente="transcriptor",
+            modelo=modelo,
+            id_conversacion=id_conversacion,
+            telefono=telefono,
+            llamadas=1,
+            tokens_entrada=0,
+            tokens_entrada_cacheados=0,
+            tokens_salida=0,
+            costo_usd=0.0,
+        )
+    except Exception:  # noqa: BLE001 -- ver el docstring del módulo
+        log.exception("no se pudo anotar el consumo del transcriptor; el turno sigue")
+        return
+    if segundos:
+        log.info("transcritos %s segundos de audio con %s", segundos, modelo)
+
+
 def _escribir(database_url: str, **campos) -> None:
     """La parte síncrona. Abre su propia conexión: corre en otro hilo y una conexión de
     `psycopg` no se comparte entre hilos."""

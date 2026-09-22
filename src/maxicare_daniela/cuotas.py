@@ -125,6 +125,39 @@ async def puede_leer_archivos(telefono: str, *, config: Config, tipos) -> bool:
         return True
 
 
+def _puede_transcribir(database_url: str, telefono: str, *, config: Config, tipos) -> bool:
+    with persistencia.conectar(database_url) as conn:
+        return persistencia.archivos_del_dia(conn, telefono, tipos) < config.cuota_audios_dia
+
+
+async def puede_transcribir(telefono: str, *, config: Config, tipos) -> bool:
+    """Si a este número todavía se le transcriben las notas de voz.
+
+    **El audio le llega al doctor pase lo que pase**, igual que cualquier otro archivo: eso es
+    la garantía de la fase 2 y por eso esta comprobación vive aquí y no en la entrega.
+
+    Cuenta APARTE de `puede_leer_archivos` y no es una duplicación por descuido: son dos
+    gastos de órdenes de magnitud distintos --el lector es el modelo flagship con una imagen
+    dentro; esto son céntimos por minuto de audio-- y con un contador compartido, veinte notas
+    de voz se comerían la cuota de la serie periapical que viene detrás. Ese caso clínico es
+    justo el que hizo subir `CUOTA_ARCHIVOS_DIA` de 12 a 30.
+
+    Y corta en SILENCIO, como la de archivos y al revés que la de mensajes: no manda frase ni
+    Telegram. Quien se pase deja de ser entendido, pero no se queda sin respuesta -- Daniela
+    le pide que lo escriba, que es una salida que el paciente puede tomar por su cuenta. Una
+    frase de cuota aquí sería asustar a alguien por algo que se arregla escribiendo.
+    """
+    try:
+        return await asyncio.to_thread(
+            _puede_transcribir, config.database_url, telefono, config=config, tipos=tipos
+        )
+    except Exception:  # noqa: BLE001 -- regla 2
+        log.exception(
+            "no se pudo revisar la cuota de audios de %s; se transcribe igual", telefono
+        )
+        return True
+
+
 def aviso_para_el_doctor(telefono: str, veredicto: Veredicto, *, corto: bool) -> str:
     """El texto del Telegram al General. HTML, como el resto de los avisos.
 

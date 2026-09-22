@@ -54,6 +54,7 @@ Entregables por fase. **Los marcados gastan tokens**; los demás, ni uno:
 | `scripts/probar_reactivacion.py` | el barrido de reactivación de leads y las once reglas anti-reporte | no |
 | `scripts/probar_plantilla.py` | la plantilla de Meta, y manda UNA de verdad | **sí** (`--estado` no) |
 | `scripts/probar_calendario.py` | `CalendarioGoogle` contra el calendario real | no |
+| `scripts/probar_transcripcion.py` | las notas de voz reales contra la API de audio | **sí** (poco: se factura por duración) |
 | `scripts/probar_webhook.py <url>` | el webhook en producción | **sí** (despierta a Daniela) |
 
 **Estos scripts doblan funciones de `src/` con firmas escritas a mano, y `pytest -q` no los
@@ -299,6 +300,30 @@ una —qué se midió, qué costó— está en la regla que cubre ese archivo.
    forma y la que atraviesa `Runner.run` con sesión de verdad— o una versión del SDK que
    cambie el formato pasa entera. Y esto acota lo que promete el truncado de la 27: `_acotar`
    limita cada turno, pero el historial lo rearma el SDK DESPUÉS.
+
+29. **Una nota de voz se TRANSCRIBE y entra al turno como texto del paciente, y el audio le
+   llega al doctor igual que siempre.** `audio` estaba en `TIPOS_CON_ARCHIVO` y no en
+   `TIPOS_QUE_SE_LEEN`, así que a Daniela le llegaba «nadie lo ha revisado y tú no puedes
+   verlo» y ella hacía lo que esa frase pide: confirmar y escalar. Las CINCO notas de voz que
+   vio el sistema en su vida cerraron con `motivo = 'archivo_recibido'` y «Ya recibimos tu
+   audio». Esa frase es la correcta para una radiografía --que hay que interpretar, y eso es
+   del doctor-- y absurda para alguien que dijo «¿cuánto cuesta la limpieza?» en voz alta:
+   un audio solo hay que oírlo. **El modelo es `gpt-transcribe` y de los cuatro de la cuenta
+   es el ÚNICO que sirve**: `gpt-4o-transcribe` y su mini devuelven algo que parece español
+   y no lo es («Con xenáula se una doctora»), que es peor que no transcribir porque Daniela
+   contestaría a una frase inventada. **`.oga` es un `400` («Unsupported file format oga») y
+   es lo que produce `canales._nombre_sugerido`**, así que el nombre se FUERZA a `.ogg` en el
+   borde que habla con la API; pasarle `archivo.nombre` --lo natural-- no transcribe ni un
+   audio y no deja nada rojo. `language="es"` mejora de forma medible; un `prompt` con el
+   vocabulario de la clínica EMPEORA («por favor» → «por ambos») y no se usa: sesgar hacia lo
+   que esperas oír es la dirección equivocada cuando al otro lado alguien describe un
+   síntoma. **Sin transcripción se le pide al paciente que lo escriba y NO se escala** --él lo
+   resuelve en un segundo y el doctor ya tiene el audio delante--. **Y la transcripción
+   alimenta `menciona_sintomas`**: `m.texto` es `None` en un audio, así que un dolor DICHO en
+   voz alta daba `False` y el prefiltro de `sin_lectura_clinica` quedaba colgando solo de
+   `hubo_adjunto`; van las dos cosas, y `adjunto_del_mensaje` sigue en `True`.
+   `MAXICARE_TRANSCRIBIR_AUDIO` es el TERCER freno de mano y no cuelga de los otros dos: el
+   de archivos promete no tocar lo del paciente, y esto ES del paciente.
 
 # Dónde está el resto
 

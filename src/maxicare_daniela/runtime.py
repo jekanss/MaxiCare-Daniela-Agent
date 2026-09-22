@@ -72,6 +72,7 @@ from . import (
     relevo,
     reseteo,
     seguimientos,
+    transcripcion,
 )
 from .calendario import (
     ZONA_BOGOTA,
@@ -1051,6 +1052,25 @@ async def _entregar(m: ingesta.MensajeEntrante) -> None:
                 "%s pasó la cuota de archivos del día: se entrega sin leer", m.telefono
             )
 
+    # Lo mismo para la nota de voz, con SU interruptor y SU cuota, y ninguno de los dos
+    # compartido con los de arriba.
+    #
+    # El interruptor no cuelga de `leer_archivos` porque aquel promete no tocar lo del
+    # paciente y esto ES del paciente; ni de `daniela_responde` porque la transcripción
+    # también baja al hilo del doctor. El razonamiento entero está en `config.py`, junto al
+    # campo. Y la cuota va aparte porque el gasto es de otro orden de magnitud: con un
+    # contador compartido, veinte notas de voz se comerían la cuota de la serie de
+    # radiografías que viene detrás.
+    transcribir = config.transcribir_audio
+    if transcribir and m.trae_archivo:
+        transcribir = await cuotas.puede_transcribir(
+            m.telefono, config=config, tipos=transcripcion.TIPOS_QUE_SE_TRANSCRIBEN
+        )
+        if not transcribir:
+            log.warning(
+                "%s pasó la cuota de audios del día: se entrega sin transcribir", m.telefono
+            )
+
     entrega = None
     try:
         entrega = await ingesta.procesar_mensaje(
@@ -1060,6 +1080,7 @@ async def _entregar(m: ingesta.MensajeEntrante) -> None:
             database_url=config.database_url,
             tema_general=_tema_general,
             leer_archivos=leer_archivos,
+            transcribir=transcribir,
         )
     except Exception:  # noqa: BLE001
         log.exception("fallo inesperado entregando %s", m.wamid)
@@ -1148,6 +1169,7 @@ async def _entregar(m: ingesta.MensajeEntrante) -> None:
             calendario=_calendario,
             al_escalar=_avisar_a_doctores,
             lectura=entrega.lectura if entrega is not None else None,
+            transcripcion=entrega.transcripcion if entrega is not None else None,
         )
     except Exception:  # noqa: BLE001 -- `atender` promete no propagar; esto lo hace cierto
         # Aquí ya no hay nada que salvar para el paciente, pero el archivo YA llegó al
@@ -2495,6 +2517,17 @@ async def _recoger_lo_que_quedo_sin_responder() -> int:
                 # se entregó al doctor antes de morir el proceso. Rehacerla costaría otra
                 # llamada al modelo para un destinatario que ya la tiene.
                 lectura=None,
+                # Y sin `transcripcion`, que aquí SÍ cuesta algo y hay que decirlo: la
+                # transcripción se hizo y bajó al hilo del doctor, pero los bytes del audio
+                # murieron con el proceso --`ArchivoDescargado` vive en memoria-- y
+                # recuperarlos exigiría volver a canjear el `media_id` contra Meta, que este
+                # barrido no hace para nada.
+                #
+                # Así que el paciente rescatado recibe «no te entendí el audio, ¿me lo
+                # escribes?». Es una degradación, no una pérdida: el paciente puede resolverlo
+                # en un segundo, sigue sin escalarse, y el doctor ya tiene el audio Y su
+                # texto. Peor sería el silencio, que es lo que había antes de este barrido.
+                transcripcion=None,
             )
         except Exception:  # noqa: BLE001
             log.exception("el reintento de %s también falló", mensaje.wamid)

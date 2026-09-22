@@ -71,6 +71,14 @@ argument 'group_id'`). **Quien cambie una de esas firmas corre los seis que no g
     apuntarían con `clave` al UUID de una cita que el propio script acaba de borrar.
 - `probar_calendario.py --diagnosticar` **solo lee**: es lo primero que hay que correr
   cuando Calendar «no funciona».
+- `probar_transcripcion.py` **imprime las frases en vez de contar OK**, y esa es su razón de
+  ser. Tres de los cuatro modelos de audio de la cuenta devuelven un `200` con algo que parece
+  español y no lo es —«Con xenáula se una doctora»—, así que una comprobación automática los
+  daría por buenos. Quien lo corra tiene que LEER lo que salió. Usa audios REALES sacados de
+  `mensajes_entrantes` (solo lee) y no uno sintetizado: lo que hay que comprobar es que la API
+  acepte lo que graba el WhatsApp de un teléfono, no lo que sepa generar esta máquina. Si Meta
+  ya caducó los `media_id` guardados lo dice y sale con 1 — no finge que pasó. `--comparar`
+  corre los otros tres modelos al lado, que es como se eligió el que corre.
 - `probar_atencion.py` tiene **un fallo intermitente conocido**, y no es del producto: la
   comprobación «el segundo turno empezó sin esperar al primero (el candado es POR
   conversación)» compara el orden de eventos de dos corrutinas que tardan 0,15 s. Si la

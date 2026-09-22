@@ -57,6 +57,7 @@ def config_falso(**cambios) -> Config:
         modelo_daniela="modelo-de-prueba",
         modelo_lector="modelo-de-prueba",
         modelo_evaluador="modelo-de-prueba",
+        modelo_transcriptor="modelo-de-prueba",
         secreto_sesion="",
         permitir_cookie_insegura=False,
         daniela_responde=True,
@@ -419,3 +420,72 @@ def test_la_frase_al_paciente_no_le_habla_de_cuotas_ni_de_limites():
     for palabra in ("cuota", "límite", "limite", "bloque", "spam"):
         assert palabra not in frase, f"la frase al paciente nombra el mecanismo: {palabra!r}"
     assert "doctor" in frase, "promete que alguien le escribe, que es lo que de verdad pasa"
+
+
+# ==========================================================================================
+# La cuota de notas de voz
+# ==========================================================================================
+#
+# Existe desde el 21/09/2026, cuando transcribir convirtio una nota de voz en algo que llama a
+# un modelo. Cuenta APARTE de la de archivos, y esa separacion es el punto entero.
+
+
+@pytest.mark.parametrize(
+    "cuantos,puede",
+    [(0, True), (39, True), (40, False), (90, False)],
+    ids=["ninguno", "casi", "justo", "muchos"],
+)
+def test_puede_transcribir_respeta_la_cuota_del_dia(monkeypatch, cuantos, puede):
+    """Mismo `<` que la de archivos: «se transcriben 40 al dia», asi que el 40 es el primero
+    que ya no entra."""
+    BaseFalsa(archivos=cuantos).instalar(monkeypatch)
+
+    resultado = asyncio.run(
+        cuotas.puede_transcribir(
+            TELEFONO, config=config_falso(cuota_audios_dia=40), tipos=("audio", "voice")
+        )
+    )
+
+    assert resultado is puede
+
+
+def test_la_cuota_de_audio_NO_comparte_contador_con_la_de_archivos(monkeypatch):
+    """La razon por la que son dos y no una, como aserción.
+
+    El lector es el modelo flagship con una imagen dentro; una transcripcion son centimos por
+    minuto de audio. Con un contador compartido, veinte notas de voz se comerian la cuota de
+    la serie periapical que viene detras -- que es justo el caso clinico que hizo subir
+    `CUOTA_ARCHIVOS_DIA` de 12 a 30.
+    """
+    config = config_falso(cuota_archivos_dia=12, cuota_audios_dia=40)
+    # Treinta: pasado el limite de archivos, muy por debajo del de audios.
+    BaseFalsa(archivos=30).instalar(monkeypatch)
+
+    assert asyncio.run(
+        cuotas.puede_leer_archivos(TELEFONO, config=config, tipos=("image",))
+    ) is False
+    assert asyncio.run(
+        cuotas.puede_transcribir(TELEFONO, config=config, tipos=("audio",))
+    ) is True
+
+
+def test_los_tipos_de_la_cuota_de_audio_tambien_los_pone_QUIEN_LLAMA(monkeypatch):
+    """Misma razon que en la de archivos: la lista vive en
+    `transcripcion.TIPOS_QUE_SE_TRANSCRIBEN` y es suya."""
+    base = BaseFalsa(archivos=0).instalar(monkeypatch)
+
+    asyncio.run(
+        cuotas.puede_transcribir(TELEFONO, config=config_falso(), tipos=("voice",))
+    )
+
+    assert base.archivos_consultados == [(TELEFONO, ("voice",))]
+
+
+def test_si_la_base_revienta_se_transcribe_igual(monkeypatch):
+    """Regla 2 del modulo: si la base no contesta, se deja pasar. Dejar de entender a un
+    paciente por una consulta de contabilidad es degradar el servicio por lo de menos."""
+    BaseCaida().instalar(monkeypatch)
+
+    assert asyncio.run(
+        cuotas.puede_transcribir(TELEFONO, config=config_falso(), tipos=("audio",))
+    ) is True
