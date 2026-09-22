@@ -58,6 +58,7 @@ from __future__ import annotations
 import asyncio
 import html
 import logging
+import re
 from datetime import datetime
 from typing import Any
 
@@ -365,16 +366,19 @@ def _guardar_del_doctor(
     conversacion_id: str | None,
     autor: str,
     texto: str,
+    origen: str = "telegram",
     wamid: str | None = None,
     fallo: str | None = None,
 ) -> None:
+    """El `origen` tiene default porque este camino nació con Telegram y sigue siendo el que
+    más pasa. El panel lo pasa explícito: el CHECK de la 026 solo admite esos dos valores."""
     with persistencia.conectar(database_url) as conn:
         persistencia.guardar_mensaje_del_doctor(
             conn,
             telefono=telefono,
             conversacion_id=conversacion_id,
             autor=autor,
-            origen="telegram",
+            origen=origen,
             texto=texto,
             wamid=wamid,
             fallo=fallo,
@@ -629,15 +633,30 @@ async def activar(
     *,
     id_conversacion: str,
     doctor: str,
-    callback_id: str,
+    callback_id: str | None,
     mensaje_id: int | None,
     telegram,
     database_url: str,
     doctor_id: int | None = None,
     cierre_relevo_minutos: int = 180,
     tema_general: int = 0,
-) -> None:
+) -> str | None:
     """El doctor pulsó «Hablar yo con el paciente». Nunca propaga.
+
+    Devuelve **`None` si la conversación quedó suya**, y si no, el motivo en una frase
+    pensada para leerse: «Ya la tiene Fulano.». Ese retorno nació con el panel y no con
+    Telegram, donde el acuse del callback ya dice lo mismo y nadie mira lo que vuelve.
+
+    Un POST del panel tiene que poder contestar 409 con el nombre del que se le adelantó, y
+    la única forma honesta de saberlo es esta: preguntar antes con una lectura suelta deja
+    entre la lectura y el `UPDATE` la ventana por la que pasan los dos doctores --es la misma
+    carrera que ya se mide en `tests/test_relevo_neon.py`--. Quien decide sigue siendo el
+    `UPDATE ... WHERE tomada_por IS NULL` de `persistencia.activar_relevo`; lo que cambia es
+    que su respuesta ya no muere aquí dentro.
+
+    **`callback_id` acepta `None` porque el panel no tiene ninguno.** Sin él no se responde
+    ningún callback: pasárselo igual a Telegram sería una llamada que ya sabemos que va a
+    fallar, y el acuse que traería es para un botón que nadie pulsó.
 
     ------------------------------------------------------------------------------------
     El orden de los pasos está elegido, no es el que salió
@@ -665,29 +684,36 @@ async def activar(
     de antes. Ahora el enlace se pone en cuanto existe el mensaje al que apunta, y el volcado
     --que es lo lento y lo que menos prisa tiene-- va detrás.
     """
+    async def _acusar(texto: str, *, alerta: bool = False) -> str:
+        """Responde el callback si lo hay, y devuelve el mismo texto para quien llamó."""
+        if callback_id:
+            await telegram.responder_callback(callback_id, texto, alerta=alerta)
+        return texto
+
+    # Lo que decide qué se devuelve si algo revienta más abajo. Pasado este punto la
+    # conversación YA es suya según la base --que es la única que manda-- y un fallo
+    # adornando el hilo no puede contarse como «no la tomaste»: el panel pintaría un error
+    # sobre una conversación que en Neon está a su nombre, y el doctor la vería tomada al
+    # refrescar diez segundos después.
+    ya_es_suya = False
+
     try:
         telefono = await asyncio.to_thread(_telefono, database_url, id_conversacion)
         if telefono is None:
-            await telegram.responder_callback(
-                callback_id, "Esa conversación ya no existe.", alerta=True
-            )
-            return
+            return await _acusar("Esa conversación ya no existe.", alerta=True)
 
         ocupada_por = await asyncio.to_thread(
             _activar_en_base, database_url, id_conversacion, doctor
         )
         if ocupada_por is not None:
             # La carrera normal: el escalamiento suena en el teléfono de todos a la vez.
-            await telegram.responder_callback(
-                callback_id, f"Ya la tiene {ocupada_por}.", alerta=True
-            )
-            return
+            return await _acusar(f"Ya la tiene {ocupada_por}.", alerta=True)
+
+        ya_es_suya = True
 
         # El acuse no promete lo que el botón no puede hacer. Decía «te llevo a su hilo» y no
         # llevaba a nadie: el doctor leía eso, no pasaba nada, y volvía a pulsar.
-        await telegram.responder_callback(
-            callback_id, "Es tuya. Te acabo de escribir en su hilo: toca el aviso."
-        )
+        await _acusar("Es tuya. Te acabo de escribir en su hilo: toca el aviso.")
 
         try:
             tema = await _tema_abierto_para(
@@ -706,7 +732,10 @@ async def activar(
                 "⚠️ No se pudo abrir el hilo de ese paciente, así que el relevo no quedó "
                 "activo. Daniela sigue atendiéndolo.",
             )
-            return
+            return (
+                "No se pudo abrir el hilo de ese paciente en Telegram, así que el relevo no "
+                "quedó activo. Daniela sigue atendiéndolo."
+            )
 
         async def _dar_la_bienvenida(en_el_tema: int) -> int:
             return await telegram.enviar_mensaje(
@@ -791,8 +820,12 @@ async def activar(
 
         _avisados.discard(id_conversacion)
         log.info("%s tomó la conversación %s (+%s)", doctor, id_conversacion, telefono)
+        return None
     except Exception:  # noqa: BLE001 -- el webhook ya devolvió 200; nada puede propagar
         log.exception("falló la activación del relevo de %s", id_conversacion)
+        if ya_es_suya:
+            return None
+        return "No se pudo tomar la conversación. Inténtalo otra vez."
 
 
 # ==========================================================================================
@@ -889,6 +922,7 @@ async def _anotar_lo_que_dijo_el_doctor(
     relevo: dict[str, Any],
     texto: str,
     *,
+    origen: str = "telegram",
     wamid: str | None = None,
     fallo: str | None = None,
 ) -> None:
@@ -906,6 +940,7 @@ async def _anotar_lo_que_dijo_el_doctor(
             conversacion_id=relevo["id_conversacion"],
             autor=relevo.get("doctor") or "un doctor",
             texto=texto,
+            origen=origen,
             wamid=wamid,
             fallo=fallo,
         )
@@ -1846,6 +1881,172 @@ async def barrer(
 
 
 # ==========================================================================================
+# El panel -> paciente
+# ==========================================================================================
+#
+# La tercera puerta del relevo, después del botón de Telegram y del barrido. Vive aquí y no
+# en `panel.py` por dónde está la frontera: `panel.py` recibe una conexión y devuelve
+# diccionarios --no abre conexiones, no es `async` y no conoce ni a Meta ni a Telegram--, y
+# esto es justo lo contrario. Lo que `runtime.py` hace con ello es traducirlo a HTTP.
+
+
+class NoSePudoAgendar(RuntimeError):
+    """El cierre traía una cita y la cita no se pudo crear, así que el relevo NO se cerró.
+
+    Es el mismo desenlace que en el hilo de Telegram, donde el diálogo se lo dice al doctor y
+    sigue esperando otra hora (`recibir_la_fecha`). Cerrar aquí dejaría al paciente con una
+    cita prometida de viva voz que no existe en la agenda de nadie, y a Daniela creyendo que
+    sí existe: es el no negociable 1 entrando por la puerta de atrás.
+    """
+
+
+def _sin_etiquetas(texto: str) -> str:
+    """El aviso de `_agendar` está escrito para Telegram, que va en HTML. El panel no."""
+    return html.unescape(re.sub(r"<[^>]+>", "", texto)).strip()
+
+
+async def escribir_desde_el_panel(
+    *,
+    telefono: str,
+    texto: str,
+    autor: str,
+    telegram,
+    whatsapp,
+    database_url: str,
+) -> str:
+    """Le manda al paciente lo que un doctor escribió en el panel. Devuelve el wamid.
+
+    Hermana de `relevar_mensaje` por el otro canal, con **una diferencia que importa: esta
+    SÍ propaga**. Allí el doctor ya ve su mensaje escrito en el hilo y lo único que puede
+    hacer el sistema es reaccionar; aquí está mirando la pantalla y esperando la respuesta,
+    así que un envío que no salió tiene que llegarle como un error y no como un mensaje más
+    en la conversación. La fila queda escrita en los dos casos, con `fallo` cuando no salió.
+
+    El eco al hilo de Telegram no es cosmético: las dos ventanas tienen que enseñar lo mismo.
+    Un doctor en el panel y otro en el hilo son el caso normal de una clínica con dos
+    consultorios, y el que está en Telegram no puede ver aparecer la respuesta del paciente
+    sin la pregunta que la provocó. Va **mudo** y **no crea hilo si no hay** (no negociable
+    14): quien abre expediente es el primer archivo o un escalamiento, nunca un texto.
+    """
+    id_conversacion = await asyncio.to_thread(_conversacion_de, database_url, telefono)
+    rastro = {"telefono": telefono, "id_conversacion": id_conversacion, "doctor": autor}
+
+    try:
+        wamid = await whatsapp.enviar_texto(telefono, texto)
+    except Exception as e:  # noqa: BLE001 -- se anota y se propaga; ver docstring
+        await _anotar_lo_que_dijo_el_doctor(
+            database_url, rastro, texto, origen="panel", fallo=str(e)[:400]
+        )
+        raise
+
+    await _anotar_lo_que_dijo_el_doctor(
+        database_url, rastro, texto, origen="panel", wamid=wamid
+    )
+
+    tema = await asyncio.to_thread(_tema_de, database_url, telefono)
+    if tema:
+        await _avisar_en_tema(
+            telegram,
+            tema,
+            f"💬 <b>{_escapar(autor)}</b> <i>(desde el panel)</i>\n{_escapar(texto)}",
+        )
+
+    try:
+        await asyncio.to_thread(_tocar, database_url, id_conversacion)
+    except Exception:  # noqa: BLE001 -- el mensaje ya salió; esto solo mueve el reloj
+        log.warning("no se pudo empujar el reloj del relevo de +%s", telefono)
+
+    return wamid
+
+
+async def cerrar_desde_el_panel(
+    *,
+    telefono: str,
+    doctor: str,
+    hubo_cita: bool,
+    cuando: datetime | None = None,
+    tratamiento: str | None = None,
+    nombre: str | None = None,
+    telegram,
+    database_url: str,
+    calendario=None,
+    tema_general: int = 0,
+) -> bool:
+    """Devuelve el control a Daniela desde el panel. `True` si este cierre fue el que cerró.
+
+    El formulario del panel trae de una vez lo que en Telegram son cuatro preguntas
+    encadenadas, así que aquí no hay estado que sostener: o viene todo, o no viene la cita.
+    Lo que NO cambia es el orden ni quién agenda -- `_agendar`, la misma función, con su
+    **cupo -> Calendar -> fila**. Una cuarta vía de escritura de citas es exactamente lo que
+    este proyecto no se puede permitir.
+
+    Lanza `NoSePudoAgendar` si la cita no se pudo crear, y entonces **el relevo sigue
+    abierto**: Daniela sigue callada y el doctor puede escribir otra hora. Es lo mismo que
+    hace el diálogo del hilo, que se lo dice y sigue esperando.
+    """
+    id_conversacion = await asyncio.to_thread(_conversacion_de, database_url, telefono)
+    tema = await asyncio.to_thread(_tema_de, database_url, telefono)
+
+    if nombre:
+        # `nombrar_si_esta_pendiente`, no `asegurar_paciente`: escribe sobre el marcador y
+        # nunca sobre un nombre de verdad. El teléfono de una casa lo usan dos personas.
+        try:
+            await asyncio.to_thread(_nombrar, database_url, telefono, nombre[:TOPE_NOMBRE])
+        except Exception:  # noqa: BLE001
+            # Una cita con el nombre a medias vale muchísimo más que ninguna cita: el cupo
+            # queda tomado y el evento existe. El nombre lo arregla un humano desde el panel,
+            # que es justo donde está.
+            log.warning("no se pudo guardar el nombre de +%s al cerrar", telefono)
+
+    if hubo_cita:
+        if cuando is None:
+            raise NoSePudoAgendar("Falta la fecha y la hora de la cita.")
+        if cuando.tzinfo is None:
+            # Un `<input type="datetime-local">` manda «2026-09-23T14:30», sin zona, y así
+            # lo entrega Pydantic. Lo que el doctor escribió es hora de Bogotá: dejarlo
+            # ingenuo reventaría la comparación de abajo con un `TypeError`, y tratarlo como
+            # UTC movería la cita cinco horas sin que nadie lo note hasta que el paciente se
+            # presente. Se decide aquí, en un solo sitio, y no en cada llamador.
+            cuando = cuando.replace(tzinfo=ZONA_BOGOTA)
+        if cuando < datetime.now(ZONA_BOGOTA):
+            raise NoSePudoAgendar(f"{_formatear(cuando)} ya pasó. Escribe una hora futura.")
+        if calendario is None:
+            raise NoSePudoAgendar(
+                "No hay calendario disponible ahora mismo, así que la cita no se puede "
+                "registrar. Vuelve a intentarlo en un momento."
+            )
+
+        agendada, aviso = await asyncio.to_thread(
+            _agendar,
+            database_url,
+            id_conversacion=id_conversacion,
+            telefono=telefono,
+            inicio=cuando,
+            calendario=calendario,
+            doctor=doctor,
+            tratamiento=tratamiento or "Sin identificar",
+        )
+        # Al hilo va el aviso tal cual, agendara o no: el doctor que esté en Telegram tiene
+        # que ver la cita que acaba de entrar, y también la hora que se le rechazó.
+        if tema:
+            await _avisar_en_tema(telegram, tema, aviso, silencioso=False)
+        if not agendada:
+            raise NoSePudoAgendar(_sin_etiquetas(aviso))
+
+    return await cerrar(
+        id_conversacion,
+        motivo="devuelto_por_doctor",
+        telegram=telegram,
+        database_url=database_url,
+        telefono=telefono,
+        tema_id=tema,
+        tema_general=tema_general,
+        cita=cuando if hubo_cita else None,
+        doctor=doctor,
+    )
+
+
+# ==========================================================================================
 # Dos envíos que no pueden tumbar nada
 # ==========================================================================================
 
@@ -1874,12 +2075,15 @@ async def _decir_en_general(telegram, tema_general: int, texto: str) -> None:
 
 
 __all__ = [
+    "NoSePudoAgendar",
     "PREFIJO_DEVOLVER",
     "PREFIJO_TOMAR",
     "activar",
     "barrer",
     "cerrar",
+    "cerrar_desde_el_panel",
     "cerrar_por_tema_cerrado",
+    "escribir_desde_el_panel",
     "nombre_de_quien_pulsa",
     "relevar_mensaje",
     "teclado_devolver",

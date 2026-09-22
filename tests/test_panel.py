@@ -1974,3 +1974,286 @@ def test_un_telefono_que_no_es_un_telefono_no_llega_a_la_base(monkeypatch):
 
     assert r.status_code == 404
     assert conexion.verbos == [], "se consultó la base con un teléfono que no lo era"
+
+
+# ==========================================================================================
+# Conversaciones: los tres POST
+# ==========================================================================================
+
+
+def _sin_neon(monkeypatch):
+    """Los tres POST abren su `with persistencia.conectar(...)`. Aquí no hay Neon."""
+    monkeypatch.setattr(
+        runtime.persistencia, "conectar", lambda url: _ConexionFalsaSinResolver()
+    )
+
+
+def test_recepcion_no_puede_tomar_ni_escribir_ni_cerrar(monkeypatch):
+    """El control vive en `exigir_rol`, no en el booleano que viaja a la pantalla.
+
+    Con dos listas --una para esconder el botón y otra para permitir la acción-- esconder y
+    permitir se separan sin que nada falle, así que las dos salen de `ROLES_QUE_ESCRIBEN`.
+    """
+    _sin_neon(monkeypatch)
+
+    def _no_llames(*a, **k):
+        pytest.fail("recepción llegó a la maquinaria del relevo")
+
+    monkeypatch.setattr(runtime.relevo, "activar", _no_llames)
+    monkeypatch.setattr(runtime.relevo, "escribir_desde_el_panel", _no_llames)
+    monkeypatch.setattr(runtime.relevo, "cerrar_desde_el_panel", _no_llames)
+
+    runtime.app.dependency_overrides[runtime.usuario_actual] = _como("recepcion")
+    try:
+        c = TestClient(runtime.app)
+        respuestas = [
+            c.post("/api/conversaciones/573001110101/tomar"),
+            c.post("/api/conversaciones/573001110101/mensaje", json={"texto": "hola"}),
+            c.post("/api/conversaciones/573001110101/cerrar", json={"hubo_cita": False}),
+        ]
+    finally:
+        runtime.app.dependency_overrides.clear()
+
+    assert [r.status_code for r in respuestas] == [403, 403, 403]
+    assert all("detalle" in r.json() for r in respuestas)
+
+
+def test_tomar_una_conversacion_QUE_YA_TIENE_OTRO_da_409_con_su_nombre(monkeypatch):
+    _sin_neon(monkeypatch)
+
+    async def _ya_la_tiene(**k):
+        return "Ya la tiene Dr. Pérez."
+
+    monkeypatch.setattr(runtime.relevo, "activar", _ya_la_tiene)
+    monkeypatch.setattr(runtime.relevo, "_conversacion_de", lambda url, tel: "c-1")
+
+    runtime.app.dependency_overrides[runtime.usuario_actual] = _como("doctor")
+    try:
+        r = TestClient(runtime.app).post("/api/conversaciones/573001110101/tomar")
+    finally:
+        runtime.app.dependency_overrides.clear()
+
+    assert r.status_code == 409
+    assert r.json()["detalle"] == "Ya la tiene Dr. Pérez."
+
+
+def test_tomar_pasa_el_nombre_del_usuario_y_NI_callback_NI_mensaje(monkeypatch):
+    """Lo que distingue a esta puerta de la de Telegram, y es todo lo que la distingue."""
+    _sin_neon(monkeypatch)
+    argumentos = {}
+
+    async def _activar(**k):
+        argumentos.update(k)
+        return None
+
+    monkeypatch.setattr(runtime.relevo, "activar", _activar)
+    monkeypatch.setattr(runtime.relevo, "_conversacion_de", lambda url, tel: "c-1")
+
+    runtime.app.dependency_overrides[runtime.usuario_actual] = _como("admin")
+    try:
+        r = TestClient(runtime.app).post("/api/conversaciones/573001110101/tomar")
+    finally:
+        runtime.app.dependency_overrides.clear()
+
+    assert r.status_code == 200 and r.json()["ok"] is True
+    assert argumentos["callback_id"] is None, "no hay ningún botón que acusar"
+    assert argumentos["mensaje_id"] is None, "no cuelga de ningún aviso del General"
+    assert argumentos["doctor"] == "Prueba", "el hilo dice quién habla, y sale de la sesión"
+
+
+def test_fuera_de_las_24_horas_no_se_le_escribe_al_paciente(monkeypatch):
+    """Y la prueba comprueba ADEMÁS que se consultó el último mensaje del paciente.
+
+    Una aserción sobre algo que no pasa también pasa cuando no corrió nada: si el endpoint
+    dejara de mirar la ventana, `enviar_texto` tampoco se llamaría en esta prueba --porque
+    está doblado-- y seguiría en verde mientras Meta rechaza el envío en producción.
+    """
+    _sin_neon(monkeypatch)
+    consultados = []
+
+    def _hace_treinta_horas(conn, telefono):
+        consultados.append(telefono)
+        return _AHORA_CONVERSACIONES - timedelta(hours=30)
+
+    monkeypatch.setattr(
+        panel.persistencia, "ultimo_mensaje_del_paciente", _hace_treinta_horas
+    )
+    monkeypatch.setattr(runtime, "_ahora_en_bogota", lambda: _AHORA_CONVERSACIONES)
+
+    async def _no_escribas(**k):
+        pytest.fail("se intentó escribir fuera de la ventana de 24 h")
+
+    monkeypatch.setattr(runtime.relevo, "escribir_desde_el_panel", _no_escribas)
+
+    runtime.app.dependency_overrides[runtime.usuario_actual] = _como("doctor")
+    try:
+        r = TestClient(runtime.app).post(
+            "/api/conversaciones/573001110101/mensaje", json={"texto": "hola"}
+        )
+    finally:
+        runtime.app.dependency_overrides.clear()
+
+    assert r.status_code == 409
+    assert "24 horas" in r.json()["detalle"]
+    assert consultados == ["573001110101"], "el endpoint no llegó a mirar la ventana"
+
+
+def test_dentro_de_la_ventana_el_mensaje_sale_con_el_nombre_de_quien_lo_escribe(monkeypatch):
+    _sin_neon(monkeypatch)
+    monkeypatch.setattr(
+        panel.persistencia,
+        "ultimo_mensaje_del_paciente",
+        lambda conn, tel: _AHORA_CONVERSACIONES - timedelta(hours=2),
+    )
+    monkeypatch.setattr(runtime, "_ahora_en_bogota", lambda: _AHORA_CONVERSACIONES)
+    enviados = []
+
+    async def _escribir(**k):
+        enviados.append(k)
+        return "wamid.1"
+
+    monkeypatch.setattr(runtime.relevo, "escribir_desde_el_panel", _escribir)
+
+    runtime.app.dependency_overrides[runtime.usuario_actual] = _como("doctor")
+    try:
+        r = TestClient(runtime.app).post(
+            "/api/conversaciones/573001110101/mensaje", json={"texto": "Nos vemos"}
+        )
+    finally:
+        runtime.app.dependency_overrides.clear()
+
+    assert r.status_code == 200 and r.json()["wamid"] == "wamid.1"
+    assert enviados[0]["texto"] == "Nos vemos"
+    assert enviados[0]["autor"] == "Prueba"
+
+
+def test_un_texto_de_mas_de_4000_no_entra(monkeypatch):
+    """El mismo tope que el chat web. El carril que da a internet ya lo tenía; este no era
+    ese carril, pero un mensaje de WhatsApp se corta en 4096 de todos modos."""
+    _sin_neon(monkeypatch)
+
+    async def _no_escribas(**k):
+        pytest.fail("un texto de 5000 llegó a WhatsApp")
+
+    monkeypatch.setattr(runtime.relevo, "escribir_desde_el_panel", _no_escribas)
+
+    runtime.app.dependency_overrides[runtime.usuario_actual] = _como("doctor")
+    try:
+        r = TestClient(runtime.app).post(
+            "/api/conversaciones/573001110101/mensaje", json={"texto": "x" * 5000}
+        )
+    finally:
+        runtime.app.dependency_overrides.clear()
+
+    assert r.status_code == 422
+
+
+def test_si_WhatsApp_rechaza_el_envio_el_panel_lo_dice_y_no_finge_que_salio(monkeypatch):
+    _sin_neon(monkeypatch)
+    monkeypatch.setattr(
+        panel.persistencia,
+        "ultimo_mensaje_del_paciente",
+        lambda conn, tel: _AHORA_CONVERSACIONES - timedelta(hours=2),
+    )
+    monkeypatch.setattr(runtime, "_ahora_en_bogota", lambda: _AHORA_CONVERSACIONES)
+
+    async def _revienta(**k):
+        raise runtime.ErrorDeCanal("WhatsApp rechazó el envío: 400")
+
+    monkeypatch.setattr(runtime.relevo, "escribir_desde_el_panel", _revienta)
+
+    runtime.app.dependency_overrides[runtime.usuario_actual] = _como("doctor")
+    try:
+        r = TestClient(runtime.app).post(
+            "/api/conversaciones/573001110101/mensaje", json={"texto": "hola"}
+        )
+    finally:
+        runtime.app.dependency_overrides.clear()
+
+    assert r.status_code == 502
+    assert "400" in r.json()["detalle"]
+
+
+def test_un_tratamiento_que_no_esta_en_la_lista_viva_no_cierra_nada(monkeypatch):
+    """Aquí SÍ se valida, al revés que en el hilo de Telegram, y no es una incoherencia: allí
+    el doctor teclea a mano en mitad de una conversación --decisión explícita del cliente--;
+    aquí hay un desplegable, así que un valor de fuera es una pantalla desincronizada."""
+    _sin_neon(monkeypatch)
+    monkeypatch.setattr(runtime.panel, "vocabulario_activo", lambda conn: ["ortodoncia"])
+
+    async def _no_cierres(**k):
+        pytest.fail("se cerró el relevo con un tratamiento inventado")
+
+    monkeypatch.setattr(runtime.relevo, "cerrar_desde_el_panel", _no_cierres)
+
+    runtime.app.dependency_overrides[runtime.usuario_actual] = _como("doctor")
+    try:
+        r = TestClient(runtime.app).post(
+            "/api/conversaciones/573001110101/cerrar",
+            json={
+                "hubo_cita": True,
+                "tratamiento": "lo_que_sea",
+                "cuando": "2099-01-05T10:00:00",
+            },
+        )
+    finally:
+        runtime.app.dependency_overrides.clear()
+
+    assert r.status_code == 400
+    assert "lo_que_sea" in r.json()["detalle"]
+
+
+def test_una_cita_que_no_se_pudo_agendar_devuelve_409_y_deja_el_relevo_abierto(monkeypatch):
+    """409 y no 400: lo que manda el doctor está bien formado, es el mundo el que dice que no
+    --la hora se llenó, Google no contesta--. La pantalla deja el formulario puesto."""
+    _sin_neon(monkeypatch)
+    monkeypatch.setattr(runtime.panel, "vocabulario_activo", lambda conn: ["ortodoncia"])
+
+    async def _no_se_pudo(**k):
+        raise runtime.relevo.NoSePudoAgendar("Esa hora ya está llena.")
+
+    monkeypatch.setattr(runtime.relevo, "cerrar_desde_el_panel", _no_se_pudo)
+
+    runtime.app.dependency_overrides[runtime.usuario_actual] = _como("doctor")
+    try:
+        r = TestClient(runtime.app).post(
+            "/api/conversaciones/573001110101/cerrar",
+            json={
+                "hubo_cita": True,
+                "tratamiento": "ortodoncia",
+                "cuando": "2099-01-05T10:00:00",
+            },
+        )
+    finally:
+        runtime.app.dependency_overrides.clear()
+
+    assert r.status_code == 409
+    assert r.json()["detalle"] == "Esa hora ya está llena."
+
+
+def test_cerrar_sin_cita_ni_siquiera_mira_el_catalogo(monkeypatch):
+    _sin_neon(monkeypatch)
+    monkeypatch.setattr(
+        runtime.panel,
+        "vocabulario_activo",
+        lambda conn: pytest.fail("no había tratamiento que validar"),
+    )
+    recibidos = {}
+
+    async def _cerrar(**k):
+        recibidos.update(k)
+        return True
+
+    monkeypatch.setattr(runtime.relevo, "cerrar_desde_el_panel", _cerrar)
+
+    runtime.app.dependency_overrides[runtime.usuario_actual] = _como("doctor")
+    try:
+        r = TestClient(runtime.app).post(
+            "/api/conversaciones/573001110101/cerrar", json={"hubo_cita": False}
+        )
+    finally:
+        runtime.app.dependency_overrides.clear()
+
+    assert r.status_code == 200 and r.json()["cerrado"] is True
+    assert recibidos["hubo_cita"] is False and recibidos["cuando"] is None
+    assert recibidos["doctor"] == "Prueba"

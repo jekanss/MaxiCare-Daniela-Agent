@@ -13,11 +13,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import datetime
 
 import pytest
 
 from maxicare_daniela import persistencia, relevo
 from maxicare_daniela.canales import HiloInvalido, Telegram
+from maxicare_daniela.contratos import ZONA_BOGOTA
 
 CONV = "11111111-2222-3333-4444-555555555555"
 
@@ -294,7 +296,9 @@ def _activar(tg, **cambios):
         database_url=URL,
     )
     argumentos.update(cambios)
-    asyncio.run(relevo.activar(**argumentos))
+    #: Se DEVUELVE lo que devuelve `activar`: es lo que el panel traduce a un 409, y sin
+    #: esto ninguna prueba de aquí podría mirarlo.
+    return asyncio.run(relevo.activar(**argumentos))
 
 
 def _mensaje_del_doctor(**cambios):
@@ -2212,3 +2216,304 @@ def test_el_nombre_se_recorta_como_el_tratamiento(monkeypatch):
     )
 
     assert len(nombrados[0]) == relevo.TOPE_NOMBRE
+
+
+# ==========================================================================================
+# La tercera puerta: el panel
+# ==========================================================================================
+
+
+def test_tomar_una_conversacion_QUE_YA_TIENE_OTRO_devuelve_quien_la_tiene(monkeypatch):
+    """El 409 del panel sale de ESTE retorno, y no de una lectura previa.
+
+    Preguntar antes «esta libre?» y escribir despues deja en medio la ventana por la que
+    pasan los dos doctores. Quien decide sigue siendo el `UPDATE ... WHERE tomada_por IS
+    NULL`; lo unico que cambio es que su respuesta ya no muere dentro de `activar`.
+    """
+    monkeypatch.setattr(relevo, "_activar_en_base", lambda url, conv, doctor: "Dr. Perez")
+    tg = TelegramFalso()
+
+    motivo = _activar(tg, callback_id="cb-9")
+
+    assert motivo == "Ya la tiene Dr. Perez."
+    assert tg.callbacks == [("cb-9", "Ya la tiene Dr. Perez.", True)]
+    assert tg.creados == [] and tg.mensajes == [], "no se le abre hilo a un relevo ajeno"
+
+
+def test_tomarla_libre_devuelve_None_que_es_lo_que_el_panel_lee_como_OK():
+    tg = TelegramFalso()
+
+    assert _activar(tg) is None
+    assert tg.anclados, "el relevo tiene que haberse activado de verdad"
+
+
+def test_desde_el_panel_NO_se_responde_ningun_callback():
+    """Un `callback_id` vacio pasado a Telegram es una llamada que ya sabemos que va a
+    fallar, y el acuse que traeria es para un boton que nadie pulso."""
+    tg = TelegramFalso()
+
+    assert _activar(tg, callback_id=None, mensaje_id=None) is None
+
+    assert tg.callbacks == []
+    assert tg.teclados == [], "sin `mensaje_id` no hay teclado del General que cambiar"
+    assert tg.anclados, "y aun asi el relevo se activa entero"
+
+
+def test_lo_que_el_panel_le_escribe_al_paciente_sale_por_WhatsApp_y_se_ECOA_en_el_hilo():
+    """Las dos ventanas tienen que ensenar lo mismo: un doctor en el panel y otro en el hilo
+    son el caso normal de una clinica con dos consultorios."""
+    tg, wa = TelegramFalso(), WhatsAppFalso()
+
+    wamid = asyncio.run(
+        relevo.escribir_desde_el_panel(
+            telefono=TEL,
+            texto="Nos vemos manana a las 10",
+            autor="Dra. Ruiz",
+            telegram=tg,
+            whatsapp=wa,
+            database_url=URL,
+        )
+    )
+
+    assert wa.textos == [(TEL, "Nos vemos manana a las 10")]
+    assert wamid == "wamid.1"
+
+    fila = guardados_del_doctor[-1]
+    assert fila["origen"] == "panel", "sin esto el hilo no distingue de donde salio"
+    assert fila["autor"] == "Dra. Ruiz" and fila["wamid"] == "wamid.1"
+    assert fila["fallo"] is None
+
+    texto, tema, silencioso, _ = tg.mensajes[-1]
+    assert tema == TEMA and silencioso is True, "el hilo del paciente va mudo"
+    assert "Dra. Ruiz" in texto and "Nos vemos manana a las 10" in texto
+
+
+def test_el_eco_NO_le_abre_hilo_a_quien_no_lo_tiene(monkeypatch):
+    """Un texto nunca estrena expediente (no negociable 14): eso es del primer archivo o de
+    un escalamiento. Si no, cada mensaje del panel a un numero equivocado abriria uno."""
+    monkeypatch.setattr(relevo, "_tema_de", lambda url, tel: None)
+    tg, wa = TelegramFalso(), WhatsAppFalso()
+
+    asyncio.run(
+        relevo.escribir_desde_el_panel(
+            telefono=TEL,
+            texto="hola",
+            autor="Dra. Ruiz",
+            telegram=tg,
+            whatsapp=wa,
+            database_url=URL,
+        )
+    )
+
+    assert wa.textos, "al paciente SI se le escribe"
+    assert tg.creados == [] and tg.mensajes == []
+
+
+def test_si_WhatsApp_rechaza_el_envio_del_panel_la_fila_queda_con_el_motivo_y_SIN_wamid():
+    """Y ademas PROPAGA, al reves que el carril de Telegram.
+
+    Alla el doctor ya ve su mensaje escrito en el hilo y lo unico que se puede hacer es
+    reaccionar; aqui esta mirando la pantalla y esperando la respuesta, asi que un envio que
+    no salio tiene que llegarle como un error y no como un mensaje mas en la conversacion.
+    """
+    tg, wa = TelegramFalso(), WhatsAppFalso(revienta=True)
+
+    with pytest.raises(RuntimeError):
+        asyncio.run(
+            relevo.escribir_desde_el_panel(
+                telefono=TEL,
+                texto="Nos vemos manana",
+                autor="Dra. Ruiz",
+                telegram=tg,
+                whatsapp=wa,
+                database_url=URL,
+            )
+        )
+
+    fila = guardados_del_doctor[-1]
+    assert fila["wamid"] is None
+    assert "Meta devolvio 400" in fila["fallo"]
+    assert fila["origen"] == "panel"
+    assert fila["texto"] == "Nos vemos manana", "lo que no salio tambien queda escrito"
+
+
+def test_una_cita_que_NO_se_pudo_agendar_NO_cierra_el_relevo(monkeypatch):
+    """La laguna que traia el plan de esta pantalla, y es el no negociable 1 por la puerta de
+    atras: `cerrar(cita=...)` solo se lo CUENTA a Daniela, no crea nada.
+
+    Sin esto, el doctor marca «si hubo cita», el relevo se cierra, Daniela cree que existe y
+    el paciente se presenta a una clinica donde nadie lo espera.
+    """
+    cerrados = []
+
+    async def _cerrar_espia(*a, **k):
+        cerrados.append(k.get("motivo"))
+        return True
+
+    monkeypatch.setattr(relevo, "cerrar", _cerrar_espia)
+    monkeypatch.setattr(
+        relevo,
+        "_agendar",
+        lambda url, **k: (False, "⚠️ <b>No se pudo agendar</b>: esa hora ya esta llena."),
+    )
+    tg = TelegramFalso()
+
+    with pytest.raises(relevo.NoSePudoAgendar) as e:
+        asyncio.run(
+            relevo.cerrar_desde_el_panel(
+                telefono=TEL,
+                doctor="Dra. Ruiz",
+                hubo_cita=True,
+                cuando=datetime(2099, 1, 5, 10, 0, tzinfo=ZONA_BOGOTA),
+                tratamiento="ortodoncia",
+                telegram=tg,
+                database_url=URL,
+                calendario=object(),
+            )
+        )
+
+    assert cerrados == [], "el relevo sigue abierto: Daniela callada y el doctor escribiendo"
+    assert "<b>" not in str(e.value), "el aviso esta escrito para Telegram; el panel no es HTML"
+    assert "esa hora ya esta llena" in str(e.value)
+    assert any("llena" in m[0] for m in tg.mensajes), "y el hilo tambien se entera"
+
+
+def test_el_cierre_del_panel_agenda_con_la_MISMA_maquinaria_y_luego_cierra(monkeypatch):
+    """Cupo -> Calendar -> fila, la de `_agendar`. Una cuarta via de escritura de citas es
+    exactamente lo que este proyecto no se puede permitir."""
+    llamadas, cerrados = [], []
+
+    async def _cerrar_espia(conv, **k):
+        cerrados.append((conv, k.get("motivo"), k.get("cita"), k.get("doctor")))
+        return True
+
+    monkeypatch.setattr(relevo, "cerrar", _cerrar_espia)
+    monkeypatch.setattr(
+        relevo,
+        "_agendar",
+        lambda url, **k: (llamadas.append(k), (True, "✅ Cita registrada"))[1],
+    )
+    cuando = datetime(2099, 1, 5, 10, 0, tzinfo=ZONA_BOGOTA)
+
+    cerro = asyncio.run(
+        relevo.cerrar_desde_el_panel(
+            telefono=TEL,
+            doctor="Dra. Ruiz",
+            hubo_cita=True,
+            cuando=cuando,
+            tratamiento="ortodoncia",
+            nombre="Ana Ruiz",
+            telegram=TelegramFalso(),
+            database_url=URL,
+            calendario=object(),
+        )
+    )
+
+    assert cerro is True
+    assert llamadas[0]["inicio"] == cuando
+    assert llamadas[0]["tratamiento"] == "ortodoncia"
+    assert cerrados == [(CONV, "devuelto_por_doctor", cuando, "Dra. Ruiz")]
+
+
+def test_una_hora_SIN_ZONA_se_lee_como_hora_de_Bogota(monkeypatch):
+    """Un `<input type="datetime-local">` manda «2099-01-05T10:00», sin zona. Tratarla como
+    UTC moveria la cita cinco horas sin que nadie lo note hasta que el paciente se presente.
+    """
+    llamadas = []
+
+    async def _cerrar_espia(*a, **k):
+        return True
+
+    monkeypatch.setattr(relevo, "cerrar", _cerrar_espia)
+    monkeypatch.setattr(
+        relevo,
+        "_agendar",
+        lambda url, **k: (llamadas.append(k), (True, "ok"))[1],
+    )
+
+    asyncio.run(
+        relevo.cerrar_desde_el_panel(
+            telefono=TEL,
+            doctor="Dra. Ruiz",
+            hubo_cita=True,
+            cuando=datetime(2099, 1, 5, 10, 0),
+            tratamiento="ortodoncia",
+            telegram=TelegramFalso(),
+            database_url=URL,
+            calendario=object(),
+        )
+    )
+
+    assert llamadas[0]["inicio"] == datetime(2099, 1, 5, 10, 0, tzinfo=ZONA_BOGOTA)
+
+
+def test_cerrar_SIN_cita_no_toca_la_agenda(monkeypatch):
+    cerrados = []
+
+    async def _cerrar_espia(conv, **k):
+        cerrados.append(k.get("cita"))
+        return True
+
+    monkeypatch.setattr(relevo, "cerrar", _cerrar_espia)
+    monkeypatch.setattr(
+        relevo, "_agendar", lambda url, **k: pytest.fail("no habia cita que agendar")
+    )
+
+    asyncio.run(
+        relevo.cerrar_desde_el_panel(
+            telefono=TEL,
+            doctor="Dra. Ruiz",
+            hubo_cita=False,
+            telegram=TelegramFalso(),
+            database_url=URL,
+            calendario=object(),
+        )
+    )
+
+    assert cerrados == [None]
+
+
+def test_sin_calendario_el_cierre_con_cita_NO_se_traga_la_promesa(monkeypatch):
+    """`CalendarioCaido` deja `calendario` sin servir. Cerrar igual seria confirmarle al
+    paciente una cita que no existe: el no negociable 1."""
+
+    async def _cerrar_espia(*a, **k):
+        pytest.fail("se cerro el relevo sin haber podido agendar")
+
+    monkeypatch.setattr(relevo, "cerrar", _cerrar_espia)
+
+    with pytest.raises(relevo.NoSePudoAgendar):
+        asyncio.run(
+            relevo.cerrar_desde_el_panel(
+                telefono=TEL,
+                doctor="Dra. Ruiz",
+                hubo_cita=True,
+                cuando=datetime(2099, 1, 5, 10, 0, tzinfo=ZONA_BOGOTA),
+                tratamiento="ortodoncia",
+                telegram=TelegramFalso(),
+                database_url=URL,
+                calendario=None,
+            )
+        )
+
+
+def test_una_cita_en_el_PASADO_no_llega_a_tocar_el_cupo(monkeypatch):
+    monkeypatch.setattr(
+        relevo, "_agendar", lambda url, **k: pytest.fail("se tomo un cupo del pasado")
+    )
+
+    with pytest.raises(relevo.NoSePudoAgendar) as e:
+        asyncio.run(
+            relevo.cerrar_desde_el_panel(
+                telefono=TEL,
+                doctor="Dra. Ruiz",
+                hubo_cita=True,
+                cuando=datetime(2020, 1, 5, 10, 0, tzinfo=ZONA_BOGOTA),
+                tratamiento="ortodoncia",
+                telegram=TelegramFalso(),
+                database_url=URL,
+                calendario=object(),
+            )
+        )
+
+    assert "ya pasó" in str(e.value)

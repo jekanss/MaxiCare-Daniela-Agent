@@ -325,10 +325,20 @@ esperando_fecha`. Una pantalla no tiene esa limitación: pregunta las cuatro cos
                                     [ Devolvérsela a Daniela ]
 ```
 
-Y ese botón llama a **`relevo.cerrar(id, motivo='devuelto_por_doctor', cita=…, doctor=…)`**, la
-misma función que usa Telegram. No hay dos implementaciones que puedan separarse: hay un
-formulario que recoge lo que la función ya pedía. `cierre_pendiente` no se toca desde el panel
-—ese estado es la máquina de Telegram— y el cierre del panel es directo.
+Y ese botón llama a las **dos** funciones que usa Telegram, en el mismo orden: primero
+`relevo._agendar(...)` —cupo, Google Calendar, fila— y **solo si esa dice que sí**,
+`relevo.cerrar(id, motivo='devuelto_por_doctor', cita=…, doctor=…)`. No hay dos
+implementaciones que puedan separarse: hay un formulario que recoge lo que las funciones ya
+pedían. `cierre_pendiente` no se toca desde el panel —ese estado es la máquina de Telegram— y
+el cierre del panel es directo.
+
+> **Esta frase decía solo `cerrar`, y estaba mal** (corregido el 22/09/2026, al implementarla).
+> El `cita=` de `cerrar` **no crea ninguna cita**: su único uso es `_nota_del_relevo`, o sea
+> contárselo a Daniela. Cerrar sin pasar por `_agendar` deja al doctor marcando «sí hubo
+> cita», a Daniela creyendo que existe y al paciente presentándose en una clínica donde nadie
+> lo espera — el no negociable 1 por la puerta de atrás. Si `_agendar` dice que no (la hora se
+> llenó, Google no contesta), **el relevo NO se cierra**: llega un 409, el formulario se queda
+> puesto y el doctor escribe otra hora, que es exactamente lo que hace el diálogo del hilo.
 
 El desplegable de tratamiento sale de `panel.vocabulario_activo()`, la lista viva. Es la
 excepción del no negociable 19 mirada de frente: allí el `tratamiento` del relevo se guarda tal
