@@ -6,7 +6,7 @@
    Inter que apuntaban a `static.figma.com`. Ninguna se usaba -- toda la aplicación pide
    'Space Grotesk' -- y eran restos de los archivos de importación de Figma. */
 
-@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=Sora:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500&display=swap');
 @import 'tailwindcss';
 
 @theme {
@@ -37,3 +37,20 @@ body {
 ::-webkit-scrollbar { width: 4px; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: rgba(124, 58, 237, 0.5); border-radius: 2px; }
+
+/* Las animaciones de la portada, con los nombres y las curvas del archivo de diseño
+   (`docs/diseno/panel-2026-09-22.dc.html`). Viven aquí y no en la pantalla porque un
+   `@keyframes` no se puede declarar en un `style` inline, que es el dialecto del resto
+   del panel.
+
+   `mcGrow` y `mcTick` las usa la rejilla de tarjetas; `mcPulse`, el punto verde de la
+   cabecera; `mcRise`, la entrada de cada bloque. */
+@keyframes mcRise { from { opacity: 0; transform: translateY(16px); } to { opacity: 1; transform: none; } }
+@keyframes mcGrow { from { transform: scaleX(0); } to { transform: scaleX(1); } }
+@keyframes mcTick { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+@keyframes mcPulse { 0% { opacity: 1; transform: scale(1); } 70%, 100% { opacity: 0; transform: scale(2.6); } }
+
+/* Nadie que haya pedido menos movimiento tiene por qué ver nada de lo de arriba. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; }
+}

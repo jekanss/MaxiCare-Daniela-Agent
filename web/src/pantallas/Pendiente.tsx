@@ -72,7 +72,10 @@ export default function Pendiente({ seccion }: { seccion: Seccion }) {
   return (
     <div className="flex-1 overflow-y-auto" style={{ fontFamily: SP, backgroundColor: '#F9FAFB' }}>
       <header className="px-8 py-4 border-b" style={{ backgroundColor: '#FFFFFF', borderColor: '#E5E7EB' }}>
-        <h1 className="text-lg font-bold" style={{ color: '#111827' }}>
+        {/* El icono es un SVG de trazo desde que el menú pasó a oscuro, no un emoji: por
+            eso va en una fila flexible y no pegado al texto, que lo dejaba fuera de la
+            línea base del título. */}
+        <h1 className="text-lg font-bold flex items-center gap-2" style={{ color: '#111827' }}>
           {seccion.icono} {seccion.etiqueta}
         </h1>
         <p className="text-sm" style={{ color: '#6B7280' }}>Todavía no construida</p>

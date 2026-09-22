@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import Sidebar, { CONFIGURACION, PRUEBAS, SECCIONES, type Seccion, type SeccionId } from '@/componentes/Sidebar'
 import Ingreso from '@/pantallas/Ingreso'
+import Inicio from '@/pantallas/Inicio'
 import Agenda from '@/pantallas/Agenda'
 import Pruebas from '@/pantallas/Pruebas'
 import Tratamientos from '@/pantallas/Tratamientos'
@@ -15,10 +16,10 @@ const TODAS: Seccion[] = [...SECCIONES, CONFIGURACION, PRUEBAS]
  * Es cuatro líneas más y compra tres cosas que en una herramienta que se usa varias horas al
  * día se notan: el botón «atrás» del navegador funciona, recargar no te devuelve al inicio, y
  * una pantalla se puede pasar por chat como enlace. No se trajo `react-router` porque son
- * ocho destinos planos sin parámetros: la dependencia costaría más de lo que resuelve. */
+ * nueve destinos planos sin parámetros: la dependencia costaría más de lo que resuelve. */
 function seccionDelHash(): SeccionId {
   const id = window.location.hash.replace(/^#\/?/, '') as SeccionId
-  return TODAS.some((s) => s.id === id) ? id : 'agenda'
+  return TODAS.some((s) => s.id === id) ? id : 'inicio'
 }
 
 export default function App() {
@@ -64,7 +65,11 @@ export default function App() {
   return (
     <div className="flex h-screen overflow-hidden" style={{ backgroundColor: '#F9FAFB' }}>
       <Sidebar activa={activa} ir={ir} sesion={sesion} alSalir={cerrarSesion} />
-      {activa === 'agenda' ? (
+      {activa === 'inicio' ? (
+        // La portada. De solo lectura, como SinResolver: vuelve al ingreso por el mismo
+        // camino si la sesión caduca a mitad de la mañana.
+        <Inicio alCaducarSesion={() => setSesion(null)} />
+      ) : activa === 'agenda' ? (
         // Escribe --marca asistencias--, así que puede toparse con un 401 a mitad de la tarde
         // igual que Tratamientos y SinResolver, y vuelve al ingreso por el mismo camino.
         <Agenda alCaducarSesion={() => setSesion(null)} />
