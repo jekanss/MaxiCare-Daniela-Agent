@@ -59,6 +59,34 @@ siguiente. La alternativa --una migración más que reparase el CHECK después--
 armada para la próxima vez. Quien tenga que elegir otra vez: se edita la vieja **solo** para
 volverla inofensiva, nunca para cambiar lo que hizo.
 
+# Un DELETE dentro de una migracion corre en CADA arranque
+
+La 029 borra los casos de prueba de «sin resolver» para que la medicion empiece de cero. Un
+`DELETE FROM casos_sin_resolver` a pelo ahi habria borrado la medicion ENTERA en el siguiente
+despliegue, y en todos los siguientes: las migraciones se aplican todas, siempre.
+
+Es el modo de fallo de la 021 con un filo peor. **Aquel abortaba ruidosamente** --
+`CheckViolation`, `inicializar_base.py` con codigo 1, despliegue que no arranca -- y este no
+deja nada: la tabla vuelve a cero, la pantalla se ve vacia, y «no ha pasado nada raro este
+mes» es una lectura perfectamente creible de una pantalla vacia.
+
+La guarda es un dato que la propia migracion escribe:
+
+```sql
+IF NOT EXISTS (SELECT 1 FROM configuracion WHERE clave = 'medicion_sin_resolver_desde') THEN
+    DELETE FROM casos_sin_resolver;
+    INSERT INTO configuracion (clave, valor, descripcion) VALUES ('medicion_...', now(), ...);
+END IF;
+```
+
+Las dos sentencias van en el MISMO bloque: escribir la marca sin borrar, o borrar sin
+escribirla, deja un estado que la migracion no sabe interpretar en el arranque siguiente.
+
+**La regla: una migracion que BORRA datos necesita una marca que diga que ya corrio, y esa
+marca la escribe ella misma en la misma transaccion.** Lo fija
+`test_sin_resolver_neon.py::test_reaplicar_las_migraciones_NO_borra_los_casos_que_ya_se_midieron`,
+que llama a `aplicar_esquema` dos veces con una fila en medio.
+
 # Lo que el esquema protege
 
 - `reservas` tiene `UNIQUE (inicio, cupo_num)`. Ese constraint **es** el control de

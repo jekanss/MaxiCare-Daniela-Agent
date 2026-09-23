@@ -8,6 +8,7 @@ import Pruebas from '@/pantallas/Pruebas'
 import Tratamientos from '@/pantallas/Tratamientos'
 import SinResolver from '@/pantallas/SinResolver'
 import PantallaPendiente from '@/pantallas/Pendiente'
+import { CargandoPantalla } from '@/componentes/Estado'
 import { salir, sesionActual, type Sesion } from '@/api'
 
 const TODAS: Seccion[] = [...SECCIONES, CONFIGURACION, PRUEBAS]
@@ -27,6 +28,17 @@ export default function App() {
   const [sesion, setSesion] = useState<Sesion | null>(null)
   const [comprobando, setComprobando] = useState(true)
   const [activa, setActiva] = useState<SeccionId>(seccionDelHash)
+  /* Un salto de «Sin resolver» a la conversacion donde paso el caso.
+   *
+   * Vive aqui y NO en el hash, a proposito: el hash lleva nueve destinos planos sin
+   * parametros --la decision esta tres lineas mas arriba-- y meterle uno obligaria a
+   * cambiar `seccionDelHash` y a volver el enrutado un router de verdad por un solo salto.
+   * Lo que se pierde: este salto no se puede pegar como enlace. Lo que no se pierde: el
+   * boton «atras» sigue funcionando, porque `ir` sigue escribiendo el hash.
+   *
+   * Se consume UNA vez. Sin limpiarlo, volver a Conversaciones desde el menu media hora
+   * despues reabriria aquella conversacion sola, sin que nadie lo hubiera pedido. */
+  const [saltarA, setSaltarA] = useState<string | null>(null)
 
   // Al cargar se le pregunta al servidor si la cookie sigue valiendo. Sin esto, recargar la
   // página devolvería al login aunque la sesión estuviera viva -- la cookie es `HttpOnly` y
@@ -54,9 +66,18 @@ export default function App() {
   }
 
   if (comprobando) {
-    // Un instante en blanco, no un spinner: en una red local esto dura menos de lo que tarda
-    // en verse, y un spinner que parpadea se lee como si algo hubiera fallado.
-    return <div style={{ minHeight: '100vh', backgroundColor: '#07060B' }} />
+    // Esto decía «un instante en blanco, no un spinner: en una red local dura menos de lo
+    // que tarda en verse». Era cierto en una red local y falso donde vive el panel: la
+    // comprobación de sesión cruza internet hasta el VPS y de ahí a Neon, que está en otro
+    // continente. Lo que MaxiCare veía al abrir el panel el 22/09/2026 era un rectángulo
+    // negro sin una palabra, y después una pantalla de rectángulos grises también sin una
+    // palabra (ver `componentes/Estado.tsx`). Para quien mira, eso no es «cargando»: es
+    // «no funciona».
+    return (
+      <div className="flex" style={{ minHeight: '100vh' }}>
+        <CargandoPantalla oscuro que="MaxiCare · Daniela" detalle="Comprobando tu sesión…" />
+      </div>
+    )
   }
 
   if (!sesion) return <Ingreso alEntrar={setSesion} />
@@ -72,7 +93,11 @@ export default function App() {
         <Inicio alCaducarSesion={() => setSesion(null)} />
       ) : activa === 'conversaciones' ? (
         // Mira y, si el rol lo permite, escribe. El 401 se maneja como en las demas.
-        <Conversaciones alCaducarSesion={() => setSesion(null)} />
+        <Conversaciones
+          alCaducarSesion={() => setSesion(null)}
+          seleccionInicial={saltarA}
+          alConsumirSeleccion={() => setSaltarA(null)}
+        />
       ) : activa === 'agenda' ? (
         // Escribe --marca asistencias--, así que puede toparse con un 401 a mitad de la tarde
         // igual que Tratamientos y SinResolver, y vuelve al ingreso por el mismo camino.
@@ -92,7 +117,13 @@ export default function App() {
         // Pantalla puramente informativa: sin sesion no hay nada que mostrar mas que el
         // ingreso, y con sesion caducada a mitad de lectura vuelve a el desde aqui, igual
         // que Tratamientos.
-        <SinResolver alCaducarSesion={() => setSesion(null)} />
+        <SinResolver
+          alCaducarSesion={() => setSesion(null)}
+          alAbrirConversacion={(telefono) => {
+            setSaltarA(telefono)
+            ir('conversaciones')
+          }}
+        />
       ) : (
         <PantallaPendiente seccion={seccion} />
       )}

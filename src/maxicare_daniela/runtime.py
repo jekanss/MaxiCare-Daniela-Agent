@@ -2100,7 +2100,16 @@ async def api_sin_resolver(quien: dict = Depends(usuario_actual)) -> dict:
     """
     with persistencia.conectar(config.database_url) as conn:
         casos = persistencia.casos_recientes(conn)
-    return {"casos": casos, "es_admin": quien["rol"] == "admin"}
+        # Desde cuando cuentan estos numeros. Sale en la pantalla porque sin ella «3 veces»
+        # no dice si son tres veces en dos dias o en dos meses, y porque la medicion empezo
+        # de cero el 22/09/2026 al borrar los casos de prueba (migracion 029). `None` si la
+        # 029 no se aplico en este esquema: la pantalla calla en vez de inventarse una fecha.
+        desde = persistencia.medicion_sin_resolver_desde(conn)
+    return {
+        "casos": casos,
+        "es_admin": quien["rol"] == "admin",
+        "midiendo_desde": desde,
+    }
 
 
 @app.get("/api/inicio")

@@ -12,7 +12,7 @@ import {
   type Sesion,
   type TratamientoFila,
 } from '@/api'
-import { Bloque, Cargando, Fallo } from '@/componentes/Estado'
+import { CargandoPantalla, Fallo } from '@/componentes/Estado'
 
 const SP = "'Space Grotesk', sans-serif"
 
@@ -1216,6 +1216,9 @@ export default function Tratamientos({
     }
   }
 
+  // Sin cabecera ni filtros: la pantalla no se enseña a medias. Ver `CargandoPantalla`.
+  if (cargando) return <CargandoPantalla que="Leyendo la base…" fondo="#F9FAFB" />
+
   return (
     <div className="flex-1 flex flex-col min-w-0 overflow-hidden" style={{ fontFamily: SP, backgroundColor: '#F9FAFB' }}>
       <header className="shrink-0 px-8 py-4 border-b" style={{ backgroundColor: '#FFFFFF', borderColor: '#E5E7EB' }}>
@@ -1291,23 +1294,7 @@ export default function Tratamientos({
 
           {verBitacora && <Bitacora cambios={cambios} fallo={falloBitacora} />}
 
-          {cargando ? (
-            <Cargando que="Leyendo la base…" className="flex flex-col gap-3">
-              {[0, 1, 2, 3, 4].map((i) => (
-                <div
-                  key={i}
-                  className="rounded-xl px-5 py-4 flex items-center justify-between gap-4"
-                  style={{ backgroundColor: '#FFFFFF', border: '1px solid #E5E7EB' }}
-                >
-                  <div className="flex flex-col gap-2 flex-1 min-w-0">
-                    <Bloque alto={13} ancho="34%" retraso={i * 110} />
-                    <Bloque alto={11} ancho="56%" retraso={i * 110 + 60} />
-                  </div>
-                  <Bloque alto={24} ancho={78} radio={8} retraso={i * 110 + 30} />
-                </div>
-              ))}
-            </Cargando>
-          ) : pestana === 'tratamientos' ? (
+          {pestana === 'tratamientos' ? (
             tratamientos.map((t) => (
               <FilaTratamiento
                 key={t.clave}

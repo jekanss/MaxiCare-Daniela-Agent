@@ -127,8 +127,29 @@ def huella_humano(motivo: str) -> str:
 
 
 def sin_telefonos(ejemplos: list[dict]) -> list[str]:
-    """Solo las frases. Lo unico que puede cruzar hacia el navegador."""
+    """Solo las frases, sin el numero de quien las escribio."""
     return [e["texto"] for e in ejemplos if e.get("texto")]
+
+
+def telefonos_de(ejemplos: list[dict]) -> list[str]:
+    """Los numeros detras de los ejemplos, sin repetir y en el orden en que aparecen.
+
+    Hasta el 22/09/2026 el telefono se quedaba aqui dentro: `casos_recientes` solo dejaba
+    salir las frases «para que ni siquiera viaje al navegador». Esa cautela no protegia nada
+    --la pantalla de Conversaciones le ensena a esa MISMA persona la lista entera de numeros
+    con su nombre al lado-- y costaba lo unico que convierte un caso en algo accionable:
+    poder abrir la conversacion donde paso. MaxiCare pidio ese enlace.
+
+    Lo que sigue sin salir es la correspondencia frase -> numero. Solo se dice de que
+    conversaciones salio el caso, no quien dijo cada cosa: dentro del panel da igual, pero
+    un caso es un AGREGADO y emparejar cada frase con su autor lo convertiria en otra cosa.
+    """
+    vistos: list[str] = []
+    for e in ejemplos:
+        tel = (e.get("telefono") or "").strip()
+        if tel and tel not in vistos:
+            vistos.append(tel)
+    return vistos
 
 
 def frase_para_el_informe(textos: list[str | None]) -> str | None:

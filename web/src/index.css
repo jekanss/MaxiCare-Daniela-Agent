@@ -58,6 +58,11 @@ body {
    esqueleto existe para evitar. */
 @keyframes mcLatido { 0%, 100% { opacity: 1; } 50% { opacity: 0.45; } }
 
+/* El giro del anillo de `CargandoPantalla`, el loader que tapa la pantalla entera mientras
+   los datos no están. Lineal y no `ease`: un anillo que acelera y frena se lee como si se
+   atascara, y esta espera dura de uno a cinco segundos. */
+@keyframes mcGiro { to { transform: rotate(360deg); } }
+
 /* Nadie que haya pedido menos movimiento tiene por qué ver nada de lo de arriba. */
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }

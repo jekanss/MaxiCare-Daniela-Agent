@@ -9,7 +9,7 @@ import {
   type CitaDeAgenda,
   type CorreccionDeAgenda,
 } from '@/api'
-import { Bloque, Cargando, Fallo } from '@/componentes/Estado'
+import { CargandoPantalla, Fallo } from '@/componentes/Estado'
 
 const SP = "'Space Grotesk', sans-serif"
 
@@ -470,43 +470,16 @@ export default function Agenda({ alCaducarSesion }: { alCaducarSesion: () => voi
     return (
       <div className="flex-1 flex flex-col min-w-0 overflow-hidden" style={marco}>
         <Cabecera dia={dia} irA={setDia} resumen={null} />
-        {/* El esqueleto imita la rejilla y no la sustituye por un texto, porque esta es la
-            espera más larga del panel --de 3 a 5 segundos contra Google-- y es la única
-            pantalla donde el usuario ya sabe qué forma tiene lo que está esperando. */}
-        <Cargando
-          que="Cargando la agenda y contrastándola con Google Calendar…"
-          className="flex-1 overflow-hidden"
-        >
-          <p className="px-8 pt-6 pb-2 text-sm" style={{ color: '#9CA3AF' }}>
-            Contrastando con Google Calendar…
-          </p>
-          <div className="py-2">
-            {[0, 1, 2, 3, 4, 5].map((i) => (
-              <div
-                key={i}
-                className="relative flex"
-                style={{ minHeight: ALTO_HORA, borderTop: '1px solid #F3F4F6' }}
-              >
-                <div className="shrink-0 w-16 flex items-start justify-end pr-3">
-                  <Bloque alto={11} ancho={32} retraso={i * 100} estilo={{ marginTop: -4 }} />
-                </div>
-                <div className="flex-1 min-w-0 pl-3 pr-8">
-                  {i % 2 === 0 && (
-                    <div className="pt-3 pb-2">
-                      <div
-                        className="rounded-xl px-4 py-3 flex flex-col gap-2"
-                        style={{ backgroundColor: '#FFFFFF', border: '1px solid #E5E7EB' }}
-                      >
-                        <Bloque alto={13} ancho="38%" retraso={i * 100} />
-                        <Bloque alto={11} ancho="26%" retraso={i * 100 + 60} />
-                      </div>
-                    </div>
-                  )}
-                </div>
-              </div>
-            ))}
-          </div>
-        </Cargando>
+        {/* La cabecera SÍ se queda, y es la única pantalla donde se queda: sus flechas
+            cambian de día, y esta espera --de 3 a 5 segundos contra Google-- es la más larga
+            del panel. Taparla entera obligaría a esperar a que cargue un día que ya no
+            quieres ver para poder pedir otro. El loader cubre la rejilla, que es lo que no
+            se puede enseñar a medias. */}
+        <CargandoPantalla
+          que="Cargando la agenda…"
+          detalle="Contrastándola con Google Calendar. Puede tardar unos segundos."
+          fondo="#F9FAFB"
+        />
       </div>
     )
   }

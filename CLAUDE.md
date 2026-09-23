@@ -195,6 +195,22 @@ una —qué se midió, qué costó— está en la regla que cubre ese archivo.
    es. Y `/clearstate` borra los ejemplos **sin** bajar el contador: bajarlo borraría de la
    cuenta a un paciente real cada vez que alguien resetea su número, y «doce personas
    preguntaron por ortodoncia» dejaría de ser cierto.
+22b. **La medicion de «sin resolver» empieza el 22/09/2026 y el informe tiene DOS mitades.**
+   Los casos que habia eran de pruebas y la 029 los borro, escribiendo en `configuracion` la
+   marca `medicion_sin_resolver_desde` --que es a la vez la guarda que impide que ese `DELETE`
+   vuelva a correr en el siguiente arranque, y la fecha que la pantalla ensena para que «3
+   veces» signifique algo (`.claude/rules/migraciones.md`)--. **Y el analista no daba informes
+   especificos porque no PODIA**: recibia la etiqueta del tipo y la huella cruda, y «en que
+   paso se escalo» no esta en ninguna de las dos --esta en el codigo que produjo el caso--.
+   Por eso se tocaron las dos mitades: `analista.MECANICA` y `_partes_de_la_huella` le ponen
+   delante lo que solo sabia el codigo, y el prompt le pide separar lo COMPROBADO de la
+   `Hipotesis:`, no atribuirle reacciones al paciente que no esten en una frase literal, y
+   cerrar cada recomendacion con cuando tiene sentido DEJARLO COMO ESTA. Cambiar solo el
+   prompt habria dado lo peor: un informe que suena especifico sobre cosas que el modelo no
+   puede saber. **El telefono del caso SI viaja ahora** (`telefonos`), para poder abrir la
+   conversacion desde el caso; lo que sigue sin viajar es que frase dijo cada numero, porque
+   un caso es un AGREGADO.
+
 23. **El rótulo de un quick reply llega en `button.text`, y `uso_indebido` NO lo evalúa.** Meta
    manda `type: "button"`, no `text`: mirar solo `text.body` deja el turno MUDO —sin un error en
    ningún log— y los dos botones que Meta aprobó sin servir para nada. Y el rótulo suelto

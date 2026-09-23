@@ -564,6 +564,36 @@ def consultar_conocimiento(conn, tratamiento: str, concepto: str | None = None) 
     return formatear_conocimiento(filas, tratamiento=tratamiento, concepto=concepto)
 
 
+#: La clave de `configuracion` donde la 029 dejo escrito desde cuando cuentan los casos de
+#: «sin resolver». La escribe esa migracion y no la toca nadie mas: reescribirla borraria el
+#: sentido de los contadores que ya estan sobre la pantalla.
+CLAVE_MEDICION_SIN_RESOLVER = "medicion_sin_resolver_desde"
+
+
+def medicion_sin_resolver_desde(conn) -> str | None:
+    """Desde cuando cuentan los casos de «sin resolver», en ISO 8601 UTC, o `None`.
+
+    `None` significa que la 029 no se ha aplicado en este esquema, no que no haya medicion.
+    La pantalla lo trata como «no lo se» y calla, que es lo correcto: inventar una fecha de
+    inicio seria peor que no dar ninguna.
+
+    No pasa por `leer_configuracion` porque esa funcion devuelve `dict[str, int]` y se salta
+    sola --por su `except ... continue`-- todo valor que no sea un entero. Esta marca es una
+    fecha, asi que nunca saldria de ahi.
+    """
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT valor FROM configuracion WHERE clave = %s",
+                (CLAVE_MEDICION_SIN_RESOLVER,),
+            )
+            fila = cur.fetchone()
+            return fila[0] if fila else None
+    except Exception:
+        conn.rollback()
+        raise
+
+
 def leer_configuracion(conn) -> dict[str, int]:
     """La configuración operativa vigente, con los defaults como respaldo."""
     valores = dict(CONFIGURACION_POR_DEFECTO)
@@ -4213,7 +4243,7 @@ def casos_recientes(conn, *, dias: int = 30, limite: int = 50) -> list[dict[str,
     deja la transaccion de la conexion tan abortada como un `INSERT`, y esta funcion puede
     correr sobre una conexion que el llamador siga usando despues.
     """
-    from .sin_resolver import sin_telefonos
+    from .sin_resolver import sin_telefonos, telefonos_de
 
     try:
         with conn.cursor() as cur:
@@ -4230,7 +4260,8 @@ def casos_recientes(conn, *, dias: int = 30, limite: int = 50) -> list[dict[str,
                 {
                     "huella": huella, "tipo": tipo, "contador": contador, "escalo": escalo,
                     "primera_vez": primera.isoformat(), "ultima_vez": ultima.isoformat(),
-                    "ejemplos": sin_telefonos(json.loads(ejemplos)),
+                    "ejemplos": sin_telefonos(guardados := json.loads(ejemplos)),
+                    "telefonos": telefonos_de(guardados),
                     "informe": json.loads(informe) if informe else None,
                 }
                 for huella, tipo, contador, escalo, primera, ultima, ejemplos, informe

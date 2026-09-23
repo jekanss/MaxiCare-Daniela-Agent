@@ -12,6 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from maxicare_daniela import analista
 from maxicare_daniela.analista import InformeDelCaso, texto_del_caso
 
 
@@ -107,8 +108,12 @@ def _montar(monkeypatch, *, casos, responder):
     class _RunnerFalso:
         @staticmethod
         async def run(agente, entrada, **kw):
-            huella = [l for l in entrada.splitlines() if l.startswith("huella: ")][0][8:]
-            caso = next(c for c in casos if c["huella"] == huella)
+            # Se identifica el caso por la entrada ENTERA y no rascando una linea concreta.
+            # Rascaba `huella: `, y el dia que `texto_del_caso` dejo de escribir esa linea
+            # --22/09/2026, cuando la huella paso a ir repartida en sus partes-- estas seis
+            # pruebas se cayeron a la vez por un cambio que no las afectaba. Comparar la
+            # entrada completa no se puede quedar viejo: o es la de ese caso, o no lo es.
+            caso = next(c for c in casos if analista.texto_del_caso(c) == entrada)
             return SimpleNamespace(final_output=responder(caso))
 
     def _sin_informe(c, *, limite, **kw):
@@ -332,3 +337,140 @@ def test_MAXICARE_ANALIZAR_SIN_RESOLVER_en_1_si_arranca_la_tarea(monkeypatch):
             pass
 
     asyncio.run(escenario())
+
+
+# ==========================================================================================
+# Lo que el analista VE, que es la mitad del arreglo del 22/09/2026
+#
+# MaxiCare pidio informes especificos --en que paso se escalo, cual fue la causa, que hacer--
+# y el prompt solo es la mitad: el modelo no podia ser especifico porque no recibia con que.
+# Estas pruebas fijan lo que ahora si recibe. Ninguna llama al modelo.
+# ==========================================================================================
+
+
+def test_la_entrada_lleva_la_MECANICA_de_la_clase_y_no_solo_su_etiqueta():
+    """Sin esto el modelo no tiene forma de saber en que paso se paso la conversacion a una
+    persona: esa informacion no esta en la huella, esta en el codigo que produjo el caso."""
+    texto = analista.texto_del_caso(_caso("falta_dato:ortodoncia:precio"))
+    assert "FALTA_DATO" in texto
+    assert "SIN DATO DOCUMENTADO" in texto, "la mecanica de la clase tiene que ir dentro"
+    assert analista.MECANICA["FALTA_DATO"] in texto
+
+
+def test_la_entrada_reparte_la_huella_en_sus_partes():
+    """`falta_dato:ortodoncia:precio` cruda produce «falta un dato de ortodoncia». Repartida
+    produce «el precio de la ortodoncia», que es lo que se puede accionar."""
+    texto = analista.texto_del_caso(_caso("falta_dato:ortodoncia:precio"))
+    assert "tratamiento por el que se pregunto: «ortodoncia»" in texto
+    assert "dato concreto que no estaba cargado: «precio»" in texto
+
+
+def test_las_cuatro_clases_de_huella_se_reparten_y_ninguna_se_queda_cruda():
+    """El reparto cubre las cuatro que `sin_resolver.py` sabe construir. Una clase nueva cae
+    en la rama de respaldo, que dice el identificador entero en vez de callarse."""
+    casos = {
+        "falta_dato:_general:formas de pago": "un dato general de la clinica",
+        "guardrail:uso_indebido:_general": "ningun tratamiento en concreto",
+        "roto:TimeoutError": "clase de la averia: TimeoutError",
+        "humano:clinico": "sub-motivo por el que se paso a una persona: clinico",
+    }
+    for huella, esperado in casos.items():
+        assert esperado in analista._partes_de_la_huella(huella), huella
+
+    inventada = analista._partes_de_la_huella("clase_que_no_existe:algo")
+    assert "clase_que_no_existe:algo" in inventada, "una clase nueva no puede quedar muda"
+
+
+def test_la_entrada_dice_la_PROPORCION_de_interrupciones_y_no_solo_el_numero():
+    """«se interrumpio a un doctor 2 de esas veces» y «todas las veces» son dos hechos de
+    negocio distintos, y el segundo es el que decide si urge. Un `escalo: 2` suelto obliga al
+    modelo a hacer la cuenta, y la hacia mal."""
+    assert "no se interrumpio a ningun doctor" in analista.texto_del_caso(
+        _caso("falta_dato:x:y") | {"escalo": 0, "contador": 4}
+    )
+    assert "todas las veces" in analista.texto_del_caso(
+        _caso("falta_dato:x:y") | {"escalo": 4, "contador": 4}
+    )
+    assert "2 de esas veces" in analista.texto_del_caso(
+        _caso("falta_dato:x:y") | {"escalo": 2, "contador": 4}
+    )
+
+
+def test_la_entrada_no_lleva_ni_un_telefono():
+    """Los ejemplos llegan ya sin telefono desde `casos_sin_informe`, pero esta entrada viaja
+    a OpenAI y conviene que la prueba lo diga: es el mismo criterio que puso `sin_telefonos`.
+    """
+    caso = _caso("falta_dato:ortodoncia:precio")
+    caso["ejemplos"] = ["cuanto vale la ortodoncia"]
+    assert "57" not in analista.texto_del_caso(caso).replace("2026", "")
+
+
+# ==========================================================================================
+# Lo que se le PIDE al analista
+#
+# Son pruebas sobre el texto del prompt, como `test_el_protocolo_de_alarma_sale_de_LA_BASE`.
+# No demuestran que el modelo obedezca --eso solo se ve contra la API real-- sino que la
+# instruccion sigue escrita. Lo que protegen es que nadie la borre al reordenar el prompt.
+# ==========================================================================================
+
+
+def _instrucciones() -> str:
+    return analista._analista.instructions
+
+
+def test_el_prompt_exige_separar_lo_comprobado_de_la_hipotesis():
+    """Es la peticion textual de MaxiCare: «Distingue una causa comprobada de una hipotesis».
+    Sin la etiqueta literal, las dos se leen igual y la clinica no sabe de cual fiarse."""
+    texto = _instrucciones()
+    assert "COMPROBADO" in texto
+    assert "Hipotesis:" in texto, "la marca tiene que ser literal, o no se distingue nada"
+
+
+def test_el_prompt_prohibe_inventarle_una_reaccion_al_paciente():
+    """«No atribuyas molestia al paciente ni otras reacciones sin evidencia». El analista ve
+    cinco frases sueltas, no la conversacion: cualquier estado de animo que escriba es
+    inventado salvo que este en una de esas frases."""
+    texto = _instrucciones()
+    assert "PROHIBIDO atribuirle al paciente una reaccion" in texto
+    assert "molestia" in texto
+
+
+def test_el_prompt_dice_lo_que_el_analista_NO_ve():
+    """Sin esta lista el modelo escribia como si hubiera leido la conversacion entera."""
+    assert analista.SIN_EVIDENCIA in _instrucciones()
+    assert "si acabo agendando" in analista.SIN_EVIDENCIA
+
+
+def test_la_recomendacion_tiene_que_ser_una_OPCION_con_su_alternativa():
+    """«Las recomendaciones deben presentarse como opciones; no deben modificar
+    automaticamente las reglas del negocio». Y la alternativa --dejarlo como esta-- es parte
+    del encargo, no un adorno: hay datos que la clinica prefiere que confirme una persona."""
+    texto = _instrucciones()
+    assert "DEJARLO COMO ESTA" in texto
+    assert "No ordenas ni das por hecho" in texto
+
+
+def test_el_prompt_sigue_prohibiendo_proponer_el_contenido_que_falta():
+    """La prohibicion mas vieja del modulo, y la que no se puede perder al reescribirlo: un
+    informe con un precio dentro es lo que alguien aprobaria de un clic hacia la base de
+    conocimiento."""
+    texto = _instrucciones()
+    assert "PROHIBIDO, sin excepcion" in texto
+    assert "no puedes decir cual es ese precio" in texto
+
+
+def test_la_recomendacion_cabe_entera_y_el_que_paso_sigue_acotado():
+    """Los topes subieron para que quepan las tres partes de la recomendacion, no para dejar
+    divagar: `que_paso` sigue siendo corto a proposito."""
+    campos = InformeDelCaso.model_fields
+    assert campos["recomiendo"].metadata[0].max_length == 700
+    assert campos["que_paso"].metadata[0].max_length == 420
+    # Y el ejemplo que dio MaxiCare, que es el listón, cabe:
+    largo = (
+        "Si quieres que Daniela responda estas consultas, anade al sistema las aseguradoras "
+        "aceptadas por cada doctor y las condiciones aplicables. Asi podra contestar futuras "
+        "preguntas sobre cobertura sin escalar por falta de ese dato. Si prefieres que una "
+        "persona confirme siempre esta informacion, manten el comportamiento actual e ignora "
+        "esta recomendacion."
+    )
+    InformeDelCaso(que_paso="x", por_que="y", recomiendo=largo)

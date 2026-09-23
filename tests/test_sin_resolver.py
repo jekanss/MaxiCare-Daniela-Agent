@@ -12,6 +12,7 @@ from maxicare_daniela.sin_resolver import (
     Senal,
     casos_del_turno,
     sin_telefonos,
+    telefonos_de,
 )
 
 
@@ -399,7 +400,15 @@ def test_una_frase_justo_en_el_tope_no_se_recorta():
 # ==========================================================================================
 
 
-def test_el_telefono_nunca_sale_hacia_la_pantalla():
+def test_la_frase_sale_sin_el_telefono_de_quien_la_escribio():
+    """`sin_telefonos` sigue haciendo lo de siempre: devolver SOLO las frases.
+
+    Lo que cambio el 22/09/2026 no es esto: es que ademas se manda la lista de telefonos
+    APARTE (`telefonos_de`), para poder abrir la conversacion desde el caso. La
+    correspondencia frase -> numero es lo que sigue sin salir, y esta prueba es lo que lo
+    fija: un caso es un agregado de varias personas, y emparejar cada frase con su autor lo
+    convertiria en otra cosa.
+    """
     ejemplos = [
         {"texto": "cuanto vale", "telefono": "+573001112233"},
         {"texto": "y en cuotas?", "telefono": "+573004445566"},
@@ -409,6 +418,31 @@ def test_el_telefono_nunca_sale_hacia_la_pantalla():
 
     assert salida == ["cuanto vale", "y en cuotas?"]
     assert not any("+57" in t for t in salida)
+
+
+def test_los_telefonos_del_caso_van_sin_repetir_y_en_orden():
+    """Dos frases del mismo numero son UNA conversacion que abrir, no dos botones iguales."""
+    ejemplos = [
+        {"texto": "cuanto vale", "telefono": "+573001112233"},
+        {"texto": "y en cuotas?", "telefono": "+573004445566"},
+        {"texto": "sigue ahi?", "telefono": "+573001112233"},
+    ]
+
+    assert telefonos_de(ejemplos) == ["+573001112233", "+573004445566"]
+
+
+def test_un_ejemplo_sin_telefono_no_deja_un_boton_vacio():
+    """`ejemplos` es TEXT con JSON dentro y lo escribieron versiones distintas del codigo: un
+    ejemplo viejo sin la clave, o con la cadena vacia, no puede producir un boton que lleve a
+    ninguna parte."""
+    ejemplos = [
+        {"texto": "a", "telefono": ""},
+        {"texto": "b"},
+        {"texto": "c", "telefono": "  "},
+        {"texto": "d", "telefono": "+573001112233"},
+    ]
+
+    assert telefonos_de(ejemplos) == ["+573001112233"]
 
 
 # ==========================================================================================

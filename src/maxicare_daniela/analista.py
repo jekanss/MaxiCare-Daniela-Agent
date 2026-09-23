@@ -9,6 +9,20 @@ La prohibicion que manda sobre todo lo demas: el informe describe el hueco y rec
 accion, JAMAS propone el contenido clinico ni una cifra. Si pudiera, alguien lo aprobaria de
 un clic y habriamos metido un precio alucinado a la base de conocimiento por la puerta de
 atras -- exactamente lo que `sin_cifra_no_documentada` existe para impedir.
+
+QUE CAMBIO EL 22/09/2026, y por que hacian falta las DOS mitades
+
+MaxiCare leyo los informes que salian y pidio otra cosa: que digan en que paso se paso la
+conversacion a una persona, cual fue la causa concreta, que se puede hacer en el negocio, y
+que distingan lo comprobado de lo supuesto. Lo que salia era generico --«falta un dato de
+ortodoncia», «revisar el caso»-- y la razon no era solo el prompt: **el modelo no tenia con
+que ser especifico**. Recibia la etiqueta del tipo y la huella cruda, y en que paso escala
+Daniela no esta en ninguna de las dos: esta en el codigo que produjo el caso.
+
+Asi que se tocaron las dos: `MECANICA` y `_partes_de_la_huella` le ponen delante lo que
+antes solo sabia el codigo, y las instrucciones le piden lo que MaxiCare pidio. Cambiar solo
+el prompt habria conseguido lo peor de los dos mundos: un informe que suena especifico sobre
+cosas que el modelo no puede saber.
 """
 
 from __future__ import annotations
@@ -65,11 +79,80 @@ class InformeDelCaso(BaseModel):
 
     Los topes no son decoracion: un informe de tres parrafos no lo abre nadie en una reunion.
     Un modelo con este `output_type` no puede divagar aunque quiera.
+
+    Subieron de 280/280/320 a 420/420/700 el 22/09/2026, y el que subio de verdad es el
+    tercero. La recomendacion tiene que decir tres cosas --que hacer, que permitiria resolver,
+    y cuando tiene sentido dejarlo como esta-- y en 320 caracteres el modelo se comia la
+    tercera, que es justo la que convierte una orden en una opcion. Los otros dos suben poco,
+    porque ahi el riesgo es el contrario: un «que paso» largo se lee como relleno.
     """
 
-    que_paso: str = Field(max_length=280, description="Que ocurrio, en numeros y en llano.")
-    por_que: str = Field(max_length=280, description="La causa concreta.")
-    recomiendo: str = Field(max_length=320, description="La accion. Nunca el contenido.")
+    que_paso: str = Field(
+        max_length=420,
+        description="Que intentaba resolver el paciente, en que paso se paso a una persona, "
+                    "y que quedo pendiente.",
+    )
+    por_que: str = Field(
+        max_length=420,
+        description="La causa concreta, separando lo comprobado de la hipotesis.",
+    )
+    recomiendo: str = Field(
+        max_length=700,
+        description="La accion de negocio, que resolveria, y cuando dejarlo como esta. "
+                    "Nunca el contenido que falta.",
+    )
+
+
+#: Que significa MECANICAMENTE cada clase de caso.
+#:
+#: Es lo que permite que el informe diga «en que paso se paso a una persona» sin inventarselo.
+#: Sin esto el modelo veia una etiqueta (`FALTA_DATO`) y una huella, y rellenaba el hueco con
+#: lo que sonaba razonable: «el paciente se mostro molesto», «la consulta era compleja».
+#: Ninguna de las dos cosas consta en ningun sitio. Lo que SI consta es el mecanismo, y es lo
+#: que hay escrito aqui.
+#:
+#: Va en este modulo y no en `sin_resolver.py` a proposito: aquello es puro y describe COMO se
+#: arma una huella; esto es texto para un modelo y describe QUE significa para una clinica.
+MECANICA: dict[str, str] = {
+    "FALTA_DATO": (
+        "Daniela consulto la base de conocimiento de la clinica por un (tratamiento, concepto) "
+        "concreto y no habia ficha aprobada. La consulta devolvio «SIN DATO DOCUMENTADO», que "
+        "es el texto que le ordena no inventarse nada, decirle al paciente que lo confirma con "
+        "el equipo, y avisar a los doctores. El paciente se quedo sin esa respuesta en ese "
+        "momento."
+    ),
+    "GUARDRAIL": (
+        "Un control automatico freno a Daniela. Los controles miran la respuesta ANTES de "
+        "enviarla --que no diga una cifra que nadie aprobo, que no ofrezca una hora que "
+        "ninguna consulta verifico, que no interprete una radiografia-- o la entrada antes de "
+        "contestarla --que no se use el sistema para encargos ajenos a la clinica--. Cuando "
+        "salta, Daniela reescribe la respuesta una vez; si vuelve a saltar, manda un mensaje "
+        "prudente y avisa a los doctores."
+    ),
+    "ROTO": (
+        "El turno se corto por una falla tecnica: una excepcion, un limite de la conversacion, "
+        "o un envio que no salio. No es una decision del sistema: es una averia. El paciente "
+        "recibio un mensaje prudente o no recibio nada."
+    ),
+    "HUMANO": (
+        "El sistema paso la conversacion a una persona. El sub-motivo va dentro de la huella y "
+        "cada uno significa algo distinto: `relevo` es que un doctor tomo la conversacion desde "
+        "Telegram; `clinico` es que se topo con el limite de lo que no puede decir sin un "
+        "diagnostico; `dato_faltante` es que le falto un dato aprobado; `agenda_llena` es que no "
+        "habia cupo que ofrecer; `archivo_recibido` es que llego algo que tiene que mirar un "
+        "humano; `excepcion_comercial` es que pidieron algo que se sale de la regla."
+    ),
+}
+
+#: Lo que el analista NO tiene delante, dicho para que no lo suponga.
+#:
+#: Ve el caso AGREGADO: la huella, los contadores, y hasta cinco frases sueltas de pacientes
+#: distintos. No ve la conversacion. Sin esta lista dentro del prompt, el modelo escribia como
+#: si la hubiera leido entera.
+SIN_EVIDENCIA = (
+    "la conversacion completa, lo que Daniela respondio, el tono del paciente, si volvio a "
+    "escribir, si acabo agendando, ni si un doctor le contesto despues"
+)
 
 
 _analista = Agent(
@@ -77,19 +160,69 @@ _analista = Agent(
     model=MODELO_EVALUADOR,
     output_type=InformeDelCaso,
     instructions=(
-        "Lees un caso agrupado de cosas que una asistente de una clinica dental no pudo "
-        "resolver, y escribes tres frases para que el equipo decida que ajustar.\n\n"
+        "Lees un caso AGRUPADO de cosas que Daniela --la asistente de WhatsApp de una clinica "
+        "dental-- no pudo resolver sola, y escribes tres campos para que el equipo de la "
+        "clinica decida que ajustar en el negocio.\n\n"
+
         "Escribes para la clinica, no para un programador: NUNCA nombres de errores tecnicos, "
-        "nombres de funciones ni nombres de guardrails en tu texto.\n\n"
-        "PROHIBIDO, sin excepcion: proponer el contenido que falta. No inventas ni sugieres "
-        "una cifra, un precio, una duracion, un diagnostico ni un protocolo. Puedes decir que "
-        "falta la ficha de un precio; no puedes decir cual es ese precio. Si no lo sabes --y "
-        "no lo sabes-- lo dices.\n\n"
-        "Si los ejemplos muestran un matiz (preguntan por la cuota mensual y no por el total, "
-        "usan una palabra distinta a la que la clinica tiene cargada), ese matiz es lo mas "
-        "valioso que puedes aportar: dilo en `recomiendo`.\n\n"
-        "Si el caso parece deliberado --la clinica decidio no dar ese dato por chat-- dilo, y "
-        "en vez de pedir que se arregle, senala el volumen como dato de negocio."
+        "nombres de funciones ni nombres de controles en tu texto.\n\n"
+
+        "== LO QUE VES Y LO QUE NO ==\n"
+        "Ves el caso ya agrupado: que clase de caso es, que significa esa clase, de que va en "
+        "concreto, cuantas veces paso, cuantas se interrumpio a un doctor, y hasta cinco "
+        "frases sueltas de pacientes distintos. NO ves " + SIN_EVIDENCIA + ". Escribe solo "
+        "sobre lo que ves.\n"
+        "PROHIBIDO atribuirle al paciente una reaccion --molestia, prisa, desconfianza, que se "
+        "fue a otra clinica-- que no este escrita literalmente en una de las frases. Si una "
+        "frase lo dice, citala; si no, no existe.\n\n"
+
+        "== que_paso ==\n"
+        "Tres cosas, en este orden, en dos o tres frases:\n"
+        "1. Que intentaba resolver el paciente. Sale de las frases y de la huella. Si las "
+        "frases no lo dejan claro, dilo asi: «no se puede determinar que buscaba; las frases "
+        "guardadas no lo dicen».\n"
+        "2. En que paso se paso a una persona. Eso SI lo sabes: te lo dice la mecanica de la "
+        "clase. Dilo en llano.\n"
+        "3. Que quedo pendiente para el paciente en ese momento.\n"
+        "Identifica el caso por lo que es --el tratamiento y el dato concretos, el sub-motivo "
+        "concreto-- y no con una etiqueta generica.\n\n"
+
+        "== por_que ==\n"
+        "La causa CONCRETA, y separa dos cosas:\n"
+        "- Lo COMPROBADO: lo que se deduce de la mecanica y de la huella. Que la clinica no "
+        "tiene cargado ese dato para ese tratamiento, por ejemplo, CONSTA: es exactamente lo "
+        "que produjo el caso. Escribelo sin rodeos y sin llamarlo suposicion.\n"
+        "- La HIPOTESIS: cualquier cosa que infieras de las frases. Va siempre empezando por "
+        "la palabra «Hipotesis:», y solo si aporta algo.\n"
+        "Si no puedes determinar la causa, di exactamente que no se puede determinar y que "
+        "informacion haria falta para saberlo. Esa es una respuesta valida y util; inventarse "
+        "una causa para parecer preciso, no.\n\n"
+
+        "== recomiendo ==\n"
+        "Una accion de negocio concreta, presentada como OPCION. Tres partes:\n"
+        "1. Que hacer, en terminos de lo que la clinica controla: cargar un dato, decidir una "
+        "politica, ampliar una lista, cambiar un horario. Di QUE dato o QUE decision falta. "
+        "Nunca «revisar el caso manualmente» si puedes senalar que informacion falta.\n"
+        "2. Que permitiria resolver en futuras conversaciones.\n"
+        "3. Cuando tiene sentido DEJARLO COMO ESTA, y dicho en serio: hay cosas que la clinica "
+        "prefiere que confirme siempre una persona, y esa es una decision legitima. Cierra con "
+        "esa alternativa.\n"
+        "No ordenas ni das por hecho que se vaya a hacer: propones. La clinica decide.\n\n"
+
+        "== PROHIBIDO, sin excepcion ==\n"
+        "Proponer el contenido que falta. No inventas ni sugieres una cifra, un precio, una "
+        "duracion, un diagnostico ni un protocolo. Puedes decir que falta la ficha de un "
+        "precio; no puedes decir cual es ese precio. Si no lo sabes --y no lo sabes-- lo "
+        "dices.\n\n"
+
+        "== LOS MATICES VALEN ORO ==\n"
+        "Si las frases muestran un matiz --preguntan por la cuota mensual y no por el total, "
+        "usan una palabra distinta de la que la clinica tiene cargada, preguntan por algo que "
+        "la clinica quiza ni ofrece-- ese matiz es lo mas valioso que puedes aportar: dilo en "
+        "`recomiendo`, porque cambia QUE hay que cargar.\n"
+        "Si el caso parece deliberado --la clinica decidio no dar ese dato por chat, o el "
+        "control hizo justo lo que tenia que hacer-- dilo, y en vez de pedir que se arregle, "
+        "senala el volumen como dato de negocio."
     ),
 )
 
@@ -109,17 +242,69 @@ def _con_cifra(informe: InformeDelCaso) -> set[str]:
     return cifras_de(" ".join(informe.model_dump().values()))
 
 
+def _partes_de_la_huella(huella: str) -> str:
+    """La huella repartida en las dos o tres cosas concretas que lleva dentro.
+
+    La huella es `falta_dato:ortodoncia:precio`, y el modelo la recibia tal cual. Con la
+    cadena cruda escribia «falta un dato de ortodoncia»; con las partes separadas y nombradas
+    puede escribir «la clinica no tiene cargado el precio de la ortodoncia», que es lo que se
+    puede accionar. Su forma la fija `sin_resolver.py` y es fija, asi que esto no adivina
+    nada: reparte.
+    """
+    clase, _, resto = huella.partition(":")
+    uno, _, dos = resto.partition(":")
+    if clase == "falta_dato":
+        cual = "un dato general de la clinica, no de un tratamiento" if uno == "_general" else f"«{uno}»"
+        concepto = "la ficha entera" if dos in ("", "_general") else f"«{dos}»"
+        return (
+            f"  tratamiento por el que se pregunto: {cual}\n"
+            f"  dato concreto que no estaba cargado: {concepto}"
+        )
+    if clase == "guardrail":
+        sobre = "ningun tratamiento en concreto" if dos in ("", "_general") else f"«{dos}»"
+        return (
+            f"  control que freno la respuesta: {uno}\n"
+            f"  se estaba hablando de: {sobre}"
+        )
+    if clase == "roto":
+        return f"  clase de la averia: {uno}"
+    if clase == "humano":
+        return f"  sub-motivo por el que se paso a una persona: {uno}"
+    return f"  identificador del caso: {huella}"
+
+
 def texto_del_caso(caso: dict) -> str:
-    """Lo que ve el modelo. Corto a proposito: la entrada tambien cuesta."""
-    ejemplos = "\n".join(f"  - {e}" for e in caso.get("ejemplos") or []) or "  (ninguno)"
+    """Lo que ve el modelo.
+
+    Dejo de ser una ficha tecnica el 22/09/2026. Antes iba la etiqueta del tipo y la huella
+    cruda, y con eso el informe solo podia ser generico: no habia forma de que supiera en que
+    paso se habia pasado la conversacion a una persona, porque esa informacion no estaba en la
+    entrada --esta en el codigo que produjo el caso--. Ahora van tres cosas que faltaban: la
+    mecanica de la clase, la huella repartida, y la proporcion de veces que se interrumpio a
+    un doctor.
+
+    Sigue siendo corto --la entrada tambien cuesta--: son unas lineas fijas por caso, no una
+    conversacion.
+    """
+    ejemplos = "\n".join(f"  - «{e}»" for e in caso.get("ejemplos") or []) or "  (ninguna)"
+    contador = caso["contador"]
+    escalo = caso["escalo"]
+    if escalo == 0:
+        interrupciones = "no se interrumpio a ningun doctor por esto"
+    elif escalo == contador:
+        interrupciones = "se interrumpio a un doctor todas las veces"
+    else:
+        interrupciones = f"se interrumpio a un doctor {escalo} de esas veces"
+
     return (
-        f"tipo: {caso['tipo']}\n"
-        f"huella: {caso['huella']}\n"
-        f"veces: {caso['contador']}\n"
-        f"de esas, se molesto al doctor: {caso['escalo']}\n"
-        f"primera vez: {caso['primera_vez']}\n"
-        f"ultima vez: {caso['ultima_vez']}\n"
-        f"lo que escribieron los pacientes:\n{ejemplos}"
+        f"CLASE DE CASO: {caso['tipo']}\n"
+        f"QUE SIGNIFICA ESA CLASE: {MECANICA.get(caso['tipo'], '(clase desconocida)')}\n\n"
+        f"DE QUE VA ESTE CASO EN CONCRETO:\n{_partes_de_la_huella(caso['huella'])}\n\n"
+        f"CUANTO: paso {contador} {'vez' if contador == 1 else 'veces'}, y {interrupciones}.\n"
+        f"DESDE: {caso['primera_vez']}\n"
+        f"HASTA: {caso['ultima_vez']}\n\n"
+        "LO QUE ESCRIBIERON LOS PACIENTES (frases sueltas, de personas distintas):\n"
+        f"{ejemplos}"
     )
 
 

@@ -12,6 +12,7 @@ pooler mide otra cosa.
 
 from __future__ import annotations
 
+from datetime import datetime
 import json
 import os
 import threading
@@ -216,7 +217,21 @@ def test_la_ventana_deja_fuera_lo_viejo_y_ordena_por_frecuencia(esquema):
     assert casos[0]["contador"] == 9
 
 
-def test_el_telefono_no_sale_por_la_capa_de_lectura(esquema):
+def test_la_frase_y_el_telefono_salen_SEPARADOS(esquema):
+    """Esta prueba decia «el telefono no puede viajar al navegador» y dejo de ser cierta el
+    22/09/2026, a proposito.
+
+    La cautela vieja no protegia nada: la pantalla de Conversaciones le ensena a esa MISMA
+    persona la lista entera de numeros con su nombre al lado. Y costaba lo unico que
+    convierte un caso en algo accionable: poder abrir la conversacion donde paso. MaxiCare
+    pidio ese enlace.
+
+    Lo que SI se sostiene, y es lo que esta prueba vigila ahora: los dos salen por campos
+    distintos, y `ejemplos` sigue siendo una lista de CADENAS. Mientras lo sea, no hay forma
+    de saber quien dijo que -- que es lo que mantiene el caso siendo un agregado. El dia que
+    alguien devuelva `[{"texto": ..., "telefono": ...}]` «para que sea mas completo», esto se
+    pone rojo.
+    """
     with persistencia.conectar(esquema) as conn:
         persistencia.registrar_caso(
             conn, huella="falta_dato:secreto:precio", tipo="FALTA_DATO",
@@ -226,7 +241,11 @@ def test_el_telefono_no_sale_por_la_capa_de_lectura(esquema):
 
     uno = next(c for c in casos if c["huella"] == "falta_dato:secreto:precio")
     assert uno["ejemplos"] == ["cuanto vale"]
-    assert "+573001112233" not in repr(casos), "el telefono no puede viajar al navegador"
+    assert all(isinstance(e, str) for e in uno["ejemplos"]), (
+        "las frases salen sueltas: emparejarlas con su numero convertiria el agregado en un "
+        "listado de quien dijo que"
+    )
+    assert uno["telefonos"] == ["+573001112233"], "el enlace a la conversacion sale aparte"
 
 
 def test_clearstate_borra_la_frase_y_el_contador_no_baja(esquema):
@@ -320,3 +339,78 @@ def test_guardar_informe_y_dejar_de_estar_pendiente(esquema):
         leido = next(c for c in persistencia.casos_recientes(conn) if c["huella"] == huella)
 
     assert leido["informe"]["recomiendo"] == "crearla"
+
+
+# ==========================================================================================
+# La 029: la medicion empieza de cero, y el DELETE no puede volver a correr
+# ==========================================================================================
+
+
+def test_la_029_deja_la_marca_de_cuando_empezo_a_contarse(esquema):
+    """`aplicar_esquema` ya corrio en el fixture, asi que la marca tiene que estar puesta."""
+    with persistencia.conectar(esquema) as conn:
+        desde = persistencia.medicion_sin_resolver_desde(conn)
+
+    assert desde is not None, "la 029 no escribio la marca"
+    assert desde.endswith("Z") and "T" in desde, f"tiene que ser ISO 8601 UTC, llego {desde!r}"
+    # Lo que va a hacer el navegador con ella. Si esto falla, la pantalla calla y nadie sabe
+    # desde cuando cuentan los numeros.
+    datetime.fromisoformat(desde.replace("Z", "+00:00"))
+
+
+def test_reaplicar_las_migraciones_NO_borra_los_casos_que_ya_se_midieron(esquema):
+    """La prueba que impide un desastre silencioso.
+
+    `aplicar_esquema` corre TODAS las migraciones en CADA arranque del contenedor. Un
+    `DELETE FROM casos_sin_resolver` sin guarda dentro de la 029 vaciaria la medicion entera
+    en el siguiente despliegue, sin un error en ningun log y sin que nadie lo notara hasta
+    que alguien abriera la pantalla y la viera vacia. La guarda es la marca, y esto lo fija.
+    """
+    with persistencia.conectar(esquema) as conn:
+        persistencia.registrar_caso(
+            conn, huella="falta_dato:sobrevive:precio", tipo="FALTA_DATO",
+            ejemplo="cuanto vale", telefono="+573001112233",
+        )
+        marca_antes = persistencia.medicion_sin_resolver_desde(conn)
+
+        # El arranque siguiente, entero.
+        persistencia.aplicar_esquema(conn)
+
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT count(*) FROM casos_sin_resolver WHERE huella = %s",
+                ("falta_dato:sobrevive:precio",),
+            )
+            assert cur.fetchone()[0] == 1, "la 029 volvio a borrar: el DELETE perdio su guarda"
+        assert persistencia.medicion_sin_resolver_desde(conn) == marca_antes, (
+            "la marca se reescribio; los contadores dejarian de significar lo que dicen"
+        )
+
+
+def test_un_caso_trae_los_telefonos_de_donde_salio_y_no_quien_dijo_que(esquema):
+    """Lo que hace accionable un caso: poder abrir la conversacion. Y lo que sigue sin salir:
+    la correspondencia entre cada frase y su numero."""
+    with persistencia.conectar(esquema) as conn:
+        persistencia.registrar_caso(
+            conn, huella="falta_dato:enlace:precio", tipo="FALTA_DATO",
+            ejemplo="cuanto vale", telefono="+573001112233",
+        )
+        persistencia.registrar_caso(
+            conn, huella="falta_dato:enlace:precio", tipo="FALTA_DATO",
+            ejemplo="y en cuotas", telefono="+573004445566",
+        )
+        persistencia.registrar_caso(
+            conn, huella="falta_dato:enlace:precio", tipo="FALTA_DATO",
+            ejemplo="sigues ahi", telefono="+573001112233",
+        )
+
+        caso = next(
+            c for c in persistencia.casos_recientes(conn)
+            if c["huella"] == "falta_dato:enlace:precio"
+        )
+
+    assert caso["telefonos"] == ["+573001112233", "+573004445566"], "sin repetir y en orden"
+    assert caso["ejemplos"] == ["cuanto vale", "y en cuotas", "sigues ahi"]
+    assert all(isinstance(e, str) for e in caso["ejemplos"]), (
+        "las frases salen sueltas: emparejarlas con su numero convertiria el agregado en otra cosa"
+    )

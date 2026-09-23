@@ -17,7 +17,21 @@ import {
   type ResumenConversacion,
   type TratamientoFila,
 } from '@/api'
-import { Bloque, Cargando, Fallo } from '@/componentes/Estado'
+import { CargandoPantalla, Fallo } from '@/componentes/Estado'
+import {
+  Buscador,
+  CabeceraDePanel,
+  Chip,
+  MarcoDeDosPaneles,
+  MONO,
+  Panel,
+  Pastilla,
+  Rotulo,
+  SG,
+  telefonoLegible,
+  TituloDePanel,
+  Vacio,
+} from '@/componentes/Panel'
 
 /* La pantalla de Conversaciones: la lista de personas a la izquierda y su hilo completo a la
  * derecha, refrescándose sola.
@@ -32,8 +46,9 @@ import { Bloque, Cargando, Fallo } from '@/componentes/Estado'
  *    en la misma vuelta. Con las dos rutas devolviéndolo, un desfase entre ellas pintaría
  *    una pantalla que se contradice a sí misma. */
 
-const SG = "'Space Grotesk', sans-serif"
-const MONO = "'JetBrains Mono', monospace"
+/* `SG`, `MONO` y las piezas de los dos paneles viven en `componentes/Panel.tsx` desde que
+ * `SinResolver` adoptó este mismo layout: dos copias de un borde o de un gris se separan
+ * en silencio, y la aplicación acaba con dos maneras de decir lo mismo. */
 
 /** Diez segundos, y solo cuando la pestaña está a la vista.
  *
@@ -42,7 +57,15 @@ const MONO = "'JetBrains Mono', monospace"
  * ya estaba despierta. Lo que sí evita es una pestaña olvidada consultando toda la noche. */
 const REFRESCO_MS = 10_000
 
-type Props = { alCaducarSesion: () => void }
+type Props = {
+  alCaducarSesion: () => void
+  /** Una conversacion que otra pantalla pide abrir --hoy «Sin resolver», desde el caso--.
+   *  `null` en el caso normal, que es entrar por el menu. */
+  seleccionInicial?: string | null
+  /** Se llama en cuanto la peticion se atiende, para que `App` la olvide. Sin esto, volver
+   *  aqui desde el menu media hora despues reabriria aquella conversacion sola. */
+  alConsumirSeleccion?: () => void
+}
 
 type Filtro = 'todas' | 'activas' | 'esperando' | 'relevo'
 
@@ -103,11 +126,6 @@ function cuandoCorto(iso: string, hoy: string): string {
 
 /** El teléfono en trozos, como lo escribiría una persona. Los dígitos se quedan tal cual:
  *  esto es presentación, y lo que viaja al servidor es siempre el número crudo. */
-function telefonoLegible(tel: string): string {
-  const m = /^57(\d{3})(\d{3})(\d{4})$/.exec(tel)
-  return m ? `+57 ${m[1]} ${m[2]} ${m[3]}` : `+${tel}`
-}
-
 function coincide(c: ResumenConversacion, busqueda: string): boolean {
   const q = busqueda.trim().toLowerCase()
   if (!q) return true
@@ -131,52 +149,7 @@ function pasaElFiltro(c: ResumenConversacion, filtro: Filtro): boolean {
 
 function Insignia({ estado }: { estado: EstadoConversacion }) {
   const t = TONOS[estado]
-  return (
-    <span
-      style={{
-        fontFamily: MONO,
-        fontSize: '9.5px',
-        letterSpacing: '0.12em',
-        textTransform: 'uppercase',
-        backgroundColor: t.fondo,
-        color: t.tinta,
-        padding: '4px 8px',
-        whiteSpace: 'nowrap',
-      }}
-    >
-      {t.texto}
-    </span>
-  )
-}
-
-function Rotulo({ children }: { children: React.ReactNode }) {
-  return (
-    <span
-      style={{
-        fontFamily: MONO,
-        fontSize: '10.5px',
-        letterSpacing: '0.14em',
-        textTransform: 'uppercase',
-        color: '#6E6880',
-        whiteSpace: 'nowrap',
-      }}
-    >
-      {children}
-    </span>
-  )
-}
-
-function Vacio({ children }: { children: React.ReactNode }) {
-  return (
-    <div className="flex flex-1 items-center justify-center px-6 py-10 text-center">
-      <span
-        className="text-sm"
-        style={{ fontWeight: 300, lineHeight: 1.6, color: '#6E6880', maxWidth: '32ch' }}
-      >
-        {children}
-      </span>
-    </div>
-  )
+  return <Pastilla texto={t.texto} fondo={t.fondo} tinta={t.tinta} />
 }
 
 function FilaDeLaLista({
@@ -976,10 +949,11 @@ function ConfirmarBorrado({
         </h2>
 
         {datos === null && !error ? (
-          <Cargando que="Comprobando qué contiene esta conversación…">
-            <Bloque alto={14} />
-            <Bloque alto={14} ancho="70%" retraso={120} />
-          </Cargando>
+          <CargandoPantalla
+            que="Comprobando qué contiene…"
+            detalle="Cuántos mensajes se van y si hay citas futuras."
+            fondo="#FFFFFF"
+          />
         ) : null}
 
         {datos !== null ? (
@@ -1051,7 +1025,11 @@ function ConfirmarBorrado({
   )
 }
 
-export default function Conversaciones({ alCaducarSesion }: Props) {
+export default function Conversaciones({
+  alCaducarSesion,
+  seleccionInicial = null,
+  alConsumirSeleccion,
+}: Props) {
   const [lista, setLista] = useState<ResumenConversacion[]>([])
   const [hilo, setHilo] = useState<HiloDeConversacion | null>(null)
   const [seleccion, setSeleccion] = useState<string | null>(null)
@@ -1092,6 +1070,17 @@ export default function Conversaciones({ alCaducarSesion }: Props) {
   // deps dejaría la pantalla releyendo Neon en bucle. La trampa está en `web/CLAUDE.md`.
   const caducar = useRef(alCaducarSesion)
   caducar.current = alCaducarSesion
+
+  // La peticion de otra pantalla, atendida UNA vez. `alConsumirSeleccion` va por `ref` por lo
+  // mismo que `alCaducarSesion`: en las deps, `App` la recrea en cada render y esto correria
+  // en bucle. Es la trampa de `web/CLAUDE.md`.
+  const consumir = useRef(alConsumirSeleccion)
+  consumir.current = alConsumirSeleccion
+  useEffect(() => {
+    if (!seleccionInicial) return
+    setSeleccion(seleccionInicial)
+    consumir.current?.()
+  }, [seleccionInicial])
 
   const hoy = diaEnBogota(new Date().toISOString())
 
@@ -1214,38 +1203,18 @@ export default function Conversaciones({ alCaducarSesion }: Props) {
     }
   }
 
+  // La pantalla entera, no media: `cargando` solo es cierto en la PRIMERA carga --se pone a
+  // `false` y nunca vuelve a `true`--, así que el refresco de cada diez segundos no la tapa.
+  if (cargando) return <CargandoPantalla que="Cargando las conversaciones…" />
+
   return (
-    <main className="min-w-0 flex-1 overflow-hidden" style={{ backgroundColor: '#F7F6FA' }}>
-      <div className="flex h-full flex-wrap items-stretch gap-4 p-4 md:gap-5 md:p-6">
-        {/* ---------------------------------------------------------------- La lista */}
-        <section
-          aria-label="Listado de conversaciones"
-          className="flex min-h-0 min-w-0 flex-col overflow-hidden"
-          style={{
-            flex: '1 1 320px',
-            maxWidth: '100%',
-            maxHeight: '100%',
-            backgroundColor: '#FFFFFF',
-            border: '1px solid #DCD8E6',
-          }}
-        >
-          <div
-            className="flex flex-col gap-3"
-            style={{ padding: '18px 18px 14px', borderBottom: '1px solid #ECE8F4' }}
-          >
+    <>
+      <MarcoDeDosPaneles etiqueta="Conversaciones">
+        {/* ------------------------------------------------------------------ La lista */}
+        <Panel etiqueta="Listado de conversaciones" peso="1 1 320px">
+          <CabeceraDePanel>
             <div className="flex items-baseline justify-between gap-3">
-              <h1
-                style={{
-                  margin: 0,
-                  fontFamily: SG,
-                  fontWeight: 600,
-                  fontSize: 'clamp(17px, 1.6vw, 21px)',
-                  letterSpacing: '-0.024em',
-                  color: '#16111F',
-                }}
-              >
-                Conversaciones
-              </h1>
+              <TituloDePanel>Conversaciones</TituloDePanel>
               <div className="flex shrink-0 items-center gap-2">
                 <Rotulo>
                   {visibles.length === lista.length
@@ -1276,70 +1245,27 @@ export default function Conversaciones({ alCaducarSesion }: Props) {
               </p>
             ) : null}
 
-            <label
-              className="flex items-center gap-2"
-              style={{ border: '1px solid #DCD8E6', padding: '0 12px', minHeight: '44px' }}
-            >
-              <svg aria-hidden width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#6E6880" strokeWidth="1.8" strokeLinecap="square">
-                <circle cx="11" cy="11" r="6.5" />
-                <path d="M16 16l4.5 4.5" />
-              </svg>
-              <input
-                type="search"
-                value={busqueda}
-                onChange={(e) => setBusqueda(e.target.value)}
-                placeholder="Buscar por nombre o teléfono"
-                aria-label="Buscar conversaciones"
-                className="min-w-0 flex-1 border-none bg-transparent outline-none"
-                style={{ fontSize: '14px', color: '#16111F', padding: '10px 0' }}
-              />
-            </label>
+            <Buscador
+              valor={busqueda}
+              alCambiar={setBusqueda}
+              marcador="Buscar por nombre o teléfono"
+              etiqueta="Buscar conversaciones"
+            />
 
             <div className="flex flex-wrap gap-2">
-              {CHIPS.map((chip) => {
-                const puesto = filtro === chip.id
-                return (
-                  <button
-                    key={chip.id}
-                    type="button"
-                    onClick={() => setFiltro(chip.id)}
-                    style={{
-                      backgroundColor: puesto ? '#6D28D9' : '#FFFFFF',
-                      color: puesto ? '#FFFFFF' : '#4A4458',
-                      border: `1px solid ${puesto ? '#6D28D9' : '#DCD8E6'}`,
-                      fontFamily: MONO,
-                      fontSize: '10.5px',
-                      letterSpacing: '0.12em',
-                      textTransform: 'uppercase',
-                      padding: '9px 13px',
-                      minHeight: '36px',
-                      cursor: 'pointer',
-                    }}
-                  >
-                    {chip.etiqueta}
-                  </button>
-                )
-              })}
-            </div>
-          </div>
-
-          {cargando ? (
-            <Cargando que="Cargando las conversaciones…" className="flex min-h-0 flex-1 flex-col">
-              {[0, 1, 2, 3, 4, 5].map((i) => (
-                <div
-                  key={i}
-                  className="flex flex-col gap-2"
-                  style={{ borderBottom: '1px solid #ECE8F4', padding: '15px 16px' }}
+              {CHIPS.map((chip) => (
+                <Chip
+                  key={chip.id}
+                  puesto={filtro === chip.id}
+                  alPulsar={() => setFiltro(chip.id)}
                 >
-                  <div className="flex w-full items-baseline justify-between gap-2">
-                    <Bloque alto={13} ancho="46%" retraso={i * 110} />
-                    <Bloque alto={10} ancho={34} retraso={i * 110 + 50} />
-                  </div>
-                  <Bloque alto={11} ancho="78%" retraso={i * 110 + 90} />
-                </div>
+                  {chip.etiqueta}
+                </Chip>
               ))}
-            </Cargando>
-          ) : error ? (
+            </div>
+          </CabeceraDePanel>
+
+          {error ? (
             // Si la consulta falló, la pantalla lo DICE. Nunca una lista vieja sin avisar:
             // una pantalla «en vivo» congelada es peor que una que reconoce que no sabe.
             // Y con salida: antes solo quedaba recargar la página entera.
@@ -1371,20 +1297,10 @@ export default function Conversaciones({ alCaducarSesion }: Props) {
               ))}
             </ul>
           )}
-        </section>
+        </Panel>
 
-        {/* ----------------------------------------------------------------- El hilo */}
-        <section
-          aria-label="Detalle de la conversación"
-          className="flex min-h-0 min-w-0 flex-col overflow-hidden"
-          style={{
-            flex: '2 1 380px',
-            maxWidth: '100%',
-            maxHeight: '100%',
-            backgroundColor: '#FFFFFF',
-            border: '1px solid #DCD8E6',
-          }}
-        >
+        {/* -------------------------------------------------------------------- El hilo */}
+        <Panel etiqueta="Detalle de la conversación" peso="2 1 380px">
           {!seleccion || !elegida ? (
             <Vacio>Selecciona una conversación para ver el historial.</Vacio>
           ) : (
@@ -1462,24 +1378,14 @@ export default function Conversaciones({ alCaducarSesion }: Props) {
                     />
                   </div>
                 ) : hilo === null ? (
-                  <Cargando que="Cargando la conversación…" className="flex flex-col gap-3">
-                    {[
-                      { lado: 'flex-start', ancho: '58%' },
-                      { lado: 'flex-end', ancho: '44%' },
-                      { lado: 'flex-start', ancho: '68%' },
-                      { lado: 'flex-end', ancho: '36%' },
-                    ].map((b, i) => (
-                      <div key={i} className="flex" style={{ justifyContent: b.lado }}>
-                        <Bloque
-                          alto={52}
-                          ancho={b.ancho}
-                          radio={0}
-                          retraso={i * 130}
-                          estilo={{ border: '1px solid #DCD8E6' }}
-                        />
-                      </div>
-                    ))}
-                  </Cargando>
+                  /* El nombre ya está arriba en la cabecera, así que el loader dice lo que la
+                     cabecera no dice: que los mensajes vienen en camino. `hilo` vuelve a
+                     `null` SOLO al cambiar de persona --el refresco de diez segundos no lo
+                     toca-- así que esto no parpadea mientras se lee. */
+                  <CargandoPantalla
+                    que="Cargando la conversación…"
+                    detalle="Trayendo los mensajes de este paciente."
+                  />
                 ) : hilo.mensajes.length === 0 ? (
                   <Vacio>
                     No hay nada escrito en este hilo. Puede que esta persona solo haya mandado
@@ -1512,8 +1418,8 @@ export default function Conversaciones({ alCaducarSesion }: Props) {
               />
             </div>
           )}
-        </section>
-      </div>
+        </Panel>
+      </MarcoDeDosPaneles>
 
       {porBorrar ? (
         <ConfirmarBorrado
@@ -1533,6 +1439,6 @@ export default function Conversaciones({ alCaducarSesion }: Props) {
           alCaducar={() => caducar.current()}
         />
       ) : null}
-    </main>
+    </>
   )
 }

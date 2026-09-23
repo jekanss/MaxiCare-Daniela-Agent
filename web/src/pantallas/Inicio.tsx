@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { leerInicio, SesionCaducada, type ResumenInicio } from '@/api'
-// Con alias: esta pantalla ya tiene su propio `Bloque`, que es una sección de la portada.
-import { Bloque as Hueco, Cargando, Fallo, Lineas } from '@/componentes/Estado'
+import { CargandoPantalla, Fallo } from '@/componentes/Estado'
 import { hhmm } from '@/pantallas/Agenda'
 import { titulo } from '@/pantallas/SinResolver'
 
@@ -581,51 +580,9 @@ export default function Inicio({ alCaducarSesion }: Props) {
     void recargar()
   }, [recargar])
 
-  if (cargando) {
-    return (
-      <Marco resumen={null}>
-        <Cargando que="Cargando el resumen…" className="flex flex-col" estilo={{ gap: 'clamp(18px,2.4vw,30px)' }}>
-          <section
-            className="grid"
-            style={{
-              gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%,208px), 1fr))',
-              gap: 'clamp(12px,1.4vw,18px)',
-            }}
-          >
-            {[0, 1, 2, 3, 4].map((i) => (
-              <div
-                key={i}
-                className="flex flex-col gap-3"
-                style={{ backgroundColor: '#FFFFFF', border: '1px solid #DCD8E6', padding: '18px 18px 16px' }}
-              >
-                <Hueco alto={10} ancho="58%" retraso={i * 80} />
-                <Hueco alto={30} ancho="42%" retraso={i * 80 + 50} />
-              </div>
-            ))}
-          </section>
+  // Ni la cabecera: la portada no se enseña a medias. Ver `CargandoPantalla`.
+  if (cargando) return <CargandoPantalla que="Cargando el resumen…" />
 
-          <div
-            className="grid items-start"
-            style={{
-              gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%,330px), 1fr))',
-              gap: 'clamp(12px,1.4vw,18px)',
-            }}
-          >
-            {[0, 1].map((i) => (
-              <div
-                key={i}
-                className="flex flex-col gap-4"
-                style={{ backgroundColor: '#FFFFFF', border: '1px solid #DCD8E6', padding: '18px' }}
-              >
-                <Hueco alto={12} ancho="44%" retraso={i * 120} />
-                <Lineas cuantas={4} alto={11} retraso={i * 120} />
-              </div>
-            ))}
-          </div>
-        </Cargando>
-      </Marco>
-    )
-  }
 
   // Si la consulta falló, la pantalla lo DICE. Nunca una cifra de respaldo: un número
   // inventado en una portada es peor que una portada vacía, porque nadie sabe que lo es.

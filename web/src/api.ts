@@ -180,6 +180,9 @@ export type CasoSinResolver = {
   primera_vez: string
   ultima_vez: string
   ejemplos: string[]
+  /** Los numeros de las conversaciones de donde salio el caso, sin repetir. No dice quien
+   *  escribio cada frase: un caso es un agregado. Sirve para poder abrir la conversacion. */
+  telefonos: string[]
   informe: { que_paso: string; por_que: string; recomiendo: string } | null
 }
 
@@ -191,8 +194,14 @@ export type CasoSinResolver = {
 export async function listarSinResolver(): Promise<{
   casos: CasoSinResolver[]
   es_admin: boolean
+  /** Desde cuando cuentan los contadores, en ISO 8601. `null` si no consta. */
+  midiendo_desde: string | null
 }> {
-  return pedir<{ casos: CasoSinResolver[]; es_admin: boolean }>('/api/sin-resolver')
+  return pedir<{
+    casos: CasoSinResolver[]
+    es_admin: boolean
+    midiendo_desde: string | null
+  }>('/api/sin-resolver')
 }
 
 // ------------------------------------------------------------------------------------------

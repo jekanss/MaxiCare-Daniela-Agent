@@ -502,21 +502,31 @@ _CASO = {
     "primera_vez": "2026-09-01T10:00:00+00:00",
     "ultima_vez": "2026-09-10T10:00:00+00:00",
     "ejemplos": ["¿Cuánto vale la ortodoncia?"],
+    "telefonos": ["573001112233"],
     "informe": {"que_paso": "x", "por_que": "y", "recomiendo": "z"},
 }
 
+#: Lo que la 029 dejó escrito. El endpoint lo lee aparte de los casos, así que se dobla aparte.
+_DESDE = "2026-09-22T20:15:00Z"
+
 
 def test_sin_resolver_responde_con_la_forma_pactada(monkeypatch):
-    """`{"casos": [...], "es_admin": bool}`, con las ocho claves de cada caso intactas -- ni
-    una de más (el teléfono no viaja) ni una de menos."""
+    """`{"casos": [...], "es_admin": bool, "midiendo_desde": str|None}`, con las nueve claves
+    de cada caso intactas -- ni una de más ni una de menos.
+
+    `telefonos` sí viaja desde el 22/09/2026 --es lo que deja abrir la conversación desde el
+    caso-- y lo que sigue sin viajar es QUÉ frase dijo cada número: un caso es un agregado.
+    """
     monkeypatch.setattr(persistencia, "conectar", lambda url: _ConexionFalsaSinResolver())
     monkeypatch.setattr(persistencia, "casos_recientes", lambda conn: [dict(_CASO)])
+    monkeypatch.setattr(persistencia, "medicion_sin_resolver_desde", lambda conn: _DESDE)
     runtime.app.dependency_overrides[runtime.usuario_actual] = _como("doctor")
     try:
         r = TestClient(runtime.app).get("/api/sin-resolver")
         assert r.status_code == 200
         cuerpo = r.json()
-        assert set(cuerpo) == {"casos", "es_admin"}
+        assert set(cuerpo) == {"casos", "es_admin", "midiendo_desde"}
+        assert cuerpo["midiendo_desde"] == _DESDE
         assert len(cuerpo["casos"]) == 1
         assert set(cuerpo["casos"][0]) == set(_CASO)
         assert cuerpo["casos"][0] == _CASO
@@ -524,14 +534,35 @@ def test_sin_resolver_responde_con_la_forma_pactada(monkeypatch):
         runtime.app.dependency_overrides.clear()
 
 
+def test_sin_resolver_sin_la_029_aplicada_dice_que_no_sabe_desde_cuando(monkeypatch):
+    """`None`, no una fecha inventada ni un 500.
+
+    La marca vive en `configuracion` y la escribe la 029. Un esquema donde esa migración no
+    corrió tiene casos igual, y la pantalla tiene que poder enseñarlos: lo único que se calla
+    es desde cuándo cuentan.
+    """
+    monkeypatch.setattr(persistencia, "conectar", lambda url: _ConexionFalsaSinResolver())
+    monkeypatch.setattr(persistencia, "casos_recientes", lambda conn: [dict(_CASO)])
+    monkeypatch.setattr(persistencia, "medicion_sin_resolver_desde", lambda conn: None)
+    runtime.app.dependency_overrides[runtime.usuario_actual] = _como("doctor")
+    try:
+        r = TestClient(runtime.app).get("/api/sin-resolver")
+        assert r.status_code == 200
+        assert r.json()["midiendo_desde"] is None
+        assert len(r.json()["casos"]) == 1, "sin marca, los casos se siguen viendo"
+    finally:
+        runtime.app.dependency_overrides.clear()
+
+
 def test_sin_resolver_sin_casos_no_revienta(monkeypatch):
     monkeypatch.setattr(persistencia, "conectar", lambda url: _ConexionFalsaSinResolver())
     monkeypatch.setattr(persistencia, "casos_recientes", lambda conn: [])
+    monkeypatch.setattr(persistencia, "medicion_sin_resolver_desde", lambda conn: _DESDE)
     runtime.app.dependency_overrides[runtime.usuario_actual] = _como("admin")
     try:
         r = TestClient(runtime.app).get("/api/sin-resolver")
         assert r.status_code == 200
-        assert r.json() == {"casos": [], "es_admin": True}
+        assert r.json() == {"casos": [], "es_admin": True, "midiendo_desde": _DESDE}
     finally:
         runtime.app.dependency_overrides.clear()
 
@@ -550,6 +581,7 @@ def test_es_admin_sale_de_quien_pregunta_no_del_caso():
             ):
                 mp.setattr(persistencia, "conectar", lambda url: _ConexionFalsaSinResolver())
                 mp.setattr(persistencia, "casos_recientes", lambda conn: [])
+                mp.setattr(persistencia, "medicion_sin_resolver_desde", lambda conn: None)
                 r = TestClient(runtime.app).get("/api/sin-resolver")
             assert r.status_code == 200, f"{rol} obtuvo {r.status_code}"
             assert r.json()["es_admin"] is esperado, f"{rol} -> es_admin debía ser {esperado}"
