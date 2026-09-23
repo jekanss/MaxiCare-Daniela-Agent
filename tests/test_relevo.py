@@ -241,11 +241,15 @@ def _sin_base(monkeypatch):
         lambda url, **campos: guardados_del_doctor.append(campos),
     )
     monkeypatch.setattr(relevo, "_marcar_escalamiento", lambda url, mid: None)
-    # El caso «humano:relevo» del informe. Es la unica escritura de `casos_sin_resolver` que
-    # no sale de un turno, asi que tampoco sale de `atencion._anotar_resultado`.
+    # El caso «humano:relevo:...» del informe. Es la unica escritura de `casos_sin_resolver`
+    # que no sale de un turno, asi que tampoco sale de `atencion._anotar_resultado`. Se
+    # guardan los kwargs enteros: `mensaje_id` es lo que separa el relevo que alguien pidio
+    # del que un doctor abrio por su cuenta, y hay pruebas que miran cual de los dos fue.
     relevos_contados.clear()
     monkeypatch.setattr(
-        relevo, "_registrar_relevo", lambda url: relevos_contados.append(url)
+        relevo,
+        "_registrar_relevo",
+        lambda url, **campos: relevos_contados.append({"url": url, **campos}),
     )
     monkeypatch.setattr(
         relevo,
@@ -351,7 +355,30 @@ def test_un_relevo_activado_queda_contado_en_el_informe():
     sería la única que no queda contada."""
     _activar(TelegramFalso())
 
-    assert relevos_contados == [URL]
+    assert relevos_contados == [
+        {"url": URL, "telefono": TEL, "mensaje_id": MENSAJE_DEL_GENERAL}
+    ]
+
+
+def test_el_telefono_viaja_al_informe_para_poder_abrir_la_conversacion():
+    """Sin él, el caso es la única tarjeta de la pantalla desde la que no se puede ir a ver
+    qué pasó. El resto los lleva desde el 22/09/2026 (`sin_resolver.telefonos_de`) y este se
+    había quedado fuera porque escribía la fila a mano."""
+    _activar(TelegramFalso())
+
+    assert relevos_contados[0]["telefono"] == TEL
+
+
+def test_un_relevo_tomado_desde_el_PANEL_llega_sin_aviso_detras():
+    """El panel llama a `activar` sin `mensaje_id` --no hay aviso del que colgar-- y eso es
+    lo que distingue «Daniela pidió ayuda» de «el doctor entró por su cuenta».
+
+    Que ese `None` llegue hasta el informe es todo el arreglo: con la huella fija de antes,
+    los dos relevos eran la misma fila y el análisis daba por hecho que la automatización
+    había fallado incluso cuando nadie había escalado nada."""
+    _activar(TelegramFalso(), mensaje_id=None, callback_id=None)
+
+    assert relevos_contados[0]["mensaje_id"] is None
 
 
 def test_si_el_informe_falla_el_doctor_se_queda_con_la_conversacion_igual(monkeypatch):
@@ -359,7 +386,7 @@ def test_si_el_informe_falla_el_doctor_se_queda_con_la_conversacion_igual(monkey
     `activar` corra dentro de uno: el de fuera registra «falló la activación», y a estas
     alturas el relevo ESTÁ activo -- diría una falsedad en el log y se saltaría el
     `_avisados.discard` de después."""
-    def revienta(url):
+    def revienta(url, **campos):
         raise RuntimeError("tabla sin migrar")
 
     monkeypatch.setattr(relevo, "_registrar_relevo", revienta)

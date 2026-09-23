@@ -48,6 +48,14 @@ PREFIJO_TRIPWIRE = "tripwire"
 #: Cuando salta un guardrail y en el turno no se consulto ningun tratamiento.
 GENERAL = "_general"
 
+#: Un relevo que no salio de ningun aviso: el doctor entro por su cuenta.
+#:
+#: Va con guion bajo delante como `GENERAL`, y por lo mismo: los otros valores de ese sitio
+#: son motivos de escalamiento de verdad --`dato_faltante`, `clinico`-- y el guion marca que
+#: este no lo es. Sin el, `sin_aviso` se leeria como un sexto motivo que el modelo puede
+#: emitir, y `MotivoEscalamiento` solo tiene cinco.
+SIN_AVISO = "_sin_aviso"
+
 #: Lo que queda en el ejemplo donde habia algo con forma de documento de identidad.
 OMITIDO = "[omitido]"
 
@@ -119,6 +127,27 @@ def huella_roto(motivo: str) -> str:
 
 def huella_humano(motivo: str) -> str:
     return f"humano:{_normalizar(motivo)}"
+
+
+def huella_relevo(motivo_del_aviso: str | None) -> str:
+    """Un doctor tomó la conversación. El tercer segmento dice si alguien se lo pidió.
+
+    Hasta el 23/09/2026 esto era la cadena fija `humano:relevo`, y con ella la pantalla no
+    podía distinguir las dos cosas que un relevo puede ser:
+
+    - `humano:relevo:dato_faltante` -- Daniela escaló, sonó el aviso y el doctor pulsó el
+      botón. La automatización se quedó corta y el motivo dice en qué.
+    - `humano:relevo:{SIN_AVISO}` -- nadie escaló. El doctor entró por su cuenta, desde el
+      panel o desde el hilo. **Eso no demuestra que la automatización fallara**: puede ser un
+      doctor recordando una cita, o queriendo hablar él. Contarlo como lo anterior es la
+      confusión que hacía que el informe recomendara «conservar el relevo» -- una respuesta a
+      una pregunta que nadie había hecho.
+
+    Se separan en dos huellas y no en una con un contador aparte porque la huella ES lo que
+    agrupa: mezcladas, «5 relevos» no se puede repartir después, y las dos mitades piden
+    acciones opuestas --cargar un dato la primera, nada la segunda--.
+    """
+    return f"humano:relevo:{_normalizar(motivo_del_aviso or '') or SIN_AVISO}"
 
 
 # ==========================================================================================

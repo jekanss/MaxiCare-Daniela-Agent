@@ -60,6 +60,22 @@ const CHIPS: { id: Filtro; etiqueta: string }[] = [
   { id: 'HUMANO', etiqueta: 'Al doctor' },
 ]
 
+/** Por qué Daniela avisó a los doctores, dicho como lo diría alguien de la clínica.
+ *
+ * Son los cinco valores de `MotivoEscalamiento` (`contratos.py`), que es una lista cerrada:
+ * lo que no esté aquí no puede llegar. Aun así hay respaldo en `titulo`, porque una lista
+ * cerrada en Python no impide que una fila vieja de la base traiga otra cosa. */
+const POR_QUE_AVISO: Record<string, string> = {
+  dato_faltante: 'le faltaba un dato',
+  clinico: 'era algo clínico',
+  agenda_llena: 'no había cupo',
+  archivo_recibido: 'llegó un archivo',
+  excepcion_comercial: 'pedían una excepción',
+}
+
+/** Lo que `sin_resolver.SIN_AVISO` escribe en la huella cuando nadie escaló. */
+const SIN_AVISO = '_sin_aviso'
+
 /** `falta_dato:ortodoncia:precio` -> «Falta el dato «precio» de ORTODONCIA».
  *
  * La huella cruda no se le ensena a la clinica: es un identificador, no una frase. El
@@ -78,6 +94,24 @@ export function titulo(caso: CasoSinResolver): string {
     case 'ROTO':
       return 'El sistema tuvo una falla técnica'
     case 'HUMANO':
+      // El relevo es el único caso de tres trozos, y el tercero cambia lo que hay que leer.
+      // Hasta el 23/09/2026 los dos decían «Hubo que pasarle la conversación al doctor», y
+      // eso daba por hecho un fallo en el segundo: un doctor que entra por su cuenta no
+      // demuestra que Daniela se quedara corta. Ver `sin_resolver.huella_relevo`.
+      //
+      // Los dos empiezan igual --«Un doctor entró»-- porque son dos variantes de lo mismo y
+      // la lista tiene que dejar ver eso de un vistazo. Y ninguno se confunde con el
+      // `humano:<motivo>` de abajo, que es Daniela avisando SIN que nadie entrara.
+      //
+      // Cortos a propósito: el título más largo que hoy cabe en la lista mide 53 caracteres
+      // («Daniela iba a decir algo que no debía (blanqueamiento)»), y el peor de estos dos
+      // se queda en 51. Un título que crece un 30% sobre el máximo probado es un desborde
+      // esperando a la columna de 320 px.
+      if (uno === 'relevo') {
+        if (!dos || dos === SIN_AVISO) return 'Un doctor entró por su cuenta'
+        const porQue = POR_QUE_AVISO[dos]
+        return porQue ? `Un doctor entró tras el aviso: ${porQue}` : 'Un doctor entró tras el aviso'
+      }
       return 'Hubo que pasarle la conversación al doctor'
     default:
       return caso.huella
@@ -108,13 +142,34 @@ function desdeCuando(iso: string | null): string | null {
   })
 }
 
+/** Cuántas personas hay detrás del contador, o `null` cuando no se puede afirmar.
+ *
+ * «2 veces» no dice si fueron dos pacientes o el mismo dos veces, y esa es la primera
+ * pregunta que se hace quien lo lee -- MaxiCare la hizo. Los teléfonos están, pero contarlos
+ * NO siempre da la respuesta: un caso guarda como mucho `sin_resolver.MAX_EJEMPLOS` frases,
+ * así que con contador 12 solo quedan cinco y decir «5 personas» sería falso.
+ *
+ * La condición que lo hace seguro no es saberse el tope de memoria: es que se hayan guardado
+ * TANTAS frases como apariciones tiene el caso. Si coinciden, no se recortó nada y están
+ * todas. Si no coinciden --hubo recorte, o alguna aparición no dejó frase-- se calla, que es
+ * la respuesta correcta cuando el dato no alcanza. */
+function cuantasPersonas(caso: CasoSinResolver): string | null {
+  if (caso.contador < 2 || caso.ejemplos.length !== caso.contador) return null
+  if (caso.telefonos.length === 0) return null
+  return caso.telefonos.length === 1
+    ? 'la misma persona'
+    : `${caso.telefonos.length} personas`
+}
+
 /** «3 veces · 4 sep al 19 sep», o «1 vez · 4 sep» cuando las dos fechas caen el mismo día:
  *  «4 sep al 4 sep» se lee como un error de la pantalla. */
 function cuantasYCuando(caso: CasoSinResolver): string {
   const veces = `${caso.contador} ${caso.contador === 1 ? 'vez' : 'veces'}`
   const desde = fecha(caso.primera_vez)
   const hasta = fecha(caso.ultima_vez)
-  return `${veces} · ${desde === hasta ? desde : `${desde} al ${hasta}`}`
+  const quienes = cuantasPersonas(caso)
+  const cuando = desde === hasta ? desde : `${desde} al ${hasta}`
+  return `${veces} · ${quienes ? `${quienes} · ` : ''}${cuando}`
 }
 
 function coincide(caso: CasoSinResolver, busqueda: string): boolean {

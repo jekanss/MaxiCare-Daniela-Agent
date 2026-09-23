@@ -33,7 +33,7 @@ import logging
 from agents import Agent, Runner
 from pydantic import BaseModel, Field
 
-from . import consumo, persistencia
+from . import consumo, persistencia, sin_resolver
 from .config import MODELO_EVALUADOR, config_de_corrida
 from .guardrails import cifras_de
 
@@ -135,14 +135,48 @@ MECANICA: dict[str, str] = {
         "recibio un mensaje prudente o no recibio nada."
     ),
     "HUMANO": (
-        "El sistema paso la conversacion a una persona. El sub-motivo va dentro de la huella y "
-        "cada uno significa algo distinto: `relevo` es que un doctor tomo la conversacion desde "
-        "Telegram; `clinico` es que se topo con el limite de lo que no puede decir sin un "
-        "diagnostico; `dato_faltante` es que le falto un dato aprobado; `agenda_llena` es que no "
-        "habia cupo que ofrecer; `archivo_recibido` es que llego algo que tiene que mirar un "
-        "humano; `excepcion_comercial` es que pidieron algo que se sale de la regla."
+        "Daniela decidio que esto lo tenia que ver una persona y aviso a los doctores. El "
+        "sub-motivo va dentro de la huella y cada uno significa algo distinto: `clinico` es "
+        "que se topo con el limite de lo que no puede decir sin un diagnostico; "
+        "`dato_faltante` es que le falto un dato aprobado; `agenda_llena` es que no habia cupo "
+        "que ofrecer; `archivo_recibido` es que llego algo que tiene que mirar un humano; "
+        "`excepcion_comercial` es que pidieron algo que se sale de la regla."
+    ),
+    # El relevo tiene mecanica PROPIA y no es una variedad de lo de arriba, aunque comparta el
+    # tipo `HUMANO`. Lo de arriba lo decide Daniela y es automatico; esto lo decide una persona
+    # pulsando un boton. Mezclados --como estaban hasta el 23/09/2026-- el modelo leia «el
+    # sistema paso la conversacion a una persona» y escribia que la automatizacion se habia
+    # quedado corta, incluso cuando lo unico que habia pasado era que un doctor quiso hablar el.
+    "HUMANO:relevo": (
+        "Un doctor TOMO la conversacion: a partir de ese momento Daniela calla y le escribe el "
+        "doctor en persona, por WhatsApp, desde Telegram o desde el panel. Lo decide una "
+        "persona pulsando un boton, nunca el sistema.\n"
+        "El tercer trozo de la huella dice de donde salio, y la diferencia lo cambia todo:\n"
+        "- Un MOTIVO (`dato_faltante`, `clinico`, `agenda_llena`, `archivo_recibido`, "
+        "`excepcion_comercial`): Daniela escalo por eso, sono el aviso y el doctor lo pulso. "
+        "Ahi la automatizacion SI se quedo corta, y el motivo dice exactamente en que.\n"
+        "- `_sin_aviso`: NADIE escalo. Daniela no pidio ayuda; el doctor entro por su cuenta. "
+        "Puede ser que quisiera recordarle una cita, adelantarse a algo, o sencillamente "
+        "hablar el. **Que un doctor tome una conversacion NO demuestra que la automatizacion "
+        "fallara**, y aqui no consta que fallara.\n"
+        "En `_sin_aviso` no hay frases guardadas, y eso NO es una laguna: como no hubo aviso, "
+        "no hay ningun mensaje del que conste que provocara el relevo, y guardar el ultimo que "
+        "el paciente escribiera seria atribuirle una causa que nadie registro."
     ),
 }
+
+
+def _mecanica(caso: dict) -> str:
+    """Que significa este caso, con el relevo separado de lo que decide Daniela.
+
+    `MECANICA` se indexa por tipo, y el relevo comparte el tipo `HUMANO` con los cinco motivos
+    que emite el modelo sin ser uno de ellos --`MotivoEscalamiento` tiene cinco y `relevo` no
+    esta--. Antes que abrir un quinto tipo, que costaria tocar el CHECK de la 018 y las cuatro
+    pastillas de la pantalla, la clave lleva el sub-motivo cuando hace falta.
+    """
+    if caso["tipo"] == "HUMANO" and caso["huella"].startswith("humano:relevo"):
+        return MECANICA["HUMANO:relevo"]
+    return MECANICA.get(caso["tipo"], "(clase desconocida)")
 
 #: Lo que el analista NO tiene delante, dicho para que no lo suponga.
 #:
@@ -196,10 +230,17 @@ _analista = Agent(
         "la palabra «Hipotesis:», y solo si aporta algo.\n"
         "Si no puedes determinar la causa, di exactamente que no se puede determinar y que "
         "informacion haria falta para saberlo. Esa es una respuesta valida y util; inventarse "
-        "una causa para parecer preciso, no.\n\n"
+        "una causa para parecer preciso, no.\n"
+        "Pero NO conviertas esa falta en la causa. «Se derivo porque no habia contexto "
+        "suficiente», «se paso a una persona porque falta informacion de la conversacion» y "
+        "cualquier frase parecida estan PROHIBIDAS: describen lo que tu no ves, no lo que le "
+        "paso al paciente. Lo que a ti te falte no le ocurrio a nadie. Si no hay causa "
+        "comprobable, una frase basta para decirlo y el resto sobra.\n\n"
 
         "== recomiendo ==\n"
-        "Una accion de negocio concreta, presentada como OPCION. Tres partes:\n"
+        "Una accion de negocio concreta, presentada como OPCION, y ATADA a la causa que "
+        "acabas de escribir en `por_que`. Si la causa fue que faltaba un dato, la accion es "
+        "sobre ese dato. Tres partes:\n"
         "1. Que hacer, en terminos de lo que la clinica controla: cargar un dato, decidir una "
         "politica, ampliar una lista, cambiar un horario. Di QUE dato o QUE decision falta. "
         "Nunca «revisar el caso manualmente» si puedes senalar que informacion falta.\n"
@@ -207,7 +248,15 @@ _analista = Agent(
         "3. Cuando tiene sentido DEJARLO COMO ESTA, y dicho en serio: hay cosas que la clinica "
         "prefiere que confirme siempre una persona, y esa es una decision legitima. Cierra con "
         "esa alternativa.\n"
-        "No ordenas ni das por hecho que se vaya a hacer: propones. La clinica decide.\n\n"
+        "No ordenas ni das por hecho que se vaya a hacer: propones. La clinica decide.\n"
+        "**Si en `por_que` no pudiste determinar la causa, este campo NO lleva las tres "
+        "partes.** Sin causa no hay accion que proponer, y las partes 2 y 3 se vuelven relleno "
+        "que suena a consejo. Escribe entonces UNA sola cosa: que haria falta registrar o "
+        "mirar para saber por que paso. Un campo corto y honesto vale mas que tres frases que "
+        "valen para cualquier caso.\n"
+        "PROHIBIDO cerrar recomendando «conservar» lo que ya existe --el aviso al doctor, la "
+        "derivacion, el control-- cuando no has senalado antes nada que cambiar: eso no es una "
+        "opcion, es describir lo que ya pasa.\n\n"
 
         "== PROHIBIDO, sin excepcion ==\n"
         "Proponer el contenido que falta. No inventas ni sugieres una cifra, un precio, una "
@@ -222,7 +271,11 @@ _analista = Agent(
         "`recomiendo`, porque cambia QUE hay que cargar.\n"
         "Si el caso parece deliberado --la clinica decidio no dar ese dato por chat, o el "
         "control hizo justo lo que tenia que hacer-- dilo, y en vez de pedir que se arregle, "
-        "senala el volumen como dato de negocio."
+        "senala el volumen como dato de negocio. Pero eso vale SOLO cuando hay volumen del que "
+        "hablar --el caso paso varias veces-- Y consta que fue deliberado. Un caso de una o "
+        "dos veces no es un volumen, y «usa este dato de negocio» ahi no dice nada: es la "
+        "frase que se escribe cuando no hay nada que decir, y si no hay nada que decir es "
+        "mejor decir eso."
     ),
 )
 
@@ -268,6 +321,20 @@ def _partes_de_la_huella(huella: str) -> str:
         )
     if clase == "roto":
         return f"  clase de la averia: {uno}"
+    if clase == "humano" and uno == "relevo":
+        # El unico caso de tres trozos, y el trozo nuevo es el que contesta «por que se
+        # derivo». Se traduce aqui --y no se le pasa crudo-- porque `_sin_aviso` es una
+        # convencion nuestra: el modelo leeria un guion bajo y un motivo que no existe.
+        if dos in ("", sin_resolver.SIN_AVISO):
+            return (
+                "  un doctor tomo la conversacion\n"
+                "  quien lo pidio: NADIE. No hubo aviso: Daniela no escalo y el doctor entro "
+                "por su cuenta"
+            )
+        return (
+            "  un doctor tomo la conversacion\n"
+            f"  aviso que pulso para entrar: Daniela habia escalado por «{dos}»"
+        )
     if clase == "humano":
         return f"  sub-motivo por el que se paso a una persona: {uno}"
     return f"  identificador del caso: {huella}"
@@ -298,7 +365,7 @@ def texto_del_caso(caso: dict) -> str:
 
     return (
         f"CLASE DE CASO: {caso['tipo']}\n"
-        f"QUE SIGNIFICA ESA CLASE: {MECANICA.get(caso['tipo'], '(clase desconocida)')}\n\n"
+        f"QUE SIGNIFICA ESA CLASE: {_mecanica(caso)}\n\n"
         f"DE QUE VA ESTE CASO EN CONCRETO:\n{_partes_de_la_huella(caso['huella'])}\n\n"
         f"CUANTO: paso {contador} {'vez' if contador == 1 else 'veces'}, y {interrupciones}.\n"
         f"DESDE: {caso['primera_vez']}\n"

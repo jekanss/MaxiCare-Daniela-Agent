@@ -414,3 +414,159 @@ def test_un_caso_trae_los_telefonos_de_donde_salio_y_no_quien_dijo_que(esquema):
     assert all(isinstance(e, str) for e in caso["ejemplos"]), (
         "las frases salen sueltas: emparejarlas con su numero convertiria el agregado en otra cosa"
     )
+
+
+# ==========================================================================================
+# Con que se escribe el caso de un relevo (23/09/2026)
+#
+# `relevo._registrar_relevo` escribia `humano:relevo` a pelo, sin frase y sin causa, y el
+# informe que salia de ahi no podia decir mas que «un doctor tomo la conversacion». Lo que
+# faltaba estaba en la base desde siempre; lo que no habia era quien lo leyera.
+# ==========================================================================================
+
+
+_TEL_RELEVO = "573009998877"
+
+
+def _sembrar_relevo(conn, *, mensaje_id, motivo="dato_faltante", sufijo=""):
+    """Una conversacion con dos frases y un aviso en medio. Devuelve su id.
+
+    La segunda frase llega DESPUES del aviso a proposito: es lo que distingue coger «la
+    ultima frase» de coger «la del turno que escalo», y solo una de las dos explica el caso.
+    """
+    # El id lo pone el codigo, no la base: el orquestador lo necesita para armar claves de
+    # idempotencia antes de haber escrito nada (`persistencia.asegurar_conversacion`).
+    conv = persistencia.asegurar_conversacion(conn, telefono=_TEL_RELEVO)
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO mensajes_entrantes (wamid, telefono, tipo, texto, conversacion_id, "
+            "recibido_en) VALUES (%s, %s, 'text', %s, %s, now() - interval '10 minutes')",
+            (f"w1{sufijo}", _TEL_RELEVO, "cuanto vale sacarme las cordales", conv),
+        )
+        cur.execute(
+            "INSERT INTO escalamientos (conversacion_id, motivo, resumen, pregunta, "
+            "clave_idempotencia, telegram_message_id, creado_en) "
+            "VALUES (%s, %s, 'r', 'p', %s, %s, now() - interval '5 minutes')",
+            (conv, motivo, f"k{mensaje_id}{sufijo}", mensaje_id),
+        )
+        cur.execute(
+            "INSERT INTO mensajes_entrantes (wamid, telefono, tipo, texto, conversacion_id, "
+            "recibido_en) VALUES (%s, %s, 'text', 'muy amable', %s, now())",
+            (f"w2{sufijo}", _TEL_RELEVO, conv),
+        )
+    conn.commit()
+    return conv
+
+
+def test_el_aviso_detras_del_relevo_trae_el_motivo_y_la_frase_QUE_LO_CAUSO(esquema):
+    """Las dos mitades de «por que se derivo». La frase se ata al aviso por su hora: entre
+    que el aviso sale y el doctor lo pulsa el paciente sigue escribiendo, y la ultima frase
+    seria la de despues del problema."""
+    with persistencia.conectar(esquema) as conn:
+        _sembrar_relevo(conn, mensaje_id=7001)
+
+        assert persistencia.aviso_detras_del_relevo(conn, 7001) == (
+            "dato_faltante",
+            "cuanto vale sacarme las cordales",
+        )
+
+
+def test_sin_mensaje_id_no_hay_aviso_y_eso_NO_es_un_fallo(esquema):
+    """Es como llama el panel: `activar` sin `mensaje_id` porque no cuelga de ningun aviso.
+    Ese `None` significa «nadie escalo, el doctor entro por su cuenta», que es justo lo que
+    el informe tiene que poder distinguir -- y no se puede resolver con una consulta."""
+    with persistencia.conectar(esquema) as conn:
+        assert persistencia.aviso_detras_del_relevo(conn, None) is None
+
+
+def test_un_mensaje_id_que_no_es_de_ningun_aviso_nuestro_tampoco_inventa_nada(esquema):
+    """Un id de Telegram que no esta en `escalamientos` -- el doctor pulso un boton de otro
+    mensaje, o la fila se fue con la conversacion. Se devuelve `None`, nunca un motivo
+    parecido: una causa inventada es peor que ninguna."""
+    with persistencia.conectar(esquema) as conn:
+        assert persistencia.aviso_detras_del_relevo(conn, 999999) is None
+
+
+def test_una_nota_de_voz_llega_al_informe_por_su_TRANSCRIPCION(esquema):
+    """En un audio `texto` es NULL y lo que dijo el paciente vive en `transcripcion` (no
+    negociable 29). Sin el `coalesce`, los turnos de audio --de los que mas escalan-- caerian
+    mudos justo en el informe que existe para leerlos."""
+    with persistencia.conectar(esquema) as conn:
+        conv = persistencia.asegurar_conversacion(conn, telefono=_TEL_RELEVO)
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO mensajes_entrantes (wamid, telefono, tipo, texto, transcripcion, "
+                "conversacion_id, recibido_en) VALUES ('wv', %s, 'audio', NULL, %s, %s, "
+                "now() - interval '10 minutes')",
+                (_TEL_RELEVO, "me duele mucho la muela", conv),
+            )
+            cur.execute(
+                "INSERT INTO escalamientos (conversacion_id, motivo, resumen, pregunta, "
+                "clave_idempotencia, telegram_message_id, creado_en) "
+                "VALUES (%s, 'clinico', 'r', 'p', 'kv', 7002, now())",
+                (conv,),
+            )
+        conn.commit()
+
+        assert persistencia.aviso_detras_del_relevo(conn, 7002) == (
+            "clinico",
+            "me duele mucho la muela",
+        )
+
+
+def test_registrar_relevo_deja_la_fila_ENTERA_sin_doblar_nada(esquema):
+    """El camino real de punta a punta: `relevo._registrar_relevo` sobre Neon.
+
+    Las pruebas de `test_relevo.py` doblan esta función --miran que `activar` la llame con lo
+    que toca-- así que ninguna comprueba lo único que importa al final: que la fila que llega
+    a la tabla lleve la huella con su causa, la frase del turno que escaló y el teléfono.
+    """
+    from maxicare_daniela import relevo
+
+    with persistencia.conectar(esquema) as conn:
+        _sembrar_relevo(conn, mensaje_id=7003, sufijo="r")
+
+    relevo._registrar_relevo(esquema, telefono=_TEL_RELEVO, mensaje_id=7003)
+
+    with persistencia.conectar(esquema) as conn:
+        caso = next(
+            c for c in persistencia.casos_recientes(conn)
+            if c["huella"].startswith("humano:relevo")
+        )
+
+    assert caso["huella"] == "humano:relevo:dato_faltante", "la causa va dentro de la huella"
+    assert caso["ejemplos"] == ["cuanto vale sacarme las cordales"], (
+        "sin la frase, el analista recibe una etiqueta y un numero -- y eso fue el bug"
+    )
+    assert caso["telefonos"] == [_TEL_RELEVO], "sin el, no se puede abrir la conversacion"
+    assert caso["escalo"] == 0, (
+        "un relevo no es una interrupcion nueva: la del aviso ya la conto el escalamiento"
+    )
+
+
+def test_un_relevo_por_iniciativa_se_cuenta_APARTE_y_sin_frase(esquema):
+    """La otra mitad, y la que MaxiCare vio mal. Sin `mensaje_id` no hubo aviso: nadie escaló
+    y el doctor entró por su cuenta. Va a su propia fila --mezclada con la de arriba, «5
+    relevos» no se podría repartir después-- y sin frase, porque no hay ningún mensaje del
+    que conste que provocara nada."""
+    from maxicare_daniela import relevo
+
+    relevo._registrar_relevo(esquema, telefono="573001234567", mensaje_id=None)
+
+    with persistencia.conectar(esquema) as conn:
+        caso = next(
+            c for c in persistencia.casos_recientes(conn)
+            if c["huella"] == "humano:relevo:_sin_aviso"
+        )
+
+    assert caso["ejemplos"] == [], "inventarle una frase seria atribuirle una causa"
+    assert caso["contador"] == 1
+    # Y SIN telefono, aunque `_registrar_relevo` se lo pase: `registrar_caso` guarda el
+    # numero DENTRO de la entrada de la frase, asi que sin frase no hay donde ponerlo.
+    #
+    # Se deja asi a proposito. Colarlo en una entrada con `texto` NULL daria el enlace a la
+    # conversacion --que aqui seria util, porque es el unico caso donde el analisis no puede
+    # decir la causa-- al precio de romper `_CONTAR_EJEMPLOS_DEL_TELEFONO`, que es el numero
+    # que `/clearstate` le dice al paciente como «N frases tuyas». Mentir en la confirmacion
+    # de un borrado cuesta mas que un enlace.
+    assert caso["telefonos"] == []

@@ -737,6 +737,56 @@ Y el eco: lo que se escribe desde el panel baja **mudo** al hilo del paciente, p
 dos ventanas enseñen lo mismo. **No abre hilo si no hay** (no negociable 14): un texto nunca
 estrena expediente.
 
+## Un relevo NO es un fallo de Daniela, y el informe lo daba por hecho (23/09/2026)
+
+`activar` escribe un caso en `casos_sin_resolver` --es la única escritura de esa tabla que no
+sale de un turno, porque el relevo se abre desde un botón y no hay `ctx.turno` que lo
+acumule--. Durante meses esa escritura fue esta línea:
+
+```python
+registrar_caso(conn, huella="humano:relevo", tipo="HUMANO", escalo=1)
+```
+
+MaxiCare leyó lo que producía: «Hubo que pasarle la conversación al doctor 2 veces», y los
+tres apartados del análisis repitiendo que hubo un relevo y que faltaba contexto. **La causa
+no era el analista**: el informe lo escribe un modelo que no ve la conversación, y con una
+etiqueta y un número no hay informe posible. El contraste estaba en la misma tabla
+--`falta_dato:_general:horarios` llegó con la frase «Tienen servicio el sábado» y el mismo
+modelo con el mismo prompt recomendó cargar la política de horarios--.
+
+Tres cosas que ahora viajan, y las tres estaban ya en la base:
+
+- **Qué lo provocó, en la huella.** `humano:relevo:{motivo}` cuando el doctor pulsó el botón
+  de un aviso, y `humano:relevo:_sin_aviso` cuando entró por su cuenta. Lo resuelve
+  `persistencia.aviso_detras_del_relevo` a partir del `mensaje_id`, que `activar` ya recibía
+  y solo usaba para cambiarle el teclado. **Tomar una conversación no demuestra que la
+  automatización fallara** --un doctor puede querer recordar una cita-- y con una huella
+  única las dos mitades eran indistinguibles.
+- **La frase del turno que escaló, y solo esa.** Se ata al aviso por su hora
+  (`recibido_en <= e.creado_en`): entre que el aviso sale y el doctor lo pulsa pueden pasar
+  horas, y la última frase a secas sería la de después del problema. Un relevo sin aviso no
+  lleva frase, y **ese vacío es el dato**: el caso lo produjo un clic, no un mensaje.
+  `analista.MECANICA["HUMANO:relevo"]` se lo explica al modelo para que no lo lea como una
+  laguna y escriba que se derivó «por falta de contexto» -- que es convertir lo que él no ve
+  en lo que le pasó al paciente.
+- **El teléfono**, que es lo que deja abrir la conversación desde la tarjeta. El resto de
+  casos lo llevan desde el 22/09/2026 y este se había quedado fuera por escribir a mano.
+  **Pero solo llega si hay frase**: `registrar_caso` lo guarda dentro de la entrada del
+  ejemplo, así que la tarjeta `_sin_aviso` se queda sin enlace -- justo la que más lo querría.
+  Darle sitio propio obligaría a guardar una entrada con `texto` NULL, y esas las cuenta
+  `_CONTAR_EJEMPLOS_DEL_TELEFONO` para decirle al paciente «N frases tuyas» cuando resetea.
+  Mentir en la confirmación de un borrado cuesta más que un enlace.
+
+Y **`escalo` bajó de 1 a 0**. Es «veces que se interrumpió a un doctor» y la pantalla lo
+imprime tal cual: si el relevo vino de un aviso, esa interrupción ya la contó el
+escalamiento --salía sumada dos veces--; si vino del panel, no interrumpió a nadie, porque
+fue el doctor quien decidió entrar. Las dos son la mentira que prohíbe el no negociable 26.
+Cuántos relevos hubo lo dice el contador de la fila.
+
+Lo que esto NO arregla: **no hay bitácora de relevos**. `tomada_en` y `relevo_cerrado_en` se
+sobrescriben en cada uno, así que de los que ya pasaron no se puede reconstruir nada y las
+filas viejas se hunden solas por la ventana de 30 días.
+
 ## Qué prueba qué
 
 | | |

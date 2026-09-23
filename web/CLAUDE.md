@@ -481,6 +481,44 @@ dirección: el `MINIMO` del modal solo evita un viaje que se sabe rechazado, y *
 vuelve a comprobarlo**. Si allí sube a 16, aquí el único efecto sería que el aviso llega del
 servidor en vez de antes; nunca que pase una contraseña corta.
 
+## Sin resolver — dos títulos para el relevo, porque no son el mismo caso (23/09/2026)
+
+`titulo()` traduce la huella a una frase, y `humano:relevo` es el único caso de TRES trozos.
+El tercero decide cuál de las dos cosas pasó, y hasta hoy las dos decían «Hubo que pasarle la
+conversación al doctor»:
+
+| Huella | Título | Qué significa |
+|---|---|---|
+| `humano:relevo:_sin_aviso` | Un doctor entró por su cuenta | Daniela no pidió ayuda. **No consta que fallara nada** |
+| `humano:relevo:dato_faltante` | Un doctor entró tras el aviso: le faltaba un dato | Daniela escaló y el doctor pulsó el botón |
+| `humano:dato_faltante` | Hubo que pasarle la conversación al doctor | Daniela avisó y **nadie entró** |
+
+Tres cosas que no se ven en el diff:
+
+- **Los dos empiezan igual** («Un doctor entró») porque son variantes de lo mismo y la lista
+  tiene que dejarlo ver de un vistazo. Y ninguno de los dos se confunde con la tercera fila,
+  que es un caso distinto: el aviso sonó y nadie lo tomó.
+- **`POR_QUE_AVISO` son los cinco valores de `MotivoEscalamiento`** (`contratos.py`), que es
+  una lista cerrada. Aun así hay respaldo, porque una lista cerrada en Python no impide que
+  una fila vieja de la base traiga otra cosa.
+- **Los títulos están medidos.** El más largo que la lista ya sabe llevar son 53 caracteres
+  («Daniela iba a decir algo que no debía (blanqueamiento)»); el peor de estos se queda en
+  51. La primera versión decía «Daniela pidió ayuda porque era una consulta clínica, y un
+  doctor entró» --70, un 30% por encima del máximo probado-- y por eso `clinico` se dice
+  «era algo clínico» y no «era una consulta clínica»: esos ocho caracteres son los que lo
+  dejan por debajo del listón en la columna de 320 px.
+
+La nota roja de «se interrumpió al doctor N de M veces» ya no sale en un relevo: `escalo`
+pasó a 0 y el porqué está en `.claude/rules/relevo-telegram.md`.
+
+Y la cabecera del detalle dice ahora **cuántas personas** hay detrás del contador: «2 veces ·
+la misma persona · 23 sep». Era la primera pregunta de quien leía «2 veces», y la respuesta
+estaba en `telefonos` sin que nadie la sacara. Pero `cuantasPersonas` **calla cuando no puede
+afirmarlo**: un caso guarda como mucho cinco frases, así que con contador 12 quedan cinco
+teléfonos y «5 personas» sería falso. La guarda no es saberse el tope --que vive en Python--
+sino comparar `ejemplos.length` con `contador`: si coinciden, no se recortó nada y están
+todos. Si no, se calla.
+
 ## Del lado de Python, pero solo importa desde aquí
 
 - Sin `MAXICARE_SECRETO_SESION` el panel se apaga con un 503 y **el webhook sigue vivo**.

@@ -4251,6 +4251,47 @@ def borrar_conversacion(conn, telefono: str, *, commit: bool = True) -> dict[str
 # ==========================================================================================
 
 
+def aviso_detras_del_relevo(conn, mensaje_id: int | None) -> tuple[str, str | None] | None:
+    """Qué provocó el aviso que el doctor pulsó, y qué había escrito el paciente.
+
+    Devuelve `(motivo, frase)` o `None` cuando el relevo no salió de ningún aviso -- porque
+    `mensaje_id` es `None` (lo tomaron desde el panel) o porque ese id no es de un aviso
+    nuestro. **Ese `None` es un dato, no un fallo**: significa que nadie escaló y que el
+    doctor entró por su cuenta, que es justo lo que el informe tiene que poder distinguir.
+
+    La frase se ata al aviso por su HORA (`recibido_en <= e.creado_en`) y no se coge la
+    última a secas. Entre que el aviso sale y el doctor lo pulsa pueden pasar horas, y en ese
+    rato el paciente sigue escribiendo: la última frase sería la de después del problema y el
+    informe contaría otra historia. Con el corte, la frase es la del turno que escaló.
+
+    `coalesce(texto, transcripcion)`: en una nota de voz `texto` es NULL y lo que dijo el
+    paciente vive en `transcripcion` (no negociable 29). Sin el `coalesce`, justo los turnos
+    de audio --de los que más escalan-- llegarían mudos al informe.
+    """
+    if mensaje_id is None:
+        return None
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT e.motivo,
+                   (SELECT coalesce(m.texto, m.transcripcion)
+                      FROM mensajes_entrantes m
+                     WHERE m.conversacion_id = e.conversacion_id
+                       AND m.recibido_en <= e.creado_en
+                       AND coalesce(m.texto, m.transcripcion) IS NOT NULL
+                     ORDER BY m.recibido_en DESC
+                     LIMIT 1)
+              FROM escalamientos e
+             WHERE e.telegram_message_id = %s
+             ORDER BY e.id DESC
+             LIMIT 1
+            """,
+            (mensaje_id,),
+        )
+        fila = cur.fetchone()
+        return (fila[0], fila[1]) if fila else None
+
+
 def registrar_caso(
     conn, *, huella: str, tipo: str, escalo: int = 0,
     ejemplo: str | None = None, telefono: str = "",

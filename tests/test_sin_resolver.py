@@ -169,6 +169,29 @@ def test_las_otras_tres_huellas_tambien_normalizan():
     assert huella_humano(" Dato_Faltante ") == "humano:dato_faltante"
 
 
+def test_la_huella_de_un_relevo_dice_QUE_aviso_lo_provoco():
+    """Un doctor puede entrar porque Daniela escalo y sono el aviso, o por su cuenta. Son dos
+    cosas distintas que piden acciones opuestas --cargar el dato que falto la primera, nada
+    la segunda-- y hasta el 23/09/2026 caian las dos en la cadena fija `humano:relevo`."""
+    from maxicare_daniela.sin_resolver import huella_relevo
+
+    assert huella_relevo("dato_faltante") == "humano:relevo:dato_faltante"
+    assert huella_relevo(" Agenda_Llena ") == "humano:relevo:agenda_llena"
+
+
+def test_un_relevo_que_nadie_pidio_se_marca_y_NO_se_mezcla_con_los_otros():
+    """`None` es lo que llega desde el panel, donde no hay aviso del que colgar. Se le pone
+    un nombre en vez de dejar la huella coja: `humano:relevo:` a secas se agruparia con
+    cualquier cosa y no se podria contar aparte."""
+    from maxicare_daniela.sin_resolver import SIN_AVISO, huella_relevo
+
+    assert huella_relevo(None) == f"humano:relevo:{SIN_AVISO}"
+    assert huella_relevo("  ") == f"humano:relevo:{SIN_AVISO}"
+    assert huella_relevo(None) != huella_relevo("dato_faltante")
+    # Y el guion bajo lo separa de los cinco motivos de verdad, como `_general`.
+    assert SIN_AVISO.startswith("_")
+
+
 def test_un_fallo_que_empieza_por_relevo_no_es_un_fallo():
     """No negociable 15: un mensaje que entra durante un relevo se anota con
     `fallo_respuesta` empezando por `relevo:` SIN ser un fallo."""

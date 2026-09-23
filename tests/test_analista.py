@@ -474,3 +474,95 @@ def test_la_recomendacion_cabe_entera_y_el_que_paso_sigue_acotado():
         "esta recomendacion."
     )
     InformeDelCaso(que_paso="x", por_que="y", recomiendo=largo)
+
+
+# ==========================================================================================
+# El relevo: un doctor tomando la conversacion NO es Daniela quedandose corta (23/09/2026)
+#
+# MaxiCare leyo «Hubo que pasarle la conversacion al doctor 2 veces» y sus tres apartados
+# repitiendo que hubo un relevo y que faltaba contexto. La causa estaba en la captura
+# --`relevo._registrar_relevo` escribia la huella a pelo, sin frase, sin telefono y sin que
+# lo habia provocado-- pero estas dos mitades son las que impiden que vuelva: que el modelo
+# reciba la mecanica del relevo separada, y que la huella diga si alguien lo pidio.
+# ==========================================================================================
+
+
+def _relevo(huella, **cambios):
+    return _caso(huella) | {"tipo": "HUMANO", "ejemplos": []} | cambios
+
+
+def test_el_relevo_tiene_MECANICA_propia_y_no_la_de_los_motivos_de_Daniela():
+    """Comparten el tipo `HUMANO` y no son lo mismo: los cinco motivos los decide Daniela y
+    son automaticos; el relevo lo decide una persona pulsando un boton. Con la mecanica
+    compartida el modelo leia «el sistema paso la conversacion a una persona» y concluia que
+    la automatizacion se habia quedado corta, tambien cuando nadie habia escalado."""
+    texto = analista.texto_del_caso(_relevo("humano:relevo:_sin_aviso"))
+
+    assert analista.MECANICA["HUMANO:relevo"] in texto
+    assert analista.MECANICA["HUMANO"] not in texto
+    # Y al reves: un `HUMANO` que no es un relevo conserva la suya.
+    assert analista.MECANICA["HUMANO"] in analista.texto_del_caso(_relevo("humano:clinico"))
+
+
+def test_la_mecanica_del_relevo_dice_que_tomarlo_NO_prueba_que_algo_fallara():
+    """Es la peticion textual: «tomarla manualmente no demuestra por si solo que la
+    automatizacion fallo». Va en la mecanica --que es un hecho del sistema-- y no solo en las
+    instrucciones, porque es lo que el modelo tiene que saber para no deducir lo contrario."""
+    texto = analista.MECANICA["HUMANO:relevo"]
+
+    assert "NO demuestra que la automatizacion" in texto
+    assert "_sin_aviso" in texto, "el sub-motivo tiene que estar explicado, no solo existir"
+
+
+def test_el_relevo_dice_QUE_aviso_pulso_el_doctor_para_entrar():
+    """La huella lleva el motivo del escalamiento que sono, y eso es «por que se derivo»
+    contestado con un hecho. Sin el tercer trozo, los dos relevos eran la misma fila."""
+    texto = analista.texto_del_caso(_relevo("humano:relevo:dato_faltante"))
+
+    assert "Daniela habia escalado por «dato_faltante»" in texto
+
+
+def test_un_relevo_SIN_aviso_dice_que_no_lo_pidio_nadie_y_no_se_queda_en_blanco():
+    """El caso que MaxiCare vio. Sin esto el modelo recibia un `_sin_aviso` crudo --un guion
+    bajo y un motivo que no existe-- y lo leia como un motivo mas."""
+    texto = analista.texto_del_caso(_relevo("humano:relevo:_sin_aviso"))
+
+    assert "quien lo pidio: NADIE" in texto
+    assert "_sin_aviso" not in texto.split("QUE SIGNIFICA")[0], (
+        "la convencion interna no se le ensena al modelo fuera de la mecanica"
+    )
+
+
+def test_la_ausencia_de_frases_en_un_relevo_por_iniciativa_esta_EXPLICADA():
+    """Sin explicarla, el modelo la lee como una laguna de datos y escribe que se derivo «por
+    falta de contexto» -- que es convertir lo que el no ve en lo que le paso al paciente. La
+    mecanica dice que ahi no hay frase porque no hubo ningun mensaje que provocara nada."""
+    assert "NO es una laguna" in analista.MECANICA["HUMANO:relevo"]
+
+
+def test_el_prompt_prohibe_presentar_la_falta_de_contexto_como_la_causa():
+    """«No presentes la ausencia de contexto como si fuera la causa del relevo». El informe
+    que salio decia justo eso: «se asegura una respuesta humana cuando no hay contexto
+    suficiente para automatizar»."""
+    texto = _instrucciones()
+
+    assert "PROHIBIDAS" in texto
+    assert "Lo que a ti te falte no le ocurrio a nadie" in texto
+
+
+def test_sin_causa_la_recomendacion_NO_lleva_las_tres_partes():
+    """Las partes 2 y 3 sin una causa detras son relleno que suena a consejo, y son lo que
+    producia «conservar el relevo para los casos que la clinica prefiera atender
+    personalmente» como recomendacion entera."""
+    texto = _instrucciones()
+
+    assert "este campo NO lleva las tres partes" in texto
+    assert "PROHIBIDO cerrar recomendando «conservar»" in texto
+
+
+def test_el_volumen_como_dato_de_negocio_ya_no_vale_para_un_caso_de_dos():
+    """Era una salida siempre disponible y el modelo la tomaba siempre. Un caso de contador 2
+    no tiene volumen del que hablar, asi que ahi la frase solo ocupa sitio."""
+    texto = _instrucciones()
+
+    assert "Un caso de una o dos veces no es un volumen" in texto

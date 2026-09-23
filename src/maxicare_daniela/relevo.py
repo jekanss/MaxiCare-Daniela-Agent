@@ -62,7 +62,7 @@ import re
 from datetime import datetime
 from typing import Any
 
-from . import persistencia
+from . import persistencia, sin_resolver
 from .canales import _TIPO_WHATSAPP_DE_TELEGRAM, HiloInvalido
 from .contratos import ZONA_BOGOTA
 from .lectura import nombre_del_tema
@@ -346,17 +346,76 @@ def _marcar_escalamiento(database_url: str, mensaje_id: int) -> None:
         persistencia.marcar_relevo_activado(conn, mensaje_id)
 
 
-def _registrar_relevo(database_url: str) -> None:
+def _registrar_relevo(
+    database_url: str, *, telefono: str, mensaje_id: int | None
+) -> None:
     """Un doctor dejó lo que hacía para atender a un paciente. Es la señal más cara que
     produce el sistema y la ÚNICA que no pasa por ningún turno: el relevo se abre desde
-    Telegram, así que no hay `ctx.turno` donde acumularla ni `_anotar_resultado` que la
-    vuelque. Sin esto, la única que no queda contada sería justo esa.
+    Telegram o desde el panel, así que no hay `ctx.turno` donde acumularla ni
+    `_anotar_resultado` que la vuelque. Sin esto, la única que no queda contada sería justo esa.
 
-    Sin frase de ejemplo a propósito: lo que se habló antes ya está en el hilo del paciente,
-    y lo que importa aquí es el conteo.
+    ------------------------------------------------------------------------------------
+    Por qué dejó de escribir la huella a pelo (23/09/2026)
+    ------------------------------------------------------------------------------------
+
+    Decía exactamente esto, y el comentario defendía cada ausencia:
+
+        registrar_caso(conn, huella="humano:relevo", tipo="HUMANO", escalo=1)
+        # Sin frase de ejemplo a proposito: lo que se hablo antes ya esta en el hilo.
+
+    Es verdad que está en el hilo, y ahí es donde no sirve: el informe de «sin resolver» lo
+    escribe un modelo que NO ve la conversación --solo la huella, los contadores y las frases
+    guardadas-- así que un caso sin frase y sin causa le deja una etiqueta y un número. Lo que
+    salía era la única cosa honesta que se puede escribir con eso: «un doctor tomó la
+    conversación; no se puede determinar la causa». Tres veces, en los tres apartados.
+
+    El contraste está en la misma tabla: `falta_dato:_general:horarios` llegó con una frase
+    --«Tienen servicio el sábado»-- y el mismo modelo con el mismo prompt escribió «cargar la
+    política de horarios, incluyendo si hay atención los sábados». La diferencia no era el
+    analista. Era esta línea.
+
+    Así que ahora viajan las tres cosas que la base ya sabía y nadie estaba leyendo:
+
+    1. **Qué lo provocó**, en la huella (`sin_resolver.huella_relevo`). Sale del aviso que el
+       doctor pulsó; sin aviso, dice que no lo hubo.
+    2. **La frase del paciente**, pero SOLO la del turno que escaló, y por eso se lee a través
+       de `aviso_detras_del_relevo` en vez de coger la última a secas. Un relevo sin aviso no
+       tiene frase que lo explique --el caso lo produjo un clic, no un mensaje-- y rellenar
+       ese hueco con lo último que dijera el paciente pintaría «Muy amable» bajo el rótulo
+       «Las preguntas tal como llegaron». Ese vacío ES el dato, y `MECANICA` se lo explica al
+       analista para que no lo lea como una laguna.
+    3. **El teléfono**, que es lo que deja abrir la conversación desde el caso. El resto de
+       casos lo llevan desde el 22/09/2026 y este se había quedado fuera.
+
+    Lo que el 3 NO consigue en el caso sin aviso: `registrar_caso` guarda el número DENTRO de
+    la entrada de la frase, así que sin frase no hay dónde ponerlo y esa tarjeta se queda sin
+    enlace -- justo la que más lo querría, porque es la única cuyo análisis no puede decir la
+    causa. Se deja así: darle sitio propio obligaría a guardar una entrada con `texto` NULL, y
+    esas las cuenta `_CONTAR_EJEMPLOS_DEL_TELEFONO` para decirle al paciente «N frases tuyas»
+    al resetear. Mentir en la confirmación de un borrado cuesta más que un enlace.
+
+    ------------------------------------------------------------------------------------
+    Y por qué `escalo` bajó de 1 a 0
+    ------------------------------------------------------------------------------------
+
+    `escalo` es «veces que se interrumpió a un doctor», y la pantalla lo imprime tal cual. Un
+    relevo no es una interrupción nueva por ninguno de los dos lados: si vino de un aviso, esa
+    interrupción **ya la contó el escalamiento** --y salía sumada dos veces--; si el doctor
+    entró desde el panel, no interrumpió a nadie, porque fue él quien decidió entrar. Las dos
+    cuentas dan la misma mentira que el no negociable 26 prohíbe, cada una por su lado. Cuántos
+    relevos hubo ya lo dice el contador de la fila.
     """
     with persistencia.conectar(database_url) as conn:
-        persistencia.registrar_caso(conn, huella="humano:relevo", tipo="HUMANO", escalo=1)
+        aviso = persistencia.aviso_detras_del_relevo(conn, mensaje_id)
+        motivo, dicho = aviso if aviso else (None, None)
+        persistencia.registrar_caso(
+            conn,
+            huella=sin_resolver.huella_relevo(motivo),
+            tipo="HUMANO",
+            escalo=0,
+            ejemplo=sin_resolver.frase_para_el_informe([dicho]),
+            telefono=telefono,
+        )
 
 
 def _guardar_del_doctor(
@@ -814,7 +873,12 @@ async def activar(
         # escribiendo el informe no puede mentir en el log ni saltarse las dos líneas de
         # abajo, y mucho menos impedir que un doctor tome una conversación.
         try:
-            await asyncio.to_thread(_registrar_relevo, database_url)
+            # `mensaje_id` es lo que separa las dos clases de relevo, y aquí ya se sabe cuál
+            # es: viene puesto cuando el doctor pulsó el botón de un aviso del General, y en
+            # `None` cuando entró desde el panel, donde no hay aviso del que colgar.
+            await asyncio.to_thread(
+                _registrar_relevo, database_url, telefono=telefono, mensaje_id=mensaje_id
+            )
         except Exception:  # noqa: BLE001
             log.warning("el relevo de %s no quedó contado en el informe", id_conversacion)
 
