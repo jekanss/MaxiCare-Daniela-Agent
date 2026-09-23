@@ -19,9 +19,13 @@ import {
 } from '@/api'
 import { CargandoPantalla, Fallo } from '@/componentes/Estado'
 import {
+  AccionDeCabecera,
+  BOTON,
   Buscador,
   CabeceraDePanel,
+  CAMPO,
   Chip,
+  ESTILO_CAMPO,
   MarcoDeDosPaneles,
   MONO,
   Panel,
@@ -392,14 +396,8 @@ type PropsDelPie = {
   alCaducar: () => void
 }
 
-const BOTON = 'px-4 text-sm font-bold transition-all disabled:opacity-40 disabled:cursor-not-allowed hover:brightness-95'
-const CAMPO = 'w-full px-3 py-2 text-sm outline-none transition-all focus:ring-3 disabled:opacity-60'
-const ESTILO_CAMPO = {
-  fontFamily: SG,
-  backgroundColor: '#FBFAFD',
-  border: '1px solid #DCD8E6',
-  color: '#16111F',
-}
+/* `BOTON`, `CAMPO` y `ESTILO_CAMPO` se fueron a `componentes/Panel.tsx` el 23/09/2026, con
+ * `AccionDeCabecera` y por el mismo motivo. */
 
 function PieDelHilo({
   conversacion,
@@ -783,43 +781,8 @@ function FormularioDeCierre(p: PropsDelCierre) {
 
 /* ---------------------------------------------------------------- Exportar y borrar */
 
-/** Un botón pequeño de cabecera. `peligro` lo pinta en rojo y no es decoración: borrar es la
- *  única acción de esta pantalla que destruye algo, y tiene que verse distinta de las otras
- *  tres antes de pulsarla, no después. */
-function AccionDeCabecera({
-  children, alPulsar, ocupado = false, peligro = false, activo = false,
-}: {
-  children: React.ReactNode
-  alPulsar: () => void
-  ocupado?: boolean
-  peligro?: boolean
-  activo?: boolean
-}) {
-  const tinta = peligro ? '#B91C1C' : '#4C1D95'
-  const borde = peligro ? '#FECACA' : '#DCD8E6'
-  return (
-    <button
-      type="button"
-      onClick={alPulsar}
-      disabled={ocupado}
-      className="transition-all disabled:cursor-not-allowed disabled:opacity-40 hover:brightness-95"
-      style={{
-        backgroundColor: activo ? (peligro ? '#FEF2F2' : '#EDE9FE') : '#FFFFFF',
-        color: tinta,
-        border: `1px solid ${borde}`,
-        fontFamily: MONO,
-        fontSize: '10.5px',
-        letterSpacing: '0.1em',
-        textTransform: 'uppercase',
-        fontWeight: 700,
-        padding: '7px 11px',
-        minHeight: '32px',
-      }}
-    >
-      {children}
-    </button>
-  )
-}
+/* `AccionDeCabecera` vivía aquí y se fue a `componentes/Panel.tsx` el 23/09/2026, cuando
+ * «Tratamientos» adoptó este layout y necesitó los mismos botones. */
 
 /** El formulario de export por rango. Vive plegado dentro de la cabecera de la lista.
  *

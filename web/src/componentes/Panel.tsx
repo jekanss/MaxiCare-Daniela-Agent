@@ -16,6 +16,21 @@
 export const SG = "'Space Grotesk', sans-serif"
 export const MONO = "'JetBrains Mono', monospace"
 
+/** Las clases y el estilo de un campo de texto y de un botón sólido. Estaban dentro de
+ *  `Conversaciones.tsx` y subieron aquí el 23/09/2026 con `AccionDeCabecera`, por lo mismo:
+ *  un formulario que se escribe de nuevo en cada pantalla acaba con cuatro grises de fondo y
+ *  tres radios de borde distintos, y eso se lee como cuatro aplicaciones. */
+export const BOTON =
+  'px-4 text-sm font-bold transition-all disabled:opacity-40 disabled:cursor-not-allowed hover:brightness-95'
+export const CAMPO =
+  'w-full px-3 py-2 text-sm outline-none transition-all focus:ring-3 disabled:opacity-60'
+export const ESTILO_CAMPO = {
+  fontFamily: SG,
+  backgroundColor: '#FBFAFD',
+  border: '1px solid #DCD8E6',
+  color: '#16111F',
+}
+
 /** El marco de la pantalla entera: el fondo y la separación entre los dos paneles.
  *
  *  ------------------------------------------------------------------------------------
@@ -183,13 +198,18 @@ export function Pastilla({
   texto,
   fondo,
   tinta,
+  titulo,
 }: {
   texto: string
   fondo: string
   tinta: string
+  /** La frase larga detrás de dos palabras en versalitas. «Fuera del muro» no se explica
+   *  solo, y el sitio donde cabe la explicación es el `title`, no la pastilla. */
+  titulo?: string
 }) {
   return (
     <span
+      title={titulo}
       style={{
         fontFamily: MONO,
         fontSize: '9.5px',
@@ -233,6 +253,53 @@ export function Chip({
         padding: '9px 13px',
         minHeight: '36px',
         cursor: 'pointer',
+      }}
+    >
+      {children}
+    </button>
+  )
+}
+
+/** Un botón pequeño de cabecera. `peligro` lo pinta en rojo y no es decoración: las acciones
+ *  que destruyen algo --borrar una conversación, desactivar un tratamiento-- tienen que verse
+ *  distintas de las otras antes de pulsarlas, no después.
+ *
+ *  Nació dentro de `Conversaciones.tsx` y salió de ahí el 23/09/2026, cuando «Tratamientos»
+ *  adoptó este mismo layout y necesitó los mismos botones en la cabecera de su detalle. Es el
+ *  motivo por el que existe este archivo: dos copias de un borde se separan en silencio.
+ *
+ *  `titulo` es el porqué cuando el botón está apagado por el rol. Un botón deshabilitado sin
+ *  explicación es indistinguible de uno roto, y esta aplicación apaga varios por permisos. */
+export function AccionDeCabecera({
+  children, alPulsar, ocupado = false, peligro = false, activo = false, titulo,
+}: {
+  children: React.ReactNode
+  alPulsar: () => void
+  ocupado?: boolean
+  peligro?: boolean
+  activo?: boolean
+  titulo?: string
+}) {
+  const tinta = peligro ? '#B91C1C' : '#4C1D95'
+  const borde = peligro ? '#FECACA' : '#DCD8E6'
+  return (
+    <button
+      type="button"
+      onClick={alPulsar}
+      disabled={ocupado}
+      title={titulo}
+      className="transition-all disabled:cursor-not-allowed disabled:opacity-40 hover:brightness-95"
+      style={{
+        backgroundColor: activo ? (peligro ? '#FEF2F2' : '#EDE9FE') : '#FFFFFF',
+        color: tinta,
+        border: `1px solid ${borde}`,
+        fontFamily: MONO,
+        fontSize: '10.5px',
+        letterSpacing: '0.1em',
+        textTransform: 'uppercase',
+        fontWeight: 700,
+        padding: '7px 11px',
+        minHeight: '32px',
       }}
     >
       {children}

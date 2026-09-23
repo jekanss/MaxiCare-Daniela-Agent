@@ -13,8 +13,25 @@ import {
   type TratamientoFila,
 } from '@/api'
 import { CargandoPantalla, Fallo } from '@/componentes/Estado'
-
-const SP = "'Space Grotesk', sans-serif"
+import {
+  AccionDeCabecera,
+  BOTON,
+  Buscador,
+  CabeceraDePanel,
+  CAMPO,
+  Chip,
+  ESTILO_CAMPO,
+  MarcoDeDosPaneles,
+  MONO,
+  Panel,
+  Pastilla,
+  Rotulo,
+  SG,
+  TituloDePanel,
+  Vacio,
+  Volver,
+} from '@/componentes/Panel'
+import { ANCHO_DOS_PANELES, usarEsAngosto } from '@/medidas'
 
 /* La primera pantalla del panel que escribe en la base de verdad.
  *
@@ -26,6 +43,29 @@ const SP = "'Space Grotesk', sans-serif"
  * conocimiento` lee la tabla en cada turno. Cambiar «$1.800.000» por «$1.500.000» aquí es
  * cambiar lo que Daniela le cotiza al siguiente paciente que pregunte. Por eso la pantalla
  * gasta tanto espacio en decir qué significa cada control en vez de asumirlo.
+ *
+ * ------------------------------------------------------------------------------------
+ * La forma: lista a la izquierda, trabajo a la derecha (23/09/2026)
+ * ------------------------------------------------------------------------------------
+ *
+ * Hasta esa fecha era UNA columna con quince acordeones, y las tres cosas que esta pantalla
+ * enseña se empujaban entre sí: abrir «ortodoncia» metía sus cinco editores de ficha DENTRO
+ * de la lista y mandaba el resto de los tratamientos fuera de la ventana; «Ver bitácora»
+ * insertaba cien filas entre la cabecera y la lista; «Nuevo tratamiento» crecía dentro de la
+ * propia cabecera. Cada acción movía de sitio a las otras dos.
+ *
+ * Ahora es el mismo layout de `Conversaciones` y `SinResolver`, con sus piezas reutilizadas
+ * de `componentes/Panel.tsx` -- no copiadas: dos copias de un borde se separan en silencio, y
+ * ese es el motivo por el que ese archivo existe--. La lista es el índice y no se mueve; el
+ * panel de la derecha es donde se trabaja, y las CUATRO cosas que se pueden estar haciendo
+ * --un tratamiento, los hechos de la clínica, la bitácora, crear uno nuevo-- son
+ * SELECCIONES de esa lista. Por eso `seleccion` es una sola cadena y no cuatro banderas:
+ * abrir una cierra la anterior por construcción, que es justo lo que antes no pasaba.
+ *
+ * Y la lista trae lo que no tenía: un buscador y cuatro filtros. El contador de la cabecera
+ * vieja decía «2 tratamientos sin precio» y ahí se acababa -- para saber CUÁLES había que ir
+ * abriendo acordeones--. Ese número es ahora el `Chip` que los deja solos en la lista, que es
+ * el trabajo principal de la pantalla (ver el punto 2 de aquí abajo).
  *
  * ------------------------------------------------------------------------------------
  * Las tres cosas que esta pantalla existe para no dejar que se malentiendan
@@ -45,7 +85,17 @@ const SP = "'Space Grotesk', sans-serif"
  *
  * 3. **`_general` no es un tratamiento.** Son los hechos de la clínica -- horario, sede,
  *    EPS, medios de pago, urgencias--. Mostrarlo en la lista con su guion bajo delante
- *    invitaría a agendarle una cita. Va en su propia pestaña, «La clínica».
+ *    invitaría a agendarle una cita.
+ *
+ *    Hasta el 23/09/2026 eso se resolvía con una pestaña aparte, «La clínica». Sigue sin
+ *    ser un tratamiento y sigue sin enseñar nunca su clave, pero ya no está escondido
+ *    detrás de una pestaña que hay que saber que existe: es una entrada con nombre propio
+ *    en su PROPIO GRUPO de la lista, encima del grupo «Tratamientos» y separado por un
+ *    rótulo. Lo que la decisión prohibía era que se leyera como un servicio agendable, no
+ *    que se pudiera alcanzar; y doce fichas con el horario, la sede y los medios de pago
+ *    son de lo más consultado que hay aquí. Por eso los filtros y el buscador recortan el
+ *    grupo de tratamientos y NUNCA este: filtrar «sin precio» no puede hacer desaparecer
+ *    algo a lo que nadie le pone precio.
  *
  * ------------------------------------------------------------------------------------
  * Los permisos
@@ -76,6 +126,47 @@ const NOMBRE_CONCEPTO: Record<string, string> = {
   profesional: 'profesional',
 }
 
+/* Las dos entradas de la lista que no son un tratamiento ni `_general`, y el formulario de
+ * crear uno. Van como valores de `seleccion` --y no como banderas sueltas-- porque son lo que
+ * ocupa el panel de la derecha, igual que un tratamiento: con banderas, abrir la bitácora
+ * mientras hay una ficha a medias dejaría las dos cosas pintadas a la vez.
+ *
+ * El doble guion bajo no puede chocar con ninguna clave real: `panel.crear_tratamiento` las
+ * valida contra `[a-z0-9_]{3,24}` empezando por letra. Mismo truco que el `OTRO` de
+ * `NuevaFicha`, que lleva aquí desde la fase 8. */
+const BITACORA = '__bitacora__'
+const NUEVO = '__nuevo__'
+
+type Filtro = 'todos' | 'sin_precio' | 'sin_aprobar' | 'inactivos'
+
+/** Los cuatro filtros de la lista, con lo que cada uno responde.
+ *
+ *  No son categorías simétricas y no tienen por qué serlo: son las cuatro preguntas que
+ *  alguien trae cuando abre esta pantalla. «Sin precio» es la que más duele --Daniela dice
+ *  «SIN DATO DOCUMENTADO» y escala-- y por eso va primera. */
+const CHIPS: { id: Filtro; etiqueta: string }[] = [
+  { id: 'todos', etiqueta: 'Todos' },
+  { id: 'sin_precio', etiqueta: 'Sin precio' },
+  { id: 'sin_aprobar', etiqueta: 'Sin aprobar' },
+  { id: 'inactivos', etiqueta: 'Inactivos' },
+]
+
+/** Lo que le falta a un tratamiento, resuelto en un sitio y no en cuatro.
+ *
+ *  `no_identificado` queda fuera de todo lo que sea «le falta algo»: es donde cae lo que
+ *  Daniela no pudo clasificar, no un servicio, y nadie le va a poner precio. Contarlo daría
+ *  «3 sin precio» cuando los que de verdad le faltan a la clínica son dos, y mandaría a
+ *  alguien a inventarle una tarifa a una categoría de error. */
+function estado(t: TratamientoFila, sinAprobar: number) {
+  const esClasificacion = t.clave === CLASIFICACION
+  return {
+    esClasificacion,
+    incompleto: t.faltan.length > 0 && !esClasificacion,
+    sinPrecio: t.activo && !esClasificacion && t.faltan.includes('precio'),
+    sinAprobar,
+  }
+}
+
 function mensajeDe(err: unknown): string {
   return err instanceof Error ? err.message : 'No se pudo completar la operación.'
 }
@@ -92,6 +183,33 @@ function sugerirClave(etiqueta: string): string {
     .slice(0, 24)
 }
 
+/** Le da a un `textarea` el alto de lo que tiene dentro.
+ *
+ *  Aquí había `rows={Math.min(10, Math.max(3, contenido.split('\n').length + 1))}`, que
+ *  cuenta SALTOS DE LÍNEA y por tanto no sabe nada del ancho. Las fichas de esta clínica no
+ *  llevan saltos --son una frase larga-- así que todas salían con tres renglones: en un móvil
+ *  de 360 px el precio de la ortodoncia ocupa seis, y lo que se veía era el texto cortado por
+ *  la mitad dentro de una caja con su propio scroll. Se comprobó con una captura a 360 px; el
+ *  ancho es justo la variable que el cálculo viejo no podía ver, y por eso también se
+ *  recalcula al cambiar el tamaño de la ventana. */
+function usarAltoDelContenido(texto: string) {
+  const caja = useRef<HTMLTextAreaElement | null>(null)
+  useEffect(() => {
+    const el = caja.current
+    if (!el) return
+    const ajustar = () => {
+      el.style.height = 'auto'
+      // 340 px de tope: pasado eso, un scroll dentro del campo es mejor que una ficha que se
+      // come la pantalla y esconde las otras cuatro del tratamiento.
+      el.style.height = `${Math.min(340, el.scrollHeight + 2)}px`
+    }
+    ajustar()
+    window.addEventListener('resize', ajustar)
+    return () => window.removeEventListener('resize', ajustar)
+  }, [texto])
+  return caja
+}
+
 function cuando(iso: string): string {
   const d = new Date(iso)
   if (Number.isNaN(d.getTime())) return iso
@@ -104,27 +222,11 @@ function cuando(iso: string): string {
   })
 }
 
-function Insignia({
-  texto,
-  fondo,
-  color,
-  titulo,
-}: {
-  texto: string
-  fondo: string
-  color: string
-  titulo?: string
-}) {
-  return (
-    <span
-      title={titulo}
-      className="text-[10px] font-semibold px-1.5 py-0.5 rounded-full whitespace-nowrap"
-      style={{ backgroundColor: fondo, color }}
-    >
-      {texto}
-    </span>
-  )
-}
+/* Aquí había una `Insignia` propia --una píldora redonda de 10 px-- y se fue el 23/09/2026 a
+ * favor de la `Pastilla` de `componentes/Panel.tsx`, que es la que usan Conversaciones y Sin
+ * resolver. No era solo estética: «Esperando» allí y «sin aprobar» aquí son lo mismo para
+ * quien mira --un estado que hay que atender-- y con dos formas distintas la clínica aprende
+ * dos códigos para una sola idea. */
 
 function Aviso({ children }: { children: React.ReactNode }) {
   return (
@@ -170,11 +272,14 @@ function Aprobacion({
               disabled={!puedeEditar}
               title={puedeEditar ? undefined : porQueNo}
               onClick={() => cambiar(o.valor)}
-              className="text-xs font-semibold px-3 py-1.5 rounded-lg transition-all disabled:cursor-not-allowed disabled:opacity-50"
+              className="text-xs font-semibold px-3 transition-all disabled:cursor-not-allowed disabled:opacity-50"
               style={{
                 backgroundColor: puesta ? o.fondo : '#FFFFFF',
-                color: puesta ? o.color : '#6B7280',
-                border: `1.5px solid ${puesta ? o.color : '#E5E7EB'}`,
+                color: puesta ? o.color : '#6E6880',
+                border: `1.5px solid ${puesta ? o.color : '#DCD8E6'}`,
+                // 36 px, como los `Chip` de la cabecera: se pulsa con el dedo en la tablet
+                // de recepción, y esto decide si un precio sale con advertencia o sin ella.
+                minHeight: '36px',
               }}
             >
               {o.texto}
@@ -182,7 +287,7 @@ function Aprobacion({
           )
         })}
       </div>
-      <p className="text-[11px] mt-1.5 leading-relaxed" style={{ color: '#9CA3AF' }}>
+      <p className="text-[11px] mt-1.5 leading-relaxed" style={{ color: '#6E6880' }}>
         Sin aprobar no la esconde: Daniela igual la usa, avisando que falta por definir.
       </p>
     </div>
@@ -215,6 +320,7 @@ function EditorFicha({
   const [aprobado, setAprobado] = useState(ficha.aprobado)
   const [nota, setNota] = useState(ficha.nota_pendiente ?? '')
   const [guardando, setGuardando] = useState(false)
+  const alto = usarAltoDelContenido(contenido)
 
   /* Sin resincronizar con la prop cuando la lista se recarga: después de guardar, `ficha`
      vuelve con lo que se acaba de escribir y `sucio` se apaga solo. Resincronizar borraría
@@ -253,36 +359,39 @@ function EditorFicha({
 
   return (
     <div
-      className="rounded-xl p-4"
+      className="p-4"
       style={{
         backgroundColor: '#FFFFFF',
-        border: `1px solid ${aprobado ? '#E5E7EB' : '#FDE68A'}`,
+        border: `1px solid ${aprobado ? '#DCD8E6' : '#FDE68A'}`,
       }}
     >
       <div className="flex items-center gap-2 mb-2 flex-wrap">
-        <p className="text-sm font-semibold" style={{ color: '#111827' }}>
+        <p
+          className="text-sm"
+          style={{ fontFamily: SG, fontWeight: 600, letterSpacing: '-0.018em', color: '#16111F' }}
+        >
           {ficha.concepto.replace(/_/g, ' ')}
         </p>
-        {!aprobado && <Insignia texto="sin aprobar" fondo="#FEF3C7" color="#92400E" />}
-        {sucio && <Insignia texto="sin guardar" fondo="#EDE9FE" color="#5B21B6" />}
-        <span className="text-[10px] ml-auto" style={{ color: '#D1D5DB' }}>
-          editada {cuando(ficha.actualizado_en)}
+        {!aprobado && <Pastilla texto="sin aprobar" fondo="#FEF3C7" tinta="#92400E" />}
+        {sucio && <Pastilla texto="sin guardar" fondo="#EDE9FE" tinta="#5B21B6" />}
+        <span
+          className="ml-auto"
+          title="Última edición"
+          style={{ fontFamily: MONO, fontSize: '10px', color: '#9C95AD', whiteSpace: 'nowrap' }}
+        >
+          {cuando(ficha.actualizado_en)}
         </span>
       </div>
 
       <textarea
+        ref={alto}
         value={contenido}
         onChange={(e) => setContenido(e.target.value)}
         disabled={!puedeEditar}
-        rows={Math.min(10, Math.max(3, contenido.split('\n').length + 1))}
+        rows={3}
         aria-label={`Contenido de ${ficha.concepto}`}
-        className="w-full px-3 py-2 text-sm rounded-lg outline-none transition-all focus:ring-3 disabled:opacity-70"
-        style={{
-          backgroundColor: '#F9FAFB',
-          border: '1px solid #E5E7EB',
-          color: '#111827',
-          fontFamily: SP,
-        }}
+        className={CAMPO}
+        style={ESTILO_CAMPO}
       />
 
       <div className="flex flex-wrap items-start justify-between gap-4 mt-3">
@@ -297,7 +406,7 @@ function EditorFicha({
             : vacio ? 'Una ficha vacía no es lo mismo que una ficha sin datos. Si MaxiCare no tiene el dato, déjala sin crear: Daniela dirá «SIN DATO DOCUMENTADO» y escalará.'
             : undefined
           }
-          className="px-4 py-2 rounded-lg text-sm font-bold transition-all disabled:opacity-40 disabled:cursor-not-allowed hover:brightness-95"
+          className={`py-2 ${BOTON}`}
           style={{ backgroundColor: '#7C3AED', color: '#FFFFFF' }}
         >
           {guardando ? 'Guardando…' : 'Guardar'}
@@ -306,7 +415,7 @@ function EditorFicha({
 
       {!aprobado && (
         <div className="mt-3">
-          <label htmlFor={`${campo}-nota`} className="block text-xs font-semibold mb-1" style={{ color: '#374151' }}>
+          <label htmlFor={`${campo}-nota`} className="block text-xs font-semibold mb-1" style={{ color: '#4A4458' }}>
             Qué falta por definir
           </label>
           <input
@@ -315,10 +424,10 @@ function EditorFicha({
             onChange={(e) => setNota(e.target.value)}
             disabled={!puedeEditar}
             placeholder="Falta confirmarlo con la doctora"
-            className="w-full px-3 py-2 text-sm rounded-lg outline-none transition-all focus:ring-3 disabled:opacity-70"
-            style={{ backgroundColor: '#FFFBEB', border: '1px solid #FDE68A', color: '#111827', fontFamily: SP }}
+            className={CAMPO}
+            style={{ backgroundColor: '#FFFBEB', border: '1px solid #FDE68A', color: '#16111F', fontFamily: SG }}
           />
-          <p className="text-[11px] mt-1" style={{ color: '#9CA3AF' }}>
+          <p className="text-[11px] mt-1" style={{ color: '#6E6880' }}>
             Esta nota se la lee Daniela, no el paciente: va dentro de la advertencia, como
             «Falta por definir: …».
           </p>
@@ -368,6 +477,7 @@ function NuevaFicha({
   const [aprobado, setAprobado] = useState(true)
   const [nota, setNota] = useState('')
   const [guardando, setGuardando] = useState(false)
+  const alto = usarAltoDelContenido(contenido)
 
   /* Si mientras este formulario está abierto se guarda otra ficha del mismo tratamiento,
      `recargar()` encoge `disponibles` y el `<option>` que casaba con `elegido` desaparece.
@@ -424,12 +534,15 @@ function NuevaFicha({
   }
 
   return (
-    <div className="rounded-xl p-4" style={{ backgroundColor: '#FFFFFF', border: '1px dashed #C4B5FD' }}>
-      <p className="text-sm font-semibold mb-3" style={{ color: '#111827' }}>
+    <div className="p-4" style={{ backgroundColor: '#FFFFFF', border: '1px dashed #C4B5FD' }}>
+      <p
+        className="text-sm mb-3"
+        style={{ fontFamily: SG, fontWeight: 600, letterSpacing: '-0.018em', color: '#16111F' }}
+      >
         Nueva ficha
       </p>
 
-      <label htmlFor={`${campo}-concepto`} className="block text-xs font-semibold mb-1" style={{ color: '#374151' }}>
+      <label htmlFor={`${campo}-concepto`} className="block text-xs font-semibold mb-1" style={{ color: '#4A4458' }}>
         Concepto
       </label>
       <select
@@ -437,8 +550,8 @@ function NuevaFicha({
         value={elegido}
         onChange={(e) => setElegido(e.target.value)}
         disabled={!puedeEditar}
-        className="w-full px-3 py-2 text-sm rounded-lg outline-none disabled:opacity-70"
-        style={{ backgroundColor: '#F9FAFB', border: '1px solid #E5E7EB', color: '#111827', fontFamily: SP }}
+        className={CAMPO}
+        style={ESTILO_CAMPO}
       >
         {disponibles.map((c) => (
           <option key={c} value={c}>
@@ -459,10 +572,10 @@ function NuevaFicha({
             disabled={!puedeEditar}
             placeholder="garantia_extendida"
             aria-label="Concepto nuevo"
-            className="w-full px-3 py-2 text-sm rounded-lg outline-none transition-all focus:ring-3 disabled:opacity-70"
-            style={{ backgroundColor: '#F9FAFB', border: '1px solid #E5E7EB', color: '#111827', fontFamily: SP }}
+            className={CAMPO}
+            style={ESTILO_CAMPO}
           />
-          <p className="text-[11px] mt-1 leading-relaxed" style={{ color: '#9CA3AF' }}>
+          <p className="text-[11px] mt-1 leading-relaxed" style={{ color: '#6E6880' }}>
             Un concepto nuevo no se pierde: si Daniela pregunta por uno que no existe, la tool
             le devuelve todos los del tratamiento. Pero un «precios» junto a un «precio» deja
             dos precios conviviendo.
@@ -473,7 +586,7 @@ function NuevaFicha({
       {/* El aviso vecino de arriba es el de duplicar. Este es el de destruir, y por eso va
           en ámbar, con el texto que se perdería delante. */}
       {chocaCon !== null && (
-        <div role="alert" className="mt-2 rounded-lg px-3 py-2.5" style={{ backgroundColor: '#FFFBEB', border: '1px solid #FDE68A' }}>
+        <div role="alert" className="mt-2 px-3 py-2.5" style={{ backgroundColor: '#FFFBEB', border: '1px solid #FDE68A' }}>
           <p className="text-xs font-semibold" style={{ color: '#92400E' }}>
             «{conceptoReal.replace(/_/g, ' ')}» ya existe en este tratamiento. Guardar no crea
             una segunda ficha: reemplaza la que hay.
@@ -488,18 +601,19 @@ function NuevaFicha({
         </div>
       )}
 
-      <label htmlFor={`${campo}-contenido`} className="block text-xs font-semibold mb-1 mt-3" style={{ color: '#374151' }}>
+      <label htmlFor={`${campo}-contenido`} className="block text-xs font-semibold mb-1 mt-3" style={{ color: '#4A4458' }}>
         Contenido
       </label>
       <textarea
         id={`${campo}-contenido`}
+        ref={alto}
         value={contenido}
         onChange={(e) => setContenido(e.target.value)}
         disabled={!puedeEditar}
         rows={3}
         placeholder="Desde $1.200.000 por unidad. Incluye la valoración inicial."
-        className="w-full px-3 py-2 text-sm rounded-lg outline-none transition-all focus:ring-3 disabled:opacity-70"
-        style={{ backgroundColor: '#F9FAFB', border: '1px solid #E5E7EB', color: '#111827', fontFamily: SP }}
+        className={CAMPO}
+        style={ESTILO_CAMPO}
       />
 
       <div className="mt-3">
@@ -513,8 +627,8 @@ function NuevaFicha({
           disabled={!puedeEditar}
           placeholder="Qué falta por definir"
           aria-label="Qué falta por definir"
-          className="w-full mt-3 px-3 py-2 text-sm rounded-lg outline-none transition-all focus:ring-3 disabled:opacity-70"
-          style={{ backgroundColor: '#FFFBEB', border: '1px solid #FDE68A', color: '#111827', fontFamily: SP }}
+          className={`mt-3 ${CAMPO}`}
+          style={{ backgroundColor: '#FFFBEB', border: '1px solid #FDE68A', color: '#16111F', fontFamily: SG }}
         />
       )}
 
@@ -524,7 +638,7 @@ function NuevaFicha({
           onClick={guardar}
           disabled={!puedeEditar || !listo || guardando}
           title={puedeEditar ? undefined : porQueNo}
-          className="px-4 py-2 rounded-lg text-sm font-bold transition-all disabled:opacity-40 disabled:cursor-not-allowed hover:brightness-95"
+          className={`py-2 ${BOTON}`}
           style={{ backgroundColor: chocaCon !== null ? '#D97706' : '#7C3AED', color: '#FFFFFF' }}
         >
           {guardando ? 'Guardando…' : chocaCon !== null ? 'Reemplazar la ficha existente' : 'Crear ficha'}
@@ -532,8 +646,8 @@ function NuevaFicha({
         <button
           type="button"
           onClick={alCerrar}
-          className="px-4 py-2 rounded-lg text-sm font-semibold border hover:bg-gray-50 transition-colors"
-          style={{ borderColor: '#E5E7EB', color: '#374151' }}
+          className="px-4 py-2 text-sm font-semibold border transition-colors hover:brightness-95"
+          style={{ borderColor: '#DCD8E6', backgroundColor: '#FFFFFF', color: '#4A4458' }}
         >
           Cancelar
         </button>
@@ -543,15 +657,270 @@ function NuevaFicha({
 }
 
 // ------------------------------------------------------------------------------------------
-// Un tratamiento de la lista
+// La lista de la izquierda
 // ------------------------------------------------------------------------------------------
 
-function FilaTratamiento({
+/** El rótulo que separa los tres grupos de la lista: «La clínica», «Tratamientos»,
+ *  «Registro».
+ *
+ *  Es lo que sostiene la decisión 3 de la cabecera de este archivo. `_general` deja de estar
+ *  escondido detrás de una pestaña sin convertirse en un tratamiento más: está en OTRO grupo,
+ *  con otro rótulo, y su clave no se pinta en ninguna parte. Sin estos rótulos sería una fila
+ *  al lado de las otras quince, que es exactamente lo que la decisión prohíbe. */
+function RotuloDeGrupo({ children }: { children: React.ReactNode }) {
+  return (
+    <li
+      style={{
+        backgroundColor: '#FBFAFD',
+        borderBottom: '1px solid #ECE8F4',
+        padding: '8px 16px',
+        fontFamily: MONO,
+        fontSize: '10px',
+        letterSpacing: '0.14em',
+        textTransform: 'uppercase',
+        color: '#6E6880',
+      }}
+    >
+      {children}
+    </li>
+  )
+}
+
+/** El esqueleto de una fila de la lista: el borde izquierdo violeta cuando está elegida y la
+ *  misma altura mínima de 44 px que en Conversaciones. Lo comparten los tratamientos y las
+ *  dos entradas fijas, y no se escribe dos veces por lo de siempre: dos copias de un borde
+ *  se separan en silencio. */
+function FilaBase({
+  activa,
+  alAbrir,
+  children,
+}: {
+  activa: boolean
+  alAbrir: () => void
+  children: React.ReactNode
+}) {
+  return (
+    <li style={{ borderBottom: '1px solid #ECE8F4' }}>
+      <button
+        type="button"
+        onClick={alAbrir}
+        className="flex w-full flex-col gap-1.5 text-left"
+        style={{
+          borderLeft: `3px solid ${activa ? '#6D28D9' : 'transparent'}`,
+          // Sin fondo en línea cuando NO está activa: un `transparent` inline le gana a la
+          // clase de hover y el hover dejaría de verse sin que nada falle. Mismo motivo que
+          // en `Conversaciones.FilaDeLaLista`.
+          backgroundColor: activa ? '#F4F1F9' : undefined,
+          padding: '13px 16px',
+          minHeight: '44px',
+          cursor: 'pointer',
+        }}
+      >
+        {children}
+      </button>
+    </li>
+  )
+}
+
+/** Una de las dos entradas que no son un tratamiento: «La clínica» y «Últimos cambios».
+ *
+ *  Llevan una frase debajo del nombre y ninguna pastilla, y eso las distingue de un
+ *  tratamiento de un vistazo: lo que tiene estado es un servicio que la clínica cotiza. */
+function FilaFija({
+  titulo,
+  detalle,
+  activa,
+  alAbrir,
+}: {
+  titulo: string
+  detalle: string
+  activa: boolean
+  alAbrir: () => void
+}) {
+  return (
+    <FilaBase activa={activa} alAbrir={alAbrir}>
+      <span
+        className="truncate"
+        style={{ fontFamily: SG, fontSize: '14.5px', fontWeight: 500, letterSpacing: '-0.01em', color: '#16111F' }}
+      >
+        {titulo}
+      </span>
+      <span style={{ fontSize: '12.5px', fontWeight: 300, lineHeight: 1.4, color: '#6E6880' }}>
+        {detalle}
+      </span>
+    </FilaBase>
+  )
+}
+
+/** Un tratamiento en la lista.
+ *
+ *  Lo que se ve sin abrir nada es lo que esta pantalla existe para que se vea (decisión 2 de
+ *  la cabecera): cuántas fichas tiene y qué le falta. La pastilla de «falta precio» va con
+ *  las palabras enteras y no con un punto de color: «falta precio, duración» se entiende sin
+ *  haber aprendido antes qué significa el rojo.
+ *
+ *  `no_identificado` sale sin marca de falta y con su propia pastilla, por lo que dice la
+ *  constante `CLASIFICACION`: no es un servicio y nadie le va a poner precio. */
+function FilaDeLaLista({
+  t,
+  sinAprobar,
+  activa,
+  alAbrir,
+}: {
+  t: TratamientoFila
+  /** Cuántas de sus fichas están sin aprobar. Se calcula en la pantalla, que es quien tiene
+   *  las fichas: la fila recibe el número ya hecho para no filtrar la lista entera por cada
+   *  una de las quince. */
+  sinAprobar: number
+  activa: boolean
+  alAbrir: () => void
+}) {
+  const e = estado(t, sinAprobar)
+  return (
+    <FilaBase activa={activa} alAbrir={alAbrir}>
+      <span className="flex w-full items-baseline justify-between gap-2">
+        <span
+          className="truncate"
+          style={{
+            fontFamily: SG,
+            fontSize: '14.5px',
+            fontWeight: 500,
+            letterSpacing: '-0.01em',
+            color: t.activo ? '#16111F' : '#6E6880',
+          }}
+        >
+          {t.etiqueta}
+        </span>
+        <span style={{ fontFamily: MONO, fontSize: '10.5px', color: '#6E6880', flex: 'none' }}>
+          {t.fichas === 0 ? 'SIN FICHAS' : t.fichas === 1 ? '1 FICHA' : `${t.fichas} FICHAS`}
+        </span>
+      </span>
+
+      <span className="truncate" style={{ fontFamily: MONO, fontSize: '11px', color: '#4C1D95' }}>
+        {t.clave}
+      </span>
+
+      <span className="flex w-full flex-wrap items-center gap-1.5" style={{ paddingTop: '2px' }}>
+        {e.esClasificacion ? (
+          <Pastilla
+            texto="no es un servicio"
+            fondo="#F7F6FA"
+            tinta="#6E6880"
+            titulo="Aquí cae lo que Daniela no pudo clasificar. No se cotiza ni se agenda, y no necesita precio."
+          />
+        ) : e.incompleto ? (
+          <Pastilla
+            texto={`falta ${t.faltan.map((c) => NOMBRE_CONCEPTO[c] ?? c).join(', ')}`}
+            fondo="#FEF2F2"
+            tinta="#B91C1C"
+            titulo="Daniela dirá «SIN DATO DOCUMENTADO» y escalará cada vez que alguien pregunte por esto."
+          />
+        ) : (
+          <Pastilla texto="completo" fondo="#ECFDF5" tinta="#065F46" titulo="Tiene precio, duración y profesional." />
+        )}
+        {!t.activo && (
+          <Pastilla
+            texto="inactivo"
+            fondo="#F7F6FA"
+            tinta="#6E6880"
+            titulo="Daniela no lo ofrece ni lo agenda. Las citas que ya existen siguen legibles."
+          />
+        )}
+        {sinAprobar > 0 && (
+          <Pastilla
+            texto={`${sinAprobar} sin aprobar`}
+            fondo="#FEF3C7"
+            tinta="#92400E"
+            titulo="Daniela las usa igual, avisando que faltan por definir."
+          />
+        )}
+      </span>
+    </FilaBase>
+  )
+}
+
+// ------------------------------------------------------------------------------------------
+// El detalle de la derecha
+// ------------------------------------------------------------------------------------------
+
+/** La cabecera del panel de detalle: quién es, y qué se le puede hacer.
+ *
+ *  Las acciones van aquí arriba y no al final de la lista de fichas, que es donde estaban
+ *  cuando esto era un acordeón: con cinco fichas de por medio, «Renombrar» y «Desactivar»
+ *  quedaban a una pantalla de scroll del nombre al que se refieren. */
+function CabeceraDeDetalle({
+  titulo,
+  clave,
+  alVolver,
+  pastillas,
+  acciones,
+}: {
+  titulo: string
+  /** La clave técnica, en versalitas debajo del nombre. `null` en «La clínica» y en la
+   *  bitácora: `_general` no se enseña nunca, y las otras dos no tienen ninguna. */
+  clave: string | null
+  alVolver: () => void
+  pastillas?: React.ReactNode
+  acciones?: React.ReactNode
+}) {
+  return (
+    <div
+      className="flex shrink-0 flex-wrap items-center gap-2 sm:gap-3"
+      style={{ padding: '14px 16px', borderBottom: '1px solid #ECE8F4' }}
+    >
+      {/* La salida cuando solo cabe un panel. Se esconde sola en escritorio, donde la lista
+          sigue estando al lado. */}
+      <Volver alPulsar={alVolver} que="Lista" />
+      <span className="flex min-w-0 flex-1 flex-col gap-1">
+        <span
+          className="truncate"
+          style={{ fontFamily: SG, fontWeight: 600, fontSize: '17px', letterSpacing: '-0.022em', color: '#16111F' }}
+        >
+          {titulo}
+        </span>
+        {clave !== null && (
+          <span className="truncate" style={{ fontFamily: MONO, fontSize: '11.5px', color: '#4C1D95' }}>
+            {clave}
+          </span>
+        )}
+      </span>
+      {/* Las acciones ocupan la fila entera hasta que de verdad quepan al lado del nombre. El
+          corte es `xl` y no `sm` por lo mismo que en el hilo de Conversaciones: lo que manda
+          es el ancho del PANEL --dos tercios de lo que sobra tras el menú--, así que a 1024 px
+          de ventana esto mide unos 400 y el nombre saldría cortado. */}
+      {(pastillas || acciones) && (
+        <span className="flex w-full flex-wrap items-center gap-2 xl:w-auto">
+          {pastillas}
+          {acciones}
+        </span>
+      )}
+    </div>
+  )
+}
+
+/** La caja con scroll propio donde va el contenido de cualquiera de los cuatro detalles.
+ *
+ *  El scroll es de ESTA caja y no del panel entero: la cabecera con el nombre y las acciones
+ *  se queda puesta mientras se baja por las fichas. Cuando esto era un acordeón, bajar a la
+ *  quinta ficha dejaba fuera de la pantalla el nombre del tratamiento que se estaba
+ *  editando. */
+function CuerpoDeDetalle({ children }: { children: React.ReactNode }) {
+  return (
+    <div
+      className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto"
+      style={{ backgroundColor: '#F7F6FA', padding: '16px' }}
+    >
+      {children}
+    </div>
+  )
+}
+
+/** Lo que se puede hacer con UN tratamiento: leer y editar sus fichas, añadir una, cambiarle
+ *  el nombre visible y activarlo o desactivarlo. */
+function DetalleTratamiento({
   t,
   fichas,
   conceptos,
-  abierta,
-  alternar,
   puedeFichas,
   puedeTratamientos,
   porQueNoFichas,
@@ -560,12 +929,11 @@ function FilaTratamiento({
   alCerrarNueva,
   alGuardarFicha,
   alCambiar,
+  alVolver,
 }: {
   t: TratamientoFila
   fichas: FichaFila[]
   conceptos: string[]
-  abierta: boolean
-  alternar: () => void
   puedeFichas: boolean
   puedeTratamientos: boolean
   porQueNoFichas: string
@@ -580,236 +948,207 @@ function FilaTratamiento({
     nota_pendiente: string | null
   }) => Promise<boolean>
   alCambiar: (clave: string, cambio: { etiqueta?: string; activo?: boolean }) => Promise<boolean>
+  alVolver: () => void
 }) {
   const [agregando, setAgregando] = useState(false)
   const [renombrando, setRenombrando] = useState(false)
   const [nombre, setNombre] = useState(t.etiqueta)
 
-  const mostrarNueva = agregando || forzarNueva
-  const esClasificacion = t.clave === CLASIFICACION
-  const incompleto = t.faltan.length > 0 && !esClasificacion
-  const sinFichas = t.fichas === 0 && !esClasificacion
-
-  function cerrarNueva() {
+  /* Los dos formularios se cierran al cambiar de tratamiento. Sin esto, abrir «ortodoncia»
+     con el renombrador puesto en «implantes» dejaría un campo con el nombre del anterior
+     encima del nuevo: el error que eso produce --renombrar al que no era-- no lo deshace
+     ningún botón, solo otro renombrado. */
+  useEffect(() => {
     setAgregando(false)
-    alCerrarNueva()
-  }
+    setRenombrando(false)
+    setNombre(t.etiqueta)
+  }, [t.clave, t.etiqueta])
+
+  const e = estado(t, 0)
+  const mostrarNueva = agregando || forzarNueva
+  const sinFichas = t.fichas === 0 && !e.esClasificacion
 
   return (
-    <div
-      className="rounded-2xl overflow-hidden"
-      style={{
-        backgroundColor: '#FFFFFF',
-        border: `1px solid ${incompleto ? '#FECACA' : '#E5E7EB'}`,
-        opacity: t.activo ? 1 : 0.65,
-      }}
-    >
-      {/* Todo lo de dentro son `span`, no `div` ni `p`: el contenido permitido de un
-          `button` es phrasing content, y un `div` ahí es HTML inválido. React no avisa y
-          los navegadores lo pintan igual, pero el parseo de un elemento mal anidado es de
-          lo poco que todavía se comporta distinto entre motores, y esta cabecera la lleva
-          TODAS las filas de la lista. `className="block"` devuelve el salto de línea que
-          daba el `div`. */}
-      <button
-        onClick={alternar}
-        aria-expanded={abierta}
-        className="w-full flex items-center gap-3 px-5 py-4 text-left hover:bg-gray-50 transition-colors"
-      >
-        <span className="text-xs shrink-0" style={{ color: '#9CA3AF' }}>
-          {abierta ? '▾' : '▸'}
-        </span>
-
-        <span className="block min-w-0">
-          <span className="flex items-center gap-2 flex-wrap">
-            <span className="block text-sm font-semibold" style={{ color: '#111827' }}>
-              {t.etiqueta}
-            </span>
-            <code className="text-[11px]" style={{ color: '#9CA3AF' }}>
-              {t.clave}
-            </code>
-            {!t.activo && (
-              <Insignia
-                texto="inactivo"
-                fondo="#F3F4F6"
-                color="#6B7280"
-                titulo="Daniela no lo ofrece ni lo agenda. Las citas que ya existen siguen legibles."
-              />
-            )}
-            {esClasificacion && (
-              <Insignia
-                texto="no es un servicio"
-                fondo="#F3F4F6"
-                color="#6B7280"
-                titulo="Aquí cae lo que Daniela no pudo clasificar. No se cotiza ni se agenda, y no necesita precio."
-              />
-            )}
+    <>
+      <CabeceraDeDetalle
+        titulo={t.etiqueta}
+        clave={t.clave}
+        alVolver={alVolver}
+        pastillas={
+          <>
+            {!t.activo && <Pastilla texto="inactivo" fondo="#F7F6FA" tinta="#6E6880" />}
             {!t.en_el_muro && (
-              <Insignia
+              <Pastilla
                 texto="fuera del muro"
                 fondo="#EEF2FF"
-                color="#3730A3"
+                tinta="#3730A3"
                 titulo="Se puede cotizar y agendar, pero una radiografía sobre él se clasifica como «no identificado» hasta que se incorpore al muro con un cambio de código."
               />
             )}
-          </span>
+          </>
+        }
+        acciones={
+          <>
+            <AccionDeCabecera
+              alPulsar={() => setAgregando(true)}
+              ocupado={!puedeFichas || mostrarNueva}
+              titulo={puedeFichas ? undefined : porQueNoFichas}
+            >
+              + Ficha
+            </AccionDeCabecera>
+            <AccionDeCabecera
+              alPulsar={() => {
+                setNombre(t.etiqueta)
+                setRenombrando(true)
+              }}
+              ocupado={!puedeTratamientos || renombrando}
+              titulo={puedeTratamientos ? undefined : porQueNoTratamientos}
+            >
+              Renombrar
+            </AccionDeCabecera>
+            {/* Desactivar, nunca borrar: borrar dejaría las citas históricas apuntando a una
+                clave que ya no existe. En rojo solo al apagar, que es el lado que quita algo. */}
+            <AccionDeCabecera
+              peligro={t.activo}
+              alPulsar={() => void alCambiar(t.clave, { activo: !t.activo })}
+              ocupado={!puedeTratamientos}
+              titulo={
+                puedeTratamientos
+                  ? t.activo
+                    ? 'Daniela deja de ofrecerlo y de agendarlo. No se borra nada: las citas que ya existen siguen legibles.'
+                    : 'Vuelve al vocabulario que Daniela puede ofrecer y agendar.'
+                  : porQueNoTratamientos
+              }
+            >
+              {t.activo ? 'Desactivar' : 'Reactivar'}
+            </AccionDeCabecera>
+          </>
+        }
+      />
 
-          <span className="flex items-center gap-2 mt-1 flex-wrap">
-            <span className="text-xs" style={{ color: '#6B7280' }}>
-              {t.fichas === 0 ? 'sin fichas' : t.fichas === 1 ? '1 ficha' : `${t.fichas} fichas`}
-            </span>
-            {esClasificacion ? (
-              <span className="text-xs" style={{ color: '#9CA3AF' }}>
-                donde cae lo que no se pudo clasificar
-              </span>
-            ) : incompleto ? (
-              <span className="text-xs font-medium" style={{ color: '#DC2626' }}>
-                falta {t.faltan.map((c) => NOMBRE_CONCEPTO[c] ?? c).join(', ')}
-              </span>
-            ) : (
-              <span className="text-xs" style={{ color: '#059669' }}>
-                ✓ precio, duración y profesional
-              </span>
-            )}
-          </span>
-        </span>
-
-        <span className="ml-auto shrink-0 text-xs" style={{ color: '#9CA3AF' }}>
-          {abierta ? 'Cerrar' : 'Abrir'}
-        </span>
-      </button>
-
-      {abierta && (
-        <div className="px-5 pb-5 flex flex-col gap-3" style={{ borderTop: '1px solid #F3F4F6' }}>
-          {sinFichas && (
-            <div className="rounded-xl px-4 py-3 mt-4" style={{ backgroundColor: '#FEF2F2', border: '1px solid #FECACA' }}>
-              <p className="text-xs leading-relaxed" style={{ color: '#991B1B' }}>
-                Este tratamiento no tiene ni una ficha. Daniela dirá «SIN DATO DOCUMENTADO» y
-                escalará cada vez que alguien pregunte por él.
-              </p>
-            </div>
-          )}
-
-          <div className="flex flex-col gap-3 mt-4">
-            {fichas.map((f) => (
-              <EditorFicha
-                key={`${f.tratamiento}/${f.concepto}`}
-                ficha={f}
-                puedeEditar={puedeFichas}
-                porQueNo={porQueNoFichas}
-                alGuardar={alGuardarFicha}
-              />
-            ))}
-          </div>
-
-          {mostrarNueva ? (
-            <NuevaFicha
-              tratamiento={t.clave}
-              conceptos={conceptos}
-              existentes={fichas}
-              puedeEditar={puedeFichas}
-              porQueNo={porQueNoFichas}
-              alGuardar={alGuardarFicha}
-              alCerrar={cerrarNueva}
+      <CuerpoDeDetalle>
+        {renombrando && (
+          <div
+            className="flex flex-wrap items-center gap-2 p-4"
+            style={{ backgroundColor: '#FFFFFF', border: '1px solid #DCD8E6' }}
+          >
+            <input
+              value={nombre}
+              onChange={(ev) => setNombre(ev.target.value)}
+              aria-label="Nombre visible del tratamiento"
+              className={`flex-1 min-w-[12rem] ${CAMPO}`}
+              style={ESTILO_CAMPO}
             />
-          ) : (
-            <div className="flex flex-wrap items-center gap-2">
-              <button
-                type="button"
-                onClick={() => setAgregando(true)}
-                disabled={!puedeFichas}
-                title={puedeFichas ? undefined : porQueNoFichas}
-                className="px-3 py-1.5 rounded-lg text-xs font-semibold border hover:bg-gray-50 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-                style={{ borderColor: '#C4B5FD', color: '#7C3AED' }}
-              >
-                + Añadir ficha
-              </button>
+            <button
+              type="button"
+              onClick={async () => {
+                if (await alCambiar(t.clave, { etiqueta: nombre })) setRenombrando(false)
+              }}
+              disabled={nombre.trim() === '' || nombre.trim() === t.etiqueta}
+              className={`py-2 ${BOTON}`}
+              style={{ backgroundColor: '#6D28D9', color: '#FFFFFF' }}
+            >
+              Guardar nombre
+            </button>
+            <button
+              type="button"
+              onClick={() => setRenombrando(false)}
+              className="px-4 py-2 text-sm font-semibold border transition-colors hover:brightness-95"
+              style={{ borderColor: '#DCD8E6', backgroundColor: '#FFFFFF', color: '#4A4458' }}
+            >
+              Cancelar
+            </button>
+            <p className="w-full text-[11px]" style={{ color: '#6E6880' }}>
+              Cambia el nombre visible, nunca la clave <code>{t.clave}</code>: esa es la que
+              está escrita dentro de las citas que ya existen.
+            </p>
+          </div>
+        )}
 
-              <button
-                type="button"
-                onClick={() => {
-                  setNombre(t.etiqueta)
-                  setRenombrando(true)
-                }}
-                disabled={!puedeTratamientos}
-                title={puedeTratamientos ? undefined : porQueNoTratamientos}
-                className="px-3 py-1.5 rounded-lg text-xs font-semibold border hover:bg-gray-50 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-                style={{ borderColor: '#E5E7EB', color: '#374151' }}
-              >
-                Renombrar
-              </button>
+        {sinFichas && (
+          <div
+            className="px-4 py-3"
+            style={{ backgroundColor: '#FEF2F2', border: '1px solid #FECACA' }}
+          >
+            <p className="text-xs leading-relaxed" style={{ color: '#991B1B' }}>
+              Este tratamiento no tiene ni una ficha. Daniela dirá «SIN DATO DOCUMENTADO» y
+              escalará cada vez que alguien pregunte por él.
+            </p>
+          </div>
+        )}
 
-              {/* Desactivar, nunca borrar: borrar dejaría las citas históricas apuntando a
-                  una clave que ya no existe. */}
-              <button
-                type="button"
-                onClick={() => void alCambiar(t.clave, { activo: !t.activo })}
-                disabled={!puedeTratamientos}
-                title={
-                  puedeTratamientos
-                    ? t.activo
-                      ? 'Daniela deja de ofrecerlo y de agendarlo. No se borra nada: las citas que ya existen siguen legibles.'
-                      : 'Vuelve al vocabulario que Daniela puede ofrecer y agendar.'
-                    : porQueNoTratamientos
-                }
-                className="px-3 py-1.5 rounded-lg text-xs font-semibold border hover:bg-gray-50 transition-colors disabled:opacity-40 disabled:cursor-not-allowed ml-auto"
-                style={{ borderColor: t.activo ? '#FECACA' : '#A7F3D0', color: t.activo ? '#B91C1C' : '#047857' }}
-              >
-                {t.activo ? 'Desactivar' : 'Reactivar'}
-              </button>
-            </div>
-          )}
+        {/* Lo que falta se dice también aquí, y no solo en la pastilla de la lista: quien
+            llega a este panel desde el filtro «Sin precio» ya no tiene la lista delante en un
+            móvil, y «qué le falta exactamente» es justo lo que viene a hacer. */}
+        {e.incompleto && !sinFichas && (
+          <div
+            className="px-4 py-3"
+            style={{ backgroundColor: '#FFFBEB', border: '1px solid #FDE68A' }}
+          >
+            <Aviso>
+              Le falta {t.faltan.map((c) => NOMBRE_CONCEPTO[c] ?? c).join(', ')}. Mientras no
+              esté, Daniela contesta «SIN DATO DOCUMENTADO» a esa pregunta y escala.
+            </Aviso>
+          </div>
+        )}
 
-          {renombrando && (
-            <div className="flex flex-wrap gap-2 items-center">
-              <input
-                value={nombre}
-                onChange={(e) => setNombre(e.target.value)}
-                aria-label="Nombre visible del tratamiento"
-                className="flex-1 min-w-[12rem] px-3 py-2 text-sm rounded-lg outline-none transition-all focus:ring-3"
-                style={{ backgroundColor: '#F9FAFB', border: '1px solid #E5E7EB', color: '#111827', fontFamily: SP }}
-              />
-              <button
-                type="button"
-                onClick={async () => {
-                  if (await alCambiar(t.clave, { etiqueta: nombre })) setRenombrando(false)
-                }}
-                disabled={nombre.trim() === '' || nombre.trim() === t.etiqueta}
-                className="px-4 py-2 rounded-lg text-sm font-bold disabled:opacity-40 disabled:cursor-not-allowed hover:brightness-95"
-                style={{ backgroundColor: '#7C3AED', color: '#FFFFFF' }}
-              >
-                Guardar nombre
-              </button>
-              <button
-                type="button"
-                onClick={() => setRenombrando(false)}
-                className="px-4 py-2 rounded-lg text-sm font-semibold border hover:bg-gray-50 transition-colors"
-                style={{ borderColor: '#E5E7EB', color: '#374151' }}
-              >
-                Cancelar
-              </button>
-              <p className="w-full text-[11px]" style={{ color: '#9CA3AF' }}>
-                Cambia el nombre visible, nunca la clave <code>{t.clave}</code>: esa es la que
-                está escrita dentro de las citas que ya existen.
-              </p>
-            </div>
-          )}
-        </div>
-      )}
-    </div>
+        {/* El formulario va ARRIBA de las fichas que ya existen, y no al final como estaría
+            en una lista de «añadir». El botón que lo abre está en la cabecera: puesto abajo,
+            pulsar «+ Ficha» en un tratamiento con cinco fichas no cambiaba nada de lo que se
+            veía --el formulario nacía a dos pantallas de scroll-- y se lee como un botón
+            roto. Se vio en una captura a 320 px, no razonándolo. */}
+        {mostrarNueva && (
+          <NuevaFicha
+            tratamiento={t.clave}
+            conceptos={conceptos}
+            existentes={fichas}
+            puedeEditar={puedeFichas}
+            porQueNo={porQueNoFichas}
+            alGuardar={alGuardarFicha}
+            alCerrar={() => {
+              setAgregando(false)
+              alCerrarNueva()
+            }}
+          />
+        )}
+
+        {fichas.map((f) => (
+          <EditorFicha
+            key={`${f.tratamiento}/${f.concepto}`}
+            ficha={f}
+            puedeEditar={puedeFichas}
+            porQueNo={porQueNoFichas}
+            alGuardar={alGuardarFicha}
+          />
+        ))}
+      </CuerpoDeDetalle>
+    </>
   )
 }
+
 
 // ------------------------------------------------------------------------------------------
 // Crear un tratamiento
 // ------------------------------------------------------------------------------------------
 
+/** El formulario de crear, que ocupa el panel de detalle como uno más.
+ *
+ *  Antes era un botón de la cabecera que desplegaba el formulario DENTRO de la cabecera: la
+ *  barra de arriba crecía cuatro centímetros y empujaba la lista hacia abajo cada vez que
+ *  alguien pulsaba «+ Nuevo». Ahora es una selección como las otras tres, así que abrirlo no
+ *  mueve nada de sitio y cerrarlo es volver a lo que estuviera elegido antes.
+ *
+ *  Quién puede verlo lo decide la pantalla, que es la que tiene el rol. */
 function NuevoTratamiento({
   alCrear,
+  alVolver,
+  alCancelar,
 }: {
   alCrear: (clave: string, etiqueta: string) => Promise<boolean>
+  alVolver: () => void
+  alCancelar: () => void
 }) {
   const campo = useId()
-  const [abierto, setAbierto] = useState(false)
   const [etiqueta, setEtiqueta] = useState('')
   const [clave, setClave] = useState('')
   const [tocada, setTocada] = useState(false)
@@ -829,105 +1168,93 @@ function NuevoTratamiento({
       setEtiqueta('')
       setClave('')
       setTocada(false)
-      setAbierto(false)
     } finally {
       setCreando(false)
     }
   }
 
-  if (!abierto) {
-    return (
-      <button
-        type="button"
-        onClick={() => setAbierto(true)}
-        className="px-4 py-2 rounded-lg text-sm font-semibold hover:brightness-95 transition-all"
-        style={{ backgroundColor: '#7C3AED', color: '#FFFFFF' }}
-      >
-        + Nuevo tratamiento
-      </button>
-    )
-  }
-
   return (
-    <div className="rounded-2xl p-5 w-full" style={{ backgroundColor: '#FFFFFF', border: '1px solid #E5E7EB' }}>
-      <p className="text-sm font-semibold mb-3" style={{ color: '#111827' }}>
-        Nuevo tratamiento
-      </p>
+    <>
+      <CabeceraDeDetalle titulo="Nuevo tratamiento" clave={null} alVolver={alVolver} />
 
-      <div className="flex flex-wrap gap-3">
-        <div className="flex-1 min-w-[14rem]">
-          <label htmlFor={`${campo}-etiqueta`} className="block text-xs font-semibold mb-1" style={{ color: '#374151' }}>
-            Nombre visible
-          </label>
-          <input
-            id={`${campo}-etiqueta`}
-            value={etiqueta}
-            onChange={(e) => escribirEtiqueta(e.target.value)}
-            placeholder="Carillas estéticas"
-            className="w-full px-3 py-2 text-sm rounded-lg outline-none transition-all focus:ring-3"
-            style={{ backgroundColor: '#F9FAFB', border: '1px solid #E5E7EB', color: '#111827', fontFamily: SP }}
-          />
+      <CuerpoDeDetalle>
+        <div className="p-5" style={{ backgroundColor: '#FFFFFF', border: '1px solid #DCD8E6' }}>
+          <div className="flex flex-wrap gap-3">
+            <div className="flex-1 min-w-[14rem]">
+              <label htmlFor={`${campo}-etiqueta`} className="block text-xs font-semibold mb-1" style={{ color: '#4A4458' }}>
+                Nombre visible
+              </label>
+              <input
+                id={`${campo}-etiqueta`}
+                value={etiqueta}
+                onChange={(e) => escribirEtiqueta(e.target.value)}
+                placeholder="Carillas estéticas"
+                className={CAMPO}
+                style={ESTILO_CAMPO}
+              />
+            </div>
+
+            <div className="flex-1 min-w-[14rem]">
+              <label htmlFor={`${campo}-clave`} className="block text-xs font-semibold mb-1" style={{ color: '#4A4458' }}>
+                Clave
+              </label>
+              {/* Se sugiere, no se impone: lo que se envía es lo que quede escrito. Si alguien
+                  lo sobrescribe con mayúsculas, el servidor devuelve su 400 y esa clave nunca
+                  entra a `citas.tratamiento` disfrazada de minúscula. */}
+              <input
+                id={`${campo}-clave`}
+                value={clave}
+                onChange={(e) => {
+                  setTocada(true)
+                  setClave(e.target.value)
+                }}
+                placeholder="carillas_esteticas"
+                className={CAMPO}
+                style={ESTILO_CAMPO}
+              />
+              <p className="text-[11px] mt-1" style={{ color: '#6E6880' }}>
+                Minúsculas, números y guion bajo, de 3 a 24. Es el texto que queda dentro de
+                cada cita y en los argumentos que ve el modelo.
+              </p>
+            </div>
+          </div>
+
+          {/* Los dos avisos. Los dos son ciertos y callarlos sería mentir sobre lo que se
+              acaba de hacer: el primero limita lo que el tratamiento nuevo puede hacer, el
+              segundo dice qué va a contestar Daniela mañana si nadie llena las fichas. */}
+          <div className="mt-4 px-4 py-3 flex flex-col gap-2" style={{ backgroundColor: '#FFFBEB', border: '1px solid #FDE68A' }}>
+            <Aviso>
+              Daniela ya podrá cotizarlo y agendarlo. Una radiografía sobre este tratamiento se
+              seguirá clasificando como «no identificado» hasta que lo incorporemos al muro.
+            </Aviso>
+            <Aviso>
+              Todavía no tiene fichas: Daniela dirá «SIN DATO DOCUMENTADO» y escalará. Llena
+              precio, duración y profesional.
+            </Aviso>
+          </div>
+
+          <div className="flex gap-2 mt-4">
+            <button
+              type="button"
+              onClick={crear}
+              disabled={creando || etiqueta.trim() === '' || clave.trim() === ''}
+              className={`py-2 ${BOTON}`}
+              style={{ backgroundColor: '#6D28D9', color: '#FFFFFF' }}
+            >
+              {creando ? 'Creando…' : 'Crear y llenar sus fichas'}
+            </button>
+            <button
+              type="button"
+              onClick={alCancelar}
+              className="px-4 py-2 text-sm font-semibold border transition-colors hover:brightness-95"
+              style={{ borderColor: '#DCD8E6', backgroundColor: '#FFFFFF', color: '#4A4458' }}
+            >
+              Cancelar
+            </button>
+          </div>
         </div>
-
-        <div className="flex-1 min-w-[14rem]">
-          <label htmlFor={`${campo}-clave`} className="block text-xs font-semibold mb-1" style={{ color: '#374151' }}>
-            Clave
-          </label>
-          {/* Se sugiere, no se impone: lo que se envía es lo que quede escrito. Si alguien
-              lo sobrescribe con mayúsculas, el servidor devuelve su 400 y esa clave nunca
-              entra a `citas.tratamiento` disfrazada de minúscula. */}
-          <input
-            id={`${campo}-clave`}
-            value={clave}
-            onChange={(e) => {
-              setTocada(true)
-              setClave(e.target.value)
-            }}
-            placeholder="carillas_esteticas"
-            className="w-full px-3 py-2 text-sm rounded-lg outline-none transition-all focus:ring-3"
-            style={{ backgroundColor: '#F9FAFB', border: '1px solid #E5E7EB', color: '#111827', fontFamily: SP }}
-          />
-          <p className="text-[11px] mt-1" style={{ color: '#9CA3AF' }}>
-            Minúsculas, números y guion bajo, de 3 a 24. Es el texto que queda dentro de cada
-            cita y en los argumentos que ve el modelo.
-          </p>
-        </div>
-      </div>
-
-      {/* Los dos avisos. Los dos son ciertos y callarlos sería mentir sobre lo que se acaba
-          de hacer: el primero limita lo que el tratamiento nuevo puede hacer, el segundo
-          dice qué va a contestar Daniela mañana si nadie llena las fichas. */}
-      <div className="mt-4 rounded-xl px-4 py-3 flex flex-col gap-2" style={{ backgroundColor: '#FFFBEB', border: '1px solid #FDE68A' }}>
-        <Aviso>
-          Daniela ya podrá cotizarlo y agendarlo. Una radiografía sobre este tratamiento se
-          seguirá clasificando como «no identificado» hasta que lo incorporemos al muro.
-        </Aviso>
-        <Aviso>
-          Todavía no tiene fichas: Daniela dirá «SIN DATO DOCUMENTADO» y escalará. Llena
-          precio, duración y profesional.
-        </Aviso>
-      </div>
-
-      <div className="flex gap-2 mt-4">
-        <button
-          type="button"
-          onClick={crear}
-          disabled={creando || etiqueta.trim() === '' || clave.trim() === ''}
-          className="px-4 py-2 rounded-lg text-sm font-bold disabled:opacity-40 disabled:cursor-not-allowed hover:brightness-95"
-          style={{ backgroundColor: '#7C3AED', color: '#FFFFFF' }}
-        >
-          {creando ? 'Creando…' : 'Crear y llenar sus fichas'}
-        </button>
-        <button
-          type="button"
-          onClick={() => setAbierto(false)}
-          className="px-4 py-2 rounded-lg text-sm font-semibold border hover:bg-gray-50 transition-colors"
-          style={{ borderColor: '#E5E7EB', color: '#374151' }}
-        >
-          Cancelar
-        </button>
-      </div>
-    </div>
+      </CuerpoDeDetalle>
+    </>
   )
 }
 
@@ -938,21 +1265,33 @@ function NuevoTratamiento({
 /* `cambios === null` NO es «no hay cambios»: es «todavía no se ha podido leer». Colapsar
  * los dos estados hacía que un fallo de red se leyera como «aquí nunca ha pasado nada»
  * sobre la única estructura del sistema que existe para saber qué pasó de verdad. */
-function Bitacora({ cambios, fallo }: { cambios: CambioFila[] | null; fallo: string | null }) {
+function Bitacora({
+  cambios,
+  fallo,
+  alVolver,
+}: {
+  cambios: CambioFila[] | null
+  fallo: string | null
+  alVolver: () => void
+}) {
   return (
-    <div className="rounded-2xl overflow-hidden" style={{ backgroundColor: '#FFFFFF', border: '1px solid #E5E7EB' }}>
-      <div className="px-5 py-3" style={{ borderBottom: '1px solid #F3F4F6' }}>
-        <p className="text-sm font-semibold" style={{ color: '#111827' }}>
-          Últimos cambios
-        </p>
-        <p className="text-xs" style={{ color: '#6B7280' }}>
+    <>
+      <CabeceraDeDetalle titulo="Últimos cambios" clave={null} alVolver={alVolver} />
+
+      <div
+        className="shrink-0"
+        style={{ backgroundColor: '#FFFFFF', padding: '12px 16px', borderBottom: '1px solid #ECE8F4' }}
+      >
+        <p className="text-xs leading-relaxed" style={{ color: '#6E6880' }}>
           Cada edición se anota en la misma transacción que la escribe. Es lo único que
-          permite reconstruir qué decía un precio antes y quién lo cambió.
+          permite reconstruir qué decía un precio antes y quién lo cambió. Las marcas de
+          asistencia no entran aquí: son quince al día y taparían el cambio de precio de la
+          semana pasada.
         </p>
       </div>
 
       {fallo !== null ? (
-        <div role="alert" className="px-5 py-4">
+        <div role="alert" className="px-4 py-4">
           <p className="text-xs font-semibold" style={{ color: '#991B1B' }}>
             No se pudo leer la bitácora. Esto no quiere decir que no haya cambios: quiere
             decir que no sabemos cuáles son.
@@ -962,34 +1301,36 @@ function Bitacora({ cambios, fallo }: { cambios: CambioFila[] | null; fallo: str
           </p>
         </div>
       ) : cambios === null ? (
-        <p className="px-5 py-4 text-xs" style={{ color: '#9CA3AF' }}>
-          Leyendo la bitácora…
-        </p>
+        <CargandoPantalla que="Leyendo la bitácora…" fondo="#F7F6FA" />
       ) : cambios.length === 0 ? (
-        <p className="px-5 py-4 text-xs" style={{ color: '#9CA3AF' }}>
-          Todavía no hay cambios registrados.
-        </p>
+        <Vacio>Todavía no hay cambios registrados.</Vacio>
       ) : (
-        <ul className="divide-y" style={{ borderColor: '#F3F4F6' }}>
+        <ul
+          className="m-0 flex min-h-0 flex-1 list-none flex-col overflow-y-auto p-0"
+          style={{ backgroundColor: '#FFFFFF' }}
+        >
           {cambios.map((c, i) => (
-            <li key={i} className="px-5 py-3">
+            <li key={i} className="px-4 py-3" style={{ borderBottom: '1px solid #ECE8F4' }}>
               <div className="flex items-center gap-2 flex-wrap">
-                <code className="text-xs font-semibold" style={{ color: '#5B21B6' }}>
+                <code style={{ fontFamily: MONO, fontSize: '11.5px', fontWeight: 700, color: '#4C1D95' }}>
                   {c.clave}
                 </code>
-                <span className="text-[10px]" style={{ color: '#9CA3AF' }}>
+                <span style={{ fontFamily: MONO, fontSize: '10px', color: '#9C95AD' }}>
                   {c.tabla}
                 </span>
-                <span className="text-[10px] ml-auto" style={{ color: '#9CA3AF' }}>
+                <span
+                  className="ml-auto"
+                  style={{ fontFamily: MONO, fontSize: '10px', color: '#9C95AD', whiteSpace: 'nowrap' }}
+                >
                   {c.usuario} · {cuando(c.cambiado_en)}
                 </span>
               </div>
-              <p className="text-xs mt-1 break-words" style={{ color: '#6B7280' }}>
+              <p className="text-xs mt-1 break-words" style={{ color: '#4A4458' }}>
                 {c.valor_anterior === null ? (
                   <span style={{ color: '#059669' }}>nuevo: </span>
                 ) : (
                   <>
-                    <span className="line-through" style={{ color: '#D1D5DB' }}>
+                    <span className="line-through" style={{ color: '#9C95AD' }}>
                       {c.valor_anterior}
                     </span>
                     {' → '}
@@ -1001,13 +1342,119 @@ function Bitacora({ cambios, fallo }: { cambios: CambioFila[] | null; fallo: str
           ))}
         </ul>
       )}
-    </div>
+    </>
+  )
+}
+
+// ------------------------------------------------------------------------------------------
+// Los hechos de la clínica
+// ------------------------------------------------------------------------------------------
+
+/** El detalle de `_general`. Es el mismo editor de fichas y ninguna otra cosa: lo único que
+ *  cambia respecto a un tratamiento es que aquí no hay nada que renombrar ni que desactivar
+ *  --no es un servicio-- y que la explicación de qué es esto va arriba del todo, porque
+ *  «La clínica» no se explica sola como se explica «Ortodoncia». */
+function DetalleClinica({
+  fichas,
+  conceptos,
+  puedeEditar,
+  porQueNo,
+  forzarNueva,
+  alCerrarNueva,
+  alGuardarFicha,
+  alPedirNueva,
+  alVolver,
+}: {
+  fichas: FichaFila[]
+  conceptos: string[]
+  puedeEditar: boolean
+  porQueNo: string
+  forzarNueva: boolean
+  alCerrarNueva: () => void
+  alGuardarFicha: (f: {
+    tratamiento: string
+    concepto: string
+    contenido: string
+    aprobado: boolean
+    nota_pendiente: string | null
+  }) => Promise<boolean>
+  alPedirNueva: () => void
+  alVolver: () => void
+}) {
+  return (
+    <>
+      <CabeceraDeDetalle
+        titulo="La clínica"
+        clave={null}
+        alVolver={alVolver}
+        acciones={
+          <AccionDeCabecera
+            alPulsar={alPedirNueva}
+            ocupado={!puedeEditar || forzarNueva}
+            titulo={puedeEditar ? undefined : porQueNo}
+          >
+            + Hecho
+          </AccionDeCabecera>
+        }
+      />
+
+      <CuerpoDeDetalle>
+        <div className="px-4 py-3" style={{ backgroundColor: '#FFFFFF', border: '1px solid #DCD8E6' }}>
+          <p className="text-xs leading-relaxed" style={{ color: '#4A4458' }}>
+            Horario, sede, EPS, medios de pago, urgencias y la política de precios: lo que
+            Daniela responde cuando la pregunta no es sobre un tratamiento. No es un servicio y
+            nadie le agenda una cita; por eso vive aparte de la lista.
+          </p>
+        </div>
+
+        {/* Arriba de las fichas, por lo mismo que en `DetalleTratamiento`: el botón que lo
+            abre está en la cabecera. */}
+        {forzarNueva && (
+          <NuevaFicha
+            tratamiento={GENERAL}
+            conceptos={conceptos}
+            existentes={fichas}
+            puedeEditar={puedeEditar}
+            porQueNo={porQueNo}
+            alGuardar={alGuardarFicha}
+            alCerrar={alCerrarNueva}
+          />
+        )}
+
+        {fichas.map((f) => (
+          <EditorFicha
+            key={f.concepto}
+            ficha={f}
+            puedeEditar={puedeEditar}
+            porQueNo={porQueNo}
+            alGuardar={alGuardarFicha}
+          />
+        ))}
+      </CuerpoDeDetalle>
+    </>
   )
 }
 
 // ------------------------------------------------------------------------------------------
 // La pantalla
 // ------------------------------------------------------------------------------------------
+
+/** `true` si el tratamiento pasa el filtro elegido. `sinAprobar` llega ya contado. */
+function pasaElFiltro(t: TratamientoFila, filtro: Filtro, sinAprobar: number): boolean {
+  const e = estado(t, sinAprobar)
+  if (filtro === 'sin_precio') return e.sinPrecio
+  if (filtro === 'sin_aprobar') return sinAprobar > 0
+  if (filtro === 'inactivos') return !t.activo
+  return true
+}
+
+/** La búsqueda mira el nombre visible y la clave. Las dos, y no solo la primera: quien viene
+ *  de un log o de una cita lee `no_identificado`, no «Sin clasificar». */
+function coincide(t: TratamientoFila, busqueda: string): boolean {
+  const q = busqueda.trim().toLowerCase()
+  if (q === '') return true
+  return t.etiqueta.toLowerCase().includes(q) || t.clave.toLowerCase().includes(q)
+}
 
 export default function Tratamientos({
   sesion,
@@ -1032,10 +1479,20 @@ export default function Tratamientos({
      también cuando lo que falló fue guardar un precio, y ahí «reintentar» promete repetir la
      escritura --que es justo lo que ese botón NO hace--. */
   const [falloDeCarga, setFalloDeCarga] = useState<string | null>(null)
-  const [pestana, setPestana] = useState<'tratamientos' | 'clinica'>('tratamientos')
-  const [abierta, setAbierta] = useState<string | null>(null)
+
+  /* Lo que ocupa el panel de la derecha, en una sola cadena: la clave de un tratamiento,
+     `GENERAL`, `BITACORA` o `NUEVO`. Eran cuatro estados sueltos --`abierta`, `pestana`,
+     `verBitacora` y el `abierto` interno de `NuevoTratamiento`-- y podían ser ciertos a la
+     vez: la bitácora salía ENCIMA del tratamiento abierto, empujándolo. Con una sola cadena
+     eso deja de poder ocurrir por construcción, no por cuidado. */
+  const [seleccion, setSeleccion] = useState<string | null>(null)
   const [nuevaEn, setNuevaEn] = useState<string | null>(null)
-  const [verBitacora, setVerBitacora] = useState(false)
+  const [busqueda, setBusqueda] = useState('')
+  const [filtro, setFiltro] = useState<Filtro>('todos')
+  /* Por debajo de `ANCHO_DOS_PANELES` la pantalla ensena UN panel: la lista, o el detalle con
+     su boton de volver. Es la unica decision responsive que no puede ser una clase de CSS,
+     porque depende de si hay algo seleccionado. Igual que en Conversaciones y Sin resolver. */
+  const unaColumna = usarEsAngosto(ANCHO_DOS_PANELES)
 
   const puedeFichas = sesion.rol === 'admin' || sesion.rol === 'doctor'
   const puedeTratamientos = sesion.rol === 'admin'
@@ -1080,6 +1537,8 @@ export default function Tratamientos({
     void recargar()
   }, [recargar])
 
+  const verBitacora = seleccion === BITACORA
+
   // La bitácora se pide solo cuando alguien la abre: son cien filas que nadie mira la mayor
   // parte del tiempo, y se recarga cada vez para que refleje lo que se acaba de escribir.
   useEffect(() => {
@@ -1119,31 +1578,53 @@ export default function Tratamientos({
 
   const deLaClinica = useMemo(() => fichas.filter((f) => f.tratamiento === GENERAL), [fichas])
 
+  /* Cuántas fichas sin aprobar tiene cada tratamiento, contadas UNA vez y no quince.
+     Alimenta la pastilla de la fila y el filtro «Sin aprobar», que tienen que decir lo
+     mismo: un chip que deja fuera a alguien con la pastilla puesta es peor que no tenerlo. */
+  const sinAprobarPorClave = useMemo(() => {
+    const cuenta = new Map<string, number>()
+    for (const f of fichas) {
+      if (f.aprobado) continue
+      cuenta.set(f.tratamiento, (cuenta.get(f.tratamiento) ?? 0) + 1)
+    }
+    return cuenta
+  }, [fichas])
+
   /* La cabecera cuenta lo que la pantalla enseña, y nada más.
    *
    * `sinPrecio` excluye los desactivados: un tratamiento que la clínica decidió dejar de
    * ofrecer no le falta un precio, le sobra la fila. Contarlo mantenía la alarma encendida
    * sobre algo que ya nadie cotiza, que es la manera más rápida de enseñarle a la clínica a
-   * ignorar la alarma.
-   *
-   * Las fichas se cuentan contra el vocabulario real --los tratamientos de la tabla, más
-   * `_general`-- porque el cuerpo solo pinta esas. Desde que `panel.guardar_ficha` valida el
-   * tratamiento no deberían existir fichas huérfanas, pero las que hubiera quedado de antes
-   * siguen en la tabla y no se pueden borrar desde el producto: que las cuente la cabecera
-   * sin que nadie pueda encontrarlas manda a alguien a buscar una ficha que no existe. */
-  const conocidos = useMemo(
-    () => new Set<string>([GENERAL, ...tratamientos.map((t) => t.clave)]),
-    [tratamientos],
-  )
-  const fichasVisibles = useMemo(
-    () => fichas.filter((f) => conocidos.has(f.tratamiento)),
-    [fichas, conocidos],
+   * ignorar la alarma. */
+  const cuentas = useMemo(() => {
+    let sinPrecio = 0
+    let sinAprobar = 0
+    let inactivos = 0
+    for (const t of tratamientos) {
+      const n = sinAprobarPorClave.get(t.clave) ?? 0
+      if (estado(t, n).sinPrecio) sinPrecio += 1
+      if (n > 0) sinAprobar += 1
+      if (!t.activo) inactivos += 1
+    }
+    return { todos: tratamientos.length, sin_precio: sinPrecio, sin_aprobar: sinAprobar, inactivos }
+  }, [tratamientos, sinAprobarPorClave])
+
+  const visibles = useMemo(
+    () =>
+      tratamientos.filter(
+        (t) => pasaElFiltro(t, filtro, sinAprobarPorClave.get(t.clave) ?? 0) && coincide(t, busqueda),
+      ),
+    [tratamientos, filtro, busqueda, sinAprobarPorClave],
   )
 
-  const sinAprobar = fichasVisibles.filter((f) => !f.aprobado).length
-  const sinPrecio = tratamientos.filter(
-    (t) => t.activo && t.clave !== CLASIFICACION && t.faltan.includes('precio'),
-  ).length
+  const elegido = seleccion ? tratamientos.find((t) => t.clave === seleccion) : undefined
+
+  /* El fallo de una escritura se suelta al cambiar de panel. Sin esto, la franja roja de «no
+     se pudo guardar el precio de implantes» se quedaba puesta encima de ortodoncia, diciendo
+     de la ficha que se está mirando algo que le pasó a otra. */
+  useEffect(() => {
+    setError(null)
+  }, [seleccion])
 
   async function guardarUnaFicha(f: {
     tratamiento: string
@@ -1202,8 +1683,7 @@ export default function Tratamientos({
       await recargar()
       // Directo a llenar las fichas: es lo único que evita que el aviso de «SIN DATO
       // DOCUMENTADO» se cumpla mañana en una conversación real.
-      setPestana('tratamientos')
-      setAbierta(creado.clave)
+      setSeleccion(creado.clave)
       setNuevaEn(creado.clave)
       return true
     } catch (err) {
@@ -1217,157 +1697,195 @@ export default function Tratamientos({
   }
 
   // Sin cabecera ni filtros: la pantalla no se enseña a medias. Ver `CargandoPantalla`.
-  if (cargando) return <CargandoPantalla que="Leyendo la base…" fondo="#F9FAFB" />
+  if (cargando) return <CargandoPantalla que="Leyendo la base…" />
+
+  /* El contenido del panel de la derecha, que es una de cuatro cosas o ninguna. Se arma aquí
+     y no dentro del JSX para que el `Panel` quede legible y para que la lista de casos se
+     lea de un vistazo, que es lo que esta pantalla tenía repartido en cuatro banderas. */
+  const detalle =
+    seleccion === NUEVO ? (
+      <NuevoTratamiento
+        alCrear={crearUno}
+        alVolver={() => setSeleccion(null)}
+        alCancelar={() => setSeleccion(null)}
+      />
+    ) : seleccion === BITACORA ? (
+      <Bitacora cambios={cambios} fallo={falloBitacora} alVolver={() => setSeleccion(null)} />
+    ) : seleccion === GENERAL ? (
+      <DetalleClinica
+        fichas={deLaClinica}
+        conceptos={conceptos}
+        puedeEditar={puedeFichas}
+        porQueNo={porQueNoFichas}
+        forzarNueva={nuevaEn === GENERAL}
+        alCerrarNueva={() => setNuevaEn(null)}
+        alGuardarFicha={guardarUnaFicha}
+        alPedirNueva={() => setNuevaEn(GENERAL)}
+        alVolver={() => setSeleccion(null)}
+      />
+    ) : elegido ? (
+      <DetalleTratamiento
+        // Al cambiar de tratamiento se monta uno nuevo: el `key` es lo que garantiza que el
+        // texto a medias de una ficha no viaje al siguiente. Sin él, React reutilizaría el
+        // mismo `EditorFicha` con otra prop y `sucio` compararía contra la ficha equivocada.
+        key={elegido.clave}
+        t={elegido}
+        fichas={fichas.filter((f) => f.tratamiento === elegido.clave)}
+        conceptos={conceptos}
+        puedeFichas={puedeFichas}
+        puedeTratamientos={puedeTratamientos}
+        porQueNoFichas={porQueNoFichas}
+        porQueNoTratamientos={porQueNoTratamientos}
+        forzarNueva={nuevaEn === elegido.clave}
+        alCerrarNueva={() => setNuevaEn(null)}
+        alGuardarFicha={guardarUnaFicha}
+        alCambiar={cambiarUno}
+        alVolver={() => setSeleccion(null)}
+      />
+    ) : null
 
   return (
-    <div className="flex-1 flex flex-col min-w-0 overflow-hidden" style={{ fontFamily: SP, backgroundColor: '#F9FAFB' }}>
-      <header className="shrink-0 px-4 sm:px-8 py-4 border-b" style={{ backgroundColor: '#FFFFFF', borderColor: '#E5E7EB' }}>
-        <div className="flex flex-wrap items-start justify-between gap-3 sm:gap-4">
-          <div className="min-w-0">
-            <h1 className="text-lg font-bold" style={{ color: '#111827' }}>
+    <MarcoDeDosPaneles etiqueta="Tratamientos">
+      {/* ------------------------------------------------------------------- La lista */}
+      {unaColumna && detalle ? null : (
+      <Panel etiqueta="Listado de tratamientos" peso="1 1 320px">
+        <CabeceraDePanel>
+          <div className="flex items-baseline justify-between gap-3">
+            <TituloDePanel>Tratamientos</TituloDePanel>
+            <div className="flex shrink-0 items-center gap-2">
+              <Rotulo>
+                {visibles.length === tratamientos.length
+                  ? `${tratamientos.length} ${tratamientos.length === 1 ? 'clave' : 'claves'}`
+                  : `${visibles.length} de ${tratamientos.length}`}
+              </Rotulo>
+              {puedeTratamientos ? (
+                <AccionDeCabecera
+                  alPulsar={() => setSeleccion(NUEVO)}
+                  activo={seleccion === NUEVO}
+                >
+                  + Nuevo
+                </AccionDeCabecera>
+              ) : null}
+            </div>
+          </div>
+
+          {/* La frase que justifica que esta pantalla exista y que vaya despacio. No es un
+              subtítulo decorativo: lo que se guarda aquí no pasa por ningún despliegue. */}
+          <p style={{ margin: 0, fontSize: '12.5px', lineHeight: 1.45, color: '#6E6880' }}>
+            Lo que se guarda aquí sale por WhatsApp en el siguiente mensaje: Daniela lee esta
+            tabla en cada turno, sin despliegue de por medio.
+          </p>
+
+          <Buscador
+            valor={busqueda}
+            alCambiar={setBusqueda}
+            marcador="Buscar por nombre o clave"
+            etiqueta="Buscar tratamientos"
+          />
+
+          {/* Los contadores viven DENTRO de los filtros y no en una línea de texto aparte.
+              Antes la cabecera decía «2 tratamientos sin precio» y ahí se acababa: para saber
+              cuáles había que ir abriendo acordeones de uno en uno. */}
+          <div className="flex flex-wrap gap-2">
+            {CHIPS.map((chip) => (
+              <Chip key={chip.id} puesto={filtro === chip.id} alPulsar={() => setFiltro(chip.id)}>
+                {chip.id === 'todos' ? chip.etiqueta : `${chip.etiqueta} · ${cuentas[chip.id]}`}
+              </Chip>
+            ))}
+          </div>
+        </CabeceraDePanel>
+
+        {falloDeCarga !== null ? (
+          // Si la consulta falló, la pantalla lo DICE, y con salida: antes solo quedaba
+          // recargar la página entera. Mismo criterio que Conversaciones.
+          <div className="px-4 py-6">
+            <Fallo mensaje={falloDeCarga} alReintentar={() => void recargar()} />
+          </div>
+        ) : (
+          <ul className="m-0 flex min-h-0 flex-1 list-none flex-col overflow-y-auto p-0">
+            {/* Los hechos de la clínica, arriba y fuera del filtro. El porqué de que ya no
+                sean una pestaña está en la decisión 3 de la cabecera de este archivo. */}
+            <RotuloDeGrupo>La clínica</RotuloDeGrupo>
+            <FilaFija
+              titulo="Hechos de la clínica"
+              detalle={
+                deLaClinica.length === 0
+                  ? 'Horario, sede, EPS, medios de pago. Todavía sin ninguna ficha.'
+                  : `Horario, sede, EPS, medios de pago. ${deLaClinica.length} fichas.`
+              }
+              activa={seleccion === GENERAL}
+              alAbrir={() => setSeleccion(GENERAL)}
+            />
+
+            <RotuloDeGrupo>
               Tratamientos
-            </h1>
-            <p className="text-sm" style={{ color: '#6B7280' }}>
-              {cargando
-                ? 'Leyendo la base…'
-                : `${fichasVisibles.length} fichas · ${sinAprobar} sin aprobar · ${sinPrecio} tratamientos sin precio`}
+              {visibles.length !== tratamientos.length
+                ? ` · ${visibles.length} de ${tratamientos.length}`
+                : ''}
+            </RotuloDeGrupo>
+            {visibles.length === 0 ? (
+              <li>
+                <Vacio>
+                  {busqueda.trim()
+                    ? 'Ningún tratamiento con ese nombre ni esa clave.'
+                    : filtro === 'sin_precio'
+                      ? 'Todos los tratamientos activos tienen precio. Buena señal.'
+                      : filtro === 'sin_aprobar'
+                        ? 'Ninguna ficha está pendiente de aprobar.'
+                        : 'Ninguno está desactivado.'}
+                </Vacio>
+              </li>
+            ) : (
+              visibles.map((t) => (
+                <FilaDeLaLista
+                  key={t.clave}
+                  t={t}
+                  sinAprobar={sinAprobarPorClave.get(t.clave) ?? 0}
+                  activa={t.clave === seleccion}
+                  alAbrir={() => setSeleccion(t.clave)}
+                />
+              ))
+            )}
+
+            <RotuloDeGrupo>Registro</RotuloDeGrupo>
+            <FilaFija
+              titulo="Últimos cambios"
+              detalle="Quién cambió qué precio y qué decía antes."
+              activa={seleccion === BITACORA}
+              alAbrir={() => setSeleccion(BITACORA)}
+            />
+          </ul>
+        )}
+      </Panel>
+      )}
+
+      {/* ------------------------------------------------------------------ El detalle */}
+      {/* En una columna no se pinta el hueco de «selecciona algo»: la lista ya ocupa la
+          pantalla, y un panel que pide elegir debajo de lo que hay que elegir es ruido. */}
+      {unaColumna && !detalle ? null : (
+      <Panel etiqueta="Detalle del tratamiento" peso="2 1 380px">
+        {/* El fallo de una ESCRITURA, arriba del todo y sin botón de reintentar: ese botón
+            prometería repetir un guardado que no repite. Va aquí y no en la lista porque lo
+            que falló se pulsó en este panel. */}
+        {error !== null && (
+          <div
+            role="alert"
+            className="shrink-0 px-4 py-3"
+            style={{ backgroundColor: '#FEF2F2', borderBottom: '1px solid #FECACA' }}
+          >
+            <p style={{ fontFamily: MONO, fontSize: '10.5px', letterSpacing: '0.1em', color: '#B91C1C' }}>
+              NO SE PUDO GUARDAR
+            </p>
+            <p className="text-xs mt-1" style={{ color: '#B91C1C' }}>
+              {error}
             </p>
           </div>
-
-          {/* `flex-wrap`: «Ver bitácora» y «Nuevo tratamiento» miden 204 px juntos y a 320 px
-              se salían 30 por la derecha. Cada botón conserva su tamaño; lo que cambia es que
-              pueden caer en dos filas. Medido con Playwright. */}
-          <div className="flex min-w-0 flex-wrap items-center gap-2">
-            <button
-              type="button"
-              onClick={() => setVerBitacora((v) => !v)}
-              className="px-3 py-2 rounded-lg text-sm font-semibold border hover:bg-gray-50 transition-colors"
-              style={{ borderColor: '#E5E7EB', color: '#374151' }}
-            >
-              {verBitacora ? 'Ocultar bitácora' : 'Ver bitácora'}
-            </button>
-            {puedeTratamientos && pestana === 'tratamientos' && <NuevoTratamiento alCrear={crearUno} />}
-          </div>
-        </div>
-
-        <p className="text-xs mt-2" style={{ color: '#9CA3AF' }}>
-          Lo que se guarda aquí sale por WhatsApp en el siguiente mensaje: Daniela lee esta
-          tabla en cada turno, sin despliegue de por medio.
-        </p>
-
-        <div className="flex flex-wrap gap-1 mt-3">
-          {([
-            ['tratamientos', `Tratamientos (${tratamientos.length})`],
-            ['clinica', `La clínica (${deLaClinica.length})`],
-          ] as const).map(([id, texto]) => (
-            <button
-              key={id}
-              type="button"
-              onClick={() => setPestana(id)}
-              aria-current={pestana === id ? 'true' : undefined}
-              className="px-3 py-1.5 rounded-lg text-sm transition-colors"
-              style={{
-                backgroundColor: pestana === id ? '#F5F3FF' : 'transparent',
-                color: pestana === id ? '#7C3AED' : '#6B7280',
-                fontWeight: pestana === id ? 600 : 400,
-              }}
-            >
-              {texto}
-            </button>
-          ))}
-        </div>
-      </header>
-
-      <div className="flex-1 overflow-y-auto px-4 sm:px-8 py-6">
-        <div className="max-w-4xl mx-auto flex flex-col gap-4">
-          {error !== null && (
-            <div role="alert" className="rounded-xl px-4 py-3" style={{ backgroundColor: '#FEF2F2', border: '1px solid #FECACA' }}>
-              <p className="text-xs font-semibold mb-0.5" style={{ color: '#991B1B' }}>
-                No se pudo
-              </p>
-              <p className="text-xs" style={{ color: '#B91C1C' }}>
-                {error}
-              </p>
-            </div>
-          )}
-
-          {falloDeCarga !== null && (
-            <Fallo mensaje={falloDeCarga} alReintentar={() => void recargar()} />
-          )}
-
-          {verBitacora && <Bitacora cambios={cambios} fallo={falloBitacora} />}
-
-          {pestana === 'tratamientos' ? (
-            tratamientos.map((t) => (
-              <FilaTratamiento
-                key={t.clave}
-                t={t}
-                fichas={fichas.filter((f) => f.tratamiento === t.clave)}
-                conceptos={conceptos}
-                abierta={abierta === t.clave}
-                alternar={() => setAbierta((a) => (a === t.clave ? null : t.clave))}
-                puedeFichas={puedeFichas}
-                puedeTratamientos={puedeTratamientos}
-                porQueNoFichas={porQueNoFichas}
-                porQueNoTratamientos={porQueNoTratamientos}
-                forzarNueva={nuevaEn === t.clave}
-                alCerrarNueva={() => setNuevaEn(null)}
-                alGuardarFicha={guardarUnaFicha}
-                alCambiar={cambiarUno}
-              />
-            ))
-          ) : (
-            <>
-              {/* La pestaña se llama «La clínica» y en ninguna parte se escribe `_general`
-                  como si fuera un tratamiento. Es la clave técnica de la fila, no un
-                  servicio que alguien pueda agendar. */}
-              <div className="rounded-2xl px-5 py-4" style={{ backgroundColor: '#FFFFFF', border: '1px solid #E5E7EB' }}>
-                <p className="text-sm font-semibold mb-1" style={{ color: '#111827' }}>
-                  La clínica
-                </p>
-                <p className="text-xs leading-relaxed" style={{ color: '#6B7280' }}>
-                  Horario, sede, EPS, medios de pago, urgencias y la política de precios: lo
-                  que Daniela responde cuando la pregunta no es sobre un tratamiento. No es un
-                  servicio y nadie le agenda una cita; por eso vive aparte de la lista.
-                </p>
-              </div>
-
-              {deLaClinica.map((f) => (
-                <EditorFicha
-                  key={f.concepto}
-                  ficha={f}
-                  puedeEditar={puedeFichas}
-                  porQueNo={porQueNoFichas}
-                  alGuardar={guardarUnaFicha}
-                />
-              ))}
-
-              {nuevaEn === GENERAL ? (
-                <NuevaFicha
-                  tratamiento={GENERAL}
-                  conceptos={conceptos}
-                  existentes={deLaClinica}
-                  puedeEditar={puedeFichas}
-                  porQueNo={porQueNoFichas}
-                  alGuardar={guardarUnaFicha}
-                  alCerrar={() => setNuevaEn(null)}
-                />
-              ) : (
-                <button
-                  type="button"
-                  onClick={() => setNuevaEn(GENERAL)}
-                  disabled={!puedeFichas}
-                  title={puedeFichas ? undefined : porQueNoFichas}
-                  className="self-start px-3 py-1.5 rounded-lg text-xs font-semibold border hover:bg-gray-50 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-                  style={{ borderColor: '#C4B5FD', color: '#7C3AED' }}
-                >
-                  + Añadir un hecho de la clínica
-                </button>
-              )}
-            </>
-          )}
-        </div>
-      </div>
-    </div>
+        )}
+        {detalle ?? (
+          <Vacio>Elige un tratamiento para ver sus fichas y corregir lo que falte.</Vacio>
+        )}
+      </Panel>
+      )}
+    </MarcoDeDosPaneles>
   )
 }

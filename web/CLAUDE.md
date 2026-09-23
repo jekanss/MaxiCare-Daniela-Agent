@@ -24,6 +24,19 @@ uv run uvicorn maxicare_daniela.runtime:app --port 8080
   releyendo Neon en bucle, porque `App.tsx` la pasa como una flecha nueva en cada render. No
   hay `eslint-plugin-react-hooks` ni arnés de pruebas de frontend que lo atrape: se vería
   como una pantalla lenta y una factura rara.
+- **Lo que el panel de la derecha de Tratamientos enseña es UNA cadena, `seleccion`, y no
+  cuatro banderas.** Sus valores son la clave de un tratamiento, `GENERAL`, `BITACORA` o
+  `NUEVO`. Hasta el 23/09/2026 eran cuatro estados independientes —`abierta`, `pestana`,
+  `verBitacora` y el `abierto` de `NuevoTratamiento`— que podían ser ciertos a la vez, y esa
+  era toda la avería de la pantalla: abrir la bitácora insertaba cien filas ENCIMA del
+  tratamiento que estabas editando, y «+ Nuevo» hacía crecer la cabecera y empujaba la lista.
+  Con una sola cadena, abrir una cosa cierra la anterior por construcción y no por cuidado.
+  Los dos valores especiales llevan doble guion bajo y no pueden chocar con una clave real:
+  `panel.crear_tratamiento` las valida contra `[a-z0-9_]{3,24}` empezando por letra.
+- **`const GENERAL = '_general'` no se toca sin mirar Python.** Lo ata
+  `test_el_general_del_frontend_y_el_del_servidor_son_el_mismo`, que lee este `.tsx` con una
+  expresión regular: un `.tsx` no puede importar de Python y son dos literales que tienen que
+  moverse juntos.
 - **El panel «Últimos cambios» de `Tratamientos.tsx` ya NO enseña las marcas de asistencia**, y
   es a propósito: `runtime.TABLAS_FUERA_DEL_HISTORIAL` deja `citas` fuera de
   `/api/historial`. Esa ventana son las 100 filas más recientes y existe para reconstruir qué
@@ -271,7 +284,7 @@ mueve uno y la pantalla queda con el menú de móvil y el contenido de escritori
 | | qué cambia | por qué ahí |
 |---|---|---|
 | `ANCHO_MENU` = 768 (`md`) | el menú pasa a ser un cajón | con `width: clamp(230px,18vw,272px)` fijo, un móvil de 375 px dejaba 145 de contenido |
-| `ANCHO_DOS_PANELES` = 1024 (`lg`) | Conversaciones y «Sin resolver» enseñan UN panel | los dos paneles miden 320+380+hueco+margen ≈ 768: a 800 «caben» y no se pueden usar |
+| `ANCHO_DOS_PANELES` = 1024 (`lg`) | Conversaciones, «Sin resolver» y Tratamientos enseñan UN panel | los dos paneles miden 320+380+hueco+margen ≈ 768: a 800 «caben» y no se pueden usar |
 
 **Casi todo lo responsive son clases, no el hook.** Una media query en CSS no re-renderiza
 nada y no se puede desincronizar. `usarEsAngosto` existe solo para las dos decisiones de
@@ -283,8 +296,10 @@ nada y no se puede desincronizar. `usarEsAngosto` existe solo para las dos decis
    con el comentario «por debajo de unos 700 px los dos paneles se apilan solos». Se apilaban,
    y el contenedor es `h-full overflow-hidden` con `maxHeight: 100%` en cada panel: dos filas
    piden el 200 % de una caja que no hace scroll. En un móvil, «Conversaciones» enseñaba la
-   lista y **ni rastro del hilo**, sin barra que bajara. Se quitó el `flex-wrap`; ahora las dos
-   pantallas eligen lista **o** detalle, con un `Volver` que solo existe por debajo de `lg`.
+   lista y **ni rastro del hilo**, sin barra que bajara. Se quitó el `flex-wrap`; ahora las
+   tres pantallas de dos paneles --Conversaciones, «Sin resolver» y, desde el 23/09/2026,
+   Tratamientos-- eligen lista **o** detalle, con un `Volver` que solo existe por debajo de
+   `lg`.
 2. **El menú se comía la pantalla.** Cajón `fixed` con velo, hamburguesa en una barra propia de
    `App.tsx` --y no una por pantalla--, cierre al navegar, y `inert` cuando está fuera: sin eso
    el tabulador recorre nueve enlaces invisibles.
@@ -318,6 +333,57 @@ con el spinner puesto, o sea auditando una pantalla vacía. El script espera a q
 
 El script no está versionado. Si hay que repetirlo, son ~80 líneas y lo importante es lo de
 arriba: los seis anchos, las tres comprobaciones y la espera por contenido.
+
+## Tratamientos — de quince acordeones a lista y detalle (23/09/2026)
+
+Era la última pantalla con forma propia. Una sola columna de `max-w-4xl` con quince
+acordeones, y las tres cosas que enseña empujándose entre sí: abrir «ortodoncia» metía sus
+cinco editores de ficha DENTRO de la lista y mandaba el resto fuera de la ventana, «Ver
+bitácora» insertaba cien filas entre la cabecera y la lista, y «Nuevo tratamiento» crecía
+dentro de la propia cabecera. Cada acción movía de sitio a las otras dos.
+
+Ahora es el layout de `componentes/Panel.tsx`, el mismo de Conversaciones y «Sin resolver».
+**Ni una ruta, ni un permiso, ni una escritura cambiaron**: lo que se movió es qué ocupa cada
+sitio.
+
+- **La lista trae lo que no tenía: `Buscador` y cuatro `Chip`.** La cabecera vieja decía «2
+  tratamientos sin precio» y ahí se acababa — para saber CUÁLES había que abrir acordeones de
+  uno en uno. Ese número es ahora el filtro que los deja solos, con la cuenta dentro del chip.
+  Es el trabajo principal de la pantalla: hoy endodoncia y prótesis no tienen ni una ficha.
+- **La lista tiene tres grupos rotulados: «La clínica», «Tratamientos» y «Registro».** Con eso
+  `_general` deja de estar escondido tras una pestaña que hay que saber que existe, **sin**
+  volverse un tratamiento: otro grupo, nombre propio, y su clave no se pinta en ninguna parte.
+  La decisión 3 del docstring de la pantalla prohibía que se leyera como un servicio
+  agendable, no que se pudiera alcanzar. **El buscador y los filtros recortan el grupo de
+  tratamientos y NUNCA los otros dos**: filtrar «sin precio» no puede hacer desaparecer algo a
+  lo que nadie le pone precio.
+- **De `Conversaciones.tsx` subieron a `componentes/Panel.tsx` tres cosas** —
+  `AccionDeCabecera`, y `BOTON` / `CAMPO` / `ESTILO_CAMPO`— por el motivo por el que ese
+  archivo existe. `Pastilla` ganó un `titulo`: «fuera del muro» no se explica en dos palabras
+  en versalitas, y la frase larga cabe en un `title`.
+- **La altura de un `textarea` la decide su contenido renderizado, no un `rows` calculado.**
+  Había `rows={Math.min(10, Math.max(3, contenido.split('\n').length + 1))}`, que cuenta
+  SALTOS DE LÍNEA y por tanto no sabe nada del ancho. Las fichas de esta clínica no llevan
+  saltos —son una frase larga— así que todas salían con tres renglones: en un móvil de 360 px
+  el precio de la ortodoncia ocupa seis, y lo que se veía era **el texto cortado por la
+  mitad** dentro de una caja con su propio scroll. Lo hace `usarAltoDelContenido`, que se
+  vuelve a ejecutar al cambiar el tamaño de la ventana porque el ancho es justo lo que el
+  cálculo viejo no podía ver.
+- **El formulario de «+ Ficha» va ARRIBA de las fichas que ya existen**, que es al revés de lo
+  que pide la intuición. El botón que lo abre está en la cabecera: puesto al final, pulsarlo
+  en un tratamiento con cinco fichas no cambiaba nada de lo que se veía y se leía como un
+  botón roto.
+
+**Cómo se comprobó, y qué no cubre.** Las dos últimas cosas de esa lista **no se ven leyendo
+el código**: salieron de mirar capturas. Se repitió el método del 23/09 —Playwright contra el
+Chrome instalado (`channel: 'chrome'`), seis anchos por nueve estados de la pantalla: lista,
+detalle, nueva ficha, renombrar, un tratamiento sin fichas, la clínica, la bitácora, nuevo y
+un filtro puesto— comprobando que no haya scroll horizontal, que ningún elemento se salga del
+ancho y que ningún control mida menos de 32 px. 54 casos en verde. El andamio para hacerlo sin
+backend ni sesión es un `auditoria.html` con un `src/auditoria.tsx` que dobla `window.fetch`
+con datos falsos; **no se versiona**, se escribe en diez minutos y se borra. Lo que la suite
+de Python sigue sin cubrir es todo esto: la única prueba que mira este archivo es la del
+`GENERAL`.
 
 ## Cambiar la propia contraseña — lo que hace y lo que NO
 
