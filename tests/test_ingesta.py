@@ -859,16 +859,33 @@ def test_el_tope_del_tema_cabe_dentro_de_la_entrega():
     assert lectura.TOPE_SEGUNDOS_TEMA == 5.0
 
 
-def test_un_archivo_del_paciente_NO_rehace_un_hilo_que_borraron(monkeypatch):
-    """La otra mitad de lo que pidió MaxiCare: el gesto del doctor tiene que durar.
+@pytest.mark.parametrize(
+    "tipo,mime,rehace",
+    [
+        ("image", "image/jpeg", True),
+        ("document", "application/pdf", True),
+        ("audio", "audio/ogg", False),
+        ("video", "video/mp4", False),
+        ("sticker", "image/webp", False),
+    ],
+)
+def test_solo_lo_que_un_doctor_tiene_que_MIRAR_rehace_un_hilo_borrado(
+    monkeypatch, tipo, mime, rehace
+):
+    """El gesto del doctor tiene que durar, y una radiografía tiene que verla alguien.
 
-    Borrar el tema es decir «este paciente deja de aparecer en el grupo». Si la foto que
-    manda diez minutos después le abriera un hilo nuevo, el gesto no serviría de nada y
+    Borrar el tema es decir «este paciente deja de aparecer en el grupo». Si la nota de voz
+    que manda diez minutos después le abriera un hilo nuevo, el gesto no serviría de nada y
     encima quedarían dos temas para la misma persona.
 
-    Lo que se comprueba es el ARGUMENTO, no el resultado: la decisión vive dentro de
-    `asegurar_tema` --que sabe leer la lápida de la 030-- y lo que a `ingesta` le toca es
-    pedirla. Quien la pide con el default es `lectura.rescatar_hilo`, o sea el escalamiento.
+    La excepción --imagen y documento-- no es una grieta en esa regla sino su lectura exacta:
+    bajo el no negociable 14c esos dos cierran el turno escalado con `archivo_recibido`, y un
+    escalamiento siempre pudo rehacer el hilo. Sin pedirlo AQUÍ el hilo se rehacía igual, unos
+    segundos después y por `rescatar_hilo`, pero para entonces el depósito ya había pasado: de
+    esa primera radiografía quedaba la constancia con su hora y no los bytes.
+
+    Lo que se comprueba es el ARGUMENTO y no el resultado: la decisión de leer la lápida vive
+    dentro de `asegurar_tema` (migración 030) y lo que a `ingesta` le toca es pedirla bien.
     """
     import asyncio
 
@@ -883,19 +900,22 @@ def test_un_archivo_del_paciente_NO_rehace_un_hilo_que_borraron(monkeypatch):
 
     monkeypatch.setattr(lectura, "asegurar_tema", espiar)
     monkeypatch.setattr(lectura, "leer_y_repartir", _devuelve_async(None))
+    monkeypatch.setattr(ingesta.transcripcion_mod, "transcribir_y_repartir", _devuelve_async(None))
 
     asyncio.run(
         ingesta.procesar_mensaje(
-            _mensaje_con_foto(),
+            _mensaje_con_foto(tipo=tipo, mime=mime),
             whatsapp=WhatsAppConArchivo(),
             telegram=TelegramConTemas(),
             database_url="postgresql://x",
         )
     )
 
-    assert pedidos and pedidos[0]["rehacer_si_lo_borraron"] is False, (
-        "la ingesta pidió el hilo con el default: un mensaje del paciente volvería a abrir "
-        "el tema que un doctor borró a propósito"
+    assert pedidos, "la ingesta ni siquiera pidió el hilo"
+    assert pedidos[0]["rehacer_si_lo_borraron"] is rehace, (
+        f"un {tipo} pidió el hilo con rehacer={pedidos[0]['rehacer_si_lo_borraron']}: "
+        "o resucita un tema que un doctor borró a propósito, o pierde los bytes de un "
+        "archivo que el doctor tiene que mirar"
     )
 
 

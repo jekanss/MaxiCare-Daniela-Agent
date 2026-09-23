@@ -285,12 +285,19 @@ async def _tema_del_archivo(
     pierde es que ESTE archivo se queda sin archivar. `_temas_en_curso` la sostiene mientras
     tanto, por la misma razón que `_lectores_vivos` sostiene al lector.
 
-    **`rehacer_si_lo_borraron=False`, y es la otra mitad del arreglo.** Un mensaje del
-    paciente no puede resucitar un hilo que un doctor borró: eso anularía el gesto con el que
-    dijo que ya no quería ver a esa persona en el grupo. El hilo de quien nunca tuvo uno se
-    sigue abriendo igual --su primer archivo estrena su expediente, como siempre--; lo que no
-    se rehace es el que tiene lápida (`persistencia.hilo_perdido`, migración 030). Quien lo
-    rehace es el escalamiento, por `lectura.rescatar_hilo`.
+    **Un mensaje del paciente no resucita un hilo borrado, y una imagen SÍ.** Lo primero es la
+    otra mitad del arreglo del 22/09/2026: rehacer el hilo con cualquier cosa que llegue
+    anularía el gesto con el que un doctor dijo que ya no quería ver a esa persona en el
+    grupo. Lo segundo es la única excepción, y no es una grieta en la regla sino su lectura
+    exacta: bajo el no negociable 14c una imagen o un documento **es** una petición de
+    revisión --cierra el turno escalado con `archivo_recibido` unos segundos después-- y un
+    escalamiento siempre pudo rehacer el hilo. Sin la excepción el hilo se rehacía igual, por
+    `rescatar_hilo`, pero un instante TARDE: el depósito corre antes que el turno, así que de
+    esa primera radiografía solo quedaba la constancia con su hora y los bytes se perdían.
+
+    El hilo de quien nunca tuvo uno se sigue abriendo con cualquier archivo, como siempre; lo
+    que la lápida (`persistencia.hilo_perdido`, migración 030) sigue parando es el texto, la
+    nota de voz, el vídeo y el sticker.
     """
     tarea = asyncio.ensure_future(
         lectura_mod.asegurar_tema(
@@ -298,7 +305,7 @@ async def _tema_del_archivo(
             nombre_perfil=m.nombre_perfil,
             database_url=database_url,
             telegram=telegram,
-            rehacer_si_lo_borraron=False,
+            rehacer_si_lo_borraron=m.tipo in lectura_mod.TIPOS_QUE_REVISA_UN_DOCTOR,
         )
     )
     _temas_en_curso.add(tarea)
@@ -345,9 +352,11 @@ async def _tema_del_archivo(
 # propósito: los bytes no vuelven. La decisión de MaxiCare es que el ruido cuesta más, porque
 # un canal de alertas que timbra por todo es un canal que nadie mira el día que importa.
 #
-# El otro lado de la misma regla: **un mensaje del paciente no abre ni rehace un hilo**. El
-# primer archivo de quien nunca tuvo uno sí lo estrena --eso no cambia--, pero un hilo con
-# lápida (`persistencia.hilo_perdido`, migración 030) solo lo rehace un escalamiento.
+# El otro lado de la misma regla: **un mensaje del paciente no rehace un hilo borrado**. El
+# primer archivo de quien nunca tuvo uno sí lo estrena --eso no cambia--, y un hilo con lápida
+# (`persistencia.hilo_perdido`, migración 030) solo lo rehace un escalamiento... o una imagen o
+# un documento, que desde el 22/09/2026 son lo mismo: cierran el turno escalado por código (no
+# negociable 14c). Un texto, una nota de voz, un vídeo y un sticker siguen sin poder.
 #
 # ══════════════════════════════════════════════════════════════════════════════════════════
 # NOTA DEL TEXTO SIN TEMA — por qué un mensaje puede no llegar a Telegram y no ser un fallo
@@ -575,11 +584,20 @@ async def procesar_mensaje(
             # Un doctor que cierra el hilo de un paciente está diciendo que deja de querer
             # verlo en el grupo, y que su siguiente foto le volviera a sonar anulaba el gesto.
             #
-            # Lo que se pierde: si Daniela resuelve sola y nunca escala, nadie se entera de
-            # que llegó una radiografía. Se aceptó a sabiendas. Lo que lo hace tolerable es
-            # que un archivo clínico suele hacer escalar a Daniela por su cuenta
-            # (`archivo_recibido`), y que el archivo queda en el expediente del paciente para
-            # quien entre.
+            # Lo que quedó sin cubrir al quitarlo, y lo cubre otra cosa: una imagen o un
+            # documento SÍ le suenan al doctor, pero por la puerta correcta --el turno cierra
+            # escalado con `archivo_recibido`, no negociable 14c--, así que van al General con
+            # su resumen y al hilo con el botón, pasan por la deduplicación por asunto del 26
+            # y cuentan como interrupción de verdad en la pantalla. El timbrazo que se fue no
+            # hacía ninguna de las cuatro cosas: mismo botón, cero filas en `escalamientos`.
+            #
+            # Se dijo aquí durante unas horas que «un archivo clínico suele hacer escalar a
+            # Daniela por su cuenta». Era falso y lo cazó MaxiCare: el prompt del lector le
+            # dice a Daniela que «el doctor ya lo tiene», y de los ocho archivos que el
+            # sistema había recibido en su vida ninguno escaló por sí mismo. Por eso la regla
+            # se escribió en el código y no en el prompt.
+            #
+            # Lo que sigue sin cubrir nadie: un vídeo o un sticker, que ni se leen ni escalan.
             tamano = archivo.tamano
         else:
             # Un texto NO va al General. Ver NOTA DEL TEXTO SIN TEMA, abajo.

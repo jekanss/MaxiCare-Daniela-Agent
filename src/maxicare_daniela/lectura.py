@@ -426,6 +426,20 @@ def _marcar_archivados(database_url: str, wamids: list[str], message_id: int) ->
 #: siguen con el aviso factual de la fase 2: no se pagan, y no se fingen.
 TIPOS_QUE_SE_LEEN = frozenset({"image", "document"})
 
+#: Lo que obliga a interrumpir a un doctor. Tiene hoy los mismos dos miembros que
+#: `TIPOS_QUE_SE_LEEN` y **no es un alias suyo a propósito**: aquel dice qué puede abrir el
+#: modelo lector --una capacidad técnica que cambia con el proveedor-- y este dice qué tiene
+#: que MIRAR una persona, que es una decisión de la clínica. El día que el lector aprenda a
+#: ver vídeo, el primero crecerá y este no tiene por qué crecer con él; y al revés, si mañana
+#: MaxiCare decide que un vídeo también hay que revisarlo, este crece aunque el lector siga
+#: sin poder abrirlo. Escribirlos juntos haría que un cambio de proveedor moviera a quién se
+#: interrumpe.
+#:
+#: De aquí salen las dos conductas nuevas del 22/09/2026, y las dos son del no negociable 14c:
+#: el turno cierra escalado con `archivo_recibido`, y el archivo puede LEVANTAR la lápida de
+#: un hilo borrado --la única excepción a «un mensaje del paciente no resucita un hilo»--.
+TIPOS_QUE_REVISA_UN_DOCTOR = frozenset({"image", "document"})
+
 #: Por encima de esto no se manda al modelo. El doctor recibe el archivo igual --eso no
 #: cambia nunca-- y Daniela usa la entrada de siempre.
 TOPE_BYTES_LECTOR = 20 * 1024 * 1024

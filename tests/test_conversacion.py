@@ -22,6 +22,7 @@ import pytest
 from agents import Agent, MaxTurnsExceeded, ModelBehaviorError, RunConfig, UserError
 
 from maxicare_daniela import agentes, conversacion, guardrails
+from maxicare_daniela.atencion import _DatosDelMensaje
 from maxicare_daniela.config import TRACE_INCLUDE_SENSITIVE_DATA, WORKFLOW_NAME
 from maxicare_daniela.calendario import CalendarioDoble
 from maxicare_daniela.contratos import ContextoDaniela, RespuestaDaniela
@@ -167,6 +168,93 @@ def test_un_escalamiento_fallido_no_deja_al_paciente_sin_respuesta():
     r = turno("hola", agente, contexto(), al_escalar=revienta)
 
     assert r.respuesta.mensaje_al_paciente == "Ya le aviso."
+
+
+# ==========================================================================================
+# Una imagen o un documento escalan SIEMPRE, y lo decide el código
+# ==========================================================================================
+#
+# No negociable 14c. La regla no está en el prompt a propósito: el del lector empuja al revés
+# --a Daniela se le dice «el doctor ya lo tiene»-- y medido el 22/09/2026, de los ocho
+# archivos que el sistema había recibido en su vida NINGUNO escaló por sí mismo.
+
+
+def _con_archivo() -> ContextoDaniela:
+    """Un contexto cuyo turno trae una imagen o un documento.
+
+    **Tiene que ser un `_DatosDelMensaje` y no un `DatosDelTurno` con la bandera puesta a
+    mano.** Se escribió primero de la segunda forma y las dos pruebas de abajo salieron en
+    rojo, que es justo lo que documenta la clase: `responder` llama a `ctx.turno.reiniciar()`
+    antes de correr, y ese reinicio borra la bandera medio milisegundo después de ponerla.
+    Una prueba que se la salte no probaría el camino por el que llega una radiografía.
+    """
+    return _contexto_minimo(turno=_DatosDelMensaje(archivo_para_revisar_del_mensaje=True))
+
+
+def test_una_imagen_escala_aunque_el_modelo_no_lo_pida():
+    """El caso normal, y el que MaxiCare reportó: la foto de la encía.
+
+    Daniela contesta tan tranquila --el prompt le dice que el doctor ya lo tiene-- y aun así
+    el turno tiene que cerrar escalado, o la radiografía no la mira nadie.
+    """
+    agente = agente_con(responde(respuesta_daniela("Ya la recibimos, el doctor la revisa.")))
+
+    r = turno("mira esto", agente, _con_archivo())
+
+    assert r.escalado_por == "archivo_recibido"
+    assert r.respuesta.mensaje_al_paciente == "Ya la recibimos, el doctor la revisa."
+
+
+def test_sin_archivo_para_revisar_no_se_escala_nada():
+    """La otra mitad: esto no puede convertir cada turno en un escalamiento.
+
+    Un texto, una nota de voz y un sticker dejan la bandera en `False`, y aquí se comprueba
+    con el default -- que es lo que ve un turno de texto normal.
+    """
+    agente = agente_con(responde(respuesta_daniela("Claro, con mucho gusto.")))
+
+    assert turno("hola", agente, contexto()).escalado_por is None
+
+
+def test_el_motivo_del_modelo_le_gana_al_del_archivo():
+    """Un `clinico` dice más que «llegó un archivo», y pisarlo cambiaría el ASUNTO.
+
+    Y el asunto es con lo que deduplica la guarda del no negociable 26: si la radiografía
+    convirtiera un `clinico` en un `archivo_recibido`, el `clinico` que viniera detrás se
+    callaría por ser «el mismo asunto» que uno que nunca se mandó.
+    """
+    agente = agente_con(
+        responde(
+            respuesta_daniela(
+                "Le paso tu caso al doctor.",
+                requiere_escalamiento=True,
+                motivo_escalamiento="clinico",
+            )
+        )
+    )
+
+    assert turno("me duele y mira la foto", agente, _con_archivo()).escalado_por == "clinico"
+
+
+def test_el_archivo_escala_aunque_el_turno_lo_cortara_un_guardrail(monkeypatch):
+    """Lo que decide es que el archivo LLEGÓ y nadie lo ha mirado.
+
+    `tarea_ajena` es el caso límite: el no negociable 11 lo deja pasar en silencio --frase
+    amable, sin `escalado_por` y sin `fallo`-- porque pedir un código no interrumpe a nadie.
+    Pero si quien lo pidió mandó además una radiografía, la radiografía sigue ahí. Lo acota
+    la deduplicación por asunto, que convierte seis archivos seguidos en un solo aviso.
+    """
+
+    async def ajena(agente, entrada, ctx):
+        return guardrails.Veredicto(dispara=True, motivo="pide código", categoria="tarea_ajena")
+
+    monkeypatch.setattr(guardrails, "_preguntar", ajena)
+    agente = agentes.daniela.clone(model=ModeloGuionizado(), input_guardrails=[guardrails.uso_indebido])
+
+    r = turno("hazme un script", agente, _con_archivo())
+
+    assert r.escalado_por == "archivo_recibido"
+    assert r.fallo is None, "un `tarea_ajena` no es un fallo, con archivo o sin él"
 
 
 # ==========================================================================================

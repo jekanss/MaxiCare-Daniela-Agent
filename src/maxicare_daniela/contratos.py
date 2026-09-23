@@ -541,6 +541,17 @@ class DatosDelTurno:
     horas_autorizadas: set[str] = field(default_factory=set)
     hubo_adjunto: bool = False
     menciona_sintomas: bool = False
+    #: Si el turno trajo una imagen o un documento (`lectura.TIPOS_QUE_REVISA_UN_DOCTOR`).
+    #: **No es lo mismo que `hubo_adjunto`, y por eso son dos campos**: aquel es `True` también
+    #: con una nota de voz, y una nota de voz NO tiene que interrumpir a nadie --se transcribe
+    #: y entra al turno como texto del paciente, no negociable 29--. Este es más estrecho a
+    #: propósito: es «alguien tiene que MIRAR esto».
+    #:
+    #: Lo lee `conversacion.responder` al final, para cerrar el turno escalado con
+    #: `archivo_recibido` aunque el modelo no lo pidiera. Va en el código y no en el prompt por
+    #: la misma razón que la baja comercial (25) y la deduplicación de escalamientos (26): que
+    #: un doctor vea una radiografía no puede depender de que el modelo obedezca una frase.
+    hubo_archivo_para_revisar: bool = False
     #: Lo que se consultó a la base de conocimiento en este turno, con dato o sin él. De aquí
     #: salen los casos `FALTA_DATO`, y el tratamiento con el que se enriquece la huella de un
     #: guardrail. Mismo ciclo de vida que `cifras_autorizadas`: se vacía cada turno, porque
@@ -556,6 +567,7 @@ class DatosDelTurno:
         self.horas_autorizadas = set()
         self.hubo_adjunto = False
         self.menciona_sintomas = False
+        self.hubo_archivo_para_revisar = False
         self.senales = []
 
 

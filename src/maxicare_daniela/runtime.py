@@ -911,6 +911,15 @@ async def _avisar_a_doctores(
             f"al paciente: {mensaje_al_paciente}"
         )
         pregunta = "¿Alguien puede revisar esta conversación y retomarla si hace falta?"
+        # Un `archivo_recibido` no es «Daniela se atascó»: ella contestó bien --el lector ya
+        # bajó la ficha clínica al hilo-- y lo que hace falta es que un humano MIRE el
+        # archivo. El no negociable 14c lo escala por código justo por eso, así que el aviso
+        # tiene que decir lo que pasó: leer «no pudo resolverlo sola» junto a una radiografía
+        # manda al doctor a buscar un problema que no existe.
+        porque = "Daniela no pudo resolverlo sola."
+        if motivo == "archivo_recibido":
+            porque = "Llegó un archivo del paciente y hay que revisarlo."
+            pregunta = "¿Alguien puede mirar el archivo y retomar la conversación si hace falta?"
 
         # La guarda del asunto rancio. Va ANTES del INSERT --la fila tampoco se escribe, o
         # `telegram_message_id` NULL dejaría de significar «el Telegram no salió»-- y desde
@@ -941,7 +950,7 @@ async def _avisar_a_doctores(
         texto = (
             f"<b>Escalamiento · {_escapar(str(motivo))}</b>\n"
             f"{_escapar(nombre)} · +{ctx.telefono_completo}\n\n"
-            "Daniela no pudo resolverlo sola.\n\n"
+            f"{porque}\n\n"
             f"<b>Lo que se le respondió al paciente:</b>\n"
             f"{_escapar(mensaje_al_paciente)}"
         )

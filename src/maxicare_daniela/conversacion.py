@@ -582,6 +582,27 @@ async def responder(
         motivo = resultado.respuesta.motivo_escalamiento
         resultado.escalado_por = None if motivo == "ninguno" else motivo  # type: ignore[assignment]
 
+    # Una imagen o un documento escalan SIEMPRE, lo pida el modelo o no.
+    #
+    # Va aquí, en el código, y no como una frase en el prompt, por lo mismo que la baja
+    # comercial (25) y la deduplicación de escalamientos (26): que un doctor vea una
+    # radiografía no puede depender de que el modelo obedezca. Y el prompt del lector empuja
+    # justo al revés --a Daniela se le dice «el doctor ya lo tiene»--, así que pedírselo por
+    # escrito sería pedirle que se contradiga. Medido el 22/09/2026: de los ocho archivos que
+    # el sistema había recibido en su vida, NINGUNO produjo un escalamiento por sí mismo.
+    #
+    # Va DESPUÉS del respaldo de arriba y solo rellena un hueco: si el modelo ya dio un
+    # motivo, ese manda. Un `clinico` dice más que «llegó un archivo», y pisarlo cambiaría el
+    # asunto con el que la guarda del 26 deduplica.
+    #
+    # Se aplica también cuando el turno lo cortó un guardrail --incluido el `tarea_ajena` que
+    # el 11 deja pasar en silencio--: lo que decide es que el archivo LLEGÓ y nadie lo ha
+    # mirado, y eso sigue siendo cierto por mucho que el texto que venía al lado fuera otra
+    # cosa. Lo acota la deduplicación por asunto: seis radiografías seguidas son un aviso.
+    if resultado.escalado_por is None and ctx.turno.hubo_archivo_para_revisar:
+        resultado.escalado_por = "archivo_recibido"
+        log.info("archivo para revisar en %s · se escala por código", ctx.id_conversacion)
+
     _guardar_estado(ctx, resultado)
 
     if resultado.escalado_por is not None and al_escalar is not None:

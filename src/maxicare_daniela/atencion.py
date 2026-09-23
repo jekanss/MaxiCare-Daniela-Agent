@@ -238,6 +238,11 @@ class _DatosDelMensaje(DatosDelTurno):
     #: Lo que trajo el mensaje. `reiniciar()` los vuelve a poner, no los borra.
     adjunto_del_mensaje: bool = False
     sintomas_del_mensaje: bool = False
+    #: Más estrecho que `adjunto_del_mensaje`: solo imagen o documento. De él cuelga que el
+    #: turno cierre escalado con `archivo_recibido`, así que si se borrara en el `reiniciar()`
+    #: --que corre medio milisegundo después de construir esto-- la radiografía del paciente
+    #: no la vería nadie. Misma trampa que los otros dos y mismo remedio.
+    archivo_para_revisar_del_mensaje: bool = False
 
     def __post_init__(self) -> None:
         # Para que el invariante sea cierto desde que el objeto existe y no solo a partir del
@@ -247,11 +252,13 @@ class _DatosDelMensaje(DatosDelTurno):
         # prueba, un hook, la tool de la 6B) ve lo que trajo el mensaje.
         self.hubo_adjunto = self.adjunto_del_mensaje
         self.menciona_sintomas = self.sintomas_del_mensaje
+        self.hubo_archivo_para_revisar = self.archivo_para_revisar_del_mensaje
 
     def reiniciar(self) -> None:
         super().reiniciar()
         self.hubo_adjunto = self.adjunto_del_mensaje
         self.menciona_sintomas = self.sintomas_del_mensaje
+        self.hubo_archivo_para_revisar = self.archivo_para_revisar_del_mensaje
 
 
 @dataclass(frozen=True)
@@ -1387,6 +1394,12 @@ async def atender(
                 # `sin_lectura_clinica` se quedaría sin nada que vigilar precisamente en el
                 # turno que sí habla de la imagen.
                 adjunto_del_mensaje=any(m.trae_archivo for m in mensajes),
+                # Del grupo entero también, y por el mismo motivo: la foto y el «¿esto qué
+                # es?» son dos mensajes. Mirando solo el último, la tanda que empieza por la
+                # radiografía y termina en texto no escalaría.
+                archivo_para_revisar_del_mensaje=any(
+                    m.tipo in lectura_mod.TIPOS_QUE_REVISA_UN_DOCTOR for m in mensajes
+                ),
                 # **La transcripción cuenta como texto del paciente, y sin esto se abría un
                 # agujero clínico.** `m.texto` es `None` en una nota de voz, así que «me duele
                 # muchísimo y me sangra la encía» DICHO en voz alta daba `False` aquí, y el

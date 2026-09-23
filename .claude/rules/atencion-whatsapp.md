@@ -390,8 +390,9 @@ muerto es un `HiloInvalido` garantizado—. Quien necesita la diferencia la pide
 De ahí salen las dos conductas, y la segunda es la que **no** cambió:
 
 ```
-ingesta  ->  asegurar_tema(rehacer_si_lo_borraron=False)
-             hilo con lápida  -> None, no se toca Telegram
+ingesta  ->  asegurar_tema(rehacer_si_lo_borraron = es imagen o documento)
+             hilo con lápida + texto, audio, vídeo o sticker -> None, no se toca Telegram
+             hilo con lápida + IMAGEN o DOCUMENTO            -> se REHACE  (ver abajo)
              nunca tuvo hilo  -> se le CREA. El primer archivo sigue estrenando expediente.
 
 rescatar_hilo (dentro de un escalamiento)  ->  asegurar_tema(...) con el default
@@ -413,9 +414,10 @@ hilo. Con él se fue también la rama `porque_no_se_entendio`, que es la que el 
 puso para que un audio ininteligible dijera «hay que OÍRLA».
 
 **El precio, dicho a sabiendas y aceptado por MaxiCare:** un archivo que llega sin hilo no lo
-ve nadie en el momento, y si Daniela resuelve sola y nunca escala, nadie lo ve nunca. Lo que
-lo hace tolerable son dos cosas: un archivo clínico suele hacer escalar a Daniela por su
-cuenta (`archivo_recibido`), y el volcado del escalamiento lo cuenta.
+ve nadie en el momento, y si Daniela resuelve sola y nunca escala, nadie lo ve nunca. Se
+justificó aquí diciendo que «un archivo clínico suele hacer escalar a Daniela por su cuenta
+(`archivo_recibido`)». **Era falso, lo cazó MaxiCare, y de ahí salió la sección siguiente.**
+Para lo que sigue siendo cierto —el vídeo y el sticker— lo único que queda es el volcado.
 
 `lectura.pendientes_legibles` es ese volcado, y ahora baja tres formas de línea —lo escrito,
 lo dicho (marcado como transcripción, nunca haciéndose pasar por lo que el paciente escribió)
@@ -437,6 +439,87 @@ El SQL de las dos consultas nuevas **solo lo ejercita `tests/test_ingesta_neon.p
 `-m neon`**. Offline van dobladas y degradan en silencio: `uv run pytest -q` a secas se queda
 verde con una consulta rota. Quien las toque corre
 `MAXICARE_PRUEBAS_NEON=1 uv run pytest -q -m neon`.
+
+### Una imagen o un documento SIEMPRE escalan, y lo decide el código
+
+La sección de arriba dejó un agujero y se tapó con una frase que no era cierta. Lo que se
+midió al comprobarla:
+
+- el prompt del lector le dice a Daniela, palabra por palabra, que **«el doctor ya lo tiene»**
+  y que no sabe qué muestra el archivo. Esa frase es correcta —la lectura clínica baja al hilo
+  sola— y empuja exactamente en contra de escalar;
+- la lista de cuándo escalar de `agentes.py` no menciona recibir un archivo;
+- en toda la vida del sistema habían entrado **ocho archivos, los ocho de audio**. Cero
+  imágenes y cero documentos. Los únicos tres `archivo_recibido` de la base son el bug de
+  notas de voz del 21/09 que arregló el no negociable 29.
+
+O sea: la conducta que se daba por supuesta no se había dado ni una vez, y no podía darse.
+
+**La regla vive en el código.** `conversacion.responder`, después del respaldo de
+`requiere_escalamiento`:
+
+```python
+if resultado.escalado_por is None and ctx.turno.hubo_archivo_para_revisar:
+    resultado.escalado_por = "archivo_recibido"
+```
+
+Tres cosas que no son obvias en esas dos líneas:
+
+1. **Va después, y solo rellena un hueco.** Si el modelo ya dio un motivo, ese manda: un
+   `clinico` dice más que «llegó un archivo». Y no es solo cortesía —el motivo ES el asunto
+   con el que deduplica el no negociable 26, así que pisar un `clinico` con un
+   `archivo_recibido` callaría al `clinico` siguiente por «repetido».
+2. **Se aplica aunque el turno lo cortara un guardrail**, incluido el `tarea_ajena` que el 11
+   deja pasar en silencio. Lo que decide es que el archivo llegó y nadie lo ha mirado, y eso
+   no depende del texto que viniera al lado. Lo acota la deduplicación: seis radiografías
+   seguidas son un aviso, no seis.
+3. **No se toca el prompt.** Pedirle al modelo que escale por algo que otra parte del prompt
+   le dice que ya está resuelto es pedirle que se contradiga, y el resultado sería
+   intermitente. Mismo criterio que la baja comercial (25) y que la guarda de la 26.
+
+**La bandera es propia, y no reusar `hubo_adjunto` es la decisión que más importa aquí.**
+
+| | `hubo_adjunto` | `hubo_archivo_para_revisar` |
+|---|---|---|
+| imagen, documento | sí | **sí** |
+| nota de voz | sí | no |
+| vídeo, sticker | sí | no |
+| para qué existe | prefiltro de `sin_lectura_clinica` | interrumpir a un doctor |
+
+Con una sola bandera, una nota de voz volvería a escalar con «Ya recibimos tu audio» — que es
+exactamente el bug que la 029 arregló, y el motivo del no negociable 29: un audio solo hay que
+oírlo, y quien preguntó el precio de la limpieza en voz alta no necesita a un doctor.
+
+Lo demás, en una línea cada uno:
+
+- sale del `type` del webhook y **nunca del modelo**, como `telefono_sin_paciente` (12) y
+  `entrada_solo_de_botones` (23);
+- se calcula sobre el **grupo entero** de mensajes: la foto y el «¿esto qué es?» son dos
+  mensajes, y leyendo solo uno la tanda no escalaría;
+- vive en `atencion._DatosDelMensaje`, no en `DatosDelTurno`, porque `responder` llama a
+  `reiniciar()` antes de correr y la borraría medio milisegundo después de ponerla. Se escribió
+  primero mal y las pruebas salieron en rojo, que es para lo que están;
+- `lectura.TIPOS_QUE_REVISA_UN_DOCTOR` tiene hoy los mismos dos miembros que
+  `TIPOS_QUE_SE_LEEN` y **no es un alias suyo**: uno dice qué puede abrir el modelo lector
+  —una capacidad técnica que cambia con el proveedor— y el otro qué tiene que mirar una
+  persona, que es una decisión de la clínica. Escribirlos juntos haría que cambiar de
+  proveedor moviera a quién se interrumpe.
+
+**La otra mitad: una imagen puede levantar una lápida.** `ingesta._tema_del_archivo` pide
+`rehacer_si_lo_borraron = m.tipo in TIPOS_QUE_REVISA_UN_DOCTOR`, y es la única excepción a «un
+mensaje del paciente no resucita un hilo borrado». No es una grieta en esa regla sino su
+lectura exacta: bajo esta sección una imagen **es** un escalamiento, y un escalamiento siempre
+pudo rehacer el hilo. Sin la excepción el hilo se rehacía igual, unos segundos después y por
+`rescatar_hilo`, pero para entonces el depósito ya había pasado —`procesar_mensaje` corre
+ANTES que el turno—, así que de esa primera radiografía quedaba la constancia con su hora y no
+los bytes.
+
+Lo que esto cuesta, y va dicho: **borrar el tema ya no es definitivo frente a una foto.** Si
+un doctor borra el hilo de alguien y esa persona manda una radiografía, aparece un hilo nuevo.
+Es la elección de MaxiCare del 22/09/2026 y la sostiene el principio que decide los empates:
+una radiografía sin nadie mirándola es peor que un hilo de más.
+
+Lo que sigue sin cubrir nadie: **el vídeo y el sticker**, que ni se leen ni escalan.
 
 ## `/clearstate` — resetear un número a primer contacto
 

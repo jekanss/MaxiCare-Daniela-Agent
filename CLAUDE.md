@@ -157,7 +157,35 @@ una —qué se midió, qué costó— está en la regla que cubre ese archivo.
    era el único timbrazo del General sin escalamiento detrás. **Lo que cuesta, dicho a
    sabiendas: un archivo que llega sin hilo no lo ve nadie en el momento.** Lo compensa el
    volcado —`lectura.pendientes_legibles` baja textos, transcripciones y la CONSTANCIA de cada
-   archivo con su hora— y lo compensa mal a propósito: los bytes no vuelven.
+   archivo con su hora— y lo compensa mal a propósito: los bytes no vuelven. **Esa frase dejó
+   de valer para las imágenes y los documentos el mismo día: ver 14c.**
+14c. **Una imagen o un documento SIEMPRE escalan, lo decide el CÓDIGO, y son lo único que
+   puede levantar una lápida.** El 14b dejó un agujero que MaxiCare cazó: si Daniela resuelve
+   sola y nunca escala, la radiografía no la ve nadie. Se justificó diciendo que «un archivo
+   clínico suele hacer escalar a Daniela por su cuenta» y **era falso**: el prompt del lector
+   le dice que «el doctor ya lo tiene» (`atencion.py`, entrada del archivo CON lectura) y la
+   lista de cuándo escalar (`agentes.py`) no incluye recibir uno. Medido: de los OCHO archivos
+   que el sistema recibió en su vida ninguno escaló por sí mismo, y los tres `archivo_recibido`
+   que hay en la base son el bug de audios del 21/09 que arregló el 29. Por eso la regla va en
+   `conversacion.responder` —`if escalado_por is None and ctx.turno.hubo_archivo_para_revisar`—
+   y no en el prompt: pedírselo por escrito sería pedirle que se contradiga, y es el mismo
+   criterio que la baja comercial (25) y la deduplicación (26). **Va DESPUÉS del respaldo de
+   `requiere_escalamiento` y solo rellena un hueco**: un `clinico` dice más, y pisarlo cambiaría
+   el ASUNTO con el que deduplica la 26, callando el motivo que venía detrás. **La bandera es
+   propia y NO es `hubo_adjunto`**: aquella es `True` con una nota de voz, y una nota de voz no
+   interrumpe a nadie (29) —reusarla habría devuelto el bug que la 029 arregló—; sale del
+   `type` del webhook y nunca del modelo (como 12 y 23), se calcula sobre el GRUPO entero y
+   vive en `_DatosDelMensaje`, o el `reiniciar()` la borraría medio milisegundo después.
+   `lectura.TIPOS_QUE_REVISA_UN_DOCTOR` tiene los mismos dos miembros que `TIPOS_QUE_SE_LEEN`
+   y **no es un alias suyo**: uno es lo que el modelo PUEDE abrir, el otro lo que una persona
+   TIENE que mirar. Segunda mitad: `ingesta._tema_del_archivo` pide
+   `rehacer_si_lo_borraron=<es imagen o documento>`, **única excepción a «un mensaje del
+   paciente no resucita un hilo borrado»** —y no es una grieta sino su lectura exacta: eso ya
+   es un escalamiento, y un escalamiento siempre pudo rehacerlo—. Sin ella el hilo se rehacía
+   igual por `rescatar_hilo`, un instante tarde: el depósito corre ANTES que el turno, así que
+   de esa primera radiografía solo quedaba la constancia. Texto, audio, vídeo y sticker siguen
+   sin poder. **Lo que sigue sin cubrir nadie: el vídeo y el sticker**, que ni se leen ni
+   escalan.
 15. **El relevo tiene UNA puerta de salida, y `/webhook/telegram` se cierra cuando falta el
    secreto.** `conversaciones.tomada_por` puesto significa Daniela callada **y** tema abierto:
    las dos dejan de ser verdad juntas, por `relevo.cerrar` con uno de los tres motivos del

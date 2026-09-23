@@ -283,10 +283,11 @@ def test_el_ciclo_completo_del_tema(mundo):
     antes = len(grupo.envios)
     temas_antes = len(grupo.temas_creados)
     _entra(_mensaje("w-5", texto="hola?"), grupo)
-    _entra(_mensaje("w-6", tipo="image", media_id="media-3"), grupo)
+    _entra(_mensaje("w-7", tipo="audio", media_id="media-4"), grupo)
 
     assert grupo.envios[antes:] == [], (
-        f"con el tema borrado no puede salir nada a Telegram: {grupo.envios[antes:]}"
+        f"con el tema borrado, un texto y una nota de voz no salen a ninguna parte: "
+        f"{grupo.envios[antes:]}"
     )
     assert grupo.al_general == [], "y menos al General"
     assert len(grupo.temas_creados) == temas_antes, (
@@ -294,24 +295,50 @@ def test_el_ciclo_completo_del_tema(mundo):
         "de nada y ahora hay dos temas para la misma persona"
     )
 
-    # ── 5. Daniela vuelve a escalar: el hilo se rehace y se vuelca lo acumulado ──────────
+    # ── 4b. Una IMAGEN si lo rehace, y esa es la unica excepcion ────────────────────────
+    #
+    # No es una grieta en la regla de arriba: bajo el no negociable 14c una imagen ES una
+    # peticion de revision --el turno cierra escalado con `archivo_recibido` unos segundos
+    # despues-- y un escalamiento siempre pudo rehacer el hilo. Sin esto el hilo se rehacia
+    # igual, por `rescatar_hilo`, pero un instante TARDE: el deposito corre antes que el
+    # turno, asi que de la radiografia solo quedaba la constancia con su hora.
+    _entra(_mensaje("w-6", tipo="image", media_id="media-3"), grupo)
+
+    rehecho = base.tema_vivo(TEL)
+    assert rehecho is not None, "una imagen tiene que poder rehacer el hilo: hay que mirarla"
+    assert rehecho != 901, "y tiene que ser uno nuevo: el 901 lo borraron de Telegram"
+    assert base.perdido(TEL) is False, "guardar el hilo nuevo levanta la lapida"
+    assert len(grupo.temas_creados) == temas_antes + 1, "uno, y solo uno"
+
+    deposito = grupo.envios[-1]
+    assert deposito[1] == rehecho, f"la radiografia no cayo en el hilo nuevo: {deposito}"
+    assert deposito[2] is False, (
+        "la radiografia SONO al depositarse. Quien suena es el escalamiento que viene "
+        "detras, no el deposito: si sonaran los dos, el doctor recibe dos avisos por una foto"
+    )
+    assert grupo.al_general == [], "y el General sigue sin recibir nada del paciente"
+
+    # ── 5. El escalamiento encuentra el hilo hecho, y vuelca lo que quedo fuera ──────────
     tema = asyncio.run(
         lectura.rescatar_hilo(
             telefono=TEL, nombre_perfil="Ana Perez",
             database_url="postgresql://x", telegram=grupo,
         )
     )
-    assert tema is not None, "el escalamiento TIENE que poder rehacer el hilo"
+    assert tema == rehecho, "el escalamiento tiene que reusar el hilo, no abrir otro"
     assert len(grupo.temas_creados) == temas_antes + 1, "y exactamente uno, sin duplicados"
-    assert base.tema_vivo(TEL) == tema and base.perdido(TEL) is False, (
-        "guardar el hilo nuevo tiene que levantar la lapida"
-    )
 
     volcado = grupo.en_el_tema(tema)
-    assert len(volcado) == 1, f"un solo mensaje con todo, no uno por frase: {volcado}"
-    assert "hola?" in volcado[0], "lo que escribio mientras no habia hilo"
-    assert "una imagen" in volcado[0], (
-        f"la radiografia no dejo constancia en el expediente: {volcado[0]!r}"
+    assert len(volcado) == 2, (
+        f"la radiografia y UN volcado con el resto, no uno por frase: {volcado}"
+    )
+    assert "hola?" in volcado[1], "lo que escribio mientras no habia hilo"
+    assert "una nota de voz" in volcado[1], (
+        f"la nota de voz no dejo constancia en el expediente: {volcado[1]!r}"
+    )
+    assert "una imagen" not in volcado[1], (
+        "la radiografia salio DOS veces: entera en el deposito y otra vez como constancia. "
+        "Lo que ya se archivo no vuelve a bajar -- de eso vive la idempotencia del rescate"
     )
 
     # ── 6. Y la puerta, que es lo unico que vuelve a sonar ──────────────────────────────

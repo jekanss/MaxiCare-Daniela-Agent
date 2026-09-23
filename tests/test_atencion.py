@@ -392,6 +392,7 @@ class Turnos:
                 "sesion": sesion,
                 "hubo_adjunto": ctx.turno.hubo_adjunto,
                 "menciona_sintomas": ctx.turno.menciona_sintomas,
+                "hubo_archivo_para_revisar": ctx.turno.hubo_archivo_para_revisar,
             }
         )
         return conversacion.Resultado(
@@ -1376,6 +1377,53 @@ def test_la_nota_de_voz_sigue_contando_como_adjunto(monkeypatch):
     assert turnos.llamadas[-1]["hubo_adjunto"] is True
 
 
+@pytest.mark.parametrize(
+    "tipo,mime,revisar",
+    [
+        ("image", "image/jpeg", True),
+        ("document", "application/pdf", True),
+        ("audio", "audio/ogg", False),
+        ("video", "video/mp4", False),
+        ("sticker", "image/webp", False),
+    ],
+)
+def test_solo_una_imagen_o_un_documento_encienden_la_bandera_de_revision(
+    monkeypatch, tipo, mime, revisar
+):
+    """La señal que hace que el turno cierre escalado, y sale del `type` del webhook.
+
+    **No es `hubo_adjunto`, y por eso son dos banderas.** Aquella es `True` también con una
+    nota de voz, y una nota de voz no tiene que interrumpir a nadie: se transcribe y entra al
+    turno como texto del paciente (no negociable 29). Reusarla habría devuelto exactamente el
+    bug que la 029 arregló -- «Ya recibimos tu audio» y un doctor interrumpido porque alguien
+    preguntó el precio de la limpieza en voz alta.
+
+    Nace del `type` del webhook y nunca del modelo, igual que `entrada_solo_de_botones` (23)
+    y `telefono_sin_paciente` (12).
+    """
+    _, turnos = preparar(monkeypatch)
+
+    atender(
+        mensaje_texto(
+            tipo=tipo, texto=None, media_id="media-1", mime=mime, nombre_archivo="x.bin"
+        )
+    )
+
+    assert turnos.llamadas[-1]["hubo_archivo_para_revisar"] is revisar
+    assert turnos.llamadas[-1]["hubo_adjunto"] is True, (
+        "los cinco siguen siendo adjuntos: esta bandera es más estrecha, nunca menos"
+    )
+
+
+def test_un_texto_pelado_no_enciende_la_bandera_de_revision(monkeypatch):
+    """La otra mitad: esto no puede convertir cada turno en un escalamiento."""
+    _, turnos = preparar(monkeypatch)
+
+    atender(mensaje_texto("¿tienen parqueadero?"))
+
+    assert turnos.llamadas[-1]["hubo_archivo_para_revisar"] is False
+
+
 def test_lo_que_dijo_en_el_audio_es_su_frase_para_el_informe(monkeypatch):
     """`frase_para_el_informe` leía `m.texto`, que en un audio es `None`.
 
@@ -1422,16 +1470,25 @@ def test_los_hechos_del_mensaje_sobreviven_al_reinicio_del_turno():
     """`responder` llama a `ctx.turno.reiniciar()` antes de correr, y eso borraba los dos
     campos del prefiltro clínico. Que el paciente haya mandado una radiografía no es algo que
     autorizara una tool: es un hecho del mensaje que ya entró."""
-    turno = atencion._DatosDelMensaje(adjunto_del_mensaje=True, sintomas_del_mensaje=True)
+    turno = atencion._DatosDelMensaje(
+        adjunto_del_mensaje=True,
+        sintomas_del_mensaje=True,
+        archivo_para_revisar_del_mensaje=True,
+    )
 
     # Antes de reiniciar nada: el invariante ya tiene que ser cierto.
     assert turno.hubo_adjunto is True
     assert turno.menciona_sintomas is True
+    assert turno.hubo_archivo_para_revisar is True
 
     turno.reiniciar()
 
     assert turno.hubo_adjunto is True
     assert turno.menciona_sintomas is True
+    assert turno.hubo_archivo_para_revisar is True, (
+        "de esta cuelga que el turno cierre escalado con `archivo_recibido`: borrarla en el "
+        "reinicio deja la radiografía del paciente sin que la mire nadie"
+    )
 
 
 def test_el_reinicio_sigue_borrando_las_cifras_y_las_horas_autorizadas():
@@ -1832,6 +1889,10 @@ def test_un_adjunto_en_cualquier_mensaje_del_grupo_marca_el_turno(monkeypatch):
 
     assert len(turnos.llamadas) == 2, "cada orden tenía que dar exactamente un turno"
     assert [l["hubo_adjunto"] for l in turnos.llamadas] == [True, True]
+    # Misma trampa y mismo remedio para la bandera del 14c, con más en juego: leyendo un solo
+    # mensaje del grupo, la tanda que empieza por la radiografía y termina en texto --que es
+    # cómo la manda todo el mundo-- no escalaría, y esa foto no la miraría nadie.
+    assert [l["hubo_archivo_para_revisar"] for l in turnos.llamadas] == [True, True]
 
 
 def test_dos_telefonos_distintos_no_se_agrupan(monkeypatch):
