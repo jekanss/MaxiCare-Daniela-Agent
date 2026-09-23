@@ -8,6 +8,7 @@ import Pruebas from '@/pantallas/Pruebas'
 import Tratamientos from '@/pantallas/Tratamientos'
 import SinResolver from '@/pantallas/SinResolver'
 import PantallaPendiente from '@/pantallas/Pendiente'
+import CambiarContrasena from '@/componentes/CambiarContrasena'
 import { CargandoPantalla } from '@/componentes/Estado'
 import { salir, sesionActual, type Sesion } from '@/api'
 
@@ -39,6 +40,10 @@ export default function App() {
    * Se consume UNA vez. Sin limpiarlo, volver a Conversaciones desde el menu media hora
    * despues reabriria aquella conversacion sola, sin que nadie lo hubiera pedido. */
   const [saltarA, setSaltarA] = useState<string | null>(null)
+  /* El modal de cambiar la propia contraseña. Vive aquí y no dentro del `Sidebar` porque se
+   * dibuja sobre TODO el panel --es `fixed inset-0`-- y porque puede toparse con un 401, que
+   * en este archivo es una línea (`setSesion(null)`) y allí sería un callback más. */
+  const [cambiandoClave, setCambiandoClave] = useState(false)
 
   // Al cargar se le pregunta al servidor si la cookie sigue valiendo. Sin esto, recargar la
   // página devolvería al login aunque la sesión estuviera viva -- la cookie es `HttpOnly` y
@@ -86,7 +91,23 @@ export default function App() {
 
   return (
     <div className="flex h-screen overflow-hidden" style={{ backgroundColor: '#F9FAFB' }}>
-      <Sidebar activa={activa} ir={ir} sesion={sesion} alSalir={cerrarSesion} />
+      <Sidebar
+        activa={activa}
+        ir={ir}
+        sesion={sesion}
+        alSalir={cerrarSesion}
+        alCambiarClave={() => setCambiandoClave(true)}
+      />
+      {cambiandoClave ? (
+        <CambiarContrasena
+          nombre={sesion.nombre}
+          alCerrar={() => setCambiandoClave(false)}
+          alCaducarSesion={() => {
+            setCambiandoClave(false)
+            setSesion(null)
+          }}
+        />
+      ) : null}
       {activa === 'inicio' ? (
         // La portada. De solo lectura, como SinResolver: vuelve al ingreso por el mismo
         // camino si la sesión caduca a mitad de la mañana.

@@ -65,6 +65,15 @@ export async function salir(): Promise<void> {
   await fetch('/api/salir', { method: 'POST', credentials: 'same-origin' })
 }
 
+/** Cambia la contraseña de quien esté dentro. Pide la actual: tener la sesión prueba que
+ *  alguien entró, no que sea el dueño de la cuenta. */
+export async function cambiarContrasena(actual: string, nueva: string): Promise<void> {
+  await pedir<{ ok: boolean }>('/api/cambiar-contrasena', {
+    method: 'POST',
+    body: JSON.stringify({ actual, nueva }),
+  })
+}
+
 export async function hablarConDaniela(
   mensaje: string,
   conversacion: string | null,

@@ -399,6 +399,133 @@ def test_al_usuario_desactivado_se_le_corta_la_sesion_en_curso(cliente, monkeypa
 
 
 # ==========================================================================================
+# Cambiar la propia contraseña
+# ==========================================================================================
+#
+# Hasta el 22/09/2026 no había forma: la única manera de poner o restablecer una clave era
+# `scripts/crear_usuario.py`, con SSH y el `.env` delante. La clave con la que se creaba una
+# cuenta era la clave de por vida.
+
+
+@pytest.fixture
+def con_sesion(cliente, monkeypatch):
+    """`cliente` ya dentro, y espiando lo que se escribe en la base."""
+    cliente.cookies.set(
+        runtime.COOKIE, autenticacion.firmar_token("ana.rodriguez", secreto=SECRETO)
+    )
+    escritos: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        persistencia,
+        "cambiar_contrasena",
+        lambda conn, usuario, *, hash_contrasena: bool(
+            escritos.append((usuario, hash_contrasena))
+        )
+        or True,
+    )
+    return cliente, escritos
+
+
+def test_cambiar_la_contrasena_guarda_un_hash_que_sirve(con_sesion):
+    """Y se comprueba VERIFICANDO, no mirando que la cadena cambió.
+
+    Un hash guardado con la clave vieja, o con un formato que `verificar_contrasena` no sabe
+    leer, pasaría cualquier comprobación de «se escribió algo» y dejaría a la persona fuera
+    de su propia cuenta en el siguiente ingreso -- sin un error en ningún log y sin nadie que
+    pueda arreglarlo desde el panel.
+    """
+    cliente, escritos = con_sesion
+
+    r = cliente.post(
+        "/api/cambiar-contrasena",
+        json={"actual": CLAVE, "nueva": "otra frase bastante larga"},
+    )
+
+    assert r.status_code == 200
+    assert len(escritos) == 1
+    usuario, hash_nuevo = escritos[0]
+    assert usuario == "ana.rodriguez"
+    assert autenticacion.verificar_contrasena("otra frase bastante larga", hash_nuevo)
+    assert not autenticacion.verificar_contrasena(CLAVE, hash_nuevo), "guardó la vieja"
+
+
+def test_sin_la_contrasena_actual_no_se_cambia_nada(con_sesion):
+    """LA PRUEBA QUE NO SE PUEDE RELAJAR de este endpoint.
+
+    Tener la cookie prueba que alguien entró, no que sea el dueño de la cuenta: un portátil
+    sin bloquear en la recepción es exactamente ese caso. Sin esta comprobación, ese portátil
+    basta para dejar fuera al dueño y quedarse dentro, y una sesión de 8 h se convierte en
+    acceso permanente.
+    """
+    cliente, escritos = con_sesion
+
+    r = cliente.post(
+        "/api/cambiar-contrasena",
+        json={"actual": "la que me invente", "nueva": "otra frase bastante larga"},
+    )
+
+    assert r.status_code == 400
+    assert escritos == [], "se escribió una contraseña sin saber la anterior"
+
+
+def test_una_contrasena_nueva_demasiado_corta_se_rechaza_con_el_motivo(con_sesion):
+    """400 con el texto del módulo dentro, no un genérico.
+
+    Es lo único de este endpoint que el usuario puede corregir escribiendo; un «no se pudo»
+    lo deja probando largos a ciegas."""
+    cliente, escritos = con_sesion
+
+    r = cliente.post("/api/cambiar-contrasena", json={"actual": CLAVE, "nueva": "corta"})
+
+    assert r.status_code == 400
+    assert str(autenticacion.MINIMO_CONTRASENA) in r.json()["detalle"]
+    assert escritos == []
+
+
+def test_la_contrasena_corta_se_rechaza_ANTES_de_mirar_la_actual(con_sesion, monkeypatch):
+    """Y no al revés, que es lo que saldría de escribirlo en el orden natural.
+
+    `hash_contrasena` va primero a propósito: validar el largo no necesita la base, y
+    ponerlo después haría que cada intento con una clave corta pagara los ~60 ms de scrypt de
+    `verificar_contrasena` para acabar rechazándolo por algo que se sabía sin consultar nada.
+
+    Se espía la VERIFICACIÓN y no `buscar_usuario`, que es lo primero que uno escribe y no
+    aísla nada: `usuario_actual` --la dependencia que protege la ruta-- ya consulta esa misma
+    fila para comprobar que el usuario siga activo, así que el doble saltaría antes de entrar
+    al endpoint y la prueba pasaría verde sin mirar lo que dice mirar.
+    """
+    cliente, _ = con_sesion
+    monkeypatch.setattr(
+        autenticacion,
+        "verificar_contrasena",
+        lambda *a, **kw: pytest.fail("pagó scrypt por una contraseña que ya se sabía corta"),
+    )
+
+    assert cliente.post(
+        "/api/cambiar-contrasena", json={"actual": CLAVE, "nueva": "corta"}
+    ).status_code == 400
+
+
+def test_cambiar_la_contrasena_no_toca_el_rol_ni_el_nombre(con_sesion, monkeypatch):
+    """`crear_usuario` haría el mismo trabajo y traería tres columnas de regalo.
+
+    La ruta no manda el rol --quien cambia su clave no lo sabe ni tiene por qué--, así que
+    reusar aquel upsert significaría reenviar el rol actual desde el frontend, y un descuido
+    ahí degrada a un admin a recepción sin un error en ningún sitio.
+    """
+    cliente, _ = con_sesion
+    monkeypatch.setattr(
+        persistencia,
+        "crear_usuario",
+        lambda *a, **kw: pytest.fail("el cambio de clave pasó por el upsert de crear_usuario"),
+    )
+
+    assert cliente.post(
+        "/api/cambiar-contrasena",
+        json={"actual": CLAVE, "nueva": "otra frase bastante larga"},
+    ).status_code == 200
+
+
+# ==========================================================================================
 # Sin secreto, el panel se apaga y el webhook sigue vivo
 # ==========================================================================================
 

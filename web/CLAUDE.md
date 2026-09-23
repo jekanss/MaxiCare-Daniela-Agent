@@ -258,6 +258,47 @@ uv run uvicorn maxicare_daniela.runtime:app --port 8080
   vez de como una pestaña en blanco con un JSON dentro. El `URL.revokeObjectURL` del final no
   sobra: sin él, exportar treinta veces en una tarde deja treinta copias en el navegador.
 
+## Cambiar la propia contraseña — lo que hace y lo que NO
+
+`POST /api/cambiar-contrasena` y el modal de `componentes/CambiarContrasena.tsx`, que se abre
+desde el botón de la llave en el pie del menú, pegado al de salir. Va ahí y no en
+«Configuración» porque es lo que uno hace con su propia cuenta, no un ajuste de la clínica.
+
+Llegó el 22/09/2026. Hasta entonces **el panel no tenía ninguna forma de cambiar una clave**:
+la única era `scripts/crear_usuario.py`, con SSH y el `.env` delante. Eso hacía que la clave
+con la que se crea una cuenta fuera la clave de por vida, y convertía «quiero cambiarla» y «se
+me filtró» en la misma llamada a un desarrollador.
+
+Tres cosas que hay que saber antes de tocarlo:
+
+- **Pide la contraseña actual, y no es autenticación duplicada.** Tener la cookie prueba que
+  alguien entró, no que sea el dueño de la cuenta: un portátil sin bloquear en la recepción es
+  exactamente ese caso. Sin esa comprobación ese portátil basta para dejar fuera al dueño y
+  quedarse dentro, y una sesión de 8 h se vuelve acceso permanente.
+- **Valida el largo ANTES de verificar la actual**, que es al revés de como sale escribirlo.
+  Si no, cada intento con una clave corta paga los ~60 ms de scrypt para acabar rechazándolo
+  por algo que se sabía sin consultar nada. Lo fija
+  `test_la_contrasena_corta_se_rechaza_ANTES_de_mirar_la_actual`, que espía
+  `verificar_contrasena` y **no** `buscar_usuario`: la dependencia `usuario_actual` ya consulta
+  esa misma fila, así que espiar ahí deja la prueba verde sin mirar lo que dice mirar.
+- **Cambiar la clave NO cierra ninguna sesión abierta**, ni la propia ni la de nadie. El token
+  se valida con matemática y no contra una tabla (el porqué, en el docstring de
+  `autenticacion.py`), así que quien tuviera una copia sigue adentro hasta 8 h. El modal lo
+  dice con esas palabras al terminar, porque quien cambia su contraseña creyendo que se la
+  robaron tiene que saberlo. Las dos salidas de emergencia son las de siempre:
+  `crear_usuario.py --quitar-acceso` corta a UNA persona en su siguiente petición, y rotar
+  `MAXICARE_SECRETO_SESION` las invalida TODAS.
+
+Usa `persistencia.cambiar_contrasena` y **no** `crear_usuario`, que haría lo mismo con su
+`ON CONFLICT DO UPDATE` y traería tres columnas de regalo: la ruta no manda el rol --quien
+cambia su clave no lo sabe--, así que reusarlo obligaría a reenviarlo desde el frontend, y un
+descuido ahí degrada a un admin a recepción sin un error en ningún sitio.
+
+El mínimo de 12 caracteres está escrito en los dos lados y la duplicación va en una sola
+dirección: el `MINIMO` del modal solo evita un viaje que se sabe rechazado, y **el servidor
+vuelve a comprobarlo**. Si allí sube a 16, aquí el único efecto sería que el aviso llega del
+servidor en vez de antes; nunca que pase una contraseña corta.
+
 ## Del lado de Python, pero solo importa desde aquí
 
 - Sin `MAXICARE_SECRETO_SESION` el panel se apaga con un 503 y **el webhook sigue vivo**.

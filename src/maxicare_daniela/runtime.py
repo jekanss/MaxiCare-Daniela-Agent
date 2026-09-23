@@ -1755,6 +1755,72 @@ async def sesion(quien: dict = Depends(usuario_actual)) -> dict:
     return quien
 
 
+class CambioDeContrasena(BaseModel):
+    actual: str = Field(min_length=1, max_length=512)
+    nueva: str = Field(min_length=1, max_length=512)
+
+
+@app.post("/api/cambiar-contrasena")
+async def cambiar_contrasena(
+    cuerpo: CambioDeContrasena, quien: dict = Depends(usuario_actual)
+) -> dict:
+    """Cada quien cambia LA SUYA, y hay que saber la actual.
+
+    Hasta el 22/09/2026 no existía: la única forma de poner o restablecer una clave era
+    `scripts/crear_usuario.py`, o sea alguien con SSH y el `.env` delante. Eso convertía
+    «quiero cambiar mi contraseña» y «se me filtró la contraseña» en la misma llamada a un
+    desarrollador, y en la práctica significaba que la clave con la que se crea una cuenta es
+    la clave de por vida.
+
+    -------------------------------------------------------------------------------------
+    Por qué se pide la actual aunque ya haya sesión
+    -------------------------------------------------------------------------------------
+
+    Tener la cookie prueba que alguien entró, no que sea el dueño de la cuenta: un portátil
+    sin bloquear en la recepción de la clínica es exactamente ese caso. Sin la actual, ese
+    portátil basta para dejar fuera al dueño y quedarse dentro, y la sesión --que dura como
+    mucho 8 h-- se convierte en acceso permanente. No es autenticación duplicada: es lo que
+    separa «usar una sesión» de «apropiarse de una cuenta».
+
+    -------------------------------------------------------------------------------------
+    Y lo que esto NO hace, dicho aquí porque importa el día que se use de verdad
+    -------------------------------------------------------------------------------------
+
+    **Cambiar la clave no cierra las sesiones que ya estén abiertas**, ni la de quien la
+    cambia ni la de nadie más. El token se valida con matemática y no consultando una tabla
+    --la decisión y su precio están en el docstring de `autenticacion.py`--, así que quien
+    tuviera una copia sigue adentro hasta que venza. Para eso está la salida de emergencia de
+    siempre, y son dos, según el caso: `--quitar-acceso` en `scripts/crear_usuario.py` corta
+    a UNA persona en la siguiente petición (lo comprueba `usuario_actual`), y rotar
+    `MAXICARE_SECRETO_SESION` las invalida TODAS de golpe.
+
+    No lleva el freno de `/api/entrar` --`_puede_intentar`-- y es deliberado: ese existe para
+    que probar contraseñas desde fuera cueste algo, y aquí ya hace falta una sesión válida
+    para llamar. Quien la tiene no gana nada adivinando la clave que la sesión ya le dio.
+    """
+    try:
+        hash_nuevo = autenticacion.hash_contrasena(cuerpo.nueva)
+    except autenticacion.ContrasenaInvalida as e:
+        # 400 y con el texto del módulo dentro: es lo único de este endpoint que el usuario
+        # puede corregir escribiendo, y un genérico lo dejaría probando largos a ciegas.
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+    with persistencia.conectar(config.database_url) as conn:
+        fila = persistencia.buscar_usuario(conn, quien["usuario"])
+        # `usuario_actual` acaba de leer esta misma fila, así que `None` aquí significa que
+        # alguien borró la cuenta entre las dos consultas. Es 401 y no 404: lo que pasó es
+        # que la sesión dejó de valer.
+        if fila is None:
+            raise HTTPException(status_code=401, detail="Tu sesión ya no es válida.")
+        if not autenticacion.verificar_contrasena(cuerpo.actual, fila["hash_contrasena"]):
+            log.warning("cambio de contraseña rechazado para %s: la actual no coincide", quien["usuario"])
+            raise HTTPException(status_code=400, detail="La contraseña actual no es correcta.")
+        persistencia.cambiar_contrasena(conn, quien["usuario"], hash_contrasena=hash_nuevo)
+
+    log.info("%s cambió su contraseña", quien["usuario"])
+    return {"ok": True}
+
+
 # ------------------------------------------------------------------------------------------
 # Chat de pruebas -- el entregable de la fase 5
 # ------------------------------------------------------------------------------------------

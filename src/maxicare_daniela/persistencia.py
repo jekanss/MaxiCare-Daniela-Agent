@@ -3399,6 +3399,28 @@ def cambiar_acceso(conn, usuario: str, *, activo: bool) -> bool:
     return toco > 0
 
 
+def cambiar_contrasena(conn, usuario: str, *, hash_contrasena: str) -> bool:
+    """Escribe el hash nuevo. True si el usuario existía.
+
+    **Solo toca `hash_contrasena`.** No el nombre, no el rol, no `activo`. `crear_usuario`
+    haría el mismo trabajo con su `ON CONFLICT DO UPDATE` y traería de regalo tres columnas
+    más: quien cambia su clave desde el panel no manda el rol, así que reusarlo significaría
+    que la ruta tiene que volver a enviar el rol actual y que un descuido ahí degrada a un
+    admin a recepción sin un error en ningún sitio. Una función estrecha no puede hacer eso.
+
+    El hash llega ya calculado (`autenticacion.hash_contrasena`): esta capa no sabe de
+    scrypt, igual que no sabe de cookies, y una contraseña en claro no cruza este archivo.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE usuarios SET hash_contrasena = %s WHERE usuario = %s",
+            (hash_contrasena, usuario.strip().lower()),
+        )
+        toco = cur.rowcount
+    conn.commit()
+    return toco > 0
+
+
 def marcar_acceso(conn, usuario: str) -> None:
     """Sella la hora del último ingreso. Nunca lanza hacia arriba: que no se pueda escribir
     una marca de tiempo no puede impedirle entrar a nadie."""

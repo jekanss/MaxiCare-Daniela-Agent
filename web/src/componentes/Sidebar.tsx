@@ -265,11 +265,13 @@ export default function Sidebar({
   ir,
   sesion,
   alSalir,
+  alCambiarClave,
 }: {
   activa: SeccionId
   ir: (id: SeccionId) => void
   sesion: Sesion
   alSalir: () => void
+  alCambiarClave: () => void
 }) {
   return (
     <aside
@@ -390,6 +392,36 @@ export default function Sidebar({
               {ROLES[sesion.rol]}
             </span>
           </span>
+          {/* Va aquí, pegado al de salir, y no en «Configuración»: es lo que uno hace con su
+              propia cuenta, no un ajuste de la clínica, y este es el único sitio del panel
+              donde ya está tu nombre. Hasta el 22/09/2026 no existía en ninguna parte --la
+              única forma de cambiar una clave era `scripts/crear_usuario.py`, con SSH. */}
+          <button
+            onClick={alCambiarClave}
+            title="Cambiar mi contraseña"
+            aria-label="Cambiar mi contraseña"
+            className="shrink-0 flex items-center justify-center transition-colors hover:bg-white/10"
+            style={{
+              width: 34,
+              height: 34,
+              border: '1px solid rgba(255,255,255,0.16)',
+              color: '#C4B5FD',
+            }}
+          >
+            <svg
+              aria-hidden="true"
+              width="15"
+              height="15"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.8"
+              strokeLinecap="square"
+            >
+              <circle cx="8" cy="12" r="4" />
+              <path d="M12 12h9M18 12v3.5M15.5 12v2.5" />
+            </svg>
+          </button>
           <button
             onClick={alSalir}
             title="Cerrar sesión"

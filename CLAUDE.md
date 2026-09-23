@@ -22,7 +22,10 @@ llegue a la cita correcta.
   conversaciones reales** antes de dar un número. No lo confundas con
   `config.LIMITE_HISTORIAL_SESION = 230`, que es un tope de seguridad y no una medición.
 - Desplegar en el VPS: `bash scripts/desplegar.sh`
-- Usuarios del panel: `uv run python scripts/crear_usuario.py` (`--listar`, `--quitar-acceso`)
+- Usuarios del panel: `uv run python scripts/crear_usuario.py` (`--listar`, `--quitar-acceso`).
+  **Crear y quitar acceso siguen siendo solo de aquí; cambiar la PROPIA contraseña ya no**:
+  desde el 22/09/2026 hay botón en el pie del menú (`web/CLAUDE.md`). `--quitar-acceso` es la
+  salida de emergencia para UNA persona, y rotar `MAXICARE_SECRETO_SESION` para todas.
 - Revisar el grupo de Telegram: `uv run python scripts/obtener_chat_telegram.py`
 - **Encender el relevo** (6C): `uv run python scripts/configurar_webhook_telegram.py --url
   https://daniela.maxicarecol.com/webhook/telegram`. Telegram NO valida la URL como hace
