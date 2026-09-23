@@ -377,15 +377,28 @@ PRECIOS_POR_MILLON: dict[str, tuple[float, float, float]] = {
 }
 
 
-#: Los WhatsApp de los doctores que reciben el aviso de cada cita nueva, en formato
-#: internacional sin `+` -- que es como los quiere la Graph API de Meta.
+#: Quién recibe el aviso de cada cita nueva, en formato internacional sin `+` -- que es como
+#: los quiere la Graph API de Meta.
 #:
 #: Que estén aquí y no solo en el `.env` es deliberado y tiene precedente en este archivo
 #: (`POLITICA_DATOS_URL`): no son un secreto, y son algo que no puede dejar de funcionar
 #: porque alguien olvidó una variable al desplegar. Un aviso de cita que no sale no falla en
 #: ninguna parte -- simplemente el doctor no se entera, y eso no se nota hasta que un paciente
 #: llega a una cita que nadie esperaba.
-WHATSAPP_DOCTORES: tuple[str, ...] = ("573106492282", "573185790008")
+#:
+#: **El nombre miente un poco y se deja así a propósito.** El tercero, Santiago, no es doctor
+#: -- es de administración -- y aun así recibe lo mismo. Renombrar la constante a algo como
+#: `WHATSAPP_AVISOS_CITA` tocaría `config.py`, `aviso_citas.py` y sus pruebas para no cambiar
+#: ni un comportamiento, así que lo que se corrige es el comentario y no el identificador. Lo
+#: que sí hay que saber al añadir a alguien: esta lista **solo** alimenta el aviso de cita
+#: nueva (`aviso_citas.ajustes_del_entorno`), no los escalamientos ni nada de Telegram, así
+#: que entrar aquí no da acceso a nada -- da un WhatsApp por cada cita que agenda Daniela.
+WHATSAPP_DOCTORES: tuple[str, ...] = (
+    "573106492282",
+    "573185790008",
+    # Santiago, de administración. Añadido el 23/09/2026 a petición suya.
+    "573132103985",
+)
 
 
 # ==========================================================================================

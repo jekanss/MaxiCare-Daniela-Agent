@@ -266,6 +266,27 @@ def test_sin_credenciales_de_meta_los_ajustes_dejan_el_canal_apagado(monkeypatch
     assert ajustes.doctores
 
 
+def test_santiago_recibe_el_aviso_con_el_env_vacio(monkeypatch):
+    """El caso real: `MAXICARE_WHATSAPP_DOCTORES` está vacía en local Y en el VPS, así que
+    quien manda de verdad es la constante de `config.py`.
+
+    No basta con mirar la constante. `desde_entorno` la enlaza con un `or`, y un `or` sobre
+    una variable mal leída --una cadena vacía que llegara como `("",)`, por ejemplo-- daría
+    una lista de destinatarios que NO es esta sin que la constante hubiera cambiado. Lo que
+    se comprueba es lo que llega al final del camino, que es lo que Meta va a recibir.
+    """
+    monkeypatch.delenv("MAXICARE_WHATSAPP_DOCTORES", raising=False)
+    monkeypatch.setenv("MAXICARE_DATABASE_URL", "postgresql://no-se-usa")
+
+    ajustes = aviso_citas.ajustes_del_entorno()
+
+    assert "573132103985" in ajustes.doctores
+    # Y los dos que ya estaban siguen estando: añadir a alguien no puede ser quitarle el
+    # aviso a otro, que es el fallo silencioso de escribir una tupla nueva en vez de crecerla.
+    assert "573106492282" in ajustes.doctores
+    assert "573185790008" in ajustes.doctores
+
+
 # ==========================================================================================
 # El viaje entero, desde `crear_cita`
 # ==========================================================================================
