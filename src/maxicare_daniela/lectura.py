@@ -72,7 +72,13 @@ def repartir(lectura: LecturaArchivo) -> tuple[str, LecturaNoClinica]:
 #: El contenedor corre con un solo worker a propósito, y por eso hoy alcanza.
 _candados_de_tema: dict[str, asyncio.Lock] = {}
 
-#: Cuánto puede tardar «buscar o crear el tema» antes de que el archivo se mande al General.
+#: Cuánto puede tardar «buscar o crear el tema» antes de que el archivo se quede sin depositar.
+#:
+#: Decía «antes de que el archivo se mande al General», y desde el 22/09/2026 el General ya no
+#: es destino de nada que mande un paciente: vencido el tope, el archivo no se archiva en
+#: ninguna parte y lo recupera el volcado del próximo escalamiento (`rescatar_hilo`). El tope
+#: sigue existiendo por lo mismo de siempre --nada puede retrasar la entrega-- pero lo que se
+#: paga por vencerlo ya no es ruido en el grupo, es una línea de menos en el expediente.
 #:
 #: `ingesta.procesar_mensaje` es quien lo aplica, porque es quien tiene el archivo en la mano.
 #: Vive aquí porque es el reloj de ESTA operación: en el primer archivo de un paciente,
@@ -93,12 +99,34 @@ def nombre_del_tema(telefono: str, nombre_perfil: str | None) -> str:
 
 
 async def asegurar_tema(
-    *, telefono: str, nombre_perfil: str | None, database_url: str, telegram
+    *,
+    telefono: str,
+    nombre_perfil: str | None,
+    database_url: str,
+    telegram,
+    rehacer_si_lo_borraron: bool = True,
 ) -> int | None:
     """El hilo de ese número, creándolo si es el primero. `None` solo si no se pudo.
 
-    Ese `None` no es un error que haya que propagar: significa «manda el archivo al tema
-    General, como antes». Degradar es aceptable; perder el archivo no lo es.
+    **`rehacer_si_lo_borraron=False` es lo que pidió MaxiCare el 22/09/2026**, y es la
+    diferencia entre un número que nunca tuvo hilo y uno al que se lo borraron (la lápida de
+    la migración 030, que lee `persistencia.hilo_perdido`):
+
+        nunca tuvo hilo      ->  se le abre, pase lo que pase. Es su expediente estrenándose.
+        se lo BORRARON       ->  con la bandera en False, se devuelve `None` y no se toca
+                                 Telegram. Solo un escalamiento lo rehace.
+
+    Lo llama así `ingesta`, y solo `ingesta`: borrar el tema es el gesto con el que un doctor
+    dice que deja de querer ver a ese paciente en el grupo, y que su siguiente nota de voz se
+    lo devolviera anularía el gesto. `rescatar_hilo` --que corre DENTRO de un escalamiento--
+    lo llama con el default, porque ahí sí hay alguien pidiendo un humano.
+
+    Ese `None` no es un error que haya que propagar: significa «este archivo no se deposita
+    en Telegram». Quien llama sigue con lo suyo --el archivo ya está descargado, el lector y
+    el transcriptor corren igual y Daniela contesta-- y la constancia de que llegó la vuelca
+    el próximo escalamiento en el hilo que abra. **Hasta el 22/09/2026 significaba «al
+    General», y eso era el bug**: convertía cada fallo de Telegram, cada timeout y cada hilo
+    borrado en un mensaje de un paciente sonando en el escritorio común de los doctores.
 
     **CUALQUIER número tiene hilo, sea paciente o no.** Hasta la migración 014 no era así, y
     la razón era buena: el hilo era una columna de `pacientes`, y `atencion._leer_estado`
@@ -117,27 +145,39 @@ async def asegurar_tema(
     abría el botón del relevo nacía vacío. Justo la persona que más falta hace atender: la
     que escribe por primera vez.
 
-    El `None` que devuelve ya solo significa «Telegram o la base fallaron»: manda el archivo
-    al General, como antes. Degradar es aceptable; perder el archivo no lo es.
+    El `None` que devuelve significa hoy una de dos: «Telegram o la base fallaron», o «a este
+    número le borraron el hilo y esto no es un escalamiento». Ninguna de las dos manda nada
+    al General.
     """
     candado = _candados_de_tema.setdefault(telefono, asyncio.Lock())
     async with candado:
         try:
-            existente = await asyncio.to_thread(_tema_de, database_url, telefono)
+            existente, perdido = await asyncio.to_thread(
+                _estado_del_hilo, database_url, telefono
+            )
         except Exception:  # noqa: BLE001
-            log.exception("no se pudo consultar el tema de %s; va al General", telefono)
+            log.exception("no se pudo consultar el tema de %s; se queda sin hilo", telefono)
             return None
         if existente:
             return existente
+        if perdido and not rehacer_si_lo_borraron:
+            log.info(
+                "el hilo de %s lo borraron y esto no es un escalamiento: no se rehace",
+                telefono,
+            )
+            return None
 
         nombre = nombre_del_tema(telefono, nombre_perfil)
         try:
             tema = await telegram.crear_tema(nombre)
         except Exception:  # noqa: BLE001 -- ancho a propósito: no solo `ErrorDeCanal`
             # (Telegram respondió "ok: false") sino también un fallo de transporte real
-            # (timeout, conexión caída). Cualquiera de los dos degrada al General; propagarlo
-            # tumbaría la entrega del archivo al doctor, que es la garantía de la fase 2.
-            log.exception("Telegram no dejó crear el tema de %s; va al General", telefono)
+            # (timeout, conexión caída). Cualquiera de los dos deja el archivo sin depositar;
+            # propagarlo tumbaría el turno del paciente, que es lo que no puede pasar.
+            log.exception(
+                "Telegram no dejó crear el tema de %s; su archivo se queda sin archivar",
+                telefono,
+            )
             return None
 
         # Cerrarlo es lo que pone el candado, y va antes de guardarlo: si el cierre falla,
@@ -164,14 +204,22 @@ async def asegurar_tema(
         return tema
 
 
-def _tema_de(database_url: str, telefono: str) -> int | None:
-    """El hilo de ese número, o `None` si todavía no tiene ninguno.
+def _estado_del_hilo(database_url: str, telefono: str) -> tuple[int | None, bool]:
+    """`(el hilo usable o None, se lo borraron)`. Las dos cosas en una sola conexión.
 
     Ya no pregunta si es paciente. Desde la migración 014 el hilo vive en `temas_telegram`,
     atado al teléfono, y tener hilo dejó de significar estar verificado -- ver `asegurar_tema`.
+
+    Las dos preguntas van juntas y no en dos idas a Neon porque esto corre delante de la
+    entrega de un archivo al doctor, que es la garantía que la fase 2 midió y protegió. La
+    segunda solo la necesita quien pasa `rehacer_si_lo_borraron=False`, pero pedirla siempre
+    cuesta una columna y no un viaje.
     """
     with persistencia.conectar(database_url) as conn:
-        return persistencia.tema_del_paciente(conn, telefono)
+        hilo = persistencia.tema_del_paciente(conn, telefono)
+        if hilo is not None:
+            return hilo, False
+        return None, persistencia.hilo_perdido(conn, telefono)
 
 
 def _guardar_tema(database_url: str, telefono: str, tema: int, abierto: bool = False) -> None:
@@ -196,12 +244,19 @@ TOPE_FRASES_RESCATE = 20
 async def rescatar_hilo(
     *, telefono: str, nombre_perfil: str | None, database_url: str, telegram
 ) -> int | None:
-    """Abre el hilo de ese número si no lo tiene, y vuelca lo que escribió mientras no había.
+    """Abre el hilo de ese número si no lo tiene, y vuelca lo que llegó mientras no había.
 
-    **Es la única puerta por la que algo que no es un archivo abre un hilo**, y el no
-    negociable 14 sigue en pie para todo lo demás: un texto suelto no lo abre. Lo que cambia
-    es quién decide, y el filtro es el ESCALAMIENTO, no el texto: un número equivocado no
-    hace escalar a Daniela, así que no estrena expediente. El paciente con dolor, sí.
+    **Es la única puerta por la que un mensaje del paciente acaba abriendo un hilo**, y lo
+    que decide no es el mensaje: es el ESCALAMIENTO. Un número equivocado no hace escalar a
+    Daniela, así que no estrena expediente; el paciente con dolor, sí.
+
+    Y desde el 22/09/2026 es también **lo único que rehace un hilo BORRADO**. Cuando un
+    doctor borra el tema, `persistencia.olvidar_tema` le pone la lápida de la migración 030 y
+    `ingesta` deja de poder recrearlo (`asegurar_tema(rehacer_si_lo_borraron=False)`): ese
+    paciente desaparece de Telegram hasta que Daniela vuelva a pedir una persona. Esta
+    función es ese «hasta que». Como llama a `asegurar_tema` con el default, la lápida no la
+    frena -- y tiene que no frenarla, o borrar un tema dejaría al paciente sin expediente
+    para siempre.
 
     El agujero que tapa, medido en producción el 16/09/2026: entre que un número se queda sin
     hilo --`/clearstate` lo borra, o alguien borra el tema-- y que un archivo se lo vuelva a
@@ -241,9 +296,9 @@ async def rescatar_hilo(
 
     # Un solo mensaje con todas las frases, no uno por frase: son mudas, pero veinte
     # depósitos seguidos convierten el expediente en un muro por el que hay que bajar.
-    cuerpo = "\n".join(f"• {html.escape(texto)}" for _, texto in pendientes)
+    cuerpo = "\n".join(f"• {linea}" for linea in pendientes_legibles(pendientes))
     aviso = (
-        "📝 <b>Lo que escribió antes de que existiera este hilo</b>\n"
+        "📝 <b>Lo que llegó antes de que existiera este hilo</b>\n"
         "<i>No se había podido archivar en ninguna parte.</i>\n\n"
         f"{cuerpo}"
     )
@@ -258,38 +313,96 @@ async def rescatar_hilo(
     # perder esas frases para siempre--, no repetirlo. Repetir un volcado es inocuo.
     try:
         await asyncio.to_thread(
-            _marcar_archivados, database_url, [w for w, _ in pendientes], message_id
+            _marcar_archivados, database_url, [fila[0] for fila in pendientes], message_id
         )
     except Exception:  # noqa: BLE001
         log.exception("el volcado de %s salió pero no quedó marcado; podría repetirse", telefono)
     return tema
 
 
-def _textos_sin_archivar(database_url: str, telefono: str) -> list[tuple[str, str]]:
-    """Los textos de ese número que se procesaron sin llegar a ningún hilo.
+#: Cómo se nombra en el volcado un archivo del que solo queda constancia. Es un subconjunto
+#: deliberado de `ingesta.NOMBRE_HUMANO` --no se importa para no crear un ciclo: `ingesta` ya
+#: importa `lectura`-- y si un tipo nuevo no está aquí, la línea sale con el tipo crudo, que
+#: se lee peor y no se pierde.
+ICONO_POR_TIPO = {
+    "image": "🖼️ una imagen",
+    "document": "📄 un documento",
+    "audio": "🎙️ una nota de voz",
+    "voice": "🎙️ una nota de voz",
+    "video": "🎬 un video",
+    "sticker": "🙂 un sticker",
+}
+
+
+def pendientes_legibles(pendientes: list[tuple]) -> list[str]:
+    """Cada fila sin archivar, como una línea del volcado. Pura, y por eso se prueba sola.
+
+    Tres formas de línea, y el orden de las ramas ES la decisión:
+
+        el paciente ESCRIBIÓ algo            ->  la frase, tal cual
+        mandó un audio que se entendió       ->  la transcripción, marcada como tal
+        mandó un archivo                     ->  la hora y qué era. Sin los bytes.
+
+    Lo tercero es lo que se ganó el 22/09/2026, cuando el General dejó de ser el destino de
+    reserva de lo que manda un paciente. Antes, un archivo que no encontraba hilo caía en el
+    escritorio común de los doctores --sonando--; ahora no cae en ninguna parte, y sin esta
+    línea el doctor abriría el expediente sin saber que hubo una radiografía. **La
+    constancia no es el archivo**: los bytes no vuelven, porque el enlace de Meta caduca y
+    aquí no se recanjea nada. Decir que llegó y cuándo es lo único honesto que se puede
+    decir, y es infinitamente más que el silencio.
+
+    La transcripción va marcada y NUNCA se hace pasar por lo que el paciente escribió, por la
+    misma razón que la migración 027 la guarda en su propia columna: «el 46» y «el 40» suenan
+    casi igual, y quien lee una frase clínica tiene derecho a saber de cuál de las dos se fía.
+    """
+    lineas: list[str] = []
+    for _, texto, transcripcion, tipo, cuando in pendientes:
+        if texto:
+            lineas.append(html.escape(texto))
+        elif transcripcion:
+            lineas.append(f"🎙️ <i>«{html.escape(transcripcion)}»</i>")
+        else:
+            que = ICONO_POR_TIPO.get(tipo, f"algo de tipo «{html.escape(str(tipo))}»")
+            hora = cuando.strftime("%H:%M") if cuando is not None else "antes"
+            lineas.append(f"<i>{hora} — mandó {que}</i>")
+    return lineas
+
+
+def _textos_sin_archivar(database_url: str, telefono: str) -> list[tuple]:
+    """Lo de ese número que se procesó sin llegar a ningún hilo. `(wamid, texto, …)`.
 
     `telegram_message_id IS NULL` junto a `fallo IS NULL` es exactamente la firma que deja
-    `ingesta`: «se procesó sin reenviar: es un texto y su número no tiene tema». Un mensaje
-    con `fallo` NO entra: ese sí se intentó entregar y se registró como perdido, y volcarlo
-    aquí lo borraría del índice por el que se vigila lo que de verdad falló.
+    `ingesta`: «se procesó sin reenviar, y su número no tenía tema». Un mensaje con `fallo`
+    NO entra: ese sí se intentó entregar y se registró como perdido, y volcarlo aquí lo
+    borraría del índice por el que se vigila lo que de verdad falló.
+
+    **Ya no filtra por `texto IS NOT NULL`, y esa es la mitad nueva.** Desde que el General
+    dejó de ser el destino de reserva (22/09/2026), un archivo que llega sin hilo tampoco se
+    deposita, y con el filtro viejo desaparecía del volcado: el doctor abría el expediente y
+    no había ni rastro de la radiografía. Ahora entran las tres cosas --lo escrito, lo dicho
+    y lo adjuntado-- y `pendientes_legibles` decide cómo se ve cada una.
     """
     with persistencia.conectar(database_url) as conn, conn.cursor() as cur:
         cur.execute(
             f"""
-            SELECT wamid, texto
+            SELECT wamid, texto, transcripcion, tipo,
+                   recibido_en AT TIME ZONE 'America/Bogota'
               FROM mensajes_entrantes
              WHERE telefono = %s
                AND telegram_message_id IS NULL
                AND fallo IS NULL
-               AND texto IS NOT NULL
-               AND texto <> ''
+               AND (
+                    (texto IS NOT NULL AND texto <> '')
+                 OR (transcripcion IS NOT NULL AND transcripcion <> '')
+                 OR media_id IS NOT NULL
+               )
                AND recibido_en > now() - interval '{HORAS_DE_RESCATE} hours'
              ORDER BY recibido_en
              LIMIT {TOPE_FRASES_RESCATE}
             """,
             (telefono,),
         )
-        return [(w, x) for w, x in cur.fetchall()]
+        return list(cur.fetchall())
 
 
 def _marcar_archivados(database_url: str, wamids: list[str], message_id: int) -> None:
@@ -508,6 +621,14 @@ async def leer_y_repartir(
     `silencioso` lo fija quien llama y vale lo mismo que valió para el archivo: la lectura
     acompaña al archivo y suena exactamente donde sonó él. Si notificara por su cuenta,
     haber callado el archivo no habría servido de nada. Ver NOTA DEL SILENCIO en `canales`.
+
+    **`tema_id=None` significa «no hay dónde depositar», NUNCA «al General».** Es la trampa
+    que hay que conocer de este parámetro: `canales.enviar_mensaje` resuelve un `tema_id`
+    falso como el tema General (su `if tema_id:`), así que pasarlo tal cual mandaría la ficha
+    clínica de un paciente al escritorio común de los doctores -- que es exactamente lo que
+    el muro existe para evitar y lo que MaxiCare pidió cortar el 22/09/2026. Se corta aquí y
+    no en `canales` porque aquí es donde vive el muro; `canales` sigue necesitando ese
+    comportamiento para los avisos que SÍ van al General.
     """
     leida = await leer_archivo(
         archivo,
@@ -518,14 +639,15 @@ async def leer_y_repartir(
         telefono=telefono,
     )
     if leida is None:
-        try:
-            await telegram.enviar_mensaje(
-                "⚠️ No se pudo leer este archivo automáticamente.",
-                tema_id=tema_id,
-                silencioso=silencioso,
-            )
-        except Exception:  # noqa: BLE001
-            log.exception("no se pudo avisar de la lectura fallida")
+        if tema_id:
+            try:
+                await telegram.enviar_mensaje(
+                    "⚠️ No se pudo leer este archivo automáticamente.",
+                    tema_id=tema_id,
+                    silencioso=silencioso,
+                )
+            except Exception:  # noqa: BLE001
+                log.exception("no se pudo avisar de la lectura fallida")
         return None
 
     clinico, no_clinica = repartir(leida)
@@ -536,12 +658,19 @@ async def leer_y_repartir(
     # El «📄 Lectura» de la 6B se fue: la cabecera de la ficha ya dice qué es el documento,
     # mucho mejor que la palabra «Lectura», y en un celular cada renglón de más empuja lo
     # decisivo fuera de la pantalla.
-    try:
-        await telegram.enviar_mensaje(
-            f"📄 {formatear_para_el_doctor(clinico)}",
-            tema_id=tema_id,
-            silencioso=silencioso,
-        )
-    except Exception:  # noqa: BLE001
-        log.exception("la lectura no llegó a Telegram; el archivo sí está")
+    #
+    # Sin hilo NO se deposita, y la mitad no clínica se devuelve igual: es lo que necesita
+    # Daniela para contestarle al paciente, y no depende de que el doctor haya podido ver
+    # nada. Ver el docstring.
+    if tema_id:
+        try:
+            await telegram.enviar_mensaje(
+                f"📄 {formatear_para_el_doctor(clinico)}",
+                tema_id=tema_id,
+                silencioso=silencioso,
+            )
+        except Exception:  # noqa: BLE001
+            log.exception("la lectura no llegó a Telegram; el archivo sí está")
+    else:
+        log.info("la lectura de %s no tiene hilo donde caer; no va al General", telefono)
     return no_clinica

@@ -114,9 +114,19 @@ class BaseDeTemas:
     de `asegurar_tema` y la prueba pasaría por la razón equivocada.
     """
 
-    def __init__(self, tema: int | None = None, *, id_paciente: int | None = 42) -> None:
+    def __init__(
+        self,
+        tema: int | None = None,
+        *,
+        id_paciente: int | None = 42,
+        perdido: bool = False,
+    ) -> None:
         self.tema = tema
         self.id_paciente = id_paciente
+        #: ¿A este número le BORRARON el hilo? (`persistencia.hilo_perdido`, migración 030.)
+        #: Es lo que separa «nunca tuvo» de «se lo quitaron», y de eso depende que un mensaje
+        #: del paciente pueda o no volver a abrirle uno.
+        self.perdido = perdido
         self.guardados: list[int] = []
         self.abiertos: list[bool] = []
         self.id_guardados: list[int] = []
@@ -139,6 +149,9 @@ class BaseDeTemas:
             lambda conn, tel: (self.id_paciente, "Ana Perez") if self.id_paciente else None,
         )
         monkeypatch.setattr(persistencia, "tema_del_paciente", lambda conn, tel: self.tema)
+        # La lápida de la migración 030. `self.perdido` es False en el caso normal --nunca
+        # tuvo hilo-- y las pruebas que van del hilo BORRADO lo ponen a mano.
+        monkeypatch.setattr(persistencia, "hilo_perdido", lambda conn, tel: self.perdido)
 
         def anotar_creacion(conn, **kw):
             self.pacientes_creados.append(kw)
@@ -831,6 +844,17 @@ class TelegramQueRecibe(TelegramDeTemas):
         return 5000 + len(self.enviados)
 
 
+def _fila(wamid, texto=None, *, dicho=None, tipo="text", cuando=None):
+    """Una fila de `_textos_sin_archivar`, con la forma EXACTA que devuelve su SQL.
+
+    Existe para que las pruebas no escriban tuplas de cinco a mano, y sobre todo para que el
+    día que la consulta cambie de forma haya UN sitio que corregir. Desde el 22/09/2026 la
+    consulta trae también lo que llegó sin texto --un audio, una radiografía--, porque el
+    General dejó de ser el destino de reserva y sin esto desaparecerían del expediente.
+    """
+    return (wamid, texto, dicho, tipo, cuando)
+
+
 def _sin_pendientes(monkeypatch, pendientes):
     """Dobla las dos consultas que el rescate hace sobre `mensajes_entrantes`."""
     marcados: list[tuple[tuple[str, ...], int]] = []
@@ -850,9 +874,9 @@ def test_al_escalar_sin_hilo_se_abre_y_se_vuelca_lo_que_el_paciente_habia_escrit
     BaseDeTemas(tema=None).instalar(monkeypatch)
     tg = TelegramQueRecibe()
     marcados = _sin_pendientes(monkeypatch, [
-        ("wamid-1", "Hola buenas noches"),
-        ("wamid-2", "Quiero sacarme una muela"),
-        ("wamid-3", "Duele mucho?"),
+        _fila("wamid-1", "Hola buenas noches"),
+        _fila("wamid-2", "Quiero sacarme una muela"),
+        _fila("wamid-3", "Duele mucho?"),
     ])
 
     tema = asyncio.run(
@@ -906,7 +930,7 @@ def test_si_el_hilo_no_se_puede_abrir_el_rescate_se_traga_el_fallo(monkeypatch):
 
     BaseDeTemas(tema=None).instalar(monkeypatch)
     tg = TelegramQueRecibe(falla_al_crear=ErrorDeCanal("Telegram caido"))
-    marcados = _sin_pendientes(monkeypatch, [("wamid-1", "Duele mucho?")])
+    marcados = _sin_pendientes(monkeypatch, [_fila("wamid-1", "Duele mucho?")])
 
     tema = asyncio.run(
         lectura.rescatar_hilo(
@@ -927,7 +951,7 @@ def test_el_volcado_escapa_el_html_del_paciente(monkeypatch):
 
     BaseDeTemas(tema=None).instalar(monkeypatch)
     tg = TelegramQueRecibe()
-    _sin_pendientes(monkeypatch, [("wamid-1", "me duele el <3 & la muela")])
+    _sin_pendientes(monkeypatch, [_fila("wamid-1", "me duele el <3 & la muela")])
 
     asyncio.run(
         lectura.rescatar_hilo(
@@ -939,3 +963,185 @@ def test_el_volcado_escapa_el_html_del_paciente(monkeypatch):
     texto = tg.enviados[0][0]
     assert "&lt;3" in texto and "&amp;" in texto
     assert "<3" not in texto
+
+
+# ==========================================================================================
+# La lápida (migración 030): quién puede rehacer un hilo borrado
+#
+# MaxiCare, 22/09/2026: «Si el doctor borró el tema: no lo recrees por la llegada de mensajes
+# ni uses el General como destino alternativo. Conserva ese contexto en el sistema para
+# recuperarlo cuando corresponda.» Estas cuatro pruebas son esa frase, partida en sus cuatro
+# afirmaciones comprobables.
+# ==========================================================================================
+
+
+def test_con_lapida_y_sin_permiso_NO_se_crea_ningun_tema(monkeypatch):
+    """Lo que pide `ingesta`: a este número le borraron el hilo, así que no se toca Telegram.
+
+    Sin esto, la foto que el paciente manda diez minutos después de que un doctor cerrara su
+    tema le abre uno nuevo, y el gesto del doctor no significa nada.
+    """
+    import asyncio
+
+    base = BaseDeTemas(tema=None, perdido=True).instalar(monkeypatch)
+    tg = TelegramDeTemas()
+
+    tema = asyncio.run(
+        lectura.asegurar_tema(
+            telefono="573001112233",
+            nombre_perfil="Ana Perez",
+            database_url="postgresql://x",
+            telegram=tg,
+            rehacer_si_lo_borraron=False,
+        )
+    )
+
+    assert tema is None
+    assert tg.creados == [], "se creó un tema sobre una lápida"
+    assert base.guardados == []
+
+
+def test_con_lapida_pero_CON_permiso_el_escalamiento_SI_lo_rehace(monkeypatch):
+    """El «hasta que» de la regla. Si esto se rompiera, borrar un tema dejaría al paciente
+    sin expediente para siempre y al doctor sin sitio donde atenderlo."""
+    import asyncio
+
+    base = BaseDeTemas(tema=None, perdido=True).instalar(monkeypatch)
+    tg = TelegramDeTemas()
+
+    tema = asyncio.run(
+        lectura.asegurar_tema(
+            telefono="573001112233",
+            nombre_perfil="Ana Perez",
+            database_url="postgresql://x",
+            telegram=tg,
+        )
+    )
+
+    assert tema == 901, "el escalamiento tiene que poder rehacer el hilo"
+    assert base.guardados == [901]
+
+
+def test_SIN_lapida_el_primer_archivo_sigue_abriendo_el_hilo(monkeypatch):
+    """El control que impide que esto se convierta en «los archivos ya no abren hilo».
+
+    Un número que NUNCA tuvo hilo no ha perdido nada, así que su primer archivo le estrena
+    el expediente igual que siempre --incluso con `rehacer_si_lo_borraron=False`--. La
+    distinción entre las dos ausencias es justo lo que la migración 030 vino a dar.
+    """
+    import asyncio
+
+    base = BaseDeTemas(tema=None, perdido=False).instalar(monkeypatch)
+    tg = TelegramDeTemas()
+
+    tema = asyncio.run(
+        lectura.asegurar_tema(
+            telefono="573001112233",
+            nombre_perfil="Ana Perez",
+            database_url="postgresql://x",
+            telegram=tg,
+            rehacer_si_lo_borraron=False,
+        )
+    )
+
+    assert tema == 901
+    assert base.guardados == [901]
+
+
+def test_rescatar_hilo_pide_el_tema_SIN_restricciones(monkeypatch):
+    """`rescatar_hilo` corre dentro de un escalamiento, así que la lápida no puede frenarlo.
+
+    Se comprueba el argumento y no el resultado: la prueba de arriba ya fija qué hace
+    `asegurar_tema` con el default, y lo que aquí importa es que el escalamiento no herede
+    por descuido la restricción que `ingesta` sí pide.
+    """
+    import asyncio
+
+    BaseDeTemas(tema=None, perdido=True).instalar(monkeypatch)
+    _sin_pendientes(monkeypatch, [])
+    pedidos: list[dict] = []
+    original = lectura.asegurar_tema
+
+    async def espiar(**kw):
+        pedidos.append(kw)
+        return await original(**kw)
+
+    monkeypatch.setattr(lectura, "asegurar_tema", espiar)
+
+    asyncio.run(
+        lectura.rescatar_hilo(
+            telefono="573001112233", nombre_perfil="Jean",
+            database_url="postgresql://x", telegram=TelegramQueRecibe(),
+        )
+    )
+
+    assert pedidos, "el rescate no llegó a pedir el hilo"
+    assert pedidos[0].get("rehacer_si_lo_borraron", True) is True
+
+
+# ==========================================================================================
+# El volcado, ahora con los archivos dentro
+#
+# Es la compensación de que el General dejara de ser destino de reserva: lo que llegó sin
+# hilo ya no lo ve nadie en el momento, así que el escalamiento tiene que contarlo. Los bytes
+# no vuelven -- el enlace de Meta caduca -- y por eso lo que baja es la CONSTANCIA.
+# ==========================================================================================
+
+
+def test_el_volcado_cuenta_los_archivos_que_llegaron_sin_hilo(monkeypatch):
+    """Sin esto, el doctor abre el expediente y no hay ni rastro de la radiografía."""
+    import asyncio
+    from datetime import datetime
+
+    BaseDeTemas(tema=None).instalar(monkeypatch)
+    tg = TelegramQueRecibe()
+    _sin_pendientes(monkeypatch, [
+        _fila("w-1", "Buenas, tengo una duda"),
+        _fila("w-2", tipo="image", cuando=datetime(2026, 9, 22, 19, 13)),
+        _fila("w-3", dicho="me duele al masticar", tipo="audio"),
+    ])
+
+    asyncio.run(
+        lectura.rescatar_hilo(
+            telefono="573001112233", nombre_perfil="Jean",
+            database_url="postgresql://x", telegram=tg,
+        )
+    )
+
+    texto = tg.enviados[0][0]
+    assert "Buenas, tengo una duda" in texto
+    assert "19:13" in texto and "una imagen" in texto, (
+        f"el archivo no dejó constancia en el volcado: {texto!r}"
+    )
+    assert "me duele al masticar" in texto, "la transcripción tiene que bajar entera"
+    assert texto.index("Buenas") < texto.index("19:13") < texto.index("me duele"), "en orden"
+
+
+def test_la_transcripcion_baja_MARCADA_y_no_como_si_la_hubiera_escrito_el_paciente():
+    """Mismo criterio que la migración 027: `texto` es lo que ESCRIBIÓ y `transcripcion` es
+    lo que una máquina entendió que dijo. «El 46» y «el 40» suenan casi igual, y quien lee
+    una frase clínica tiene derecho a saber de cuál de las dos se fía."""
+    escrito, dicho = lectura.pendientes_legibles([
+        _fila("w-1", "me duele el 46"),
+        _fila("w-2", dicho="me duele el 46", tipo="audio"),
+    ])
+
+    assert escrito == "me duele el 46", "lo escrito baja tal cual"
+    assert dicho != escrito and "🎙️" in dicho and "«me duele el 46»" in dicho
+
+
+def test_un_tipo_de_archivo_desconocido_no_se_queda_mudo_en_el_volcado():
+    """Degrada diciendo el tipo crudo. Callarlo sería perder la única señal de que llegó."""
+    (linea,) = lectura.pendientes_legibles([_fila("w-1", tipo="contacts")])
+
+    assert "contacts" in linea
+
+
+def test_el_volcado_escapa_tambien_lo_que_se_DIJO():
+    """La transcripción la escribe un modelo a partir de lo que dijo un desconocido, así que
+    tiene exactamente el mismo problema de HTML que el texto -- y hasta hoy no pasaba por
+    ningún `escape` porque no bajaba al volcado."""
+    (linea,) = lectura.pendientes_legibles([_fila("w-1", dicho="menos de 3 < 5 & ya", tipo="audio")])
+
+    assert "&lt;" in linea and "&amp;" in linea
+    assert "< 5" not in linea

@@ -846,3 +846,86 @@ def test_olvidar_un_hilo_que_no_existe_no_es_un_error(esquema):
     siguiente ciclo otro relevo del mismo numero. Reventar ahi pararia el barrido entero."""
     with persistencia.conectar(esquema) as conn:
         assert persistencia.olvidar_tema(conn, TEL) is False
+
+
+# ==========================================================================================
+# La lapida de la 030, contra la base de verdad
+#
+# Offline esto va doblado con un lambda, asi que lo que NINGUNA prueba offline puede ver es
+# si el SQL dice lo que creemos. Y aqui el SQL es todo el cambio: `tema_del_paciente` tiene
+# que dejar de ver la fila y `hilo_perdido` tiene que seguir viendola.
+# ==========================================================================================
+
+
+def test_olvidar_un_hilo_deja_CONSTANCIA_de_que_existio(esquema):
+    """La diferencia entre «nunca tuvo hilo» y «se lo borraron», que hasta la 030 no existia.
+
+    De ella depende que un mensaje del paciente pueda o no volver a abrirle un tema: un
+    doctor que cierra el hilo esta diciendo que deja de querer verlo en el grupo, y con el
+    `DELETE` de antes la siguiente foto se lo devolvia.
+    """
+    with persistencia.conectar(esquema) as conn:
+        assert persistencia.hilo_perdido(conn, TEL) is False, (
+            "un numero que nunca tuvo hilo no ha perdido nada"
+        )
+
+        persistencia.guardar_tema(conn, telefono=TEL, topic_id=4400)
+        assert persistencia.hilo_perdido(conn, TEL) is False
+
+        persistencia.olvidar_tema(conn, TEL)
+        assert persistencia.tema_del_paciente(conn, TEL) is None, (
+            "para quien lee un hilo, una lapida es indistinguible de no tener ninguno"
+        )
+        assert persistencia.hilo_perdido(conn, TEL) is True
+
+
+def test_guardar_un_hilo_nuevo_LEVANTA_la_lapida(esquema):
+    """El momento en que deja de ser verdad que este numero se quedo sin hilo.
+
+    Sin esto, un tema recien creado por un escalamiento quedaria vivo en Telegram y muerto en
+    la base: `tema_del_paciente` seguiria devolviendo `None` y el paciente no tendria donde
+    caer. El peor de los dos mundos, y en silencio.
+    """
+    with persistencia.conectar(esquema) as conn:
+        persistencia.guardar_tema(conn, telefono=TEL, topic_id=4500)
+        persistencia.olvidar_tema(conn, TEL)
+        assert persistencia.hilo_perdido(conn, TEL) is True
+
+        persistencia.guardar_tema(conn, telefono=TEL, topic_id=4501)
+
+        assert persistencia.tema_del_paciente(conn, TEL) == 4501
+        assert persistencia.hilo_perdido(conn, TEL) is False
+
+
+def test_olvidar_dos_veces_conserva_la_HORA_del_primero(esquema):
+    """El barrido, `ingesta` y `relevo.activar` pueden llegar al mismo hilo muerto. La hora
+    que vale es la de la primera, que es cuando el hilo dejo de existir de verdad -- mismo
+    criterio que `marcar_escalamientos_respondidos`."""
+    with persistencia.conectar(esquema) as conn:
+        persistencia.guardar_tema(conn, telefono=TEL, topic_id=4600)
+        assert persistencia.olvidar_tema(conn, TEL) is True
+
+        with conn.cursor() as cur:
+            cur.execute("SELECT perdido_en FROM temas_telegram WHERE telefono = %s", (TEL,))
+            primera = cur.fetchone()[0]
+
+        assert persistencia.olvidar_tema(conn, TEL) is False, (
+            "la segunda pasada no tiene nada que marcar"
+        )
+        with conn.cursor() as cur:
+            cur.execute("SELECT perdido_en FROM temas_telegram WHERE telefono = %s", (TEL,))
+            assert cur.fetchone()[0] == primera
+
+
+def test_un_relevo_vivo_sobre_un_hilo_con_lapida_no_se_encuentra_por_su_tema(esquema):
+    """`_relevo_de_tema` es quien atiende el `forum_topic_closed`. Si encontrara un relevo
+    por un `topic_id` que ya no existe, cerraria sobre un hilo muerto."""
+    conv = _conversacion(esquema)
+    with persistencia.conectar(esquema) as conn:
+        persistencia.guardar_tema(conn, telefono=TEL, topic_id=4700)
+        persistencia.activar_relevo(conn, id_conversacion=conv, doctor="Dra. Ruiz")
+
+        assert persistencia.relevo_por_tema(conn, 4700) is not None
+
+        persistencia.olvidar_tema(conn, TEL)
+        assert persistencia.relevo_por_tema(conn, 4700) is None

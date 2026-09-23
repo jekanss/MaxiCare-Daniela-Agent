@@ -177,13 +177,14 @@ def _montar(monkeypatch, modelo: ModeloGuionizado) -> BaseFalsa:
     # --- Neon, por los dos lados -----------------------------------------------------
     # La ingesta registra el wamid y marca el reenvío; `asegurar_tema` consulta y guarda el
     # tema. Se parchean las funciones que abren conexión, no `asegurar_tema` entera: así el
-    # candado por teléfono y la degradación al General siguen siendo los de producción.
+    # candado por teléfono y el camino real de producción siguen siendo los de producción.
     monkeypatch.setattr(ingesta, "_registrar", lambda url, m: True)
     monkeypatch.setattr(ingesta, "_marcar_reenviado", lambda url, w, t, s: None)
     monkeypatch.setattr(ingesta, "_marcar_fallo", lambda url, w, e: None)
     # Ana ya tiene su hilo. Desde la migración 014 eso no depende de que sea paciente: el
     # hilo va por teléfono, y que abrirlo NO verifique a nadie lo prueba `test_lectura.py`.
-    monkeypatch.setattr(lectura_mod, "_tema_de", lambda url, tel: TEMA_DE_ANA)
+    # El `False` es la lápida de la 030: a Ana no le han borrado nada.
+    monkeypatch.setattr(lectura_mod, "_estado_del_hilo", lambda url, tel: (TEMA_DE_ANA, False))
     monkeypatch.setattr(lectura_mod, "_guardar_tema", lambda *a, **kw: None)
     monkeypatch.setattr(conversacion, "_guardar_estado", lambda ctx, resultado: None)
 
@@ -244,7 +245,6 @@ async def _el_camino_completo(whatsapp, telegram) -> tuple[atencion.Atendido, as
         whatsapp=whatsapp,
         telegram=telegram,
         database_url="postgresql://no-se-usa/na",
-        tema_general=TEMA_GENERAL,
     )
     assert resultado.lectura is not None, "no se arrancó el lector: no hay muro que probar"
 
@@ -390,14 +390,13 @@ def test_el_archivo_y_su_lectura_van_al_tema_del_paciente(monkeypatch):
         f"la lectura clínica fue al tema {clinicos[0][1]} y no al de Ana ({TEMA_DE_ANA}): "
         "el contenido clínico de un paciente quedaría mezclado con el de todos los demás"
     )
-    # El aviso al General existe --es donde miran los doctores-- pero no lleva nada clínico.
-    # Desde el 13/09/2026 suena UNA vez por tanda y su texto va en plural: avisa de que esa
-    # persona mandó archivos, no de cada archivo. Ver NOTA DEL TEXTO SIN TEMA en `ingesta.py`.
-    avisos = [(texto, tema) for texto, tema in tg.mensajes if "mandó archivos" in texto]
-    assert avisos and CENTINELA not in "\n".join(t for t, _ in avisos)
-    assert [tema for _, tema in avisos] == [TEMA_GENERAL], (
-        "el aviso tiene que ir al General: es el único sitio donde los doctores miran"
-    )
+    # Y al General no llega NADA. Aquí se comprobaba que llegara el aviso «mandó archivos»
+    # sin nada clínico dentro; desde el 22/09/2026 ese aviso no existe y la comprobación se
+    # vuelve más fuerte, no más débil: el escritorio común de los doctores no recibe ni el
+    # archivo, ni su lectura, ni un aviso de que llegaron. Ver NOTA DEL DESTINO ÚNICO.
+    al_general = [texto for texto, tema in tg.mensajes if tema == TEMA_GENERAL]
+    assert al_general == [], f"algo del paciente llegó al General: {al_general}"
+    assert [tema for _, tema, _ in tg.archivos] == [TEMA_DE_ANA]
 
     # El pie viaja pegado al archivo y se compone ANTES de que el lector devuelva nada:
     # dice lo que el archivo es, nunca lo que muestra. Es la garantía de la fase 2 y esta

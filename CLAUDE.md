@@ -126,16 +126,38 @@ una —qué se midió, qué costó— está en la regla que cubre ese archivo.
    que una tool confirma queda autorizada** — incluida la vieja al reprogramar y la cancelada
    al cancelar. Si no, `sin_hora_no_verificada` bloquea la confirmación de una escritura **que
    ya ocurrió**: la cita movida y el paciente yendo a la hora vieja.
-14. **Al General solo va lo que le pide algo al doctor, y la señal de alarma es `reenviado_en`
-   NULL, no `telegram_message_id` NULL.** Un texto va mudo al tema de su paciente, o a ninguna
-   parte si no tiene tema —nunca lo crea: eso es del primer archivo—. El aviso de archivos
-   suena UNA vez por tanda (`_primer_archivo_de_la_tanda`, 24 h). **Y un escalamiento va a los
+14. **Al General SOLO van las alertas de escalamiento, y la señal de alarma es `reenviado_en`
+   NULL, no `telegram_message_id` NULL.** Nada de lo que manda un paciente —texto, archivo,
+   audio, su lectura clínica o su transcripción— llega ahí: va mudo al tema de su paciente, o
+   a ninguna parte si no tiene tema. **El General NO es el destino de reserva**, y decía que
+   sí hasta el 22/09/2026 (ver 14b). **Y un escalamiento va a los
    DOS sitios**: al General con su resumen, y al hilo del paciente solo con el motivo y el
    botón (`relevo.ofrecer_la_puerta_en_el_hilo`, que SUENA — segunda y última excepción al
    silencio del hilo, tras la bienvenida del relevo). El doctor mira el hilo, no el General:
    con la puerta solo en el General, un doctor que borró su mensaje da por hecho que el
    sistema dejó de ofrecerle tomar la conversación. El resumen y la pregunta NO bajan al
    hilo: son la deliberación, y su sitio es el General.
+14b. **Cerrar o borrar el tema significa que ese paciente desaparece de Telegram hasta el
+   siguiente ESCALAMIENTO, y hicieron falta dos mitades.** MaxiCare lo reportó como «cierro el
+   tema y sus mensajes siguen llegando al General»; el caso medido es la conversación
+   `1a5cdb48` (+57319…2471): relevo cerrado con `tema_perdido` a las 18:21:11, fila de
+   `temas_telegram` borrada, y a las 19:13:25 su nota de voz cayendo en el General **sonando**.
+   Primera mitad: `ingesta` hacía `destino = tema or tema_general`, y con `silencioso=bool(tema)
+   and …` el envío además no era mudo. Ahora es `destino = tema` y `procesar_mensaje` ya **no
+   recibe `tema_general`** —esa ausencia es la regla, no una limpieza—; sin hilo no se deposita
+   nada, y `leer_y_repartir` y `transcribir_y_repartir` cortan igual, porque en `canales` un
+   `tema_id` falso SIGNIFICA el General. Segunda mitad: `olvidar_tema` dejó de ser un `DELETE`
+   y pone la **lápida** `perdido_en` (migración 030), que `tema_del_paciente` lee como «no hay
+   hilo» y `hilo_perdido` sabe distinguir de «nunca tuvo». Con ella, `ingesta` pide el tema con
+   `asegurar_tema(rehacer_si_lo_borraron=False)`: **un mensaje del paciente no resucita un hilo
+   borrado** —eso anularía el gesto del doctor y dejaría dos temas para la misma persona— pero
+   el primer archivo de quien nunca tuvo uno **sí le estrena el expediente, como siempre**.
+   Quien lo rehace es `lectura.rescatar_hilo`, que corre dentro del escalamiento y vuelca lo
+   acumulado. Se fue también `_avisar_de_la_tanda` («📎 mandó archivos», con botón de tomar):
+   era el único timbrazo del General sin escalamiento detrás. **Lo que cuesta, dicho a
+   sabiendas: un archivo que llega sin hilo no lo ve nadie en el momento.** Lo compensa el
+   volcado —`lectura.pendientes_legibles` baja textos, transcripciones y la CONSTANCIA de cada
+   archivo con su hora— y lo compensa mal a propósito: los bytes no vuelven.
 15. **El relevo tiene UNA puerta de salida, y `/webhook/telegram` se cierra cuando falta el
    secreto.** `conversaciones.tomada_por` puesto significa Daniela callada **y** tema abierto:
    las dos dejan de ser verdad juntas, por `relevo.cerrar` con uno de los tres motivos del

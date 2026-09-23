@@ -485,7 +485,6 @@ def _sin_base(monkeypatch):
     # Por defecto: el número no tiene tema, y cada archivo es el primero de su tanda. Las
     # pruebas que miden lo contrario lo sobrescriben.
     monkeypatch.setattr(mod, "_tema_existente", lambda url, telefono: None)
-    monkeypatch.setattr(mod, "_primer_archivo_de_la_tanda", lambda url, tel, wamid: True)
     # Y nadie está en relevo (6C), que es el caso normal. Sin doblarla, `_en_relevo` abre
     # una conexión de verdad a `postgresql://x` -- exactamente el coste que describe el
     # docstring de arriba, y que ya hizo caer a
@@ -511,11 +510,13 @@ def _mensaje_con_foto(**cambios):
     return MensajeEntrante(**campos)
 
 
-def test_el_archivo_va_al_tema_del_paciente_y_el_aviso_al_general(monkeypatch):
-    """El cambio visible de 6B: el archivo deja de caer en el General.
+def test_el_archivo_va_al_tema_del_paciente_y_el_General_NO_se_entera(monkeypatch):
+    """El archivo va al hilo de esa persona, y el General se queda sin una sola línea.
 
-    Al General va un aviso, porque es donde los doctores miran; el archivo se deposita en
-    el hilo de esa persona, que es el que conserva su historial.
+    Esta prueba decía otra cosa hasta el 22/09/2026 --se llamaba `..._y_el_aviso_al_general`
+    y exigía el «📎 Ana Perez mandó archivos»--. MaxiCare pidió que al escritorio común de
+    los doctores solo lleguen las alertas de escalamiento: un archivo no le pide nada a
+    nadie mientras Daniela lo esté atendiendo. Ver NOTA DEL DESTINO ÚNICO en `ingesta.py`.
     """
     import asyncio
 
@@ -534,15 +535,11 @@ def test_el_archivo_va_al_tema_del_paciente_y_el_aviso_al_general(monkeypatch):
             whatsapp=WhatsAppConArchivo(),
             telegram=tg,
             database_url="postgresql://x",
-            tema_general=TEMA_GENERAL,
         )
     )
 
     assert tg.archivos == [("radio.jpg", TEMA_DE_ANA)]
-    assert len(tg.mensajes) == 1
-    texto, tema = tg.mensajes[0]
-    assert tema == TEMA_GENERAL
-    assert "Ana Perez" in texto
+    assert tg.mensajes == [], f"el General recibió algo: {tg.mensajes}"
 
 
 # ==========================================================================================
@@ -578,7 +575,6 @@ def _correr_texto(tg, monkeypatch, **cambios):
             whatsapp=WhatsAppConArchivo(),
             telegram=tg,
             database_url="postgresql://x",
-            tema_general=TEMA_GENERAL,
         )
     )
 
@@ -654,63 +650,100 @@ def test_un_texto_nunca_crea_el_tema(monkeypatch):
     assert tg.mensajes == []
 
 
-def test_el_segundo_archivo_de_la_tanda_no_vuelve_a_avisar(monkeypatch):
-    """La radiografía y, dos minutos después, la foto de la encía son UNA cosa.
+def test_una_TANDA_de_archivos_no_timbra_ni_una_vez(monkeypatch):
+    """La radiografía, la foto de la encía y la del carné: tres archivos, cero timbrazos.
 
-    El archivo se deposita igual --eso no se negocia-- pero el General ya se enteró.
+    Aquí vivía `test_el_segundo_archivo_de_la_tanda_no_vuelve_a_avisar`, que comprobaba que
+    el aviso del General salía UNA vez por tanda y no una por archivo. Desde el 22/09/2026
+    no sale ninguna: `_avisar_de_la_tanda` y su ventana de 24 h se fueron enteros. Lo que se
+    conserva intacto --y es lo que esta prueba defiende ahora-- es que los tres archivos SÍ
+    se depositan en el expediente del paciente.
     """
     import asyncio
 
     from maxicare_daniela import ingesta, lectura
 
     _sin_base(monkeypatch)
-    monkeypatch.setattr(ingesta, "_primer_archivo_de_la_tanda", lambda url, t, w: False)
+    monkeypatch.setattr(lectura, "asegurar_tema", _devuelve_async(TEMA_DE_ANA))
+    monkeypatch.setattr(lectura, "leer_y_repartir", _devuelve_async(None))
+    tg = TelegramConTemas()
+
+    for n in range(3):
+        asyncio.run(
+            ingesta.procesar_mensaje(
+                _mensaje_con_foto(wamid=f"wamid-foto-{n}"),
+                whatsapp=WhatsAppConArchivo(),
+                telegram=tg,
+                database_url="postgresql://x",
+            )
+        )
+
+    assert [tema for _, tema in tg.archivos] == [TEMA_DE_ANA] * 3
+    assert tg.mensajes == [], f"el General recibió algo: {tg.mensajes}"
+
+
+def test_un_archivo_SIN_hilo_no_se_deposita_en_ninguna_parte(monkeypatch):
+    """La línea que MaxiCare reportó como «cierro el tema y sus mensajes van al General».
+
+    Era `destino = tema or tema_general`, y con `silencioso=bool(tema) and ...` el archivo
+    salía además SONANDO. Los tres caminos que llegan aquí --el número sin hilo todavía, el
+    hilo borrado y el tope de 5 s-- convertían un problema de infraestructura en el mensaje
+    de un paciente vibrando en el teléfono de todos los doctores.
+
+    Lo que se conserva: el archivo se descarga, se registra y Daniela contesta. Lo único que
+    no ocurre es el depósito, y su constancia la vuelca el próximo escalamiento
+    (`lectura.rescatar_hilo`).
+    """
+    import asyncio
+
+    from maxicare_daniela import ingesta, lectura
+
+    _sin_base(monkeypatch)
+    monkeypatch.setattr(lectura, "asegurar_tema", _devuelve_async(None))
+    monkeypatch.setattr(lectura, "leer_y_repartir", _devuelve_async(None))
+    tg = TelegramConTemas()
+
+    resultado = asyncio.run(
+        ingesta.procesar_mensaje(
+            _mensaje_con_foto(),
+            whatsapp=WhatsAppConArchivo(),
+            telegram=tg,
+            database_url="postgresql://x",
+        )
+    )
+
+    assert tg.archivos == [], "el archivo de un paciente cayó en el General"
+    assert tg.mensajes == [], "algo del paciente cayó en el General"
+    assert resultado.nuevo is True, "el mensaje se procesó igual: no se pierde el turno"
+    assert resultado.reenviado is False
+
+
+def test_el_archivo_entra_MUDO_en_el_hilo_del_paciente(monkeypatch):
+    """Fuera de un relevo el hilo es un expediente y no suena nunca.
+
+    Esta prueba tenía una segunda mitad --«sin tema, el archivo ES lo que llega al General,
+    así que tiene que sonar»-- que dejó de existir el 22/09/2026: sin tema ya no llega a
+    ninguna parte, y eso lo fija la prueba de arriba.
+    """
+    import asyncio
+
+    from maxicare_daniela import ingesta, lectura
+
+    _sin_base(monkeypatch)
     monkeypatch.setattr(lectura, "asegurar_tema", _devuelve_async(TEMA_DE_ANA))
     monkeypatch.setattr(lectura, "leer_y_repartir", _devuelve_async(None))
     tg = TelegramConTemas()
 
     asyncio.run(
         ingesta.procesar_mensaje(
-            _mensaje_con_foto(wamid="wamid-foto-2"),
+            _mensaje_con_foto(),
             whatsapp=WhatsAppConArchivo(),
             telegram=tg,
             database_url="postgresql://x",
-            tema_general=TEMA_GENERAL,
         )
     )
 
-    assert tg.archivos == [("radio.jpg", TEMA_DE_ANA)]
-    assert tg.mensajes == []
-
-
-def test_el_archivo_que_cae_en_un_tema_no_notifica_pero_el_del_general_si(monkeypatch):
-    """La asimetría entera en una prueba.
-
-    Con tema: el archivo entra mudo y lo que suena es el aviso del General. Sin tema, el
-    archivo ES lo que llega al General, así que tiene que sonar — nadie va a abrir un hilo
-    que no existe para encontrarlo.
-    """
-    import asyncio
-
-    from maxicare_daniela import ingesta, lectura
-
-    for tema, silencio_esperado in ((TEMA_DE_ANA, True), (None, False)):
-        _sin_base(monkeypatch)
-        monkeypatch.setattr(lectura, "asegurar_tema", _devuelve_async(tema))
-        monkeypatch.setattr(lectura, "leer_y_repartir", _devuelve_async(None))
-        tg = TelegramConTemas()
-
-        asyncio.run(
-            ingesta.procesar_mensaje(
-                _mensaje_con_foto(),
-                whatsapp=WhatsAppConArchivo(),
-                telegram=tg,
-                database_url="postgresql://x",
-                tema_general=TEMA_GENERAL,
-            )
-        )
-
-        assert tg.archivos_con_silencio[0][2] is silencio_esperado
+    assert tg.archivos_con_silencio[0][2] is True
 
 
 def test_el_lector_no_retrasa_la_entrega_del_archivo(monkeypatch):
@@ -742,7 +775,6 @@ def test_el_lector_no_retrasa_la_entrega_del_archivo(monkeypatch):
             whatsapp=WhatsAppConArchivo(),
             telegram=tg,
             database_url="postgresql://x",
-            tema_general=TEMA_GENERAL,
         )
         tardo = time.monotonic() - arranque
         if resultado.lectura is not None:
@@ -765,9 +797,10 @@ def test_un_tema_lento_tampoco_retrasa_la_entrega_del_archivo(monkeypatch):
     del doctor esperaba medio minuto por algo que el propio diseño clasifica como degradable
     --y el candado por teléfono se lo sumaba al segundo archivo del mismo número.
 
-    Lo que se afirma: vencido el tope, el archivo va al General y `procesar_mensaje` vuelve
-    en seguida. Y la operación NO se cancela: sigue por detrás, para que el hilo esté listo
-    para el próximo archivo en vez de quedar huérfano en Telegram a medio crear.
+    Lo que se afirma: vencido el tope, `procesar_mensaje` vuelve en seguida y el archivo se
+    queda sin depositar --hasta el 22/09/2026 se iba al General, y era uno de los tres
+    caminos del ruido--. Y la operación NO se cancela: sigue por detrás, para que el hilo
+    esté listo para el próximo archivo en vez de quedar huérfano en Telegram a medio crear.
     """
     import asyncio
     import time
@@ -795,7 +828,6 @@ def test_un_tema_lento_tampoco_retrasa_la_entrega_del_archivo(monkeypatch):
             whatsapp=WhatsAppConArchivo(),
             telegram=tg,
             database_url="postgresql://x",
-            tema_general=TEMA_GENERAL,
         )
         tardo = time.monotonic() - arranque
         if resultado.lectura is not None:
@@ -809,9 +841,9 @@ def test_un_tema_lento_tampoco_retrasa_la_entrega_del_archivo(monkeypatch):
 
     resultado, tardo = asyncio.run(corrida())
 
-    assert resultado.reenviado is True
-    assert tg.archivos == [("radio.jpg", TEMA_GENERAL)], (
-        "vencido el tope, el archivo tiene que irse al General: degradar, no esperar"
+    assert resultado.reenviado is False
+    assert tg.archivos == [], (
+        "vencido el tope, el archivo se fue al General: eso es justo el ruido que se cortó"
     )
     assert tardo < 0.3, f"la entrega del archivo espero al tema: tardo {tardo:.2f} s"
     assert termino == [TEMA_DE_ANA], (
@@ -827,30 +859,44 @@ def test_el_tope_del_tema_cabe_dentro_de_la_entrega():
     assert lectura.TOPE_SEGUNDOS_TEMA == 5.0
 
 
-def test_si_no_hay_tema_el_archivo_cae_al_general(monkeypatch):
-    """Degradar, no perder. Un fallo de Telegram al crear el tema no puede dejar al doctor
-    sin la radiografia."""
+def test_un_archivo_del_paciente_NO_rehace_un_hilo_que_borraron(monkeypatch):
+    """La otra mitad de lo que pidió MaxiCare: el gesto del doctor tiene que durar.
+
+    Borrar el tema es decir «este paciente deja de aparecer en el grupo». Si la foto que
+    manda diez minutos después le abriera un hilo nuevo, el gesto no serviría de nada y
+    encima quedarían dos temas para la misma persona.
+
+    Lo que se comprueba es el ARGUMENTO, no el resultado: la decisión vive dentro de
+    `asegurar_tema` --que sabe leer la lápida de la 030-- y lo que a `ingesta` le toca es
+    pedirla. Quien la pide con el default es `lectura.rescatar_hilo`, o sea el escalamiento.
+    """
     import asyncio
 
     from maxicare_daniela import ingesta, lectura
 
     _sin_base(monkeypatch)
-    monkeypatch.setattr(lectura, "asegurar_tema", _devuelve_async(None))
+    pedidos: list[dict] = []
+
+    async def espiar(**kw):
+        pedidos.append(kw)
+        return None
+
+    monkeypatch.setattr(lectura, "asegurar_tema", espiar)
     monkeypatch.setattr(lectura, "leer_y_repartir", _devuelve_async(None))
-    tg = TelegramConTemas()
 
     asyncio.run(
         ingesta.procesar_mensaje(
             _mensaje_con_foto(),
             whatsapp=WhatsAppConArchivo(),
-            telegram=tg,
+            telegram=TelegramConTemas(),
             database_url="postgresql://x",
-            tema_general=TEMA_GENERAL,
         )
     )
 
-    assert tg.archivos == [("radio.jpg", TEMA_GENERAL)]
-    assert tg.mensajes == [], "sin tema propio no hay nada que avisar: el archivo YA esta ahi"
+    assert pedidos and pedidos[0]["rehacer_si_lo_borraron"] is False, (
+        "la ingesta pidió el hilo con el default: un mensaje del paciente volvería a abrir "
+        "el tema que un doctor borró a propósito"
+    )
 
 
 @pytest.mark.parametrize("tipo,mime", [("audio", "audio/ogg"), ("sticker", "image/webp")])
@@ -870,7 +916,6 @@ def test_lo_que_no_se_lee_no_arranca_el_lector(monkeypatch, tipo, mime):
             whatsapp=WhatsAppConArchivo(),
             telegram=TelegramConTemas(),
             database_url="postgresql://x",
-            tema_general=TEMA_GENERAL,
         )
     )
 
@@ -894,7 +939,6 @@ def test_un_archivo_enorme_no_arranca_el_lector(monkeypatch):
             whatsapp=WhatsAppConArchivo(tamano=lectura.TOPE_BYTES_LECTOR + 1),
             telegram=tg,
             database_url="postgresql://x",
-            tema_general=TEMA_GENERAL,
         )
     )
 
@@ -931,7 +975,6 @@ def test_el_aviso_al_general_no_invalida_una_entrega_que_ya_ocurrio(monkeypatch)
             whatsapp=WhatsAppConArchivo(),
             telegram=tg,
             database_url="postgresql://x",
-            tema_general=TEMA_GENERAL,
         )
     )
 
@@ -983,7 +1026,6 @@ def test_ingesta_resuelve_la_conversacion_viva_y_se_la_pasa_al_lector(monkeypatc
             whatsapp=WhatsAppConArchivo(),
             telegram=tg,
             database_url="postgresql://x",
-            tema_general=TEMA_GENERAL,
         )
         assert resultado.lectura is not None, "el lector no arranco"
         await resultado.lectura
@@ -1022,7 +1064,6 @@ def test_sin_conversacion_viva_el_lector_no_recibe_un_grupo_inventado(monkeypatc
             whatsapp=WhatsAppConArchivo(),
             telegram=tg,
             database_url="postgresql://x",
-            tema_general=TEMA_GENERAL,
         )
         await resultado.lectura
         return resultado
@@ -1052,7 +1093,6 @@ def _correr_archivo(tg, **cambios):
             whatsapp=WhatsAppConArchivo(),
             telegram=tg,
             database_url="postgresql://x",
-            tema_general=TEMA_GENERAL,
         )
     )
 
@@ -1397,7 +1437,7 @@ def test_un_texto_contra_un_hilo_borrado_olvida_el_hilo_y_no_cuenta_como_fallo(m
     res = asyncio.run(
         ingesta.procesar_mensaje(
             m, whatsapp=WhatsAppConArchivo(), telegram=tg,
-            database_url="postgresql://x", tema_general=0,
+            database_url="postgresql://x",
         )
     )
 
@@ -1407,11 +1447,18 @@ def test_un_texto_contra_un_hilo_borrado_olvida_el_hilo_y_no_cuenta_como_fallo(m
     assert tg.mensajes == [], "el texto NO se reencamina a ninguna parte"
 
 
-def test_un_archivo_contra_un_hilo_borrado_olvida_el_hilo_y_cae_al_general(monkeypatch):
-    """Con el archivo la regla es la contraria: degradar es aceptable, perderlo no.
+def test_un_archivo_contra_un_hilo_borrado_le_pone_lapida_y_NO_cae_al_general(monkeypatch):
+    """Ahora el archivo se trata igual que un texto, y eso es el arreglo del 22/09/2026.
 
-    Va al General --sonando, porque ya no hay hilo donde reposar-- y el hilo muerto se
-    olvida para que el siguiente archivo abra uno nuevo.
+    Esta prueba decía lo contrario --se llamaba `..._y_cae_al_general` y exigía que el
+    archivo acabara ahí SONANDO, «porque ya no hay hilo donde reposar»--. Era el tercero de
+    los tres caminos por los que el mensaje de un paciente terminaba en el escritorio común
+    de los doctores, y el más difícil de ver: hacía falta que alguien hubiera borrado el
+    tema.
+
+    Lo que se conserva: la fila se marca perdida (`_olvidar_tema`), porque si no, cada
+    archivo suyo se estrellaría contra el mismo hilo muerto para siempre. Lo que cambia: no
+    hay segundo intento contra el General, y `reenviado` dice la verdad --`False`--.
     """
     import asyncio
 
@@ -1443,17 +1490,15 @@ def test_un_archivo_contra_un_hilo_borrado_olvida_el_hilo_y_cae_al_general(monke
     res = asyncio.run(
         ingesta.procesar_mensaje(
             _mensaje_con_foto(), whatsapp=WhatsAppConArchivo(), telegram=tg,
-            database_url="postgresql://x", tema_general=0,
+            database_url="postgresql://x",
         )
     )
 
-    assert olvidados == ["573001112233"], "el hilo muerto tiene que olvidarse"
-    assert fallos == [], "el archivo se entregó: no es un fallo"
-    assert res.reenviado is True
-    assert tg.archivos == [("radio.jpg", 0)], "el archivo tiene que acabar en el General"
-    assert tg.archivos_con_silencio[0][2] is False, (
-        "en el General suena: nadie va a abrir un hilo que ya no existe para encontrarlo"
-    )
+    assert olvidados == ["573001112233"], "el hilo muerto tiene que marcarse perdido"
+    assert fallos == [], "un hilo borrado no es un fallo de entrega: se decidió no reenviar"
+    assert res.reenviado is False
+    assert tg.archivos == [], "el archivo acabó en el General: es el ruido que se cortó"
+    assert tg.mensajes == [], "y tampoco un aviso"
 
 
 def test_otro_rechazo_de_telegram_sigue_siendo_un_fallo_y_no_borra_el_hilo(monkeypatch):
@@ -1486,7 +1531,7 @@ def test_otro_rechazo_de_telegram_sigue_siendo_un_fallo_y_no_borra_el_hilo(monke
     res = asyncio.run(
         ingesta.procesar_mensaje(
             m, whatsapp=WhatsAppConArchivo(), telegram=TelegramCaido(),
-            database_url="postgresql://x", tema_general=0,
+            database_url="postgresql://x",
         )
     )
 
@@ -1559,7 +1604,6 @@ def test_el_transcriptor_no_retrasa_la_entrega_del_audio(monkeypatch):
             whatsapp=WhatsAppConAudio(),
             telegram=tg,
             database_url="postgresql://x",
-            tema_general=TEMA_GENERAL,
         )
         tardo = time.monotonic() - arranque
         if resultado.transcripcion is not None:
@@ -1602,7 +1646,6 @@ def test_con_el_interruptor_apagado_el_audio_LLEGA_IGUAL_al_doctor(monkeypatch):
             whatsapp=WhatsAppConAudio(),
             telegram=tg,
             database_url="postgresql://x",
-            tema_general=TEMA_GENERAL,
             transcribir=False,
         )
     )
@@ -1635,7 +1678,6 @@ def test_un_audio_enorme_se_entrega_pero_no_se_transcribe(monkeypatch):
             ),
             telegram=tg,
             database_url="postgresql://x",
-            tema_general=TEMA_GENERAL,
         )
     )
 
@@ -1663,7 +1705,6 @@ def test_una_FOTO_no_arranca_el_transcriptor(monkeypatch):
             whatsapp=WhatsAppConArchivo(),
             telegram=TelegramConTemas(),
             database_url="postgresql://x",
-            tema_general=TEMA_GENERAL,
         )
     )
 
@@ -1708,7 +1749,6 @@ def test_una_nota_de_voz_ENTENDIDA_no_timbra_en_el_General(monkeypatch):
             whatsapp=WhatsAppConAudio(),
             telegram=tg,
             database_url="postgresql://x",
-            tema_general=TEMA_GENERAL,
         )
         # La decision del aviso vive DENTRO de la tarea, asi que hay que dejarla terminar.
         if r.transcripcion is not None:
@@ -1754,7 +1794,6 @@ def test_lo_que_se_entendio_se_GUARDA_con_el_wamid_de_su_audio(monkeypatch):
             whatsapp=WhatsAppConAudio(),
             telegram=TelegramConTemas(),
             database_url="postgresql://x",
-            tema_general=TEMA_GENERAL,
         )
         if r.transcripcion is not None:
             await r.transcripcion
@@ -1791,7 +1830,6 @@ def test_un_audio_que_NO_se_entendio_no_guarda_una_fila_vacia(monkeypatch):
             whatsapp=WhatsAppConAudio(),
             telegram=TelegramConTemas(),
             database_url="postgresql://x",
-            tema_general=TEMA_GENERAL,
         )
         if r.transcripcion is not None:
             await r.transcripcion
@@ -1802,90 +1840,53 @@ def test_un_audio_que_NO_se_entendio_no_guarda_una_fila_vacia(monkeypatch):
     assert guardadas == [], f"se guardo algo sin haber entendido nada: {guardadas}"
 
 
-def test_una_nota_de_voz_que_NO_se_entendio_SI_timbra_y_dice_por_que(monkeypatch):
-    """La otra mitad, y es la que impide que esto sea «callar los audios».
+def test_NADA_de_lo_que_manda_un_paciente_timbra_en_el_General(monkeypatch):
+    """Las tres ramas que timbraban, ahora mudas. Es el contrato entero en una prueba.
 
-    Un audio que nadie entendio solo lo resuelve una persona oyendolo, y eso SI es pedirle
-    algo al doctor. El texto se lo dice: «oyela», no «mirala».
+    Hasta el 22/09/2026 esto eran tres pruebas que afirmaban lo contrario:
+
+        `test_una_nota_de_voz_que_NO_se_entendio_SI_timbra_y_dice_por_que`
+        `test_sin_transcriptor_el_audio_timbra_COMO_SIEMPRE`
+        `test_una_FOTO_sigue_timbrando_igual`
+
+    Las tres eran correctas bajo la regla vieja --«al General va lo que le pide algo al
+    doctor», y un archivo que hay que mirar u oír se lo pide-- y MaxiCare cambió la regla:
+    **al General solo van las alertas de escalamiento**. Un doctor que cierra el hilo de un
+    paciente está diciendo que deja de querer verlo en el grupo, y el timbrazo de la tanda
+    era el único que le pasaba por encima.
+
+    Lo que NO se perdió, y por eso las tres ramas siguen aquí: el archivo se deposita en el
+    expediente del paciente en las tres, y `reenviado` lo dice.
     """
     import asyncio
 
     from maxicare_daniela import ingesta, lectura, transcripcion
 
-    _sin_base(monkeypatch)
-    monkeypatch.setattr(lectura, "asegurar_tema", _devuelve_async(TEMA_DE_ANA))
-    monkeypatch.setattr(transcripcion, "transcribir_y_repartir", _devuelve_async(None))
-    tg = TelegramConTemas()
+    casos = {
+        "una nota de voz que no se entendió": (_nota_de_voz(), WhatsAppConAudio(), True),
+        "un audio sin transcriptor": (_nota_de_voz(), WhatsAppConAudio(), False),
+        "una radiografía": (_mensaje_con_foto(), WhatsAppConArchivo(), True),
+    }
+    for rotulo, (mensaje, wa, transcribir) in casos.items():
+        _sin_base(monkeypatch)
+        monkeypatch.setattr(lectura, "asegurar_tema", _devuelve_async(TEMA_DE_ANA))
+        monkeypatch.setattr(lectura, "leer_y_repartir", _devuelve_async(None))
+        monkeypatch.setattr(transcripcion, "transcribir_y_repartir", _devuelve_async(None))
+        tg = TelegramConTemas()
 
-    async def corrida():
-        r = await ingesta.procesar_mensaje(
-            _nota_de_voz(),
-            whatsapp=WhatsAppConAudio(),
-            telegram=tg,
-            database_url="postgresql://x",
-            tema_general=TEMA_GENERAL,
-        )
-        if r.transcripcion is not None:
-            await r.transcripcion
-        return r
+        async def corrida():
+            r = await ingesta.procesar_mensaje(
+                mensaje,
+                whatsapp=wa,
+                telegram=tg,
+                database_url="postgresql://x",
+                transcribir=transcribir,
+            )
+            if r.transcripcion is not None:
+                await r.transcripcion
+            return r
 
-    asyncio.run(corrida())
+        resultado = asyncio.run(corrida())
 
-    avisos = _mensajes_al_general(tg)
-    assert len(avisos) == 1, f"se esperaba UN aviso al General, salieron {len(avisos)}"
-    assert "nota de voz" in avisos[0]
-    assert "no se pudo entender" in avisos[0]
-
-
-def test_sin_transcriptor_el_audio_timbra_COMO_SIEMPRE(monkeypatch):
-    """Con el interruptor apagado, la cuota pasada o un audio enorme no hay quien lo
-    entienda, asi que el doctor tiene que enterarse igual que antes de todo esto."""
-    import asyncio
-
-    from maxicare_daniela import ingesta, lectura
-
-    _sin_base(monkeypatch)
-    monkeypatch.setattr(lectura, "asegurar_tema", _devuelve_async(TEMA_DE_ANA))
-    tg = TelegramConTemas()
-
-    resultado = asyncio.run(
-        ingesta.procesar_mensaje(
-            _nota_de_voz(),
-            whatsapp=WhatsAppConAudio(),
-            telegram=tg,
-            database_url="postgresql://x",
-            tema_general=TEMA_GENERAL,
-            transcribir=False,
-        )
-    )
-
-    assert resultado.reenviado is True
-    assert resultado.transcripcion is None
-    avisos = _mensajes_al_general(tg)
-    assert len(avisos) == 1 and "mandó archivos" in avisos[0]
-
-
-def test_una_FOTO_sigue_timbrando_igual(monkeypatch):
-    """Lo de arriba es SOLO para las notas de voz. Una radiografia hay que mirarla, y que el
-    doctor se entere de que entro es la garantia de la fase 2."""
-    import asyncio
-
-    from maxicare_daniela import ingesta, lectura
-
-    _sin_base(monkeypatch)
-    monkeypatch.setattr(lectura, "asegurar_tema", _devuelve_async(TEMA_DE_ANA))
-    monkeypatch.setattr(lectura, "leer_y_repartir", _devuelve_async(None))
-    tg = TelegramConTemas()
-
-    asyncio.run(
-        ingesta.procesar_mensaje(
-            _mensaje_con_foto(),
-            whatsapp=WhatsAppConArchivo(),
-            telegram=tg,
-            database_url="postgresql://x",
-            tema_general=TEMA_GENERAL,
-        )
-    )
-
-    avisos = _mensajes_al_general(tg)
-    assert len(avisos) == 1 and "mandó archivos" in avisos[0]
+        assert _mensajes_al_general(tg) == [], f"{rotulo} timbró en el General"
+        assert resultado.reenviado is True, f"{rotulo} no llegó a su expediente"

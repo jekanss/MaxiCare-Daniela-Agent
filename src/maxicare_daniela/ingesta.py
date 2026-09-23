@@ -25,10 +25,12 @@ from datetime import datetime, timezone
 from . import lectura as lectura_mod
 from . import persistencia
 from . import transcripcion as transcripcion_mod
-# Solo por el teclado del botón. `relevo` importa `lectura`, `persistencia` y `canales`, y
-# NUNCA `ingesta`: no hay ciclo, y `tests/test_estructura.py` vigila que siga sin haberlo.
-from . import relevo as relevo_mod
 from .canales import ErrorDeCanal, HiloInvalido, Telegram, WhatsApp
+
+# Aquí se importaba `relevo`, y solo por el teclado «Hablar yo con el paciente» que colgaba
+# del aviso de archivos en el General. Ese aviso se fue el 22/09/2026 y el import con él: la
+# ingesta ya no le ofrece a nadie tomar una conversación, porque eso es cosa del
+# escalamiento. `tests/test_estructura.py` sigue vigilando que no vuelva a haber ciclo.
 
 log = logging.getLogger("maxicare.ingesta")
 
@@ -48,21 +50,6 @@ _temas_en_curso: set[asyncio.Task] = set()
 #: mente es media aunque nunca sea clínico; excluirlo haría que un sticker se procesara como
 #: un texto vacío y se perdiera el registro.
 TIPOS_CON_ARCHIVO = frozenset({"image", "document", "audio", "voice", "video", "sticker"})
-
-#: Cada cuánto puede volver a SONAR el aviso de «mandó archivos» en el General.
-#:
-#: Las mismas 24 horas que `persistencia.conversacion_viva`, y no es una coincidencia que
-#: convenga documentar: la tanda de archivos de un paciente ES su conversación. Quien manda
-#: la radiografía y a los dos minutos la foto de la encía está contando UNA cosa, y merece
-#: un aviso, no dos.
-#:
-#: No se ata a la fila de `conversaciones` justamente porque en el primer archivo de una
-#: conversación nueva esa fila TODAVÍA NO EXISTE: `runtime._entregar` corre
-#: `procesar_mensaje` antes que `atencion.atender`, que es quien la crea. Atarlo ahí haría
-#: sonar el primero (sin fila que marcar) y otra vez el segundo (fila recién creada, sin
-#: marca) — exactamente los dos timbrazos que esto existe para evitar. `mensajes_entrantes`
-#: sí está escrita: la escribe `_registrar` en la primera línea de `procesar_mensaje`.
-VENTANA_AVISO_ARCHIVO_HORAS = 24
 
 #: Cómo se le nombra a cada tipo delante de un doctor. Un «mandó un image» no lo lee nadie.
 NOMBRE_HUMANO = {
@@ -277,10 +264,13 @@ def _soltar_tema(tarea: asyncio.Task) -> None:
         log.error("la creación del tema falló por detrás: %s", tarea.exception())
 
 
-async def _tema_o_general(
+async def _tema_del_archivo(
     m: MensajeEntrante, *, database_url: str, telegram: Telegram
 ) -> int | None:
-    """`asegurar_tema` con un reloj delante. `None` significa «al General».
+    """`asegurar_tema` con un reloj delante. `None` significa «no se deposita».
+
+    Hasta el 22/09/2026 ese `None` significaba «al General», y era la mitad del ruido que
+    MaxiCare reportó. Ver NOTA DEL DESTINO ÚNICO.
 
     El `except` de `asegurar_tema` ya degradaba ante un fallo; lo que faltaba era que el
     RELOJ degradara también. Sin esto, el primer archivo de un paciente encadena `crear_tema`
@@ -292,8 +282,15 @@ async def _tema_o_general(
     si Telegram ya había creado el tema nadie lo guarda: queda un tema huérfano en el grupo y
     el siguiente archivo crea otro. Con él, la operación termina por su cuenta --crea, cierra
     y guarda-- y el hilo queda listo para el próximo archivo de esa persona; lo único que se
-    pierde es que ESTE archivo cae en el General. `_temas_en_curso` la sostiene mientras
+    pierde es que ESTE archivo se queda sin archivar. `_temas_en_curso` la sostiene mientras
     tanto, por la misma razón que `_lectores_vivos` sostiene al lector.
+
+    **`rehacer_si_lo_borraron=False`, y es la otra mitad del arreglo.** Un mensaje del
+    paciente no puede resucitar un hilo que un doctor borró: eso anularía el gesto con el que
+    dijo que ya no quería ver a esa persona en el grupo. El hilo de quien nunca tuvo uno se
+    sigue abriendo igual --su primer archivo estrena su expediente, como siempre--; lo que no
+    se rehace es el que tiene lápida (`persistencia.hilo_perdido`, migración 030). Quien lo
+    rehace es el escalamiento, por `lectura.rescatar_hilo`.
     """
     tarea = asyncio.ensure_future(
         lectura_mod.asegurar_tema(
@@ -301,6 +298,7 @@ async def _tema_o_general(
             nombre_perfil=m.nombre_perfil,
             database_url=database_url,
             telegram=telegram,
+            rehacer_si_lo_borraron=False,
         )
     )
     _temas_en_curso.add(tarea)
@@ -311,7 +309,7 @@ async def _tema_o_general(
         )
     except asyncio.TimeoutError:
         log.warning(
-            "el tema de %s tardó más de %.0f s: este archivo va al General y el tema se "
+            "el tema de %s tardó más de %.0f s: este archivo no se archiva y el tema se "
             "sigue creando por detrás para el siguiente",
             m.telefono,
             lectura_mod.TOPE_SEGUNDOS_TEMA,
@@ -319,6 +317,38 @@ async def _tema_o_general(
         return None
 
 
+# ══════════════════════════════════════════════════════════════════════════════════════════
+# NOTA DEL DESTINO ÚNICO — el General no recibe nada que mande un paciente
+# ══════════════════════════════════════════════════════════════════════════════════════════
+#
+# Lo que manda un paciente tiene UN destino en Telegram: su hilo. Si no hay hilo, no hay
+# destino, y el mensaje se queda sin archivar. El General NO es la segunda opción.
+#
+# Hasta el 22/09/2026 sí lo era --`destino = tema or tema_general`-- y esa línea es la que
+# MaxiCare reportó como «cierro el tema y sus mensajes siguen llegando al General». El caso
+# medido, conversación 1a5cdb48 sobre +57319…2471:
+#
+#     18:21:09  un doctor pulsa «Hablar yo con el paciente»
+#     18:21:11  `relevo.activar` no consigue rehacer el hilo -> cierra con `tema_perdido`,
+#               y la fila de `temas_telegram` desaparece
+#     19:13:25  el paciente manda una nota de voz -> sin hilo, caía en el General, SONANDO
+#               (`silencioso=bool(tema) and ...` es False cuando no hay tema)
+#
+# Tres caminos llevaban ahí y los tres tenían prueba en verde: el número sin hilo todavía, el
+# `HiloInvalido` de un tema borrado, y el tope de 5 s de `_tema_del_archivo`. Cada uno de los
+# tres convierte un problema de infraestructura en el mensaje de un paciente vibrando en el
+# teléfono de todos los doctores, que es justo lo que el no negociable 14 vino a quitar.
+#
+# Lo que se pierde al cortarlo, dicho sin adornos: un archivo que llega sin hilo ya no lo ve
+# nadie. Lo compensa el volcado del siguiente escalamiento --`lectura.rescatar_hilo` vuelca
+# textos, transcripciones y la CONSTANCIA de cada archivo, con su hora-- y lo compensa mal a
+# propósito: los bytes no vuelven. La decisión de MaxiCare es que el ruido cuesta más, porque
+# un canal de alertas que timbra por todo es un canal que nadie mira el día que importa.
+#
+# El otro lado de la misma regla: **un mensaje del paciente no abre ni rehace un hilo**. El
+# primer archivo de quien nunca tuvo uno sí lo estrena --eso no cambia--, pero un hilo con
+# lápida (`persistencia.hilo_perdido`, migración 030) solo lo rehace un escalamiento.
+#
 # ══════════════════════════════════════════════════════════════════════════════════════════
 # NOTA DEL TEXTO SIN TEMA — por qué un mensaje puede no llegar a Telegram y no ser un fallo
 # ══════════════════════════════════════════════════════════════════════════════════════════
@@ -360,7 +390,6 @@ async def procesar_mensaje(
     whatsapp: WhatsApp,
     telegram: Telegram,
     database_url: str,
-    tema_general: int | None = None,
     leer_archivos: bool = True,
     transcribir: bool = True,
 ) -> Resultado:
@@ -369,6 +398,12 @@ async def procesar_mensaje(
     El orden no es negociable. La deduplicación va primero porque un reintento de Meta no
     debe volver a gastar la descarga; la descarga va inmediatamente después porque el enlace
     caduca; y el registro del reenvío va al final porque solo entonces es cierto.
+
+    **Ya no recibe `tema_general`, y esa ausencia ES la regla.** Se quitó el 22/09/2026: la
+    ingesta no tiene nada que mandar al escritorio común de los doctores, ni el archivo de un
+    paciente, ni su lectura, ni su transcripción, ni un aviso de que llegaron. Dejar el
+    parámetro «por si acaso» era dejar la puerta por la que volvió tres veces. Ver NOTA DEL
+    DESTINO ÚNICO.
     """
     # `persistencia` es psycopg síncrono. Llamarlo directo dentro de un handler async
     # bloquearía el bucle de eventos mientras Neon responde. Con el volumen de la clínica
@@ -386,50 +421,50 @@ async def procesar_mensaje(
             archivo = await whatsapp.descargar_media(
                 m.media_id, nombre_original=m.nombre_archivo
             )
-            tema = await _tema_o_general(m, database_url=database_url, telegram=telegram)
-            destino = tema or tema_general
+            tema = await _tema_del_archivo(m, database_url=database_url, telegram=telegram)
+            # Su hilo o nada. Ver NOTA DEL DESTINO ÚNICO.
+            destino = tema
             pie = componer_aviso(m, tamano=archivo.tamano)
             # Durante un relevo el hilo está en vivo y todo lo del paciente suena ahí. Fuera
             # del relevo es un expediente y no suena nunca. Ver `_en_relevo`.
             en_relevo = bool(tema) and await asyncio.to_thread(
                 _en_relevo, database_url, m.telefono
             )
-            # Silencioso SOLO si cae en el tema del paciente. Si no hay tema, el archivo va
-            # al General --es el caso del número que todavía no es paciente-- y ahí tiene
-            # que sonar: nadie va a abrir un hilo que no existe para encontrarlo.
-            try:
-                telegram_id = await telegram.enviar_archivo(
-                    archivo,
-                    tipo_whatsapp=m.tipo,
-                    pie=pie,
-                    tema_id=destino,
-                    silencioso=bool(tema) and not en_relevo,
-                )
-            except HiloInvalido as e:
-                # Alguien borró el hilo de esta persona. Telegram no lo avisa por ningún
-                # evento, y `relevo.barrer` solo lo sondea si está EN RELEVO, así que este
-                # rechazo es la única noticia que va a llegar nunca. Se olvida la fila --si
-                # no, cada archivo suyo se estrella contra el mismo hilo muerto, para
-                # siempre-- y el archivo cae al General.
-                #
-                # `tema = None` no es cosmético: de ahí cuelgan las tres decisiones de
-                # abajo. El lector deposita su lectura donde cayó el archivo, el envío
-                # suena --nadie va a abrir un hilo que ya no existe para encontrarlo-- y el
-                # aviso «están en su tema» NO se manda, porque ya no es verdad.
-                log.warning(
-                    "el hilo de %s ya no existe (%s); se olvida y el archivo va al General",
-                    m.telefono,
-                    e,
-                )
-                await asyncio.to_thread(_olvidar_tema, database_url, m.telefono)
-                tema, destino = None, tema_general
-                telegram_id = await telegram.enviar_archivo(
-                    archivo,
-                    tipo_whatsapp=m.tipo,
-                    pie=pie,
-                    tema_id=destino,
-                    silencioso=False,
-                )
+            telegram_id = None
+            if destino:
+                try:
+                    telegram_id = await telegram.enviar_archivo(
+                        archivo,
+                        tipo_whatsapp=m.tipo,
+                        pie=pie,
+                        tema_id=destino,
+                        silencioso=not en_relevo,
+                    )
+                except HiloInvalido as e:
+                    # Alguien borró el hilo de esta persona. Telegram no lo avisa por ningún
+                    # evento, y `relevo.barrer` solo lo sondea si está EN RELEVO, así que
+                    # este rechazo es la única noticia que va a llegar nunca. Se le pone la
+                    # lápida --si no, cada archivo suyo se estrella contra el mismo hilo
+                    # muerto, para siempre-- y este archivo se queda sin archivar, igual que
+                    # un texto en el mismo caso.
+                    #
+                    # NO se reintenta contra el General. Era lo que hacía hasta el
+                    # 22/09/2026, y con sonido: el hilo borrado de un paciente convertía cada
+                    # foto suya en un timbrazo en el escritorio común. Ver NOTA DEL DESTINO
+                    # ÚNICO.
+                    #
+                    # `tema = None` no es cosmético: de ahí cuelgan el lector y el
+                    # transcriptor, que dejan de tener dónde depositar. Lo que llegó mientras
+                    # no había hilo lo vuelca el próximo escalamiento.
+                    log.warning(
+                        "el hilo de %s ya no existe (%s); se marca perdido y su archivo no "
+                        "se archiva hasta que un escalamiento abra uno nuevo",
+                        m.telefono,
+                        e,
+                    )
+                    await asyncio.to_thread(_olvidar_tema, database_url, m.telefono)
+                    tema = destino = None
+                    en_relevo = False
             # A partir de aquí el archivo YA está entregado. Nada de lo que sigue —el aviso
             # al General, el arranque del lector— puede convertir esta entrega en un fallo,
             # así que el aviso queda en su propio try/except y el lector arranca ANTES de
@@ -471,7 +506,7 @@ async def procesar_mensaje(
                         # Misma regla que el archivo: la lectura acompaña al archivo, así que
                         # suena exactamente donde sonó él. Si notificara aparte, callar el
                         # archivo no habría servido de nada.
-                        silencioso=bool(tema) and not en_relevo,
+                        silencioso=not en_relevo,
                         # Para anotar lo que costó esta lectura. El lector corre con el modelo
                         # flagship, así que es el consumidor cuyo gasto más hace falta ver por
                         # separado del de Daniela: un pico aquí es alguien mandando archivos y
@@ -508,34 +543,11 @@ async def procesar_mensaje(
                         tema_id=destino,
                         # Misma regla que el archivo y que la lectura: la transcripción
                         # acompaña al audio y suena exactamente donde sonó él.
-                        silencioso=bool(tema) and not en_relevo,
+                        silencioso=not en_relevo,
                         database_url=database_url,
                         telefono=m.telefono,
                         id_conversacion=grupo,
                     )
-
-                    # Aquí es donde una nota de voz deja de ser «un archivo» y pasa a ser un
-                    # mensaje más: **si se entendió, el General no se entera.** Daniela la
-                    # contesta como contestaría un texto, y timbrarle al doctor por algo que
-                    # ya está resuelto es exactamente el ruido que hace que deje de mirar el
-                    # grupo -- y por el que un día se pierde el aviso que sí importaba.
-                    #
-                    # Si NO se entendió, sí: ahí el audio solo lo puede resolver alguien
-                    # oyéndolo, y eso es pedirle algo al doctor.
-                    #
-                    # `_primer_archivo_de_la_tanda` se consulta aquí y no arriba, y da lo
-                    # mismo que `_marcar_reenviado` haya corrido ya o no: su `wamid <>`
-                    # excluye esta fila, que es justo para lo que está puesto.
-                    if texto_dicho is None and tema and not en_relevo:
-                        if await asyncio.to_thread(
-                            _primer_archivo_de_la_tanda, database_url, m.telefono, m.wamid
-                        ):
-                            await _avisar_de_la_tanda(
-                                m,
-                                telegram=telegram,
-                                tema_general=tema_general,
-                                porque_no_se_entendio=True,
-                            )
 
                     # Y se guarda. Este es el ÚNICO punto del proyecto donde coexisten el
                     # `wamid` del audio y lo que se entendió de él: más adelante la
@@ -554,22 +566,20 @@ async def procesar_mensaje(
                 # lo que el paciente acaba de decir.
                 _lectores_vivos.add(tarea_voz)
                 tarea_voz.add_done_callback(_lectores_vivos.discard)
-            # `not en_relevo`: durante un relevo el doctor YA tiene el archivo sonándole en
-            # el hilo donde está conversando. El aviso al General sería el mismo timbrazo por
-            # segunda vez, en el sitio donde menos falta hace.
+            # Aquí vivía `_avisar_de_la_tanda`: «📎 fulano mandó archivos — están en su
+            # tema», al General, con el botón de tomar la conversación, una vez cada 24 h.
             #
-            # **Y una nota de voz NO avisa aquí: lo decide el transcriptor.** Este aviso
-            # existe para que un humano ABRA el archivo, porque una radiografía hay que
-            # mirarla. Una nota de voz que Daniela entendió y contestó no le pide nada a
-            # nadie, y la regla del proyecto es que al General solo va lo que le pide algo al
-            # doctor. Pero eso solo se sabe cuando la transcripción vuelve, así que la
-            # decisión viaja con ella -- ver `_transcribir_con_grupo`. Si no se arrancó
-            # transcriptor (interruptor apagado, cuota, audio enorme) esto avisa como siempre:
-            # ahí nadie va a entender ese audio si no lo oye una persona.
-            if tarea_voz is None and tema and not en_relevo and await asyncio.to_thread(
-                _primer_archivo_de_la_tanda, database_url, m.telefono, m.wamid
-            ):
-                await _avisar_de_la_tanda(m, telegram=telegram, tema_general=tema_general)
+            # Se fue el 22/09/2026, y es una decisión de MaxiCare, no una simplificación. Era
+            # el único timbrazo del General que no venía de un escalamiento, y la regla que
+            # pidieron es exactamente esa: **al General solo van las alertas de escalamiento**.
+            # Un doctor que cierra el hilo de un paciente está diciendo que deja de querer
+            # verlo en el grupo, y que su siguiente foto le volviera a sonar anulaba el gesto.
+            #
+            # Lo que se pierde: si Daniela resuelve sola y nunca escala, nadie se entera de
+            # que llegó una radiografía. Se aceptó a sabiendas. Lo que lo hace tolerable es
+            # que un archivo clínico suele hacer escalar a Daniela por su cuenta
+            # (`archivo_recibido`), y que el archivo queda en el expediente del paciente para
+            # quien entre.
             tamano = archivo.tamano
         else:
             # Un texto NO va al General. Ver NOTA DEL TEXTO SIN TEMA, abajo.
@@ -745,88 +755,6 @@ def _en_relevo(database_url: str, telefono: str) -> bool:
     except Exception:  # noqa: BLE001 -- ver docstring
         log.warning("no se pudo saber si +%s está en relevo; entra mudo", telefono)
         return False
-
-
-async def _avisar_de_la_tanda(
-    m: MensajeEntrante,
-    *,
-    telegram: Telegram,
-    tema_general: int | None,
-    porque_no_se_entendio: bool = False,
-) -> None:
-    """El timbrazo del General: «fulano mandó archivos, están en su tema».
-
-    El archivo no cae en el General, así que el General tiene que enterarse igual: es donde
-    los doctores miran. Degradación, no entrega: si esto falla, el archivo sigue estando
-    donde ya quedó, y por eso el `try` se lo traga.
-
-    UNA vez por tanda, no una por archivo. Quien manda la radiografía y a los dos minutos la
-    foto de la encía dispararía dos timbrazos por una sola cosa, y a base de timbrazos que no
-    piden nada el doctor deja de mirar el grupo -- que es como se pierde el escalamiento que
-    sí importaba. El plural del texto es deliberado: avisa de la tanda, no del archivo que la
-    abrió.
-
-    `porque_no_se_entendio` cambia el texto y con él lo que el doctor sabe que tiene que
-    hacer. «Mandó archivos» le dice que hay algo que mirar; «mandó una nota de voz que no se
-    pudo entender» le dice que tiene que OÍRLA, que es una acción distinta y la única razón
-    por la que a un audio se le permite timbrar desde que se transcriben.
-    """
-    quien = _escapar(m.nombre_perfil or m.telefono)
-    if porque_no_se_entendio:
-        texto = (
-            f"🎙️ {quien} mandó una nota de voz que no se pudo entender"
-            " — está en su tema. Ya le pedimos que la escriba."
-        )
-    else:
-        texto = f"📎 {quien} mandó archivos — están en su tema."
-    try:
-        await telegram.enviar_mensaje(
-            texto,
-            tema_id=tema_general,
-            # El botón va AQUÍ y no solo en el escalamiento. Un escalamiento ocurre una vez;
-            # los archivos siguen llegando, y el doctor que ve entrar la tercera radiografía
-            # de alguien tiene que poder tomar la conversación sin esperar a que Daniela
-            # vuelva a escalar.
-            teclado=relevo_mod.teclado_tomar(m.telefono),
-        )
-    except Exception:  # noqa: BLE001
-        log.exception(
-            "el archivo de %s ya está entregado; solo falló el aviso al General", m.wamid
-        )
-
-
-def _primer_archivo_de_la_tanda(database_url: str, telefono: str, wamid: str) -> bool:
-    """¿Es el primer archivo ENTREGADO de este número en la ventana? Decide si el General
-    suena o no.
-
-    `reenviado_en IS NOT NULL` no es un detalle: si el archivo anterior se quedó por el
-    camino --Telegram caído, un 429-- el doctor nunca lo vio, así que este no puede heredar
-    un aviso que no llegó a existir. Ese mismo filtro excluye de paso la fila de ESTE mensaje,
-    que `_registrar` acaba de insertar sin reenviar todavía; el `wamid <>` se queda igual
-    para que la consulta siga siendo correcta lea quien la lea.
-
-    Ante un fallo de la base devuelve `True` --avisa--. Un timbrazo de más es ruido; uno de
-    menos es una radiografía que nadie mira.
-    """
-    try:
-        with persistencia.conectar(database_url) as conn, conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT 1
-                  FROM mensajes_entrantes
-                 WHERE telefono = %s
-                   AND wamid <> %s
-                   AND tipo = ANY(%s)
-                   AND reenviado_en IS NOT NULL
-                   AND recibido_en > now() - make_interval(hours => %s)
-                 LIMIT 1
-                """,
-                (telefono, wamid, sorted(TIPOS_CON_ARCHIVO), VENTANA_AVISO_ARCHIVO_HORAS),
-            )
-            return cur.fetchone() is None
-    except Exception:  # noqa: BLE001
-        log.exception("no se pudo saber si %s ya tenía archivos; se avisa igual", telefono)
-        return True
 
 
 def _marcar_reenviado(

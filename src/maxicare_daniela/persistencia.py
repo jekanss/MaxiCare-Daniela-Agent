@@ -719,11 +719,48 @@ def tema_del_paciente(conn, telefono: str) -> int | None:
     El tema se ata al TELÉFONO, no a la conversación ni a la ficha: una persona puede tener
     varios episodios a lo largo del tiempo y todos comparten hilo --eso lo dijo la 002 y sigue
     valiendo-- y además puede no ser paciente todavía, que es lo que arregló la 014.
+
+    **`perdido_en IS NULL` (migración 030).** Una fila con lápida es un hilo que alguien
+    borró en Telegram: existió y ya no existe. Para todo el que lee un hilo eso es
+    indistinguible de no tener ninguno, y tiene que serlo --depositar en un `topic_id` muerto
+    es un `HiloInvalido` garantizado--. Quien necesita la diferencia la pide con
+    `hilo_perdido`, y hoy solo la necesita uno: `lectura.asegurar_tema`, para no resucitar
+    con un mensaje del paciente un hilo que un doctor cerró a propósito.
     """
     with conn.cursor() as cur:
-        cur.execute("SELECT topic_id FROM temas_telegram WHERE telefono = %s", (telefono,))
+        cur.execute(
+            "SELECT topic_id FROM temas_telegram "
+            " WHERE telefono = %s AND perdido_en IS NULL",
+            (telefono,),
+        )
         fila = cur.fetchone()
     return fila[0] if fila else None
+
+
+def hilo_perdido(conn, telefono: str) -> bool:
+    """¿Este número TUVO hilo y se lo borraron? (Migración 030.)
+
+    Es la pregunta que no se podía hacer mientras `olvidar_tema` borraba la fila, y la que
+    separa dos casos que el sistema trataba igual:
+
+        no hay fila            -> nunca tuvo hilo. Su primer archivo se lo abre, como siempre.
+        hay fila con lápida    -> se lo borraron. Solo un ESCALAMIENTO vuelve a abrirlo.
+
+    Lo segundo es lo que pidió MaxiCare el 22/09/2026: cerrar o borrar el tema tiene que
+    significar que ese paciente deja de aparecer en Telegram hasta que Daniela vuelva a
+    necesitar a una persona. Sin esta distinción, la nota de voz que mandara diez minutos
+    después abría el hilo otra vez --o, peor, caía en el General-- y el gesto del doctor no
+    servía de nada.
+
+    Devuelve `False` si no hay fila: quien nunca tuvo hilo no ha perdido nada.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT 1 FROM temas_telegram "
+            " WHERE telefono = %s AND perdido_en IS NOT NULL LIMIT 1",
+            (telefono,),
+        )
+        return cur.fetchone() is not None
 
 
 def guardar_tema(conn, *, telefono: str, topic_id: int, abierto: bool = False) -> None:
@@ -735,13 +772,20 @@ def guardar_tema(conn, *, telefono: str, topic_id: int, abierto: bool = False) -
     `ON CONFLICT` sobre el teléfono y no un `UPDATE`: quien llama a esto está creando el hilo
     por primera vez, pero dos archivos del mismo número pueden llegar casi a la vez, y el
     candado de `lectura._candados_de_tema` es de proceso -- no protege entre réplicas.
+
+    **Y levanta la lápida de la 030 (`perdido_en = NULL`).** Guardar un hilo nuevo es
+    exactamente el momento en que deja de ser verdad que este número se quedó sin hilo. Si no
+    se limpiara, `tema_del_paciente` seguiría devolviendo `None` sobre un tema recién creado
+    y el paciente quedaría con hilo en Telegram y sin hilo en la base: el peor de los dos
+    mundos, y en silencio.
     """
     with conn.cursor() as cur:
         cur.execute(
             """
             INSERT INTO temas_telegram (telefono, topic_id, abierto) VALUES (%s, %s, %s)
             ON CONFLICT (telefono) DO UPDATE
-               SET topic_id = EXCLUDED.topic_id, abierto = EXCLUDED.abierto
+               SET topic_id = EXCLUDED.topic_id, abierto = EXCLUDED.abierto,
+                   perdido_en = NULL
             """,
             (telefono, topic_id, abierto),
         )
@@ -763,22 +807,40 @@ def marcar_tema_abierto(conn, telefono: str, *, abierto: bool) -> None:
 
 
 def olvidar_tema(conn, telefono: str) -> bool:
-    """Borra la fila del hilo de ese número. `True` si había una.
+    """Le pone la LÁPIDA al hilo de ese número. `True` si había uno que marcar.
 
     Se llama cuando se comprueba que el tema YA NO EXISTE en Telegram --alguien lo borró a
     mano--, y sin esto el sistema no se recupera nunca: `temas_telegram` seguiría apuntando a
     un `topic_id` muerto, `lectura.asegurar_tema` lo daría por bueno sin crear ninguno, y cada
     archivo que mandara esa persona fallaría al depositarse. Para siempre, y en silencio.
 
-    Olvidarlo hace que el siguiente archivo le abra un hilo nuevo, que es la recuperación
-    correcta. Lo que se pierde es lo que ya se perdió al borrar el tema: el expediente
-    anterior. Por eso `relevo.cerrar` avisa en el General de que alguien lo hizo.
+    **Hasta la migración 030 esto era un `DELETE`, y el `DELETE` borraba de más.** La
+    recuperación que buscaba --«que el siguiente archivo le abra un hilo nuevo»-- resultó ser
+    justo lo que MaxiCare no quiere: borrar el tema es el gesto con el que un doctor dice que
+    ya no quiere ver a ese paciente en Telegram, y que su siguiente nota de voz se lo
+    devolviera anulaba el gesto. Ahora la fila se queda como constancia y
+    `tema_del_paciente` la lee como «no hay hilo», que es lo que era; lo único que cambia es
+    que `hilo_perdido` puede distinguirla de quien nunca tuvo uno.
+
+    Quien SÍ vuelve a abrirlo es el escalamiento (`lectura.rescatar_hilo`), que además vuelca
+    dentro lo que llegó mientras no había. Lo que se pierde sigue siendo lo que ya se perdió
+    al borrar el tema: el expediente anterior. Por eso `relevo.cerrar` avisa en el General de
+    que alguien lo hizo.
+
+    `perdido_en IS NULL` en el `WHERE`: esto se llama varias veces sobre el mismo número --el
+    barrido, `ingesta` ante un `HiloInvalido`, `relevo.activar`-- y la hora que vale es la de
+    la primera, que es cuando el hilo dejó de existir de verdad. Mismo criterio que
+    `marcar_escalamientos_respondidos`.
     """
     with conn.cursor() as cur:
-        cur.execute("DELETE FROM temas_telegram WHERE telefono = %s", (telefono,))
-        borradas = cur.rowcount
+        cur.execute(
+            "UPDATE temas_telegram SET perdido_en = now(), abierto = FALSE "
+            " WHERE telefono = %s AND perdido_en IS NULL",
+            (telefono,),
+        )
+        marcadas = cur.rowcount
     conn.commit()
-    return borradas > 0
+    return marcadas > 0
 
 
 def transcripcion(conn, telefono: str, *, limite: int = 40) -> list[tuple[str, str, Any]]:
@@ -1397,6 +1459,7 @@ def relevo_por_tema(conn, topic_id: int) -> dict[str, Any] | None:
               FROM temas_telegram t
               JOIN conversaciones c ON c.telefono = t.telefono
              WHERE t.topic_id = %s
+               AND t.perdido_en IS NULL
                AND c.tomada_por IS NOT NULL
              ORDER BY c.tomada_en DESC
              LIMIT 1
@@ -1487,7 +1550,8 @@ def relevos_activos(conn) -> list[dict[str, Any]]:
                                         COALESCE(c.ultimo_mensaje_doctor_en, c.tomada_en))
                    )) / 60.0
               FROM conversaciones c
-              LEFT JOIN temas_telegram t ON t.telefono = c.telefono
+              LEFT JOIN temas_telegram t
+                     ON t.telefono = c.telefono AND t.perdido_en IS NULL
              WHERE c.tomada_por IS NOT NULL
              ORDER BY c.tomada_en
             """
@@ -3436,7 +3500,11 @@ def rastro_de(conn, telefono: str) -> dict:
         eventos = [f[0] for f in cur.fetchall()]
 
         cur.execute(
-            "SELECT topic_id FROM temas_telegram WHERE telefono = %(tel)s",
+            # `perdido_en IS NULL`: un tema con lápida ya no existe en Telegram, así que
+            # pedirle a la API que lo borre es una llamada garantizada a fallar. La fila sí
+            # se borra entera más abajo, que es lo que `/clearstate` promete.
+            "SELECT topic_id FROM temas_telegram "
+            " WHERE telefono = %(tel)s AND perdido_en IS NULL",
             {"tel": telefono},
         )
         fila = cur.fetchone()

@@ -1,13 +1,17 @@
-"""Las dos consultas que decidieron el silencio del General, contra Postgres de verdad.
+"""Las consultas que deciden el silencio del General, contra Postgres de verdad.
 
     MAXICARE_PRUEBAS_NEON=1 uv run pytest -q -m neon
 
-Existe porque `tests/test_ingesta.py` dobla `_tema_existente` y `_primer_archivo_de_la_tanda`
+Existe porque `tests/test_ingesta.py` dobla `_tema_existente` y `lectura._textos_sin_archivar`
 con `monkeypatch` --tiene que hacerlo: es una suite offline-- y un doble no ejecuta una línea
-de SQL. El `make_interval(hours => ...)` y el `tipo = ANY(%s)` de la ventana son sintaxis que
-solo el motor valida, y un error ahí no se ve en rojo: las dos funciones atrapan la excepción
-y degradan a propósito. El texto se archivaría sin tema y el General volvería a sonar por cada
-archivo, con los 578 tests en verde y nadie enterándose.
+de SQL. Un error ahí no se ve en rojo: las funciones atrapan la excepción y degradan a
+propósito, así que el texto se archivaría sin tema y el volcado del escalamiento saldría vacío
+con la suite entera en verde.
+
+Desde el 22/09/2026 la consulta que más falta hace vigilar es la del volcado
+(`_textos_sin_archivar`), no la del aviso de tanda: aquella se borró con el aviso, y esta
+ganó el `OR media_id IS NOT NULL` que es lo único que impide que una radiografía llegada sin
+hilo desaparezca sin dejar rastro.
 
 También cierra el otro extremo: que `_marcar_reenviado` acepte un `telegram_message_id` NULL
 no es una promesa de Python, es una columna que tiene que ser nullable.
@@ -22,7 +26,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from maxicare_daniela import ingesta, persistencia
+from maxicare_daniela import ingesta, lectura, persistencia
 from maxicare_daniela.config import cargar_dotenv
 
 pytestmark = pytest.mark.neon
@@ -105,59 +109,122 @@ def _insertar(url: str, *, wamid: str, telefono: str, tipo: str, hace_horas: flo
 
 
 # ==========================================================================================
-# `_primer_archivo_de_la_tanda` — quién hace sonar el General
+# `lectura._textos_sin_archivar` — lo que el escalamiento rescata
+#
+# Aqui vivian las siete pruebas de `_primer_archivo_de_la_tanda`, la consulta que decidia si
+# el General sonaba una vez por tanda de archivos. El 22/09/2026 MaxiCare pidio que al General
+# solo lleguen las alertas de escalamiento, y esa funcion se borro entera.
+#
+# Lo que la sustituye en importancia es esta otra consulta, y por la misma razon por la que
+# aquella estaba aqui: offline va doblada con un `monkeypatch`, `rescatar_hilo` se traga sus
+# propias excepciones, y un error de SQL dejaria al doctor abriendo un expediente vacio con
+# la suite entera en verde. Ademas es MAS fragil que antes: el `OR media_id IS NOT NULL` es
+# nuevo y es justo lo que hace que una radiografia que llego sin hilo deje constancia.
 # ==========================================================================================
 
 
-def test_sin_archivos_previos_el_general_suena(esquema):
-    assert ingesta._primer_archivo_de_la_tanda(esquema, TEL, "w-nuevo") is True
+def _mensaje(url: str, *, wamid: str, telefono: str = TEL, tipo: str = "text",
+             texto: str | None = None, transcripcion: str | None = None,
+             media_id: str | None = None, archivado: bool = False,
+             fallo: str | None = None, hace_horas: float = 0.0) -> None:
+    """Una fila de `mensajes_entrantes` con el estado exacto que deja `ingesta`.
+
+    `archivado` es `telegram_message_id` puesto, o sea «ya cayo en un hilo»: lo que hace
+    idempotente al rescate.
+    """
+    recibido = datetime.now(timezone.utc) - timedelta(hours=hace_horas)
+    with persistencia.conectar(url) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO mensajes_entrantes
+                    (wamid, telefono, nombre_perfil, tipo, texto, transcripcion, media_id,
+                     recibido_en, telegram_message_id, reenviado_en, fallo)
+                VALUES (%s, %s, 'Ana', %s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                (wamid, telefono, tipo, texto, transcripcion, media_id, recibido,
+                 55 if archivado else None, recibido, fallo),
+            )
+        conn.commit()
 
 
-def test_con_un_archivo_reciente_el_general_se_calla(esquema):
-    """La radiografía y, dos minutos después, la foto de la encía son UNA cosa."""
-    _insertar(esquema, wamid="w-1", telefono=TEL, tipo="image", hace_horas=0.03)
+def test_el_rescate_trae_el_texto_la_transcripcion_y_el_archivo(esquema):
+    """Las tres formas, y el `OR media_id IS NOT NULL` que las junta.
 
-    assert ingesta._primer_archivo_de_la_tanda(esquema, TEL, "w-2") is False
+    Antes del 22/09/2026 la consulta exigia `texto IS NOT NULL`, asi que una radiografia que
+    llegaba sin hilo desaparecia del volcado. Daba igual mientras el General fuera el destino
+    de reserva --el doctor la veia ahi-- y dejo de darlo el dia que ese reenvio se corto.
+    """
+    _mensaje(esquema, wamid="w-1", texto="Buenas, tengo una duda")
+    _mensaje(esquema, wamid="w-2", tipo="image", media_id="media-1")
+    _mensaje(esquema, wamid="w-3", tipo="audio", media_id="media-2",
+             transcripcion="me duele al masticar")
 
+    filas = lectura._textos_sin_archivar(esquema, TEL)
 
-def test_pasada_la_ventana_el_general_vuelve_a_sonar(esquema):
-    """A las 24 h la conversación murió; lo que llegue después es un caso nuevo."""
-    viejo = ingesta.VENTANA_AVISO_ARCHIVO_HORAS + 1
-    _insertar(esquema, wamid="w-1", telefono=TEL, tipo="image", hace_horas=viejo)
-
-    assert ingesta._primer_archivo_de_la_tanda(esquema, TEL, "w-2") is True
-
-
-def test_un_texto_previo_no_calla_el_aviso_del_archivo(esquema):
-    """La ventana cuenta ARCHIVOS. Si contara mensajes, el «hola» de las 2:00 dejaría mudo
-    al archivo de las 2:03, que es justo lo que el doctor tiene que ver."""
-    _insertar(esquema, wamid="w-texto", telefono=TEL, tipo="text", hace_horas=0.05)
-
-    assert ingesta._primer_archivo_de_la_tanda(esquema, TEL, "w-foto") is True
+    assert [f[0] for f in filas] == ["w-1", "w-2", "w-3"], "tienen que salir las tres, en orden"
+    lineas = lectura.pendientes_legibles(filas)
+    assert "Buenas, tengo una duda" in lineas[0]
+    assert "una imagen" in lineas[1], f"el archivo no dejo constancia: {lineas[1]!r}"
+    assert "me duele al masticar" in lineas[2]
 
 
-def test_un_archivo_que_no_se_entrego_no_calla_al_siguiente(esquema):
-    """Si el anterior se quedó por el camino --Telegram caído, un 429-- el doctor nunca lo
-    vio. Este no puede heredar un aviso que no llegó a existir."""
-    _insertar(
-        esquema, wamid="w-1", telefono=TEL, tipo="image", hace_horas=0.05, reenviado=False
+def test_lo_que_YA_cayo_en_un_hilo_no_se_vuelve_a_volcar(esquema):
+    """Lo que hace idempotente al rescate. Sin esto, el segundo escalamiento de la misma
+    conversacion repetiria el volcado entero."""
+    _mensaje(esquema, wamid="w-1", texto="esto ya esta en su hilo", archivado=True)
+    _mensaje(esquema, wamid="w-2", texto="esto no")
+
+    assert [f[0] for f in lectura._textos_sin_archivar(esquema, TEL)] == ["w-2"]
+
+
+def test_un_mensaje_con_FALLO_no_entra_en_el_volcado(esquema):
+    """Ese si se intento entregar y se registro como perdido. Volcarlo aqui lo borraria del
+    indice por el que se vigila lo que de verdad fallo."""
+    _mensaje(esquema, wamid="w-1", texto="no llego", fallo="Telegram rechazo el mensaje")
+
+    assert lectura._textos_sin_archivar(esquema, TEL) == []
+
+
+def test_el_volcado_no_es_arqueologia_de_otra_conversacion(esquema):
+    """La conversacion caduca a las 24 h. Mas alla no es «lo que este paciente venia
+    diciendo», es otro asunto."""
+    _mensaje(esquema, wamid="w-viejo", texto="de la semana pasada",
+             hace_horas=lectura.HORAS_DE_RESCATE + 1)
+    _mensaje(esquema, wamid="w-hoy", texto="de ahora")
+
+    assert [f[0] for f in lectura._textos_sin_archivar(esquema, TEL)] == ["w-hoy"]
+
+
+def test_el_volcado_no_se_lleva_lo_del_vecino(esquema):
+    _mensaje(esquema, wamid="w-vecino", telefono=TEL_VECINO, texto="soy otro")
+    _mensaje(esquema, wamid="w-mio", texto="soy yo")
+
+    assert [f[0] for f in lectura._textos_sin_archivar(esquema, TEL)] == ["w-mio"]
+
+
+def test_un_sticker_sin_nada_dentro_tampoco_se_pierde(esquema):
+    """Tiene `media_id` y ni texto ni transcripcion: entra por la tercera rama del `OR`, que
+    es la unica que lo ve. Una linea de mas en el expediente es barata; una radiografia que
+    nadie sabe que llego, no."""
+    _mensaje(esquema, wamid="w-1", tipo="sticker", media_id="media-9")
+
+    (linea,) = lectura.pendientes_legibles(lectura._textos_sin_archivar(esquema, TEL))
+    assert "sticker" in linea
+
+
+def test_la_hora_del_volcado_sale_en_BOGOTA_y_no_en_UTC(esquema):
+    """Cinco horas de diferencia. Un doctor leyendo «mando una imagen a las 00:13» sobre algo
+    que llego a las 19:13 no reconoce su propia tarde."""
+    from zoneinfo import ZoneInfo
+
+    ahora_bogota = datetime.now(ZoneInfo("America/Bogota"))
+    _mensaje(esquema, wamid="w-1", tipo="image", media_id="media-1")
+
+    (linea,) = lectura.pendientes_legibles(lectura._textos_sin_archivar(esquema, TEL))
+    assert ahora_bogota.strftime("%H:%M") in linea, (
+        f"la hora no es la de Bogota: {linea!r}"
     )
-
-    assert ingesta._primer_archivo_de_la_tanda(esquema, TEL, "w-2") is True
-
-
-def test_el_archivo_de_otro_numero_no_calla_el_mio(esquema):
-    _insertar(esquema, wamid="w-vecino", telefono=TEL_VECINO, tipo="image", hace_horas=0.05)
-
-    assert ingesta._primer_archivo_de_la_tanda(esquema, TEL, "w-mio") is True
-
-
-def test_la_fila_del_propio_mensaje_no_se_cuenta(esquema):
-    """`_registrar` inserta ESTE mensaje antes de que nadie pregunte nada. Si la consulta se
-    contara a sí misma, ningún archivo sonaría jamás."""
-    _insertar(esquema, wamid="w-yo", telefono=TEL, tipo="image", reenviado=False)
-
-    assert ingesta._primer_archivo_de_la_tanda(esquema, TEL, "w-yo") is True
 
 
 # ==========================================================================================

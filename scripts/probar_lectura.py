@@ -469,7 +469,7 @@ async def cuatro(url: str) -> None:
     lectura.leer_archivo = lector_doblado
     try:
         resultado = await ingesta.procesar_mensaje(
-            m, whatsapp=wa, telegram=tg, database_url=url, tema_general=TEMA_GENERAL
+            m, whatsapp=wa, telegram=tg, database_url=url
         )
         if resultado.lectura is not None:
             await resultado.lectura
@@ -491,11 +491,13 @@ async def cuatro(url: str) -> None:
 
     avisos_al_general = [texto for (tema, texto) in tg.mensajes if tema == TEMA_GENERAL]
     revisar(
-        "el General recibio el aviso de que llegaron archivos",
-        # Plural desde el 13/09/2026: el aviso suena UNA vez por tanda, no una por archivo.
-        # Ver NOTA DEL TEXTO SIN TEMA en `ingesta.py`.
-        any("mandó archivos" in texto for texto in avisos_al_general),
-        str(tg.mensajes),
+        "el General NO recibio nada",
+        # Aqui se comprobaba lo contrario --«el General recibio el aviso de que llegaron
+        # archivos»-- hasta el 22/09/2026. MaxiCare pidio que al General solo lleguen las
+        # alertas de escalamiento: lo que manda un paciente va a SU hilo o a ninguna parte.
+        # Ver NOTA DEL DESTINO UNICO en `ingesta.py`.
+        not avisos_al_general,
+        str(avisos_al_general),
     )
     revisar(
         "el aviso al General NO lleva nada clinico",
@@ -524,7 +526,7 @@ async def cinco(url: str, cfg: Config) -> None:
     lectura.leer_archivo = lector_doblado
     try:
         resultado = await ingesta.procesar_mensaje(
-            m, whatsapp=wa, telegram=tg, database_url=url, tema_general=TEMA_GENERAL
+            m, whatsapp=wa, telegram=tg, database_url=url
         )
         revisar("se arranco el lector: hay una tarea que recoger", resultado.lectura is not None)
 
@@ -673,7 +675,7 @@ async def ocho(url: str) -> None:
     lectura.leer_archivo = lector_doblado
     try:
         resultado = await ingesta.procesar_mensaje(
-            m, whatsapp=wa, telegram=tg, database_url=url, tema_general=TEMA_GENERAL
+            m, whatsapp=wa, telegram=tg, database_url=url
         )
         if resultado.lectura is not None:
             await resultado.lectura

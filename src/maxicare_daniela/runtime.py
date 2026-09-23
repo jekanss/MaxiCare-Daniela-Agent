@@ -1078,7 +1078,10 @@ async def _entregar(m: ingesta.MensajeEntrante) -> None:
             whatsapp=_whatsapp,
             telegram=_telegram,
             database_url=config.database_url,
-            tema_general=_tema_general,
+            # Sin `tema_general`: desde el 22/09/2026 la ingesta no manda nada al escritorio
+            # común de los doctores. Lo que llega de un paciente va a SU hilo o no va a
+            # ninguna parte, y lo único que timbra en el General es un escalamiento. Ver
+            # `ingesta`, NOTA DEL DESTINO ÚNICO.
             leer_archivos=leer_archivos,
             transcribir=transcribir,
         )

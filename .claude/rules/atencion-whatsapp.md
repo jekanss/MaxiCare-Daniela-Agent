@@ -330,18 +330,98 @@ procesar_mensaje ─┬─ descarga  ──→ Telegram del doctor       ← INT
   una degradación, no una pérdida: él puede resolverlo, no se escala, y el doctor ya tiene el
   audio y su texto.
 
-## Al General solo va lo que le pide algo al doctor
+## Al General solo van las alertas de escalamiento
 
 El General era un vertedero: cada texto que entraba sonaba ahí. Con un solo paciente activo
 ya era ruido, y el ruido en el canal de avisos se traduce en avisos que nadie mira.
 
-La regla es por DESTINATARIO, no por tipo de mensaje: **al General va lo que le pide algo al
-doctor**. Un texto normal no le pide nada, así que va **mudo al tema de su paciente** —o a
-ninguna parte, si ese número todavía no tiene tema—. Y **nunca lo crea**: abrir hilo es del
-primer ARCHIVO, no de un texto, porque el hilo existe para colgar lo que el doctor tiene que
-ver. El aviso de archivos sí suena, pero **UNA vez por tanda**: lo decide
-`_primer_archivo_de_la_tanda` con una ventana de 24 h, para que una serie de seis
-radiografías seguidas no sean seis pitidos.
+El 13/09/2026 la regla pasó a ser por DESTINATARIO: «al General va lo que le pide algo al
+doctor». El 22/09/2026 MaxiCare la estrechó un paso más, y ahora es **al General solo van las
+alertas de escalamiento**. Lo que manda un paciente va mudo al tema de su paciente, o a
+ninguna parte si no hay tema. Ni el archivo, ni su lectura clínica, ni su transcripción, ni un
+aviso de que llegaron.
+
+### El destino único, y los tres caminos que lo rompían
+
+`ingesta.procesar_mensaje` hacía `destino = tema or tema_general`. Tres caminos —los tres con
+prueba en verde— llevaban a ese `or`:
+
+```
+el número no tiene hilo todavía      ->  el archivo, al General
+`HiloInvalido` (alguien borró el tema) ->  se olvida la fila y se REINTENTA contra el General
+el tope de 5 s de `_tema_del_archivo`  ->  el archivo, al General
+```
+
+Y en los tres salía **sonando**, porque `silencioso=bool(tema) and not en_relevo` es `False`
+cuando no hay tema. Cada uno convertía un problema de infraestructura en el mensaje de un
+paciente vibrando en el teléfono de todos los doctores.
+
+El caso que lo puso encima de la mesa, conversación `1a5cdb48` sobre +57319…2471:
+
+```
+22/09 18:21:09   un doctor pulsa «Hablar yo con el paciente»
+22/09 18:21:11   `relevo.activar` no consigue rehacer el hilo -> cierra con `tema_perdido`
+                 y la fila de `temas_telegram` desaparece
+22/09 19:13:25   nota de voz del paciente -> General, con sonido
+```
+
+Hoy es `destino = tema`, y **`procesar_mensaje` ya no recibe `tema_general`**: esa ausencia es
+la regla y no una limpieza, porque el parámetro era la puerta por la que volvió tres veces.
+`leer_y_repartir` y `transcribir_y_repartir` cortan por su cuenta cuando `tema_id` es falso,
+y ese corte vive ahí y no en `canales`: **en `canales`, un `tema_id` falso SIGNIFICA el
+General** (su `if tema_id:`), que es lo que necesitan los avisos que sí van ahí.
+
+### La lápida: un hilo borrado no lo resucita el paciente
+
+`persistencia.olvidar_tema` era un `DELETE`. Recuperaba bien de lo que se pedía en su día
+—«que el siguiente archivo abra un hilo nuevo»— y borraba a la vez el dato que distingue dos
+situaciones que no son la misma:
+
+| | significaba | significa |
+|---|---|---|
+| sin fila | nunca tuvo hilo **o** se lo borraron | nunca tuvo hilo |
+| fila con `perdido_en` | — | se lo borraron (migración 030) |
+
+`tema_del_paciente` filtra por `perdido_en IS NULL`, así que para todo el que lee un hilo una
+lápida es indistinguible de no tener ninguno —y tiene que serlo: depositar en un `topic_id`
+muerto es un `HiloInvalido` garantizado—. Quien necesita la diferencia la pide con
+`hilo_perdido`, y hoy solo la necesita uno: `lectura.asegurar_tema`.
+
+De ahí salen las dos conductas, y la segunda es la que **no** cambió:
+
+```
+ingesta  ->  asegurar_tema(rehacer_si_lo_borraron=False)
+             hilo con lápida  -> None, no se toca Telegram
+             nunca tuvo hilo  -> se le CREA. El primer archivo sigue estrenando expediente.
+
+rescatar_hilo (dentro de un escalamiento)  ->  asegurar_tema(...) con el default
+             rehace el hilo pase lo que pase, o borrar un tema dejaría al paciente sin
+             expediente para siempre
+```
+
+`guardar_tema` levanta la lápida (`perdido_en = NULL`). Sin eso, un tema recién creado
+quedaría vivo en Telegram y muerto en la base. `/clearstate` sí borra la fila entera, y es
+correcto: resetear a primer contacto ES devolver el número a «nunca tuvo hilo».
+
+### Lo que se fue, y lo que cuesta
+
+`_avisar_de_la_tanda` —«📎 fulano mandó archivos — están en su tema», con el botón de tomar la
+conversación, una vez cada 24 h— se borró entero, junto con `_primer_archivo_de_la_tanda` y
+`VENTANA_AVISO_ARCHIVO_HORAS`. Era el único timbrazo del General que no venía de un
+escalamiento, y por eso el único que le pasaba por encima al gesto del doctor de cerrar el
+hilo. Con él se fue también la rama `porque_no_se_entendio`, que es la que el no negociable 29
+puso para que un audio ininteligible dijera «hay que OÍRLA».
+
+**El precio, dicho a sabiendas y aceptado por MaxiCare:** un archivo que llega sin hilo no lo
+ve nadie en el momento, y si Daniela resuelve sola y nunca escala, nadie lo ve nunca. Lo que
+lo hace tolerable son dos cosas: un archivo clínico suele hacer escalar a Daniela por su
+cuenta (`archivo_recibido`), y el volcado del escalamiento lo cuenta.
+
+`lectura.pendientes_legibles` es ese volcado, y ahora baja tres formas de línea —lo escrito,
+lo dicho (marcado como transcripción, nunca haciéndose pasar por lo que el paciente escribió)
+y la CONSTANCIA de cada archivo con su hora—. `_textos_sin_archivar` dejó de filtrar por
+`texto IS NOT NULL` para eso. **La constancia no es el archivo**: los bytes no vuelven, porque
+el enlace de Meta caduca y aquí no se recanjea nada.
 
 **Esto INVIERTE una columna, y es la trampa de esta sección.** La migración 004 escribió que
 `telegram_message_id` NULL con `fallo` NULL significa «entró y no llegó a nadie» — una

@@ -241,6 +241,14 @@ async def transcribir_y_repartir(
     `silencioso` lo fija quien llama y vale lo mismo que valió para el audio: la
     transcripción acompaña al archivo y suena exactamente donde sonó él. Ver NOTA DEL
     SILENCIO en `canales`.
+
+    **`tema_id=None` significa «no hay dónde depositar», NUNCA «al General».** Misma trampa
+    y misma razón que en `lectura.leer_y_repartir`: `canales.enviar_mensaje` resuelve un
+    `tema_id` falso como el tema General, así que pasarlo tal cual mandaría al escritorio
+    común de los doctores lo que dijo un paciente cuyo hilo no existe. El texto se devuelve
+    igual: **es el mensaje del paciente**, y el turno lo necesita aunque el doctor no vaya a
+    leerlo. La constancia de que hubo un audio la vuelca el próximo escalamiento
+    (`lectura.pendientes_legibles`), que la saca de la columna `transcripcion` de la 027.
     """
     texto = await transcribir(
         archivo,
@@ -250,6 +258,10 @@ async def transcribir_y_repartir(
         telefono=telefono,
         id_conversacion=id_conversacion,
     )
+
+    if not tema_id:
+        log.info("la transcripción no tiene hilo donde caer; no va al General")
+        return texto
 
     aviso = (
         formatear_para_el_doctor(texto)
