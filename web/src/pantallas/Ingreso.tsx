@@ -54,9 +54,9 @@ export default function Ingreso({ alEntrar }: { alEntrar: (s: Sesion) => void })
     enfocado === campo ? '#7C3AED' : error ? 'rgba(248,113,113,0.45)' : 'rgba(196,181,253,0.12)'
 
   return (
-    <div className="relative min-h-screen flex flex-col" style={{ fontFamily: SP }}>
+    <div className="relative min-h-dvh flex flex-col" style={{ fontFamily: SP }}>
       <FondoEspacial />
-      <header className="relative z-10 px-8 pt-7">
+      <header className="relative z-10 px-4 sm:px-8 pt-7">
         <LogoSinPiloto scale={1.3} />
       </header>
 
@@ -223,7 +223,7 @@ export default function Ingreso({ alEntrar }: { alEntrar: (s: Sesion) => void })
         </div>
       </main>
 
-      <footer className="relative z-10 text-center px-8 pb-7">
+      <footer className="relative z-10 text-center px-4 sm:px-8 pb-7">
         <p className="text-[11px]" style={{ color: 'rgba(161,158,171,0.3)', fontFamily: SP }}>
           © 2026 SinPiloto Technologies · Todos los derechos reservados
         </p>

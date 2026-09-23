@@ -14,7 +14,9 @@ import {
   telefonoLegible,
   TituloDePanel,
   Vacio,
+  Volver,
 } from '@/componentes/Panel'
+import { ANCHO_DOS_PANELES, usarEsAngosto } from '@/medidas'
 
 /* «Sin resolver»: lo que Daniela no pudo resolver en los últimos 30 días, agrupado por huella.
  *
@@ -433,6 +435,10 @@ export default function SinResolver({ alCaducarSesion, alAbrirConversacion }: Pr
   const [cargando, setCargando] = useState(true)
   const [error, setError] = useState('')
   const [seleccion, setSeleccion] = useState<string | null>(null)
+  /* Por debajo de `ANCHO_DOS_PANELES` la pantalla ensena UN panel: la lista, o el
+     detalle con su boton de volver. Es la unica decision responsive que no puede ser
+     una clase de CSS, porque depende de si hay algo seleccionado. */
+  const unaColumna = usarEsAngosto(ANCHO_DOS_PANELES)
   const [busqueda, setBusqueda] = useState('')
   const [filtro, setFiltro] = useState<Filtro>('todos')
 
@@ -472,6 +478,7 @@ export default function SinResolver({ alCaducarSesion, alAbrirConversacion }: Pr
   return (
     <MarcoDeDosPaneles etiqueta="Sin resolver">
       {/* ------------------------------------------------------------------- La lista */}
+      {unaColumna && elegido ? null : (
       <Panel etiqueta="Listado de casos sin resolver" peso="1 1 320px">
         <CabeceraDePanel>
           <div className="flex items-baseline justify-between gap-3">
@@ -549,15 +556,30 @@ export default function SinResolver({ alCaducarSesion, alAbrirConversacion }: Pr
           </ul>
         )}
       </Panel>
+      )}
 
       {/* ------------------------------------------------------------------ El detalle */}
+      {/* En una columna no se pinta el hueco de «selecciona un caso»: la lista ya ocupa la
+          pantalla, y un panel que pide elegir debajo de lo que hay que elegir es ruido. */}
+      {unaColumna && !elegido ? null : (
       <Panel etiqueta="Detalle del caso" peso="2 1 380px">
         {!elegido ? (
           <Vacio>Selecciona un caso para ver qué pasó y qué se recomienda.</Vacio>
         ) : (
-          <Detalle caso={elegido} esAdmin={esAdmin} alAbrirConversacion={alAbrirConversacion} />
+          <>
+            {/* La salida del detalle cuando solo cabe un panel. Se esconde sola en
+                escritorio, donde la lista sigue estando al lado. */}
+            <div
+              className="flex shrink-0 lg:hidden"
+              style={{ padding: '12px 14px', borderBottom: '1px solid #ECE8F4' }}
+            >
+              <Volver alPulsar={() => setSeleccion(null)} que="Casos" />
+            </div>
+            <Detalle caso={elegido} esAdmin={esAdmin} alAbrirConversacion={alAbrirConversacion} />
+          </>
         )}
       </Panel>
+      )}
     </MarcoDeDosPaneles>
   )
 }

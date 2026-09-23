@@ -1221,9 +1221,9 @@ export default function Tratamientos({
 
   return (
     <div className="flex-1 flex flex-col min-w-0 overflow-hidden" style={{ fontFamily: SP, backgroundColor: '#F9FAFB' }}>
-      <header className="shrink-0 px-8 py-4 border-b" style={{ backgroundColor: '#FFFFFF', borderColor: '#E5E7EB' }}>
-        <div className="flex items-start justify-between gap-4">
-          <div>
+      <header className="shrink-0 px-4 sm:px-8 py-4 border-b" style={{ backgroundColor: '#FFFFFF', borderColor: '#E5E7EB' }}>
+        <div className="flex flex-wrap items-start justify-between gap-3 sm:gap-4">
+          <div className="min-w-0">
             <h1 className="text-lg font-bold" style={{ color: '#111827' }}>
               Tratamientos
             </h1>
@@ -1234,7 +1234,10 @@ export default function Tratamientos({
             </p>
           </div>
 
-          <div className="flex items-center gap-2">
+          {/* `flex-wrap`: «Ver bitácora» y «Nuevo tratamiento» miden 204 px juntos y a 320 px
+              se salían 30 por la derecha. Cada botón conserva su tamaño; lo que cambia es que
+              pueden caer en dos filas. Medido con Playwright. */}
+          <div className="flex min-w-0 flex-wrap items-center gap-2">
             <button
               type="button"
               onClick={() => setVerBitacora((v) => !v)}
@@ -1252,7 +1255,7 @@ export default function Tratamientos({
           tabla en cada turno, sin despliegue de por medio.
         </p>
 
-        <div className="flex gap-1 mt-3">
+        <div className="flex flex-wrap gap-1 mt-3">
           {([
             ['tratamientos', `Tratamientos (${tratamientos.length})`],
             ['clinica', `La clínica (${deLaClinica.length})`],
@@ -1275,7 +1278,7 @@ export default function Tratamientos({
         </div>
       </header>
 
-      <div className="flex-1 overflow-y-auto px-8 py-6">
+      <div className="flex-1 overflow-y-auto px-4 sm:px-8 py-6">
         <div className="max-w-4xl mx-auto flex flex-col gap-4">
           {error !== null && (
             <div role="alert" className="rounded-xl px-4 py-3" style={{ backgroundColor: '#FEF2F2', border: '1px solid #FECACA' }}>

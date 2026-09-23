@@ -31,7 +31,9 @@ import {
   telefonoLegible,
   TituloDePanel,
   Vacio,
+  Volver,
 } from '@/componentes/Panel'
+import { ANCHO_DOS_PANELES, usarEsAngosto } from '@/medidas'
 
 /* La pantalla de Conversaciones: la lista de personas a la izquierda y su hilo completo a la
  * derecha, refrescándose sola.
@@ -612,8 +614,11 @@ function PieDelHilo({
           ) : null}
         </>
       ) : (
-        <div className="flex flex-wrap items-center gap-3" style={{ padding: '14px 20px' }}>
-          <span className="min-w-0 flex-1" style={{ fontFamily: SG, fontSize: '12.5px', color: '#6E6880' }}>
+        <div className="flex flex-wrap items-center gap-3" style={{ padding: '14px 16px' }}>
+          {/* `basis-full` hasta `xl`: con el botón al lado la frase se quedaba con 120 px y
+              salía en cuatro líneas de tres palabras, y no solo en un móvil -- también en el
+              panel de detalle de una tableta en horizontal. Mismo criterio que la cabecera. */}
+          <span className="min-w-0 basis-full xl:flex-1 xl:basis-0" style={{ fontFamily: SG, fontSize: '12.5px', color: '#6E6880' }}>
             {/* Tomarla fuera de la ventana de 24 h deja el estado peligroso de la regla del
                 relevo: Daniela callada y nadie pudiendo hablarle. No se prohíbe --el
                 paciente puede escribir en cualquier momento y entonces sí se le contesta--
@@ -1033,6 +1038,10 @@ export default function Conversaciones({
   const [lista, setLista] = useState<ResumenConversacion[]>([])
   const [hilo, setHilo] = useState<HiloDeConversacion | null>(null)
   const [seleccion, setSeleccion] = useState<string | null>(null)
+  /* Por debajo de `ANCHO_DOS_PANELES` la pantalla ensena UN panel: la lista, o el
+     detalle con su boton de volver. Es la unica decision responsive que no puede ser
+     una clase de CSS, porque depende de si hay algo seleccionado. */
+  const unaColumna = usarEsAngosto(ANCHO_DOS_PANELES)
   const [busqueda, setBusqueda] = useState('')
   const [filtro, setFiltro] = useState<Filtro>('todas')
   const [cargando, setCargando] = useState(true)
@@ -1211,6 +1220,7 @@ export default function Conversaciones({
     <>
       <MarcoDeDosPaneles etiqueta="Conversaciones">
         {/* ------------------------------------------------------------------ La lista */}
+        {unaColumna && seleccion ? null : (
         <Panel etiqueta="Listado de conversaciones" peso="1 1 320px">
           <CabeceraDePanel>
             <div className="flex items-baseline justify-between gap-3">
@@ -1298,20 +1308,29 @@ export default function Conversaciones({
             </ul>
           )}
         </Panel>
+        )}
 
         {/* -------------------------------------------------------------------- El hilo */}
+        {/* En una columna, el hueco «selecciona una conversación» no se pinta: ya está la
+            lista entera ocupando la pantalla, y un panel que dice «elige algo» debajo de la
+            cosa que hay que elegir es ruido. */}
+        {unaColumna && !seleccion ? null : (
         <Panel etiqueta="Detalle de la conversación" peso="2 1 380px">
           {!seleccion || !elegida ? (
             <Vacio>Selecciona una conversación para ver el historial.</Vacio>
           ) : (
             <div className="flex min-h-0 flex-1 flex-col">
               <div
-                className="flex flex-wrap items-center gap-3"
-                style={{ padding: '16px 20px', borderBottom: '1px solid #ECE8F4' }}
+                className="flex flex-wrap items-center gap-2 sm:gap-3"
+                style={{ padding: '14px 16px', borderBottom: '1px solid #ECE8F4' }}
               >
+                {/* La salida. Sin esto, abrir una conversación en un móvil es un camino sin
+                    retorno: el hilo ocupa la pantalla entera y la lista no está en ninguna
+                    parte. Se esconde solo en escritorio, donde la lista sigue al lado. */}
+                <Volver alPulsar={() => setSeleccion(null)} que="Lista" />
                 <span
                   aria-hidden
-                  className="flex items-center justify-center"
+                  className="hidden items-center justify-center sm:flex"
                   style={{ width: '40px', height: '40px', flex: 'none', backgroundColor: '#EDE9FE', color: '#4C1D95' }}
                 >
                   <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="square">
@@ -1326,25 +1345,37 @@ export default function Conversaciones({
                   >
                     {elegida.nombre ?? telefonoLegible(elegida.telefono)}
                   </span>
-                  <span style={{ fontFamily: MONO, fontSize: '11.5px', color: '#4C1D95' }}>
+                  {/* `whitespace-nowrap`: en un móvil de 360 px el número se partía en TRES
+                      líneas («+57 321 / 497 / 3105») y empujaba el nombre a «cano…». Un
+                      teléfono partido no se lee ni se dicta, que es justo para lo que está. */}
+                  <span className="whitespace-nowrap" style={{ fontFamily: MONO, fontSize: '11.5px', color: '#4C1D95' }}>
                     {telefonoLegible(elegida.telefono)}
                   </span>
                 </span>
-                <Insignia estado={elegida.estado} />
-                {/* Exportar UNA conversación lo puede hacer cualquiera que ya la esté
-                    viendo: el archivo no enseña nada que no estuviera en pantalla. Borrar es
-                    de admin, y es lo único de aquí que destruye algo. */}
-                <AccionDeCabecera
-                  alPulsar={() => void exportar({ telefono: elegida.telefono })}
-                  ocupado={exportando}
-                >
-                  {exportando ? 'Preparando…' : 'Exportar'}
-                </AccionDeCabecera>
-                {soyAdmin ? (
-                  <AccionDeCabecera peligro alPulsar={() => setPorBorrar(elegida.telefono)}>
-                    Borrar
+                {/* Los tres controles en su propio bloque, ocupando la fila entera hasta que
+                    de verdad quepan al lado del nombre. Sueltos entre los hermanos competían
+                    con él por el ancho y la cabecera salía en cuatro filas con todo estrujado.
+                    El corte es `xl` y no `sm`, y la diferencia se vio en una captura: lo que
+                    manda es el ancho del PANEL, que es dos tercios de lo que sobra tras el
+                    menú, así que a 1024 px de ventana este panel mide ~400 y el nombre salía
+                    como «canom…». Desde 1280 hay sitio y vuelven a la derecha, como siempre. */}
+                <span className="flex w-full flex-wrap items-center gap-2 xl:w-auto">
+                  <Insignia estado={elegida.estado} />
+                  {/* Exportar UNA conversación lo puede hacer cualquiera que ya la esté
+                      viendo: el archivo no enseña nada que no estuviera en pantalla. Borrar
+                      es de admin, y es lo único de aquí que destruye algo. */}
+                  <AccionDeCabecera
+                    alPulsar={() => void exportar({ telefono: elegida.telefono })}
+                    ocupado={exportando}
+                  >
+                    {exportando ? 'Preparando…' : 'Exportar'}
                   </AccionDeCabecera>
-                ) : null}
+                  {soyAdmin ? (
+                    <AccionDeCabecera peligro alPulsar={() => setPorBorrar(elegida.telefono)}>
+                      Borrar
+                    </AccionDeCabecera>
+                  ) : null}
+                </span>
               </div>
 
               <div
@@ -1419,6 +1450,7 @@ export default function Conversaciones({
             </div>
           )}
         </Panel>
+        )}
       </MarcoDeDosPaneles>
 
       {porBorrar ? (

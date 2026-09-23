@@ -258,6 +258,67 @@ uv run uvicorn maxicare_daniela.runtime:app --port 8080
   vez de como una pestaña en blanco con un JSON dentro. El `URL.revokeObjectURL` del final no
   sobra: sin él, exportar treinta veces en una tarde deja treinta copias en el navegador.
 
+## Responsive — el panel entero no lo era, y ahora hay dos números que mandan
+
+Hasta el 23/09/2026 el panel tenía **una sola** clase responsive en todo `src/` (un `md:` en
+`Panel.tsx`). El `<meta viewport>` estaba puesto desde el principio, así que no era eso: era
+que el diseño venía de un archivo de Figma pensado para escritorio y nadie lo había bajado.
+
+Los dos anchos viven en `src/medidas.ts` y en ningún otro sitio, porque cada uno tiene que
+moverse a la vez en la clase de Tailwind y en el hook. Con el número escrito en seis sitios se
+mueve uno y la pantalla queda con el menú de móvil y el contenido de escritorio a la vez.
+
+| | qué cambia | por qué ahí |
+|---|---|---|
+| `ANCHO_MENU` = 768 (`md`) | el menú pasa a ser un cajón | con `width: clamp(230px,18vw,272px)` fijo, un móvil de 375 px dejaba 145 de contenido |
+| `ANCHO_DOS_PANELES` = 1024 (`lg`) | Conversaciones y «Sin resolver» enseñan UN panel | los dos paneles miden 320+380+hueco+margen ≈ 768: a 800 «caben» y no se pueden usar |
+
+**Casi todo lo responsive son clases, no el hook.** Una media query en CSS no re-renderiza
+nada y no se puede desincronizar. `usarEsAngosto` existe solo para las dos decisiones de
+*qué se pinta*: el cajón y la elección entre lista y detalle.
+
+### Las tres cosas que estaban rotas de verdad
+
+1. **El detalle desaparecía en móvil, no se cortaba.** `MarcoDeDosPaneles` tenía `flex-wrap`
+   con el comentario «por debajo de unos 700 px los dos paneles se apilan solos». Se apilaban,
+   y el contenedor es `h-full overflow-hidden` con `maxHeight: 100%` en cada panel: dos filas
+   piden el 200 % de una caja que no hace scroll. En un móvil, «Conversaciones» enseñaba la
+   lista y **ni rastro del hilo**, sin barra que bajara. Se quitó el `flex-wrap`; ahora las dos
+   pantallas eligen lista **o** detalle, con un `Volver` que solo existe por debajo de `lg`.
+2. **El menú se comía la pantalla.** Cajón `fixed` con velo, hamburguesa en una barra propia de
+   `App.tsx` --y no una por pantalla--, cierre al navegar, y `inert` cuando está fuera: sin eso
+   el tabulador recorre nueve enlaces invisibles.
+3. **`h-screen` es `100vh`, y en un móvil eso mide más que lo que se ve.** Mientras la barra del
+   navegador está a la vista, lo anclado abajo --el campo para escribirle al paciente-- cae
+   fuera. Ahora es `h-dvh` / `min-h-dvh`. Un viewport fijo **no lo caza**, así que no lo
+   encontró la auditoría: se cambió por conocido.
+
+### El corte de una cabecera lo decide el ancho del PANEL, no el de la ventana
+
+La cabecera del hilo usa `xl:` y no `sm:`, y la diferencia se vio en una captura. El panel de
+detalle son dos tercios de lo que sobra tras el menú: a 1024 px de ventana mide ~400, y con las
+acciones en la misma fila el nombre salía como «canom…». A partir de 1280 hay sitio. Lo mismo
+en el pie. Si algún día se quiere hacer bien del todo, esto es una *container query*.
+
+### Cómo se comprobó, y qué NO comprueba la suite
+
+**No hay ni una prueba de frontend en el proyecto**, así que esto se midió con un script de
+Playwright contra el Chrome instalado (`channel: 'chrome'`, sin bajar navegador). Recorre seis
+anchos --320, 360, 740×360 horizontal, 768, 1024 y 1440-- por siete pantallas, más el hilo
+abierto, el cajón, el detalle de un caso y el modal, y comprueba tres cosas que no necesitan
+ojos: que la página no tenga scroll horizontal, que ningún elemento se salga del ancho (con su
+selector y cuántos píxeles sobra) y que ningún control mida menos de 32 px de alto. Encontró
+tres desbordes que no se veían leyendo el código --el selector de fecha de Agenda, los botones
+de Tratamientos a 320 y el teléfono partido en tres líneas-- y todos estaban en contenedores
+`flex` sin `flex-wrap`.
+
+**Esperar por reloj no sirve**: Neon está en otro continente y con 2,6 s las capturas salían
+con el spinner puesto, o sea auditando una pantalla vacía. El script espera a que el texto
+«Cargando…» desaparezca.
+
+El script no está versionado. Si hay que repetirlo, son ~80 líneas y lo importante es lo de
+arriba: los seis anchos, las tres comprobaciones y la espera por contenido.
+
 ## Cambiar la propia contraseña — lo que hace y lo que NO
 
 `POST /api/cambiar-contrasena` y el modal de `componentes/CambiarContrasena.tsx`, que se abre

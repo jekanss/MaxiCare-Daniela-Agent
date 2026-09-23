@@ -40,6 +40,9 @@ export default function App() {
    * Se consume UNA vez. Sin limpiarlo, volver a Conversaciones desde el menu media hora
    * despues reabriria aquella conversacion sola, sin que nadie lo hubiera pedido. */
   const [saltarA, setSaltarA] = useState<string | null>(null)
+  /* El cajón del menú, que solo existe por debajo de `ANCHO_MENU`. Arriba de ese ancho el
+   * menú está siempre puesto y este estado no se mira. */
+  const [menuAbierto, setMenuAbierto] = useState(false)
   /* El modal de cambiar la propia contraseña. Vive aquí y no dentro del `Sidebar` porque se
    * dibuja sobre TODO el panel --es `fixed inset-0`-- y porque puede toparse con un 401, que
    * en este archivo es una línea (`setSesion(null)`) y allí sería un callback más. */
@@ -63,6 +66,9 @@ export default function App() {
   function ir(id: SeccionId) {
     window.location.hash = `#/${id}`
     setActiva(id)
+    // Navegar cierra el cajón. En escritorio no hay cajón y esto no hace nada; en un móvil,
+    // no cerrarlo deja el menú tapando la pantalla a la que se acaba de ir.
+    setMenuAbierto(false)
   }
 
   async function cerrarSesion() {
@@ -79,7 +85,7 @@ export default function App() {
     // palabra (ver `componentes/Estado.tsx`). Para quien mira, eso no es «cargando»: es
     // «no funciona».
     return (
-      <div className="flex" style={{ minHeight: '100vh' }}>
+      <div className="flex" style={{ minHeight: '100dvh' }}>
         <CargandoPantalla oscuro que="MaxiCare · Daniela" detalle="Comprobando tu sesión…" />
       </div>
     )
@@ -90,14 +96,30 @@ export default function App() {
   const seccion = TODAS.find((s) => s.id === activa) ?? TODAS[0]
 
   return (
-    <div className="flex h-screen overflow-hidden" style={{ backgroundColor: '#F9FAFB' }}>
+    // `h-dvh` y no `h-screen`: `100vh` en un movil es la altura CON la barra del navegador
+    // escondida, asi que mientras se ve la barra el panel mide mas que el hueco visible y lo
+    // que queda debajo --el campo para escribirle al paciente, que esta anclado abajo-- cae
+    // fuera de la pantalla. `100dvh` sigue al hueco de verdad. No cambia nada en escritorio.
+    <div className="flex h-dvh overflow-hidden" style={{ backgroundColor: '#F9FAFB' }}>
       <Sidebar
         activa={activa}
         ir={ir}
         sesion={sesion}
         alSalir={cerrarSesion}
         alCambiarClave={() => setCambiandoClave(true)}
+        abierto={menuAbierto}
+        alCerrar={() => setMenuAbierto(false)}
       />
+      {/* El velo del cajón. `md:hidden` y solo cuando está abierto: en escritorio no existe.
+          Tocar fuera cierra, que es lo que todo el mundo intenta primero. */}
+      {menuAbierto ? (
+        <div
+          aria-hidden="true"
+          onClick={() => setMenuAbierto(false)}
+          className="fixed inset-0 z-40 md:hidden"
+          style={{ backgroundColor: 'rgba(11, 9, 18, 0.5)' }}
+        />
+      ) : null}
       {cambiandoClave ? (
         <CambiarContrasena
           nombre={sesion.nombre}
@@ -108,6 +130,33 @@ export default function App() {
           }}
         />
       ) : null}
+      {/* La columna del contenido. Existe por el cajón: en móvil hace falta una barra encima
+          de la pantalla con el botón del menú, y ponerla dentro de cada una de las siete
+          pantallas sería la misma barra escrita siete veces. En escritorio la barra no se
+          pinta y esta columna es transparente: su hijo sigue siendo `flex-1`, como antes. */}
+      <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
+      <header
+        className="flex shrink-0 items-center gap-3 px-3 md:hidden"
+        style={{ backgroundColor: '#0B0912', color: '#EDEAF4', minHeight: 52 }}
+      >
+        <button
+          type="button"
+          onClick={() => setMenuAbierto(true)}
+          aria-label="Abrir el menú"
+          aria-expanded={menuAbierto}
+          className="flex shrink-0 items-center justify-center"
+          style={{ width: 38, height: 38, border: '1px solid rgba(255,255,255,0.16)', color: '#C4B5FD' }}
+        >
+          <svg aria-hidden width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="square">
+            <path d="M4 7h16M4 12h16M4 17h16" />
+          </svg>
+        </button>
+        {/* El nombre de la sección donde estás. En escritorio lo dice el menú, que siempre se
+            ve; con el cajón cerrado no lo diría nadie. */}
+        <span className="truncate" style={{ fontWeight: 600, fontSize: 15, letterSpacing: '-0.02em' }}>
+          {seccion.etiqueta}
+        </span>
+      </header>
       {activa === 'inicio' ? (
         // La portada. De solo lectura, como SinResolver: vuelve al ingreso por el mismo
         // camino si la sesión caduca a mitad de la mañana.
@@ -148,6 +197,7 @@ export default function App() {
       ) : (
         <PantallaPendiente seccion={seccion} />
       )}
+      </div>
     </div>
   )
 }

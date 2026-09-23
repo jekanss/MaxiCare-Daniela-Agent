@@ -351,13 +351,19 @@ function Enlace({ a, children }: { a: string; children: React.ReactNode }) {
   return (
     <a
       href={a}
-      className="whitespace-nowrap transition-colors hover:text-[#4C1D95]"
+      className="inline-flex items-center whitespace-nowrap transition-colors hover:text-[#4C1D95]"
       style={{
         fontFamily: MONO,
         fontSize: 10.5,
         letterSpacing: '0.14em',
         textTransform: 'uppercase',
         color: '#6D28D9',
+        // 16 px de texto son 16 px de blanco donde apuntar con el pulgar. Se le da alto sin
+        // moverlo: el `inline-flex` centra la palabra y el `-mx` devuelve el sangrado lateral,
+        // así que la fila se ve exactamente igual y el área que responde es el doble.
+        minHeight: 34,
+        padding: '0 6px',
+        margin: '0 -6px',
       }}
     >
       {children}

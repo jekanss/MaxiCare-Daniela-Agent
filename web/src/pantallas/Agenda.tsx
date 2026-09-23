@@ -121,7 +121,7 @@ function Cabecera({
   const hoy = hoyEnBogota()
   return (
     <header
-      className="shrink-0 flex items-center justify-between gap-6 px-8 py-4 border-b flex-wrap"
+      className="shrink-0 flex items-center justify-between gap-3 sm:gap-6 px-4 sm:px-8 py-3 sm:py-4 border-b flex-wrap"
       style={{ backgroundColor: '#FFFFFF', borderColor: '#E5E7EB' }}
     >
       <div className="min-w-0">
@@ -129,7 +129,12 @@ function Cabecera({
         <p className="text-sm truncate" style={{ color: '#6B7280' }}>{enPalabras(dia)}</p>
       </div>
 
-      <div className="flex items-center gap-2">
+      {/* `flex-wrap` y `min-w-0`: los cuatro controles miden 366 px juntos y la cabecera
+          envolvía el BLOQUE entero pero no lo que hay dentro, así que en un móvil de 360 el
+          selector de fecha se salía 22 px por la derecha (y 62 en uno de 320). Medido con
+          Playwright, no a ojo. Cada control conserva su tamaño; lo que cambia es que ahora
+          pueden caer en dos filas. */}
+      <div className="flex min-w-0 flex-wrap items-center gap-2">
         <button
           onClick={() => irA(sumarDias(dia, -1))}
           className="px-3 py-1.5 rounded-lg text-sm border hover:bg-gray-50 transition-colors"
@@ -488,7 +493,7 @@ export default function Agenda({ alCaducarSesion }: { alCaducarSesion: () => voi
     return (
       <div className="flex-1 flex flex-col min-w-0 overflow-hidden" style={marco}>
         <Cabecera dia={dia} irA={setDia} resumen={null} />
-        <div className="px-8 py-8">
+        <div className="px-4 sm:px-8 py-8">
           <Fallo mensaje={error} alReintentar={() => void recargar(dia)} className="max-w-2xl" />
         </div>
       </div>
@@ -517,7 +522,7 @@ export default function Agenda({ alCaducarSesion }: { alCaducarSesion: () => voi
           ruidoso, que es el barato de equivocarse. */}
       {datos && datos.calendario_disponible === false && (
         datos.motivo_sin_calendario === MOTIVO_FUERA_DE_VENTANA ? (
-          <div className="shrink-0 flex items-center gap-3 px-8 py-2.5 border-b" style={{ backgroundColor: '#F3F4F6', borderColor: '#E5E7EB' }}>
+          <div className="shrink-0 flex items-center gap-3 px-4 sm:px-8 py-2.5 border-b" style={{ backgroundColor: '#F3F4F6', borderColor: '#E5E7EB' }}>
             <span className="text-[10px] font-bold px-2 py-1 rounded uppercase tracking-wide shrink-0" style={{ backgroundColor: '#6B7280', color: '#FFFFFF' }}>
               Día antiguo
             </span>
@@ -528,7 +533,7 @@ export default function Agenda({ alCaducarSesion }: { alCaducarSesion: () => voi
             </p>
           </div>
         ) : (
-          <div className="shrink-0 flex items-center gap-3 px-8 py-2.5 border-b" style={{ backgroundColor: '#FEF2F2', borderColor: '#FECACA' }}>
+          <div className="shrink-0 flex items-center gap-3 px-4 sm:px-8 py-2.5 border-b" style={{ backgroundColor: '#FEF2F2', borderColor: '#FECACA' }}>
             <span className="text-[10px] font-bold px-2 py-1 rounded uppercase tracking-wide shrink-0" style={{ backgroundColor: '#DC2626', color: '#FFFFFF' }}>
               Sin calendario
             </span>
@@ -542,14 +547,14 @@ export default function Agenda({ alCaducarSesion }: { alCaducarSesion: () => voi
       )}
 
       {aviso && (
-        <div role="alert" className="shrink-0 flex items-center gap-3 px-8 py-2.5 border-b" style={{ backgroundColor: '#FEF2F2', borderColor: '#FECACA' }}>
+        <div role="alert" className="shrink-0 flex items-center gap-3 px-4 sm:px-8 py-2.5 border-b" style={{ backgroundColor: '#FEF2F2', borderColor: '#FECACA' }}>
           <p className="text-xs flex-1" style={{ color: '#991B1B' }}>{aviso}</p>
           <button className="text-sm shrink-0" style={{ color: '#9CA3AF' }} onClick={() => setAviso('')} aria-label="Ocultar aviso">✕</button>
         </div>
       )}
 
       {datos && datos.correcciones.length > 0 && (
-        <div className="shrink-0 px-8 py-3 border-b" style={{ backgroundColor: '#F5F3FF', borderColor: '#DDD6FE' }}>
+        <div className="shrink-0 px-4 sm:px-8 py-3 border-b" style={{ backgroundColor: '#F5F3FF', borderColor: '#DDD6FE' }}>
           <p className="text-xs font-bold uppercase tracking-wide mb-1" style={{ color: '#5B21B6' }}>
             Cambios que venían de Google Calendar
           </p>
@@ -564,7 +569,7 @@ export default function Agenda({ alCaducarSesion }: { alCaducarSesion: () => voi
       )}
 
       {datos && datos.sin_marcar.length > 0 && (
-        <div className="shrink-0 px-8 py-3 border-b" style={{ backgroundColor: '#FFFBEB', borderColor: '#FCD34D' }}>
+        <div className="shrink-0 px-4 sm:px-8 py-3 border-b" style={{ backgroundColor: '#FFFBEB', borderColor: '#FCD34D' }}>
           <div className="flex items-center gap-4">
             <span className="text-lg">⚠️</span>
             <p className="text-sm font-semibold flex-1" style={{ color: '#92400E' }}>
@@ -635,7 +640,7 @@ export default function Agenda({ alCaducarSesion }: { alCaducarSesion: () => voi
 
       <div className="flex-1 overflow-y-auto">
         {citas.length === 0 && bloqueos.length === 0 && (
-          <p className="px-8 pt-6 text-sm" style={{ color: '#9CA3AF' }}>
+          <p className="px-4 sm:px-8 pt-6 text-sm" style={{ color: '#9CA3AF' }}>
             Nada agendado este día.
           </p>
         )}

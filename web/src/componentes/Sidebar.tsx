@@ -1,6 +1,7 @@
 import type { ReactNode } from 'react'
 import type { Sesion } from '@/api'
 import { PalabraSinPiloto, SimboloSinPiloto } from '@/componentes/Marca'
+import { ANCHO_MENU, usarEsAngosto } from '@/medidas'
 
 /* El menú, en oscuro, siguiendo `docs/diseno/panel-2026-09-22.dc.html` (líneas 40-135).
  *
@@ -266,23 +267,54 @@ export default function Sidebar({
   sesion,
   alSalir,
   alCambiarClave,
+  abierto,
+  alCerrar,
 }: {
   activa: SeccionId
   ir: (id: SeccionId) => void
   sesion: Sesion
   alSalir: () => void
   alCambiarClave: () => void
+  /** Solo se mira por debajo de `ANCHO_MENU`: arriba el menú está siempre puesto. */
+  abierto: boolean
+  alCerrar: () => void
 }) {
+  /* En un móvil el menú es un cajón, y el ancho va en la clase y no en el `style` por una
+     razón práctica: un `width` en línea le gana a cualquier clase de Tailwind, así que con el
+     `clamp` donde estaba no había forma de darle otro ancho al cajón.
+     `min(280px,82vw)` deja siempre a la vista un trozo del contenido de atrás, que es lo que
+     dice «esto se cierra» sin tener que explicarlo. */
+  const ancho = 'w-[min(280px,82vw)] md:w-[clamp(230px,18vw,272px)]'
+  const cajon = abierto ? 'translate-x-0' : '-translate-x-full'
+  const angosto = usarEsAngosto(ANCHO_MENU)
+
   return (
     <aside
-      className="flex flex-col h-screen sticky top-0 shrink-0 overflow-hidden"
+      className={`flex flex-col h-dvh shrink-0 overflow-hidden ${ancho} ${cajon}
+        fixed inset-y-0 left-0 z-50 transition-transform duration-200
+        md:static md:translate-x-0 md:transition-none`}
+      // Fuera de la pantalla no es solo invisible: sin esto, el tabulador y el lector de
+      // pantalla siguen recorriendo nueve enlaces que no se ven, y el primer TAB de la página
+      // se va a un menú cerrado. `inert` es atributo de verdad desde React 19.
+      inert={angosto && !abierto}
       style={{
-        width: 'clamp(230px, 18vw, 272px)',
         backgroundColor: '#0B0912',
         color: '#EDEAF4',
         fontFamily: SG,
       }}
     >
+      {/* Cerrar el cajón. Solo existe en móvil: en escritorio el menú no se cierra nunca. */}
+      <button
+        type="button"
+        onClick={alCerrar}
+        aria-label="Cerrar el menú"
+        className="absolute right-3 top-3 flex items-center justify-center md:hidden"
+        style={{ width: 36, height: 36, color: '#C4B5FD', border: '1px solid rgba(255,255,255,0.16)' }}
+      >
+        <svg aria-hidden width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="square">
+          <path d="M6 6l12 12M18 6L6 18" />
+        </svg>
+      </button>
       <div
         className="flex items-center gap-3 px-5 py-6"
         style={{ borderBottom: '1px solid rgba(255,255,255,0.1)' }}

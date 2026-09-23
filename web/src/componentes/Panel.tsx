@@ -18,8 +18,23 @@ export const MONO = "'JetBrains Mono', monospace"
 
 /** El marco de la pantalla entera: el fondo y la separación entre los dos paneles.
  *
- *  `flex-wrap` y no una rejilla de dos columnas: por debajo de unos 700 px los dos paneles
- *  se apilan solos, sin un `media query` que haya que mantener en dos sitios. */
+ *  ------------------------------------------------------------------------------------
+ *  Por qué NO hay `flex-wrap`, que es lo que había
+ *  ------------------------------------------------------------------------------------
+ *
+ *  Lo tuvo hasta el 23/09/2026, con este comentario: «por debajo de unos 700 px los dos
+ *  paneles se apilan solos, sin un media query que haya que mantener en dos sitios». Se
+ *  apilaban, sí, **y el segundo desaparecía**: este contenedor es `h-full overflow-hidden` y
+ *  cada `Panel` lleva `maxHeight: 100%`, así que dos filas piden el 200 % de una caja que no
+ *  hace scroll. En un móvil, «Conversaciones» enseñaba la lista y ni rastro del hilo -- no
+ *  cortado por abajo, invisible y sin barra que bajara.
+ *
+ *  Envolver eso en un `overflow-y-auto` lo habría hecho visible y seguiría siendo malo: una
+ *  lista de 320 px de alto encima de un hilo de chat, en una pantalla de 667 px. Lo que se
+ *  hace es lo que hace cualquier aplicación de mensajería -- lista O detalle, y un botón para
+ *  volver--, y eso no lo puede decidir este archivo porque no sabe qué hay seleccionado. Lo
+ *  deciden las dos pantallas con `usarEsAngosto(ANCHO_DOS_PANELES)`, y aquí solo queda que
+ *  UN hijo ocupe el ancho entero sin que nada se envuelva. */
 export function MarcoDeDosPaneles({ children, etiqueta }: {
   children: React.ReactNode
   /** Para el lector de pantalla: «Conversaciones», «Sin resolver». */
@@ -31,10 +46,44 @@ export function MarcoDeDosPaneles({ children, etiqueta }: {
       className="min-w-0 flex-1 overflow-hidden"
       style={{ backgroundColor: '#F7F6FA' }}
     >
-      <div className="flex h-full flex-wrap items-stretch gap-4 p-4 md:gap-5 md:p-6">
+      <div className="flex h-full items-stretch gap-4 p-3 sm:p-4 lg:gap-5 lg:p-6">
         {children}
       </div>
     </main>
+  )
+}
+
+/** «← Volver», la salida del detalle cuando la pantalla enseña un panel a la vez.
+ *
+ *  Sin esto, abrir una conversación en un móvil es un camino sin retorno: el detalle ocupa
+ *  todo y la lista no está en ninguna parte. El botón «atrás» del navegador tampoco sirve --
+ *  la selección no vive en el hash, y ponerla ahí obligaría a convertir el enrutado en un
+ *  router de verdad por un solo salto (la decisión está en `App.tsx`). */
+export function Volver({ alPulsar, que }: { alPulsar: () => void; que: string }) {
+  return (
+    <button
+      type="button"
+      onClick={alPulsar}
+      className="flex shrink-0 items-center gap-1.5 lg:hidden"
+      style={{
+        backgroundColor: '#FFFFFF',
+        border: '1px solid #DCD8E6',
+        color: '#4A4458',
+        fontFamily: MONO,
+        fontSize: '10.5px',
+        letterSpacing: '0.12em',
+        textTransform: 'uppercase',
+        padding: '0 12px',
+        // 40 px: se pulsa con el pulgar, como los `Chip` de la cabecera.
+        minHeight: '40px',
+        cursor: 'pointer',
+      }}
+    >
+      <svg aria-hidden width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="square">
+        <path d="M14 6l-6 6 6 6" />
+      </svg>
+      {que}
+    </button>
   )
 }
 
