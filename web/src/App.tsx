@@ -7,6 +7,7 @@ import Agenda from '@/pantallas/Agenda'
 import Pruebas from '@/pantallas/Pruebas'
 import Tratamientos from '@/pantallas/Tratamientos'
 import SinResolver from '@/pantallas/SinResolver'
+import Leads from '@/pantallas/Leads'
 import PantallaPendiente from '@/pantallas/Pendiente'
 import CambiarContrasena from '@/componentes/CambiarContrasena'
 import { CargandoPantalla } from '@/componentes/Estado'
@@ -188,6 +189,17 @@ export default function App() {
         // ingreso, y con sesion caducada a mitad de lectura vuelve a el desde aqui, igual
         // que Tratamientos.
         <SinResolver
+          alCaducarSesion={() => setSesion(null)}
+          alAbrirConversacion={(telefono) => {
+            setSaltarA(telefono)
+            ir('conversaciones')
+          }}
+        />
+      ) : activa === 'leads' ? (
+        // La cartera. De solo lectura, como SinResolver, y con el mismo salto: su única
+        // acción es abrir a esa persona en Conversaciones, que es la pantalla que sabe
+        // escribir --y la que comprueba la ventana de 24 h y el rol antes de dejar hacerlo--.
+        <Leads
           alCaducarSesion={() => setSesion(null)}
           alAbrirConversacion={(telefono) => {
             setSaltarA(telefono)

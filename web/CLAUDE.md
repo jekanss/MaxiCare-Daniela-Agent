@@ -284,7 +284,7 @@ mueve uno y la pantalla queda con el menú de móvil y el contenido de escritori
 | | qué cambia | por qué ahí |
 |---|---|---|
 | `ANCHO_MENU` = 768 (`md`) | el menú pasa a ser un cajón | con `width: clamp(230px,18vw,272px)` fijo, un móvil de 375 px dejaba 145 de contenido |
-| `ANCHO_DOS_PANELES` = 1024 (`lg`) | Conversaciones, «Sin resolver» y Tratamientos enseñan UN panel | los dos paneles miden 320+380+hueco+margen ≈ 768: a 800 «caben» y no se pueden usar |
+| `ANCHO_DOS_PANELES` = 1024 (`lg`) | Conversaciones, «Sin resolver», Tratamientos y Leads enseñan UN panel | los dos paneles miden 320+380+hueco+margen ≈ 768: a 800 «caben» y no se pueden usar |
 
 **Casi todo lo responsive son clases, no el hook.** Una media query en CSS no re-renderiza
 nada y no se puede desincronizar. `usarEsAngosto` existe solo para las dos decisiones de
@@ -384,6 +384,61 @@ backend ni sesión es un `auditoria.html` con un `src/auditoria.tsx` que dobla `
 con datos falsos; **no se versiona**, se escribe en diez minutos y se borra. Lo que la suite
 de Python sigue sin cubrir es todo esto: la única prueba que mira este archivo es la del
 `GENERAL`.
+
+## Leads — la pantalla que existía en la base y no en el panel (23/09/2026)
+
+Era un cartel de «todavía no construida». Su motivo para esperar estaba escrito —«hacen falta
+conversaciones reales acumuladas; con la base vacía, la pantalla más útil del producto se ve
+idéntica a una rota»— y había dejado de valer: `estado_oportunidad` tenía dieciséis personas
+con su estado comercial, su barrera y su tratamiento de interés. **Daniela reescribe esa tabla
+en CADA turno y ninguna pantalla la leía**: el dato existía y solo se leía a sí mismo.
+
+Es el layout de `componentes/Panel.tsx`, el cuarto que lo usa. Lo nuevo es `panel.listar_leads`
+y `GET /api/leads`.
+
+- **De las tres columnas que prometía el cartel se construyeron dos.** La tercera —«de qué
+  anuncio llegaron»— **no existe**: el bloque `referral` que Meta manda en los click-to-WhatsApp
+  no se lee en la ingesta, así que llega al servidor y se tira. El precedente de la fase 8 con
+  el `origen` del paciente manda —«no se fabrica el dato ni se pone `PENDIENTE` en una pantalla
+  de cara al usuario: sale»—, así que no hay columna; lo que hay es **una línea al pie del
+  detalle que lo dice**. Callarlo del todo haría que la ausencia se leyera como un olvido.
+- **«Sin estado ni actividad programada» era la frase más cara del proyecto**: aparecía UNA vez
+  en todo el repositorio, en el propio cartel, y nadie la definía. Aquí es `porAveriguar`: sin
+  tratamiento de interés **y** sin cita futura **y** sin seguimiento en cola. Las dos mitades
+  hacen falta —sin la primera entra quien ya se sabe que quiere ortodoncia, que es otro
+  trabajo; sin la segunda, quien ya tiene hora el martes—. Hoy deja 10 de 16.
+- **La pantalla no escribe nada, y eso no es una fase 1.** El estado lo pone el modelo —«no es
+  una temperatura de lead: es dónde está esta persona en su proceso»—, así que un desplegable
+  para cambiarlo prometería algo que el siguiente turno pisaría sin avisar. Y un botón de
+  «reactivar a esta persona» reintroduciría el disparo manual que la decisión D1 de la
+  reactivación descartó. Por eso `/api/leads` tampoco devuelve `puede_escribir` ni `es_admin`:
+  un booleano que no apaga ningún botón acaba pintando uno. Hay una prueba que lo fija.
+- **`con_barrera` + `barrera='ninguna'` se pinta en ROJO y aparte, como «Detenido».** No es una
+  objeción comercial: significa que la conversación se detuvo por algo que no es del paciente
+  —una avería—, y existe justo para que un fallo técnico no cuente como barrera. Pintarlo con
+  los demás frenados enseñaría averías como clientes dudando. Y por eso el chip dice
+  «Frenados», la misma palabra que su pastilla: con dos palabras para una idea, la clínica
+  aprende dos códigos.
+- **«Por teléfono» se aplica hasta el final, no solo al agrupar.** Esto lo cazó una prueba: el
+  estado colgaba de la conversación más reciente, y como se abre una nueva cada vez que la
+  anterior caduca a las 24 h, alguien que volvía a escribir aparecía «sin registrar» aunque el
+  sistema supiera desde ayer qué quería. El estado, los seguimientos y la cita salen ahora de
+  la PERSONA, que es lo que ya hacía `persistencia` para armar el contexto de Daniela.
+- **El tratamiento sale con la etiqueta que la clínica edita**, no con la clave:
+  `carillas_esteticas` es un identificador. El `NULLIF` de `no_identificado` va en el CTE y no
+  al final, porque esa clave SÍ es una fila de `tratamientos` y traducida saldría como un
+  tratamiento con nombre propio — lo contrario de lo que significa.
+- **La ventana es `persistencia.DIAS_DE_VENTANA_DE_CARTERA`, no un 30 escrito aquí.** Con un
+  número propio habría dos definiciones de «cartera» separándose en silencio.
+
+**Cómo se comprobó.** El mismo método: Playwright contra el Chrome instalado, seis anchos por
+ocho estados —lista, detalle con el nombre y la nota más largos, la avería, sin estado, con
+cita, dado de baja, un filtro puesto y la lista vacía—, 48 casos en verde, y las capturas
+revisadas a mano. Eso último cambió dos cosas que el script daba por buenas: el chip decía
+«Con barrera» mientras su pastilla decía «Frenado», y `listo_para_agendar` se explicaba con
+«es el grupo más barato de convertir que existe» —cierto, y jerga de marketing en la pantalla
+de una clínica—. Del lado de Python hay once pruebas nuevas en `tests/test_panel.py`, **nueve
+de ellas de Neon**: quien toque esta consulta corre `-m neon` o no se entera de nada.
 
 ## Cambiar la propia contraseña — lo que hace y lo que NO
 

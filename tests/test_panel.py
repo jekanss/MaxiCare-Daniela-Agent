@@ -2821,3 +2821,352 @@ def test_el_rango_se_mide_en_hora_de_BOGOTA_y_no_en_UTC():
 
     assert panel._dentro_del_rango(de_noche_en_bogota, "2026-09-21", "2026-09-21") is True
     assert panel._dentro_del_rango(de_noche_en_bogota, "2026-09-22", "2026-09-22") is False
+
+
+# ==========================================================================================
+# La pantalla de Leads
+# ==========================================================================================
+
+#: Un número que no existe fuera de estas pruebas. Los dos son de la misma «persona» para
+#: poder comprobar que varias conversaciones suyas dan UNA fila.
+_TEL_LEAD = "573001110001"
+_TEL_OTRO = "573001110002"
+
+
+def _sembrar_lead(
+    conn,
+    *,
+    telefono: str = _TEL_LEAD,
+    estado: str | None = "explorando",
+    barrera: str = "ninguna",
+    tratamiento: str | None = None,
+    notas: str | None = None,
+    nombre_perfil: str = "Quien Escribio",
+    hace_dias: int = 1,
+) -> str:
+    """Una conversación con su mensaje entrante y, si se pide, su estado de oportunidad.
+
+    El mensaje NO es opcional: `listar_leads` arranca en `mensajes_entrantes` porque la
+    pantalla promete «las personas que han ESCRITO», y una conversación sin mensajes es una
+    siembra de script, no una persona. Sembrarlo aquí es lo que hace que estas pruebas
+    recorran el mismo camino que la pantalla.
+    """
+    conversacion = persistencia.asegurar_conversacion(conn, telefono=telefono)
+    cuando = datetime.now(timezone.utc) - timedelta(days=hace_dias)
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO mensajes_entrantes (wamid, telefono, tipo, texto, nombre_perfil, "
+            "                                recibido_en, conversacion_id) "
+            "VALUES (%s, %s, 'text', 'hola', %s, %s, %s)",
+            (f"wamid.{uuid.uuid4()}", telefono, nombre_perfil, cuando, conversacion),
+        )
+        if estado is not None:
+            cur.execute(
+                "INSERT INTO estado_oportunidad "
+                "       (conversacion_id, estado, barrera, tratamiento, notas) "
+                "VALUES (%s, %s, %s, %s, %s) "
+                "ON CONFLICT (conversacion_id) DO UPDATE SET "
+                "       estado = EXCLUDED.estado, barrera = EXCLUDED.barrera, "
+                "       tratamiento = EXCLUDED.tratamiento, notas = EXCLUDED.notas",
+                (conversacion, estado, barrera, tratamiento, notas),
+            )
+    conn.commit()
+    return conversacion
+
+
+def _limpiar_leads(conn, *telefonos: str) -> None:
+    """El esquema `pruebas` persiste entre corridas: lo que siembra una prueba lo borra ella."""
+    for telefono in telefonos or (_TEL_LEAD, _TEL_OTRO):
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM mensajes_entrantes WHERE telefono = %s", (telefono,))
+            cur.execute("DELETE FROM citas WHERE telefono = %s", (telefono,))
+            cur.execute("DELETE FROM contactos WHERE telefono = %s", (telefono,))
+            cur.execute("DELETE FROM conversaciones WHERE telefono = %s", (telefono,))
+        conn.commit()
+
+
+def _lead(conn, telefono: str = _TEL_LEAD) -> dict | None:
+    ahora = datetime.now(ZONA_BOGOTA)
+    for fila in panel.listar_leads(conn, ahora=ahora):
+        if fila["telefono"] == telefono:
+            return fila
+    return None
+
+
+@pytest.mark.neon
+def test_un_lead_es_una_PERSONA_aunque_tenga_varias_conversaciones(conn):
+    """La unidad es el teléfono, y es la decisión que más se nota en la pantalla.
+
+    Una conversación caduca a las 24 h, así que alguien que lleva una semana preguntando son
+    varias filas en `conversaciones`. Sin agrupar, la clínica ve a la misma persona repetida
+    y cuenta cuatro leads donde hay uno. Con datos reales eran 18 conversaciones y 15
+    personas.
+    """
+    try:
+        _sembrar_lead(conn, estado="explorando")
+        # `asegurar_conversacion` SIEMPRE inserta, pese al nombre: esto crea una SEGUNDA.
+        _sembrar_lead(conn, estado="listo_para_agendar", tratamiento="valoracion")
+
+        filas = [f for f in panel.listar_leads(conn, ahora=datetime.now(ZONA_BOGOTA))
+                 if f["telefono"] == _TEL_LEAD]
+        assert len(filas) == 1
+        # Y la que gana es la MÁS RECIENTE, no una cualquiera: el estado de hace tres días no
+        # puede tapar el de hoy.
+        assert filas[0]["estado"] == "listo_para_agendar"
+    finally:
+        _limpiar_leads(conn)
+
+
+@pytest.mark.neon
+def test_sin_fila_de_oportunidad_el_estado_es_None_y_NO_explorando(conn):
+    """`None` no se colapsa con `'explorando'`, y esa distinción es el filtro principal.
+
+    La columna tiene DEFAULT 'explorando' para cuando se inserta; usarlo al leer convertiría
+    «nadie llegó a saber qué quería» en «está mirando», que es un hecho distinto y un trabajo
+    distinto. Son las personas que escribieron y de las que no quedó constancia de nada.
+    """
+    try:
+        _sembrar_lead(conn, estado=None)
+        fila = _lead(conn)
+        assert fila is not None
+        assert fila["estado"] is None
+        assert fila["barrera"] is None
+        assert fila["tratamiento"] is None
+    finally:
+        _limpiar_leads(conn)
+
+
+@pytest.mark.neon
+def test_no_identificado_no_se_pinta_como_tratamiento(conn):
+    """Es lo que el sistema escribe cuando NO sabe, y el no negociable 12 lo deja fuera.
+
+    Devolverlo tal cual haría que la pantalla dijera que esta persona quiere un tratamiento
+    llamado «no identificado», que es justo lo contrario de lo que ese valor significa. Sale
+    como `None`, y la pantalla dice «todavía no se sabe qué quiere» -- que es la verdad, y
+    además la mete en el grupo de «por averiguar», que es donde tiene que estar.
+    """
+    try:
+        _sembrar_lead(conn, tratamiento="no_identificado")
+        fila = _lead(conn)
+        assert fila is not None
+        assert fila["tratamiento"] is None
+    finally:
+        _limpiar_leads(conn)
+
+
+@pytest.mark.neon
+def test_el_tratamiento_sale_con_la_etiqueta_que_edita_la_clinica(conn):
+    """`carillas_esteticas` es un identificador; quien mira la pantalla lee «Carillas».
+
+    La etiqueta vive en `tratamientos` y la edita la clínica desde la otra pantalla, así que
+    pintarla aquí es además lo que mantiene los dos sitios diciendo lo mismo. Y si esa clave
+    ya no está en la tabla --`estado_oportunidad` guarda lo que se validó, que no es lo mismo
+    que lo que sigue VIGENTE-- cae a la clave cruda, que es feo pero cierto.
+    """
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT clave, etiqueta FROM tratamientos LIMIT 1")
+            clave, etiqueta = cur.fetchone()
+        _sembrar_lead(conn, tratamiento=clave)
+        assert _lead(conn)["tratamiento"] == etiqueta
+
+        # Una clave que no está en la tabla: sale cruda, no vacía.
+        _sembrar_lead(conn, tratamiento="clave_que_ya_no_existe")
+        assert _lead(conn)["tratamiento"] == "clave_que_ya_no_existe"
+    finally:
+        _limpiar_leads(conn)
+
+
+@pytest.mark.neon
+def test_una_cita_cancelada_no_cuenta_y_una_reprogramada_si(conn):
+    """`estado <> 'cancelada'`, no `= 'confirmada'`.
+
+    Una cita reprogramada sigue siendo una cita: contarla como ausente pondría a su dueño en
+    la lista de «a este hay que llamarlo» el día que ya tiene hora. Y una cancelada no puede
+    seguir tapándolo, que es el caso contrario y el que de verdad se pierde.
+    """
+    try:
+        _sembrar_lead(conn, estado="agendado")
+        assert _lead(conn)["cita"] is None
+
+        cancelada = _sembrar_cita(
+            conn, inicio=MANANA_A_LAS_NUEVE, estado="cancelada", telefono=_TEL_LEAD
+        )
+        assert _lead(conn)["cita"] is None, "una cita cancelada no es una cita"
+
+        _sembrar_cita(
+            conn, inicio=MANANA_A_LAS_NUEVE, estado="reprogramada", telefono=_TEL_LEAD
+        )
+        assert _lead(conn)["cita"] is not None, "una reprogramada sigue siendo una cita"
+        assert cancelada  # la cancelada sigue en la tabla; lo que no hace es contar
+    finally:
+        _limpiar_leads(conn)
+
+
+@pytest.mark.neon
+def test_una_cita_PASADA_no_es_actividad_por_delante(conn):
+    """El caso que hace útil la pantalla: `agendado` sin cita futura.
+
+    Se midió en producción el 23/09/2026 -- alguien con estado `agendado` cuya cita había
+    sido esa misma mañana. Si la consulta mirara «tiene cita» en vez de «tiene cita POR
+    DELANTE», esa persona se vería atendida para siempre y nadie volvería a mirarla.
+    """
+    try:
+        _sembrar_lead(conn, estado="agendado")
+        _sembrar_cita(conn, inicio=AYER_A_LAS_NUEVE, telefono=_TEL_LEAD)
+        fila = _lead(conn)
+        assert fila["estado"] == "agendado"
+        assert fila["cita"] is None
+    finally:
+        _limpiar_leads(conn)
+
+
+@pytest.mark.neon
+def test_el_estado_sobrevive_a_que_se_abra_una_conversacion_nueva(conn):
+    """Lo que se sabe de una PERSONA no se pierde porque su conversación caduque.
+
+    Una conversación se abre nueva cada vez que la anterior caduca a las 24 h, y no tiene
+    fila en `estado_oportunidad` hasta que Daniela conteste un turno. Colgando el estado de
+    la conversación más reciente, alguien que volvió a escribir esta mañana aparecía «sin
+    registrar» --y por tanto en el grupo de «por averiguar»-- aunque el sistema supiera desde
+    ayer que quiere ortodoncia y que lo frena el precio.
+
+    Lo encontró esta suite: la prueba de la cita pasada falló porque `_sembrar_cita` abre su
+    propia conversación, y ahí se vio que el SQL perdía el estado.
+    """
+    try:
+        _sembrar_lead(conn, estado="comparando", barrera="precio", tratamiento="ortodoncia")
+        # Una conversación nueva, más reciente, SIN estado de oportunidad -- exactamente lo
+        # que deja `asegurar_conversacion`, que siempre inserta.
+        persistencia.asegurar_conversacion(conn, telefono=_TEL_LEAD)
+        conn.commit()
+
+        fila = _lead(conn)
+        assert fila["estado"] == "comparando"
+        assert fila["barrera"] == "precio"
+        # `.lower()` porque lo que sale es la ETIQUETA de la clínica («Ortodoncia»), no la
+        # clave. Lo que esta prueba fija es que el estado no se pierda, no cómo se escribe:
+        # de la etiqueta se ocupa `test_el_tratamiento_sale_con_la_etiqueta_...`.
+        assert fila["tratamiento"].lower() == "ortodoncia"
+    finally:
+        _limpiar_leads(conn)
+
+
+@pytest.mark.neon
+def test_una_conversacion_sin_mensajes_no_es_una_persona(conn):
+    """La lista arranca en `mensajes_entrantes`, no en `conversaciones`.
+
+    En la base real hay conversaciones sembradas por `scripts/probar_panel.py` sin un solo
+    mensaje detrás. Son andamio de pruebas, no gente que escribió, y la pantalla promete
+    «las personas que han escrito».
+    """
+    try:
+        persistencia.asegurar_conversacion(conn, telefono=_TEL_OTRO)
+        conn.commit()
+        assert _lead(conn, _TEL_OTRO) is None
+    finally:
+        _limpiar_leads(conn)
+
+
+@pytest.mark.neon
+def test_la_baja_comercial_viaja_a_la_pantalla(conn):
+    """`contactos.no_contactar`. Sin esto, la pantalla invitaría a llamar a quien pidió que
+    no lo llamaran, que es la única forma de que esta pantalla haga daño."""
+    try:
+        _sembrar_lead(conn)
+        assert _lead(conn)["baja"] is False
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO contactos (telefono, no_contactar, no_contactar_origen) "
+                "VALUES (%s, TRUE, 'paciente')",
+                (_TEL_LEAD,),
+            )
+        conn.commit()
+        fila = _lead(conn)
+        assert fila["baja"] is True
+        assert fila["baja_origen"] == "paciente"
+    finally:
+        _limpiar_leads(conn)
+
+
+@pytest.mark.neon
+def test_fuera_de_la_ventana_de_cartera_no_sale(conn):
+    """La ventana es `DIAS_DE_VENTANA_DE_CARTERA`, la MISMA del barrido de reactivación.
+
+    Con un número propio, la pantalla y el sistema acabarían con dos definiciones de
+    «cartera» que se separan en silencio.
+    """
+    try:
+        _sembrar_lead(conn, hace_dias=persistencia.DIAS_DE_VENTANA_DE_CARTERA + 2)
+        assert _lead(conn) is None
+        assert panel.listar_leads.__defaults__ is None  # todo va por palabra clave
+    finally:
+        _limpiar_leads(conn)
+
+
+class _ConexionFalsaLeads:
+    """Sirve para el `with persistencia.conectar(...)` del endpoint y nada más."""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+
+_LEAD = {
+    "telefono": "573001112233",
+    "nombre": "Quien Escribio",
+    "estado": "listo_para_agendar",
+    "barrera": "precio",
+    "tratamiento": "valoracion",
+    "fuera_de_alcance": False,
+    "notas": "Pregunta precio de valoración.",
+    "ultimo_en": "2026-09-22T10:00:00+00:00",
+    "estado_en": "2026-09-22T10:01:00+00:00",
+    "cita": None,
+    "programado_en": None,
+    "seguimientos_enviados": 0,
+    "baja": False,
+    "baja_origen": None,
+}
+
+
+def test_leads_responde_con_la_forma_pactada(monkeypatch):
+    """`{"leads": [...], "desde": str, "dias": int, "usuario": str}`.
+
+    NO lleva `puede_escribir` ni `es_admin`, y esa ausencia es la forma de la pantalla: no
+    tiene una sola escritura. Un booleano que no apaga ningún botón prometería una acción que
+    no existe -- y el día que alguien lo viera declarado, lo pintaría.
+    """
+    monkeypatch.setattr(persistencia, "conectar", lambda url: _ConexionFalsaLeads())
+    monkeypatch.setattr(panel, "listar_leads", lambda conn, **kw: [dict(_LEAD)])
+    runtime.app.dependency_overrides[runtime.usuario_actual] = _como("recepcion")
+    try:
+        r = TestClient(runtime.app).get("/api/leads")
+        assert r.status_code == 200
+        cuerpo = r.json()
+        assert set(cuerpo) == {"leads", "desde", "dias", "usuario"}
+        assert cuerpo["dias"] == persistencia.DIAS_DE_VENTANA_DE_CARTERA
+        assert re.fullmatch(r"\d{4}-\d{2}-\d{2}", cuerpo["desde"])
+        assert len(cuerpo["leads"]) == 1
+        assert set(cuerpo["leads"][0]) == set(_LEAD)
+        assert cuerpo["leads"][0] == _LEAD
+    finally:
+        runtime.app.dependency_overrides.clear()
+
+
+def test_leads_lo_ve_recepcion_porque_no_escribe_nada():
+    """Sin `exigir_rol`: los tres roles la leen.
+
+    Es deliberado y se sostiene en que la pantalla no tiene ninguna escritura. El día que
+    alguien le añada una, este `assert` es el que hay que cambiar -- y el que obliga a
+    pensarlo.
+    """
+    ruta = next(r for r in runtime.app.routes if getattr(r, "path", "") == "/api/leads")
+    dependencias = [d.call for d in ruta.dependant.dependencies]
+    assert runtime.usuario_actual in dependencias
+    assert not any(getattr(d, "__name__", "") == "comprobar" for d in dependencias), (
+        "/api/leads ganó un exigir_rol: si ahora escribe algo, revisa que la pantalla no "
+        "siga prometiendo que solo informa"
+    )

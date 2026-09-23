@@ -18,14 +18,14 @@ const QUE_HARA: Record<string, { hace: string; espera: string }> = {
       'El relevo por temas de Telegram, que es donde hoy ocurre de verdad. Mientras esta ' +
       'pantalla no exista, los doctores toman conversaciones desde Telegram, no desde aquí.',
   },
-  leads: {
-    hace:
-      'Todas las personas que han escrito, con su tratamiento de interés, su estado y de qué ' +
-      'anuncio llegaron. El filtro que más importa: «sin estado ni actividad programada».',
-    espera:
-      'Conversaciones reales acumuladas. Con la base vacía, la pantalla más útil del ' +
-      'producto se ve idéntica a una rota.',
-  },
+  /* «leads» estuvo aquí hasta el 23/09/2026. Su motivo para esperar era que hacían falta
+     «conversaciones reales acumuladas», y dejó de valer: había dieciséis personas con su
+     estado comercial registrado y nadie podía verlo. La pantalla vive en
+     `pantallas/Leads.tsx`.
+
+     De las tres columnas que prometía aquel cartel, dos se construyeron y la tercera --«de
+     qué anuncio llegaron»-- no: ese dato no existe en la base y WhatsApp lo manda. Queda
+     dicho en la propia pantalla, que es donde alguien se va a preguntar por él. */
   tratamientos: {
     hace:
       'Las fichas que los doctores editan —precio, qué incluye, garantías, objeciones— y de ' +

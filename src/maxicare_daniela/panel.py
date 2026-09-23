@@ -1041,3 +1041,203 @@ def puede_escribir(conn, telefono: str, *, ahora: datetime) -> dict[str, Any]:
         return {"puede": False, "horas": None}
     horas = (ahora - ultimo).total_seconds() / 3600
     return {"puede": horas < VENTANA_RESPUESTA_HORAS, "horas": round(horas, 1)}
+
+
+# ==========================================================================================
+# La pantalla de Leads
+# ==========================================================================================
+
+#: Lo que el sistema escribe en `estado_oportunidad.tratamiento` cuando NO sabe a qué va el
+#: paciente. No es un tratamiento y no se pinta como tal: el no negociable 12 lo dice para la
+#: agenda («una cita con él diría que nadie sabe a qué va el paciente») y aquí vale igual.
+#: `persistencia.py` ya lo filtra en la consulta que arma el contexto de Daniela; esta es la
+#: segunda puerta por la que ese valor podría salir a una pantalla, y se cierra en el mismo
+#: sitio: traducirlo a `None` para que la pantalla diga «sin definir», que es la verdad.
+_TRATAMIENTO_SIN_SABER = "no_identificado"
+
+
+def listar_leads(
+    conn,
+    *,
+    ahora: datetime,
+    dias: int = persistencia.DIAS_DE_VENTANA_DE_CARTERA,
+    limite: int = 200,
+) -> list[dict[str, Any]]:
+    """Una fila por TELÉFONO con su estado comercial. SOLO LECTURA.
+
+    Es la hermana de `listar_conversaciones` y comparte con ella las dos decisiones que
+    importan: la unidad es el teléfono --una persona que lleva una semana preguntando son
+    siete filas en `conversaciones` y una sola aquí-- y `ahora` entra por parámetro, porque un
+    `now()` dentro del SQL convierte cualquier prueba en una que envejece.
+
+    **Y «por teléfono» se aplica hasta el final, no solo al agrupar.** El estado, los
+    seguimientos y la cita salen de la PERSONA, nunca de su conversación más reciente: una
+    conversación nueva --y se abre una cada vez que la anterior caduca a las 24 h-- no tiene
+    fila en `estado_oportunidad` hasta que Daniela conteste un turno, así que colgar el estado
+    de ella hacía desaparecer lo que ya se sabía. Lo cazó una prueba, y es la misma decisión
+    que toma `persistencia` en la consulta que arma el contexto de Daniela.
+
+    Lo que añade es lo que ninguna pantalla enseñaba todavía: `estado_oportunidad`, que Daniela
+    reescribe en CADA turno y que hasta hoy solo se leía a sí misma. El dato existía, con
+    quince personas dentro, y no había forma de verlo.
+
+    **La lista arranca en `mensajes_entrantes` y no en `conversaciones`, a propósito.** El
+    cartel que esta pantalla sustituye promete «todas las personas que han escrito», y esas dos
+    tablas no dicen lo mismo: hay teléfonos con mensajes y sin conversación viva --y son justo
+    los que nadie está mirando--, y conversaciones sembradas por un script de pruebas sin un
+    solo mensaje detrás, que no son personas.
+
+    Cuatro cosas que esta función NO hace, y cada una tiene su motivo escrito:
+
+    - **No inventa el origen del lead.** El cartel prometía «de qué anuncio llegaron» y ese
+      dato no existe en ninguna tabla: el bloque `referral` que Meta manda en los
+      click-to-WhatsApp no se lee en la ingesta. El precedente de la fase 8 con el `origen` del
+      paciente es explícito --«no se fabrica el dato ni se pone PENDIENTE en una pantalla de
+      cara al usuario: sale»-- y aquí se aplica igual.
+    - **No rellena el estado que falta.** Sin fila en `estado_oportunidad` el estado sale
+      `None`, no `'explorando'`. Esa columna tiene ese DEFAULT para cuando se inserta, y usarlo
+      aquí convertiría «nadie llegó a saber qué quería» en «está explorando», que es un hecho
+      distinto -- y precisamente el que el filtro principal de la pantalla busca.
+    - **No dice a quién va a escribir la reactivación.** Devuelve lo que hay --si hay un
+      seguimiento en cola y cuántos salieron ya--, nunca una predicción: `persistencia` advierte
+      que sus dos consultas de cartera no son la última palabra sobre a quién se le escribe, que
+      lo es `seguimientos.decidir` con sus trece guardas. Una pantalla que pintara «a estos se
+      les va a escribir» mentiría.
+    - **No agrupa `con_barrera` con las barreras.** Devuelve estado y barrera por separado
+      porque `estado='con_barrera'` con `barrera='ninguna'` significa «detenida por algo que NO
+      es una objeción del paciente» --una avería--, y mezclarlos enseñaría fallos técnicos como
+      clientes dudando. Quien decide cómo se lee eso es la pantalla, que es la que tiene sitio
+      para explicarlo.
+    """
+    desde = ahora - timedelta(days=dias)
+    parametros = {
+        "desde": desde,
+        "ahora": ahora,
+        "limite": limite,
+        "sin_saber": _TRATAMIENTO_SIN_SABER,
+    }
+
+    with conn.cursor() as cur:
+        cur.execute(
+            # `DISTINCT ON` cuatro veces, y las cuatro por lo mismo: de cada persona interesa
+            # UNA fila --su último mensaje, su conversación más reciente, su próxima cita, su
+            # seguimiento más cercano-- y sin esto una persona con cuatro conversaciones sale
+            # cuatro veces en una pantalla que promete listar personas.
+            "WITH ultimo AS ("
+            "    SELECT DISTINCT ON (telefono) telefono, nombre_perfil, recibido_en"
+            "      FROM mensajes_entrantes"
+            "     WHERE recibido_en >= %(desde)s"
+            "     ORDER BY telefono, recibido_en DESC"
+            "), viva AS ("
+            "    SELECT DISTINCT ON (telefono) telefono, id, actualizada_en"
+            "      FROM conversaciones"
+            "     WHERE canal = 'whatsapp'"
+            "     ORDER BY telefono, actualizada_en DESC"
+            # La oportunidad va por TELÉFONO y por su propia fecha, NO por la conversación más
+            # reciente. La diferencia se midió con una prueba: una conversación nueva --y se
+            # abre una cada vez que la anterior caduca a las 24 h-- todavía no tiene fila en
+            # `estado_oportunidad` hasta que Daniela conteste un turno, así que colgarla de la
+            # más reciente hacía desaparecer el estado que ya se sabía de esa persona.
+            # `persistencia` toma la misma decisión por el mismo motivo.
+            "), oportunidad AS ("
+            # El `NULLIF` va AQUÍ y no más abajo, y no es un capricho de estilo: la columna
+            # se une luego con `tratamientos` para sacar su etiqueta, y `no_identificado` ES
+            # una fila de esa tabla. Traducido, saldría como un tratamiento con nombre propio
+            # -- justo lo contrario de lo que ese valor significa. Cortado en el origen, el
+            # `JOIN` no lo encuentra y la pantalla dice «todavía no se sabe qué quiere».
+            "    SELECT DISTINCT ON (c.telefono)"
+            "           c.telefono, eo.estado, eo.barrera,"
+            "           NULLIF(eo.tratamiento, %(sin_saber)s) AS tratamiento,"
+            "           eo.fuera_de_alcance, eo.notas, eo.actualizado_en"
+            "      FROM estado_oportunidad eo"
+            "      JOIN conversaciones c ON c.id = eo.conversacion_id"
+            "     ORDER BY c.telefono, eo.actualizado_en DESC"
+            "), proxima AS ("
+            # `estado <> 'cancelada'` y no `= 'confirmada'`: una cita reprogramada sigue siendo
+            # una cita, y contarla como ausente pondría a su dueño en la lista de «a este hay
+            # que llamarlo» el día que ya tiene hora.
+            "    SELECT DISTINCT ON (telefono) telefono, inicio, tratamiento"
+            "      FROM citas"
+            "     WHERE estado <> 'cancelada' AND inicio >= %(ahora)s"
+            "     ORDER BY telefono, inicio"
+            # Los seguimientos también por teléfono, y por lo mismo: `seguimientos` cuelga de
+            # la conversación donde se programó, que puede haber caducado. «Cuántos mensajes
+            # se le han mandado a esta persona» no es «cuántos van por esta conversación».
+            "), programado AS ("
+            "    SELECT DISTINCT ON (c.telefono) c.telefono, s.fecha_objetivo"
+            "      FROM seguimientos s"
+            "      JOIN conversaciones c ON c.id = s.conversacion_id"
+            "     WHERE s.enviado_en IS NULL AND s.anulado_en IS NULL"
+            "     ORDER BY c.telefono, s.fecha_objetivo"
+            "), enviados AS ("
+            "    SELECT c.telefono, count(*) AS n"
+            "      FROM seguimientos s"
+            "      JOIN conversaciones c ON c.id = s.conversacion_id"
+            "     WHERE s.enviado_en IS NOT NULL"
+            "     GROUP BY c.telefono"
+            ") "
+            # Los dos tratamientos salen con la ETIQUETA que la clínica edita en la pantalla
+            # de Tratamientos, no con la clave: `carillas_esteticas` es un identificador de
+            # base de datos y quien mira esto no tiene por qué leer guiones bajos. El
+            # `coalesce` cae a la clave porque una clave validada no es una clave VIGENTE --
+            # la tabla puede haber perdido ese tratamiento después--, y quedarse sin nada
+            # sería peor que enseñarla cruda.
+            "SELECT u.telefono, p.nombre_completo, u.nombre_perfil, u.recibido_en,"
+            "       v.actualizada_en, o.estado, o.barrera,"
+            "       coalesce(t.etiqueta, o.tratamiento), o.fuera_de_alcance,"
+            "       o.notas, o.actualizado_en, x.inicio,"
+            "       coalesce(tc.etiqueta, x.tratamiento), g.fecha_objetivo,"
+            "       coalesce(e.n, 0), coalesce(ct.no_contactar, false), ct.no_contactar_origen"
+            "  FROM ultimo u"
+            "  LEFT JOIN viva         v  ON v.telefono = u.telefono"
+            "  LEFT JOIN oportunidad  o  ON o.telefono = u.telefono"
+            "  LEFT JOIN pacientes    p  ON p.telefono = u.telefono"
+            "  LEFT JOIN contactos    ct ON ct.telefono = u.telefono"
+            "  LEFT JOIN proxima      x  ON x.telefono = u.telefono"
+            "  LEFT JOIN programado   g  ON g.telefono = u.telefono"
+            "  LEFT JOIN enviados     e  ON e.telefono = u.telefono"
+            "  LEFT JOIN tratamientos t  ON t.clave = o.tratamiento"
+            "  LEFT JOIN tratamientos tc ON tc.clave = x.tratamiento"
+            " ORDER BY GREATEST(u.recibido_en, coalesce(v.actualizada_en, u.recibido_en)) DESC"
+            " LIMIT %(limite)s",
+            parametros,
+        )
+        filas = cur.fetchall()
+
+    lista: list[dict[str, Any]] = []
+    for fila in filas:
+        (
+            tel, ficha, perfil, recibido, tocada, estado, barrera, tratamiento,
+            fuera, notas, estado_en, cita_inicio, cita_trat, programado_en,
+            enviados, baja, baja_origen,
+        ) = fila
+        ultimo_en = max(recibido, tocada) if tocada else recibido
+        lista.append(
+            {
+                "telefono": tel,
+                "nombre": _nombre_visible(ficha, perfil),
+                "estado": estado,
+                "barrera": barrera,
+                # Ya viene como etiqueta legible, y ya viene en `None` si el sistema no sabía:
+                # las dos cosas las resuelve el SQL, cada una en el único sitio donde no se
+                # pueden pisar entre sí.
+                "tratamiento": tratamiento,
+                "fuera_de_alcance": bool(fuera),
+                # La frase que Daniela dejó escrita sobre esta persona. Es lo único de esta
+                # pantalla redactado para un humano, y lo que hace que abrir la conversación
+                # sea una decisión y no una lotería.
+                "notas": notas,
+                "ultimo_en": ultimo_en.isoformat(),
+                "estado_en": estado_en.isoformat() if estado_en else None,
+                "cita": (
+                    {"inicio": cita_inicio.isoformat(), "tratamiento": cita_trat}
+                    if cita_inicio
+                    else None
+                ),
+                "programado_en": programado_en.isoformat() if programado_en else None,
+                "seguimientos_enviados": enviados,
+                "baja": bool(baja),
+                "baja_origen": baja_origen,
+            }
+        )
+    return lista

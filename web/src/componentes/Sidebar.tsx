@@ -117,7 +117,7 @@ export const SECCIONES: Seccion[] = [
         <path d="M16 7.2a3.2 3.2 0 0 1 0 6M18 20c0-2.6-1-4.4-2.6-5.2" />
       </Icono>
     ),
-    fase: 8,
+    fase: null,
   },
   {
     id: 'tratamientos',

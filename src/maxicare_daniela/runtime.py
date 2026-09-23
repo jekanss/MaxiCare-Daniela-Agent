@@ -2218,6 +2218,44 @@ async def api_inicio(quien: dict = Depends(usuario_actual)) -> dict:
 
 
 # ------------------------------------------------------------------------------------------
+# Panel: los leads
+# ------------------------------------------------------------------------------------------
+
+
+@app.get("/api/leads")
+async def api_leads(quien: dict = Depends(usuario_actual)) -> dict:
+    """La cartera: quién ha escrito, qué quiere y qué lo frena. SOLO LECTURA.
+
+    Ni una escritura, ni una llamada a Google, ni una al modelo -- misma promesa que
+    `/api/inicio` y `/api/conversaciones`, y la diferencia deliberada con `/api/agenda`.
+
+    No lleva `puede_escribir` ni `es_admin`, y esa ausencia es la forma de la pantalla: no
+    tiene un solo botón que escriba. Lo único que se puede hacer desde ella es abrir la
+    conversación, y el permiso de escribir ahí lo resuelve la pantalla de Conversaciones con
+    su propia consulta. Añadir aquí un booleano que no apaga nada sería prometer una acción
+    que no existe.
+
+    `desde` viaja porque la lista está acotada a esos días y quien la lee tiene derecho a
+    saberlo: sin esa fecha, «16 personas» no dice si son de esta semana o de todo el año.
+    """
+    ahora = _ahora_en_bogota()
+    # La ventana NO es un número de esta ruta: es `DIAS_DE_VENTANA_DE_CARTERA`, la misma que
+    # usa el barrido de reactivación para decidir a quién sigue considerando cartera. Darle
+    # aquí un número propio crearía dos definiciones de «cartera» que se separarían en
+    # silencio, y la pantalla acabaría enseñando gente que el sistema ya descartó -- o al
+    # revés, callando a quien todavía cuenta.
+    dias = persistencia.DIAS_DE_VENTANA_DE_CARTERA
+    with persistencia.conectar(config.database_url) as conn:
+        leads = panel.listar_leads(conn, ahora=ahora, dias=dias)
+    return {
+        "leads": leads,
+        "desde": (ahora - timedelta(days=dias)).date().isoformat(),
+        "dias": dias,
+        "usuario": quien["nombre"],
+    }
+
+
+# ------------------------------------------------------------------------------------------
 # Panel: las conversaciones
 # ------------------------------------------------------------------------------------------
 

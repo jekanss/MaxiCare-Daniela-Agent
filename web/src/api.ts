@@ -537,3 +537,84 @@ export async function descargarExport(filtros: {
   // treinta veces en una tarde deja treinta copias del archivo dentro del navegador.
   URL.revokeObjectURL(url)
 }
+
+// ------------------------------------------------------------------------------------------
+// Leads
+// ------------------------------------------------------------------------------------------
+
+/** Los seis estados que Daniela puede escribir, y son una lista CERRADA (`contratos.py`).
+ *
+ *  `null` es el séptimo caso y no es uno de ellos: significa que esa persona escribió y nadie
+ *  llegó a registrar nada sobre ella. No se colapsa con `'explorando'` --que es una fase real
+ *  del proceso-- porque «no sabemos nada» y «está mirando» llevan a trabajos distintos. */
+export type EstadoLead =
+  | 'explorando'
+  | 'comparando'
+  | 'con_barrera'
+  | 'listo_para_agendar'
+  | 'agendado'
+  | 'post_atencion'
+
+/** Las siete barreras del vocabulario cerrado. `'ninguna'` es un valor, no la ausencia. */
+export type BarreraLead =
+  | 'precio'
+  | 'miedo'
+  | 'tiempo'
+  | 'desplazamiento'
+  | 'confianza'
+  | 'comparacion'
+  | 'ninguna'
+
+/** Una persona de la cartera.
+ *
+ *  Igual que en `CitaDeAgenda`, **no hay `origen` y no es un olvido**: de qué anuncio llegó
+ *  esta persona no existe en ninguna tabla. El `referral` que Meta manda en los
+ *  click-to-WhatsApp no se lee en la ingesta, así que el dato se tira antes de llegar a la
+ *  base. Declararlo aquí volvería a invitar a pintarlo.
+ *
+ *  `estado` y `barrera` vienen por separado a propósito: `estado: 'con_barrera'` con
+ *  `barrera: 'ninguna'` NO es una objeción comercial sino una conversación detenida por algo
+ *  que no es del paciente --una avería--, y pintarlas juntas enseñaría fallos técnicos como
+ *  clientes dudando. */
+export type Lead = {
+  telefono: string
+  /** `null` cuando no hay ficha ni nombre de perfil, o cuando la ficha dice `PENDIENTE`. */
+  nombre: string | null
+  /** `null` si esa persona no tiene fila en `estado_oportunidad`. */
+  estado: EstadoLead | null
+  barrera: BarreraLead | null
+  /** Qué quiere. `null` si no se sabe -- incluido cuando el sistema escribió
+   *  `no_identificado`, que el servidor ya traduce, porque eso significa justo que nadie
+   *  llegó a saberlo. */
+  tratamiento: string | null
+  fuera_de_alcance: boolean
+  /** La frase que Daniela dejó escrita sobre esta persona. Lo único de la pantalla redactado
+   *  para que lo lea un humano. */
+  notas: string | null
+  ultimo_en: string
+  /** Cuándo se registró ese estado. Puede ser MUY anterior a `ultimo_en`. */
+  estado_en: string | null
+  /** La próxima cita no cancelada. `null` no significa «nunca tuvo»: significa que hoy no
+   *  tiene ninguna por delante, que es lo que decide si hay algo que hacer. */
+  cita: { inicio: string; tratamiento: string } | null
+  /** Cuándo saldría el seguimiento que está en cola, si hay uno. */
+  programado_en: string | null
+  seguimientos_enviados: number
+  /** Pidió no recibir nada comercial. No apaga los recordatorios de una cita suya. */
+  baja: boolean
+  baja_origen: string | null
+}
+
+/** La cartera. De SOLO LECTURA: esta pantalla no tiene una sola escritura, y por eso no
+ *  devuelve `puede_escribir` ni `es_admin` -- un booleano que no apaga ningún botón sería
+ *  prometer una acción que no existe. */
+export async function leerLeads(): Promise<{
+  leads: Lead[]
+  /** El primer día que entra en la lista, `YYYY-MM-DD`. La pantalla lo dice porque «16
+   *  personas» no significa nada sin saber de cuánto tiempo. */
+  desde: string
+  dias: number
+  usuario: string
+}> {
+  return pedir<{ leads: Lead[]; desde: string; dias: number; usuario: string }>('/api/leads')
+}
