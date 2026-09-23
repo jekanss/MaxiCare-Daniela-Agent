@@ -56,7 +56,7 @@ Consecuencia practica: **un mensaje de categoria Marketing cuesta mas que uno Ut
 |---|---|
 | Categoria | **Marketing** |
 | Idioma | **Spanish** (codigo `es`) |
-| Variables en el body | **una sola**: `{{1}}` = primer nombre del paciente |
+| Variables en el body | **una sola**: `{{1}}` = primer nombre del paciente — salvo `reactivacion_sin_agendar`, que desde el 23/09/2026 no tiene ninguna (ver abajo) |
 | Footer | vacio |
 | Botones | dos, tipo *Custom* (quick reply) |
 | Message validity period | lo mas alto que permita la consola |
@@ -93,17 +93,43 @@ consulta» y «su cita», nunca de que.
 La mas importante de las tres: es el grueso del volumen. Alguien pregunto, no dijo que no, y
 se le fue.
 
+**Es la unica SIN variables, y se edito en Meta el 23/09/2026 para quitarle la que tenia.**
+
 | | |
 |---|---|
 | **Nombre** | `reactivacion_sin_agendar` |
 | **Categoria** | Marketing |
 | **Idioma** | Spanish (`es`) |
 | **Header** | Texto fijo: `Tu consulta en MaxiCare` |
-| **Body** | `Hola {{1}}, hace unos dias nos escribiste a MaxiCare y quedo pendiente agendar tu cita. Si aun te interesa, con gusto te ayudamos a encontrar un horario.` |
-| **Ejemplo de `{{1}}`** | `Maria` |
+| **Body** | `PENDIENTE` — se edito en la consola de Meta quitando `{{1}}, `; el texto exacto que quedo aprobado no se ha leido desde aqui. Antes decia: `Hola {{1}}, hace unos dias nos escribiste a MaxiCare y quedo pendiente agendar tu cita. Si aun te interesa, con gusto te ayudamos a encontrar un horario.` |
+| **Variables** | **ninguna** |
 | **Footer** | vacio |
 | **Boton 1** (Custom) | `Si, me interesa` |
 | **Boton 2** (Custom) | `Ya no, gracias` |
+
+### Por que perdio el hueco
+
+Era el nombre de pila, y esta es la unica de las tres que le escribe a quien **nunca
+agendo**. Sin cita y sin ficha en `pacientes`, la cascada de `seguimientos.
+_nombre_de_reactivacion` solo podia caer a su tercer eslabon: el nombre de perfil de
+WhatsApp, que es como la persona se llama a si misma en la app y no como se llama.
+
+Medido sobre los 17 numeros de la base el 23/09/2026: 3 tenian ficha, 8 un perfil
+presentable y **6 uno que no se puede saludar** — `jg390485`, `rodolfopatino015`, `centro`,
+`canomoraleswilmerandres`, `yualetxis` y `Jean♣️`. Dos ya habian salido de verdad: «Hola
+jg390485» y «Hola Pshico» le llegaron a pacientes. Un saludo asi es la firma de un envio
+automatizado, y el desempate de este proyecto es que nadie reporte el numero.
+
+**Las otras dos conservan el suyo**, y la diferencia no es la plantilla sino de donde sale
+el nombre: quien cancelo o no asistio ya agendo alguna vez, asi que tiene ficha con el
+nombre que dio para su cita — lo escribe `crear_cita`. Los tres con ficha de la medicion lo
+confirman: Hancer, Laura, Diego.
+
+Lo que esto obliga en el codigo, y es la parte que no se ve: una plantilla sin variables no
+admite un `body` con `parameters: []`. Meta responde **132000**, y como la fila se marca
+ANTES de enviar (no negociable 21) ese rechazo no cuesta un envio — pierde la fila para
+siempre tras los tres intentos. Por eso `canales.enviar_plantilla` omite el componente
+entero cuando no hay parametros, y `seguimientos.TIPOS_SIN_HUECOS` es quien lo decide.
 
 ## 2 · `reactivacion_cancelada`
 
@@ -149,7 +175,9 @@ real del 20/09/2026 llego con las cuatro del cuerpo intactas en el telefono.
 
 Los tres cuerpos, ya con tildes y listos para pegar:
 
-- **`reactivacion_sin_agendar`** · header `Tu consulta en MaxiCare`
+- **`reactivacion_sin_agendar`** · header `Tu consulta en MaxiCare` · **sin variables desde el
+  23/09/2026**; el texto vigente está en la consola de Meta y aquí es `PENDIENTE`. El que
+  tenía, para contrastar:
   > Hola {{1}}, hace unos días nos escribiste a MaxiCare y quedó pendiente agendar tu cita. Si aún te interesa, con gusto te ayudamos a encontrar un horario.
 - **`reactivacion_cancelada`** · header `Tu cita en MaxiCare`
   > Hola {{1}}, vimos que cancelaste tu cita en MaxiCare y no has vuelto a agendar. Si quieres, te ayudamos a buscar una nueva fecha.
@@ -178,7 +206,8 @@ de los botones esta probado de punta a punta en produccion; estas tres no vuelve
 2. Van al `.env` **y al del VPS**, no solo al local.
 3. **No hace falta ampliar nada de codigo: el despachador ya sabe mandar las cuatro.**
    `seguimientos.despachar` elige la plantilla por TIPO (`plantillas[fila["tipo"]]`) y
-   `parametros_de` arma un hueco para las de reactivacion y cuatro para la de recordatorio.
+   `parametros_de` arma cuatro huecos para el recordatorio, uno para `cancelada` y
+   `no_asistio`, y NINGUNO para `sin_agendar` (23/09/2026, ver arriba).
    Un tipo sin plantilla configurada no se pierde ni se anula: la fila se queda PENDIENTE
    hasta que exista, que es el modo de comprobacion de hoy. El motivo `sin_plantilla` ya no
    existe; lo que queda es `sin_cita`, y es otra cosa -- una fila que no es reactivacion y

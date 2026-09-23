@@ -250,6 +250,35 @@ TIPOS_QUE_EL_BARRIDO_ENCOLA = frozenset({TIPO_SIN_AGENDAR, TIPO_CANCELADA})
 #: dos, esa apertura pasaría en silencio y ninguna prueba lo notaría.
 TIPOS_QUE_EL_MODELO_PUEDE_PEDIR = frozenset({TIPO_SIN_AGENDAR, TIPO_CANCELADA})
 
+#: Los tipos cuya plantilla Meta aprobó SIN una sola variable. `parametros_de` les manda la
+#: lista vacía y `canales.enviar_plantilla` omite el componente entero: un `body` con
+#: `parameters: []` sobre una plantilla estática es un 132000.
+#:
+#: **Por qué `reactivacion_sin_agendar` perdió su hueco el 23/09/2026.** Era el nombre de
+#: pila, y esa plantilla es la única que le escribe a quien NUNCA agendó: sin cita y sin
+#: ficha, la cascada de `_nombre_de_reactivacion` solo podía caer al tercer eslabón, el
+#: nombre de perfil de WhatsApp, que es como la persona se llama a sí misma en la app y no
+#: como se llama. Medido sobre los 17 números de la base: 3 tenían ficha, 8 un perfil
+#: presentable y **6 uno que no se puede saludar** -- `jg390485`, `rodolfopatino015`,
+#: `centro`, `canomoraleswilmerandres`, `yualetxis` y `Jean♣️`. Dos de esos ya habían salido:
+#: «Hola jg390485» y «Hola Pshico» le llegaron a gente real. Un saludo así es la firma de un
+#: envío automatizado, y el desempate de este proyecto es que nadie reporte el número.
+#:
+#: **Las otras dos NO están aquí, y la diferencia no es la plantilla sino de dónde sale el
+#: nombre**: `reactivacion_cancelada` y `reactivacion_no_asistio` le escriben a quien ya
+#: agendó alguna vez, así que tiene ficha en `pacientes` con el nombre que dio para su cita
+#: --lo escribe `crear_cita`-- y ahí el hueco funciona. Los tres números con ficha de la
+#: medición lo confirman: Hancer, Laura, Diego. El recordatorio de cita conserva sus cuatro.
+#:
+#: **Lista blanca estrecha, y por el mismo motivo que `TIPOS_NO_COMERCIALES` es del conjunto
+#: exento**: solo el literal exacto compra la lista vacía. Un `tipo` que no esté aquí sigue
+#: yendo por el camino de siempre, que es el que tenía plantilla con hueco.
+#:
+#: `Jean♣️` enseñó de propina que `_primer_nombre_usable` solo caza el emoji cuando va
+#: SEPARADO («🌸 Ana» -> token «🌸»): pegado al nombre viaja entero a Meta. Sigue abierto para
+#: las dos plantillas que conservan el hueco.
+TIPOS_SIN_HUECOS = frozenset({TIPO_SIN_AGENDAR})
+
 #: Las columnas que R1, R2 y R3bis leen de la fila, y sin las cuales esas tres guardas se
 #: apagan SOLAS (revisión final, H6 bis).
 #:
@@ -708,15 +737,18 @@ def _nombre_de_reactivacion(fila: dict[str, Any]) -> str | None:
 def parametros_de(fila: dict[str, Any]) -> list[str] | None:
     """Los huecos de la plantilla de ESA fila, en el orden en que Meta los aprobó.
 
-    Dos plantillas con distinto número de huecos: el recordatorio de cita lleva cuatro y las
-    tres de reactivación llevan UNO. Mandar cuatro a una plantilla de uno no es un detalle
+    Tres formas distintas, una por plantilla: el recordatorio de cita lleva CUATRO huecos,
+    `reactivacion_cancelada` y `reactivacion_no_asistio` llevan UNO --el nombre de pila-- y
+    `reactivacion_sin_agendar` no lleva NINGUNO desde el 23/09/2026 (ver `TIPOS_SIN_HUECOS`,
+    que explica por qué perdió el suyo). Mandar cuatro a una plantilla de uno no es un detalle
     cosmético --Meta rechaza el envío-- y mandar el tratamiento a una de reactivación sería
     además una filtración: es un dato de salud y una notificación de WhatsApp se lee en la
     pantalla de bloqueo. Marketing lo quitó a propósito el 15/09/2026.
 
-    Devuelve `None` cuando una reactivación no tiene NINGÚN nombre usable (ver
+    Devuelve `None` cuando una reactivación CON hueco no tiene NINGÚN nombre usable (ver
     `_nombre_de_reactivacion`): `despachar` lo trata como una fila rota, igual que un
-    recordatorio sin `cita_inicio`, y la anula en vez de mandar "Hola paciente".
+    recordatorio sin `cita_inicio`, y la anula en vez de mandar "Hola paciente". Una lista
+    VACÍA no es eso y no se puede confundir con ello: es una plantilla que no pide nada.
 
     Pública (antes `_parametros_del_recordatorio`, privada): la dobla `scripts/probar_
     plantilla.py`, y quien le cambie la firma rompe ese script en silencio -- `pytest -q` no
@@ -745,6 +777,14 @@ def parametros_de(fila: dict[str, Any]) -> list[str] | None:
         # porque el paciente tiene hora de verdad. Lo que no puede es salir MAL formado.
         primero = ((fila.get("nombre_completo") or "").split() or [""])[0]
         return _parametros_del_recordatorio(fila, primero or "paciente")
+
+    # La plantilla de este tipo no tiene ni una variable, así que no hay nada que rellenar y
+    # `canales.enviar_plantilla` omite el componente entero. Va DESPUÉS de la rama del
+    # recordatorio y ANTES de la cascada de nombre, que es justo lo que se salta: sin hueco no
+    # hay nombre que validar, y la anulación por `sin_nombre` deja de poder alcanzar a este
+    # tipo. No es una guarda que se pierda -- es una que se quedó sin objeto.
+    if tipo in TIPOS_SIN_HUECOS:
+        return []
 
     # `_nombre_de_reactivacion` ya devuelve el PRIMER TOKEN validado -no la cadena cruda-, así
     # que aquí no se vuelve a partir ni queda un respaldo `"paciente"`: ese literal no puede

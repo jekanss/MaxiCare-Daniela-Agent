@@ -61,9 +61,10 @@ _ERRORES = {
         "      registrada con otro código falla el 100% de sus envíos."
     ),
     132000: (
-        "el número de huecos que mandamos no coincide con el que Meta aprobó. Es el error\n"
-        "      que sale al mandarle cuatro parámetros a una plantilla de reactivación, que\n"
-        "      lleva UNO: revisa que `--tipo` sea el de la plantilla que estás probando."
+        "el número de huecos que mandamos no coincide con el que Meta aprobó. Sale al\n"
+        "      mandarle cuatro parámetros a una plantilla de un hueco --revisa que `--tipo`\n"
+        "      sea el de la plantilla que pruebas-- y también al mandarle UNO a\n"
+        "      `reactivacion_sin_agendar`, que desde el 23/09/2026 no tiene ninguno."
     ),
     132005: "el texto de algún hueco es más largo de lo que Meta admite.",
     132007: "el texto de algún hueco viola el formato de la plantilla (saltos de línea, tabs).",
@@ -114,7 +115,10 @@ _PLANTILLAS: dict[str, _Plantilla] = {
         tipo=seguimientos.TIPO_SIN_AGENDAR,
         atributo="plantilla_sin_agendar",
         variable="MAXICARE_PLANTILLA_SIN_AGENDAR",
-        huecos=1,
+        # CERO desde el 23/09/2026: es la unica que le escribe a quien nunca agendo, asi que
+        # su hueco solo podia llenarse con el nombre de perfil de WhatsApp. Ver
+        # `seguimientos.TIPOS_SIN_HUECOS` para la medicion que lo decidio.
+        huecos=0,
         header="Tu consulta en MaxiCare",
         botones=("Sí, me interesa", "Ya no, gracias"),
     ),

@@ -243,3 +243,58 @@ def test_la_descarga_va_con_el_bearer_puesto(monkeypatch):
 
     assert len(cabeceras) == 2
     assert all(c.get("authorization") == "Bearer token" for c in cabeceras)
+
+
+# ==========================================================================================
+# El cuerpo que se le manda a Meta al enviar una plantilla
+# ==========================================================================================
+#
+# Offline y sobre el JSON, no sobre la excepcion: el fallo que esto vigila no lanza nada en
+# casa. Sale en produccion, como un 132000 de Meta, y como la fila se marca ANTES de enviar
+# (no negociable 21) ese rechazo no cuesta un envio: pierde la fila para siempre tras los tres
+# intentos y despierta al doctor con un aviso de fallo.
+
+
+def _enviar_plantilla_capturando(parametros: list[str], monkeypatch) -> dict:
+    """Manda una plantilla contra un transporte de mentira y devuelve el JSON que salio."""
+    cuerpos: list[dict] = []
+
+    def anotar(peticion: httpx.Request) -> httpx.Response:
+        import json
+
+        cuerpos.append(json.loads(peticion.content))
+        return httpx.Response(200, json={"messages": [{"id": "wamid.X"}]})
+
+    monkeypatch.setattr(httpx, "AsyncClient", _cliente_con(httpx.MockTransport(anotar)))
+    asyncio.run(
+        WhatsApp("token", "123").enviar_plantilla(
+            "573001112233", plantilla="una_plantilla", parametros=parametros
+        )
+    )
+    return cuerpos[0]
+
+
+def test_una_plantilla_SIN_variables_no_manda_el_componente_body(monkeypatch):
+    """`reactivacion_sin_agendar` se quedo sin hueco el 23/09/2026. A una plantilla estatica,
+    un `body` con `parameters: []` le vale un 132000 («number of parameters does not match»),
+    asi que la clave `components` no va: no es que vaya vacia, es que no esta."""
+    cuerpo = _enviar_plantilla_capturando([], monkeypatch)
+
+    assert "components" not in cuerpo["template"]
+    assert cuerpo["template"]["name"] == "una_plantilla"
+
+
+def test_una_plantilla_CON_variables_sigue_mandando_su_body(monkeypatch):
+    """La otra mitad, o el arreglo de arriba apagaria en silencio los cuatro huecos del
+    recordatorio de cita y el nombre de las otras dos reactivaciones."""
+    cuerpo = _enviar_plantilla_capturando(["Marcela", "jueves 17/9"], monkeypatch)
+
+    assert cuerpo["template"]["components"] == [
+        {
+            "type": "body",
+            "parameters": [
+                {"type": "text", "text": "Marcela"},
+                {"type": "text", "text": "jueves 17/9"},
+            ],
+        }
+    ]

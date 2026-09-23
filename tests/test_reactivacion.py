@@ -581,7 +581,7 @@ def test_el_freno_no_alcanza_al_recordatorio_de_una_cita_ni_tampoco_r3bis():
 # guardas fallaran todas a la vez. Estas pruebas cubren lo que la sustituye.
 
 
-def test_la_reactivacion_manda_UN_hueco_y_es_el_nombre_de_pila():
+def test_la_reactivacion_CON_hueco_manda_uno_y_es_el_nombre_de_pila():
     """Marketing quito el tratamiento a proposito: es un dato de salud y una notificacion se
     lee en la pantalla de bloqueo. Si esta funcion devolviera cuatro huecos, Meta rechaza el
     envio y ademas se filtraria.
@@ -590,8 +590,15 @@ def test_la_reactivacion_manda_UN_hueco_y_es_el_nombre_de_pila():
     revision-: `nombre_completo` sale de `LEFT JOIN citas`, y toda fila de reactivacion tiene
     `cita_id` NULL, asi que el SELECT real jamas le da un valor. Fijarlo a mano aqui habria
     tapado otra vez el mismo defecto que esta prueba existe para cazar.
+
+    `TIPO_CANCELADA` explicito desde el 23/09/2026: el default de la fabrica es
+    `TIPO_SIN_AGENDAR`, y esa plantilla ya no tiene hueco (`TIPOS_SIN_HUECOS`). Estas pruebas
+    de la cascada siguen vivas porque las otras dos plantillas SI lo conservan -- y ahi el
+    nombre es de fiar, que es justo la razon de que lo conserven.
     """
-    parametros = s.parametros_de(fila_de_reactivacion(nombre_perfil="Marcela Rios Gomez"))
+    parametros = s.parametros_de(
+        fila_de_reactivacion(tipo=s.TIPO_CANCELADA, nombre_perfil="Marcela Rios Gomez")
+    )
     assert parametros == ["Marcela"]
 
 
@@ -611,7 +618,9 @@ def test_la_ficha_marcada_NOMBRE_PENDIENTE_no_cuenta_como_nombre():
     from maxicare_daniela import persistencia
 
     fila = fila_de_reactivacion(
-        nombre_ficha=persistencia.NOMBRE_PENDIENTE, nombre_perfil="Marcela",
+        tipo=s.TIPO_CANCELADA,
+        nombre_ficha=persistencia.NOMBRE_PENDIENTE,
+        nombre_perfil="Marcela",
     )
     assert s.parametros_de(fila) == ["Marcela"]
 
@@ -620,13 +629,17 @@ def test_una_reactivacion_sin_ningun_nombre_usable_no_se_manda():
     """Un nombre de perfil que es solo un emoji -o vacio, o puro simbolo- no tiene ninguna
     letra: `parametros_de` devuelve `None` y `despachar` la anula en vez de mandar "Hola 🌸"
     o "Hola paciente". Ante la duda, no se manda."""
-    fila = fila_de_reactivacion(nombre_ficha=None, nombre_perfil="🌸")
+    fila = fila_de_reactivacion(
+        tipo=s.TIPO_CANCELADA, nombre_ficha=None, nombre_perfil="🌸"
+    )
     assert s.parametros_de(fila) is None
 
 
 def test_un_nombre_de_perfil_vacio_o_solo_espacios_tampoco_es_usable():
     for perfil in (None, "", "   "):
-        fila = fila_de_reactivacion(nombre_ficha=None, nombre_perfil=perfil)
+        fila = fila_de_reactivacion(
+            tipo=s.TIPO_CANCELADA, nombre_ficha=None, nombre_perfil=perfil
+        )
         assert s.parametros_de(fila) is None, repr(perfil)
 
 
@@ -639,7 +652,9 @@ def test_un_emoji_delante_del_nombre_no_se_manda_como_si_fuera_el_nombre():
     nombre, la forma mas comun de nombre de perfil en WhatsApp), la fila se anula en vez de
     mandar el emoji solo."""
     for perfil in ("🌸 Ana", "💖 Andrea", "✨ Ana"):
-        fila = fila_de_reactivacion(nombre_ficha=None, nombre_perfil=perfil)
+        fila = fila_de_reactivacion(
+            tipo=s.TIPO_CANCELADA, nombre_ficha=None, nombre_perfil=perfil
+        )
         assert s.parametros_de(fila) is None, repr(perfil)
 
 
@@ -650,7 +665,9 @@ def test_un_nombre_que_empieza_con_espacio_no_cae_al_respaldo_paciente():
     este hallazgo entero existe para sacar de las reactivaciones. `.split()` sin argumento
     ignora los espacios de sobra y rescata el nombre real -- "paciente" no puede aparecer
     aqui NUNCA, y esta prueba lo deja en firme con una fila que antes lo producia."""
-    fila = fila_de_reactivacion(nombre_ficha=" Ana Perez", nombre_perfil=None)
+    fila = fila_de_reactivacion(
+        tipo=s.TIPO_CANCELADA, nombre_ficha=" Ana Perez", nombre_perfil=None
+    )
     assert s.parametros_de(fila) == ["Ana"]
 
 
@@ -660,7 +677,9 @@ def test_un_salto_de_linea_interno_no_sobrevive_al_hueco():
     los tres intentos. `.split(" ")[0]` no cortaba por `\\n` ni por `\\t` -solo por el caracter
     espacio literal-, asi que `"Ana\\nPerez"` sobrevivia entero, salto de linea incluido.
     `.split()` sin argumento corta por CUALQUIER espacio en blanco."""
-    fila = fila_de_reactivacion(nombre_ficha=None, nombre_perfil="Ana\nPerez")
+    fila = fila_de_reactivacion(
+        tipo=s.TIPO_CANCELADA, nombre_ficha=None, nombre_perfil="Ana\nPerez"
+    )
     assert s.parametros_de(fila) == ["Ana"]
 
 
@@ -674,6 +693,86 @@ def test_el_recordatorio_de_cita_sigue_mandando_sus_cuatro_huecos():
         cita_inicio=momento(17, 9), tratamiento="Limpieza",
     )
     assert s.parametros_de(fila) == ["Marcela", "jueves 17/9", "09:00", "Limpieza"]
+
+
+# -- La plantilla que se quedo sin variables (23/09/2026) ------------------------------------
+#
+# `reactivacion_sin_agendar` perdio su unico hueco. El porque, con la medicion entera sobre la
+# base, esta en `seguimientos.TIPOS_SIN_HUECOS`: aqui solo lo que tiene que seguir siendo
+# cierto para que no se rompa por el lado que no se ve.
+
+
+def test_reactivacion_sin_agendar_no_manda_NINGUN_hueco():
+    """La fabrica usa `TIPO_SIN_AGENDAR` por defecto, que es el tipo que el barrido encola de
+    verdad. Ni un nombre perfectamente bueno viaja ya: la plantilla no tiene donde ponerlo, y
+    un parametro de mas sobre una plantilla estatica es un 132000."""
+    assert s.parametros_de(fila_de_reactivacion(nombre_perfil="Marcela Rios")) == []
+
+
+def test_un_perfil_de_whatsapp_impresentable_ya_no_puede_llegar_a_un_paciente():
+    """Los seis casos medidos en la base el 23/09/2026, y no son casos de esquina: son 6 de 17
+    numeros. Dos ya habian salido de verdad --«Hola jg390485»-- y eso es lo que costo el
+    hueco. `Jean♣️` esta aqui porque ademas enseña que `_primer_nombre_usable` solo caza el
+    emoji SEPARADO: pegado al nombre, el token entero viaja a Meta."""
+    for perfil in (
+        "jg390485", "rodolfopatino015", "centro", "canomoraleswilmerandres",
+        "yualetxis", "Jean♣️",
+    ):
+        assert s.parametros_de(fila_de_reactivacion(nombre_perfil=perfil)) == [], perfil
+
+
+def test_la_lista_vacia_no_se_puede_confundir_con_la_fila_rota():
+    """`despachar` anula con `sin_nombre` cuando `parametros_de` devuelve `None`, y lo
+    comprueba con `is None` a proposito: `[]` es falsy, asi que un `if not parametros` en ese
+    punto anularia TODAS las filas de esta plantilla -- el canal entero apagado, sin un error
+    en ningun log y con la suite en verde. Son dos estados distintos y esta prueba los
+    separa."""
+    vacia = s.parametros_de(fila_de_reactivacion(nombre_perfil="🌸"))
+    rota = s.parametros_de(
+        fila_de_reactivacion(tipo=s.TIPO_CANCELADA, nombre_ficha=None, nombre_perfil="🌸")
+    )
+    assert vacia == [] and vacia is not None
+    assert rota is None
+
+
+def test_las_otras_dos_plantillas_de_reactivacion_CONSERVAN_su_hueco():
+    """La diferencia no es la plantilla, es de donde sale el nombre: quien cancelo o no
+    asistio YA agendo alguna vez, asi que tiene ficha en `pacientes` con el nombre que dio
+    para su cita --lo escribe `crear_cita`-- y ahi el hueco si es de fiar. Meter estos dos
+    tipos en `TIPOS_SIN_HUECOS` haria que Meta rechazara sus envios."""
+    for tipo in (s.TIPO_CANCELADA, s.TIPO_NO_ASISTIO):
+        fila = fila_de_reactivacion(tipo=tipo, nombre_ficha="Ana Perez")
+        assert s.parametros_de(fila) == ["Ana"], tipo
+
+
+def test_una_sin_agendar_sin_ningun_nombre_YA_NO_se_anula_y_sale():
+    """El contraste que cierra el cambio, contra `despachar` entero. Esta misma fila --perfil
+    que es solo un emoji-- se anulaba con `sin_nombre` y no salia; ahora sale, porque no hay
+    nada que rellenar. Es la unica prueba que demuestra que quitar el hueco no solo cambia los
+    parametros: recupera a quien la guarda dejaba fuera."""
+    import asyncio
+
+    enviados: list[dict] = []
+    anuladas: list[tuple[int, str]] = []
+
+    class _WhatsAppFalso:
+        async def enviar_plantilla(self, telefono, **k):
+            enviados.append(k)
+            return "wamid.X"
+
+    recuento = asyncio.run(
+        _despachar_con(
+            [fila_de_reactivacion(nombre_ficha=None, nombre_perfil="🌸")],
+            whatsapp=_WhatsAppFalso(),
+            plantillas={s.TIPO_SIN_AGENDAR: "reactivacion_sin_agendar"},
+            ahora=momento(16, 11),
+            anuladas=anuladas,
+        )
+    )
+
+    assert anuladas == []
+    assert enviados[0]["parametros"] == []
+    assert recuento["enviados"] == 1
 
 
 def test_sin_plantilla_para_ese_tipo_no_se_manda_y_no_se_marca():
@@ -731,14 +830,20 @@ def test_cada_tipo_usa_SU_plantilla():
         )
     )
     assert enviados[0]["plantilla"] == "reactivacion_sin_agendar"
-    assert enviados[0]["parametros"] == ["Marcela"]
+    # Sin huecos desde el 23/09/2026 (`TIPOS_SIN_HUECOS`): la plantilla que Meta aprobo para
+    # este tipo ya no tiene ni una variable, asi que mandar "Marcela" seria un 132000.
+    assert enviados[0]["parametros"] == []
 
 
 def test_una_reactivacion_sin_nombre_usable_se_anula_y_no_se_manda_ni_se_marca():
     """El hallazgo CRITICO de principio a fin, contra `despachar` completo: con la plantilla
     puesta Y sin ningun nombre usable, la fila se ANULA -no se manda "Hola paciente", y no se
     deja pendiente para siempre (acumularia basura que el despachador relee cada 60 s sin
-    ninguna salida posible)."""
+    ninguna salida posible).
+
+    Sobre `TIPO_CANCELADA` desde el 23/09/2026: `sin_nombre` solo puede alcanzar a una
+    plantilla que TENGA hueco, y `reactivacion_sin_agendar` perdio el suyo. La guarda no se
+    fue -- se quedo con dos tipos en vez de tres."""
     import asyncio
 
     enviados: list[dict] = []
@@ -752,11 +857,15 @@ def test_una_reactivacion_sin_nombre_usable_se_anula_y_no_se_manda_ni_se_marca()
 
     recuento = asyncio.run(
         _despachar_con(
-            [fila_de_reactivacion(nombre_ficha=None, nombre_perfil="🌸")],
+            [
+                fila_de_reactivacion(
+                    tipo=s.TIPO_CANCELADA, nombre_ficha=None, nombre_perfil="🌸"
+                )
+            ],
             whatsapp=_WhatsAppFalso(),
             plantillas={
                 s.TIPO_RECORDATORIO: "recordatorio_cita",
-                s.TIPO_SIN_AGENDAR: "reactivacion_sin_agendar",
+                s.TIPO_CANCELADA: "reactivacion_cancelada",
             },
             ahora=momento(16, 11),
             marcadas=marcadas,
@@ -792,7 +901,11 @@ def test_en_modo_de_comprobacion_una_reactivacion_sin_nombre_queda_pendiente_com
 
     recuento = asyncio.run(
         _despachar_con(
-            [fila_de_reactivacion(nombre_ficha=None, nombre_perfil="🌸")],
+            [
+                fila_de_reactivacion(
+                    tipo=s.TIPO_CANCELADA, nombre_ficha=None, nombre_perfil="🌸"
+                )
+            ],
             whatsapp=_WhatsAppFalso(),
             plantillas={},  # el modo de comprobacion de hoy: las cuatro plantillas vacias
             ahora=momento(16, 11),

@@ -264,22 +264,29 @@ class WhatsApp:
         emisor no tiene nada que rellenar. Si Meta aprueba algún día un botón con carga
         DINÁMICA --una URL con una variable, o un `flow`--, el cuerpo hay que ampliarlo con su
         `{"type": "button", "sub_type": ..., "index": ...}`: sin él, ese botón se manda vacío.
+
+        **Y sin parámetros no manda NINGÚN componente**, que no es lo mismo que mandarlo con
+        la lista vacía: a una plantilla sin variables, un `body` con `parameters: []` le
+        responde 132000 («number of parameters does not match»). Hizo falta el 23/09/2026,
+        cuando `reactivacion_sin_agendar` perdió su único hueco --el nombre; ver
+        `seguimientos.TIPOS_SIN_HUECOS`--. Lo que está en juego no es un envío menos: la fila
+        se marca ANTES de enviar (no negociable 21), así que un rechazo de Meta la pierde para
+        siempre tras los tres intentos, y encima despierta al doctor con un aviso de fallo.
         """
+        plantilla_aprobada = {"name": plantilla, "language": {"code": idioma}}
+        if parametros:
+            plantilla_aprobada["components"] = [
+                {
+                    "type": "body",
+                    "parameters": [{"type": "text", "text": v} for v in parametros],
+                }
+            ]
         cuerpo = {
             "messaging_product": "whatsapp",
             "recipient_type": "individual",
             "to": telefono,
             "type": "template",
-            "template": {
-                "name": plantilla,
-                "language": {"code": idioma},
-                "components": [
-                    {
-                        "type": "body",
-                        "parameters": [{"type": "text", "text": v} for v in parametros],
-                    }
-                ],
-            },
+            "template": plantilla_aprobada,
         }
         async with httpx.AsyncClient(timeout=TIMEOUT_NORMAL) as cliente:
             r = await cliente.post(
