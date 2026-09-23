@@ -124,11 +124,21 @@ Dos trabajos de la rama `seguridad-perimetro`, hechos el mismo día y por el mis
 1. **Poner un límite de gasto mensual en el dashboard de OpenAI.** Es la única defensa que
    acota el peor caso ABSOLUTO — todo lo que se construyó acota el ritmo, no el total — y no se
    puede hacer desde el código. Cinco minutos.
-2. **Crear la plantilla `cita_nueva_doctores` en el Business Manager de Meta** (categoría
-   *Utility*, 5 variables: nombre, teléfono, motivo, fecha, hora). Hasta que exista y esté en
-   `MAXICARE_PLANTILLA_CITA_NUEVA`, el código se despliega y **no manda nada**: deja en el log
-   a quién se le habría avisado y con qué datos, que es como se comprueba que avisa de las
-   citas correctas antes de que salga un solo WhatsApp.
+2. ~~**Crear la plantilla `cita_nueva_doctores` en el Business Manager de Meta**~~ (categoría
+   *Utility*, 5 variables: nombre, teléfono, motivo, fecha, hora). **`MAXICARE_PLANTILLA_CITA_NUEVA`
+   ya tiene ese nombre puesto en el `.env` del VPS**, así que el aviso NO está en modo de
+   comprobación: manda. El 23/09/2026 se le sumó un tercer destinatario (Santiago, de
+   administración) en `config.WHATSAPP_DOCTORES`.
+
+   **Lo que sigue sin comprobar, y conviene saber por qué:** que Meta la tenga APROBADA y la
+   entregue. No hay forma de mirarlo desde aquí — listar plantillas cuelga de la cuenta de
+   negocio (WABA), y el token de usuario de sistema devuelve sus `granular_scopes` con
+   `target_ids` vacío, así que `probar_plantilla.py::_waba_ids` sale con las manos vacías y
+   `/me/assigned_whatsapp_business_accounts` responde `data: []`. Las dos salidas son entrar a
+   la consola de Meta, o mandar un mensaje de verdad. Y `scripts/probar_plantilla.py` **no
+   cubre esta plantilla**: su `_PLANTILLAS` tiene las cuatro de recordatorio y reactivación.
+   Mientras tanto, si no estuviera aprobada, el fallo se vería con la primera cita real y solo
+   como una línea de `log.exception` en el contenedor.
 3. **Desplegar**, que aplica la migración 022. Sin ella el perímetro no frena a nadie **y no
    hay un solo error visible** (no negociable 27).
 
