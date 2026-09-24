@@ -376,13 +376,18 @@ export type ResumenConversacion = {
 }
 
 export type MensajeDelHilo = {
-  quien: 'paciente' | 'daniela' | 'doctor'
-  /** El nombre de quien escribió. Solo lo llevan los del doctor. */
+  /** `sistema` es lo que mandó el despachador por su cuenta --un recordatorio, una
+   *  reactivación--: no lo escribió nadie, y hasta el 23/09/2026 no aparecía en el hilo,
+   *  así que la respuesta del paciente («Sí, me interesa») colgaba de la nada. */
+  quien: 'paciente' | 'daniela' | 'doctor' | 'sistema'
+  /** El nombre de quien escribió. Lo llevan los del doctor y, en los del sistema, el motivo
+   *  por el que salió el mensaje («Reactivación · preguntó y no agendó»). */
   autor: string | null
   texto: string
   cuando: string
-  /** Solo los del doctor, y solo si el envío a WhatsApp falló. Lo que hace que el hilo
-   *  distinga «no lo escribió» de «lo escribió y no salió». */
+  /** Los del doctor y los del sistema, cuando el envío a WhatsApp falló. Lo que hace que el
+   *  hilo distinga «no se mandó» de «se mandó y Meta lo rechazó» -- y el único sitio del
+   *  panel donde se ve que una plantilla viene siendo rechazada. */
   fallo: string | null
   /** El paciente no escribió esto: lo DIJO, y lo transcribió una máquina (migración 027).
    *  La pantalla tiene que decirlo, porque una transcripción puede estar mal oída y quien

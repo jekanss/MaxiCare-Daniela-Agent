@@ -627,6 +627,159 @@ def test_el_bloque_de_presentacion_va_entre_tratamientos_y_fecha():
     )
 
 
+# -- El turno 1 que NO es un primer contacto (23/09/2026) ------------------------------
+#
+# Los dos rótulos se comparan con sus saltos de línea a propósito: «NO ES UN PRIMER CONTACTO»
+# CONTIENE a «PRIMER CONTACTO», así que un `in` a secas da verdadero para los dos y una prueba
+# escrita sin este cuidado pasa siempre. El bloque se añade como `\n\n` + rótulo + `\n`.
+_SE_PRESENTA = "\n\nPRIMER CONTACTO\n"
+_RETOMA = "\n\nNO ES UN PRIMER CONTACTO\n"
+
+
+def prompt_de(**cambios) -> str:
+    return asyncio.run(
+        agentes.daniela.get_system_prompt(RunContextWrapper(context=contexto(**cambios)))
+    )
+
+
+def test_los_dos_rotulos_del_saludo_se_distinguen_por_el_salto_de_linea():
+    """La trampa de este par de pruebas, fijada antes que ellas.
+
+    `"PRIMER CONTACTO" in texto` es cierto también cuando lo que se emitió fue «NO ES UN
+    PRIMER CONTACTO». Quien escriba una prueba nueva sobre este bloque sin los saltos de
+    línea la verá pasar con cualquiera de las dos ramas, que es no probar nada.
+    """
+    assert "PRIMER CONTACTO" in _RETOMA
+    assert _SE_PRESENTA not in _RETOMA
+
+
+def test_quien_contesta_una_reactivacion_NO_recibe_el_bloque_de_primer_contacto():
+    """El caso medido: conversación `19f07190`, 23/09/2026.
+
+    La paciente escribió el 22 y recibió «Hola, soy Daniela y hago parte del equipo de
+    MaxiCare». Le reactivamos el 23 a las 16:37 --65 segundos después de que su conversación
+    caducara-- y al pulsar «Sí, me interesa» se abrió una conversación NUEVA con
+    `turno_actual = 1`: recibió la misma presentación otra vez, como si no nos conociéramos.
+    """
+    texto = prompt_de(
+        turno_actual=1,
+        ahora=datetime(2026, 9, 23, 17, 4, tzinfo=ZONA_BOGOTA),
+        ultimo_recordatorio_tipo="reactivacion_sin_agendar",
+        ultimo_recordatorio_en=datetime(2026, 9, 23, 16, 37, tzinfo=ZONA_BOGOTA),
+    )
+
+    assert _SE_PRESENTA not in texto
+    assert _RETOMA in texto
+    # Y la otra mitad sigue ahí: saber que le escribimos no sirve de nada sin saber QUÉ.
+    assert "YA LE ESCRIBIMOS NOSOTROS" in texto
+
+
+def test_quien_contesta_un_recordatorio_de_CITA_tampoco_se_lleva_la_presentacion():
+    """No es un defecto solo de la reactivación, y por eso el arreglo no distingue el tipo.
+
+    Un recordatorio de víspera sale a las 18:00 del día anterior, siempre a más de 24 h de la
+    conversación que agendó: quien responde «Sí, confirmo» abre también una conversación
+    nueva. Arreglarlo solo para la reactivación dejaba este caso saludando de cero.
+    """
+    texto = prompt_de(
+        turno_actual=1,
+        ahora=datetime(2026, 9, 17, 9, 0, tzinfo=ZONA_BOGOTA),
+        ultimo_recordatorio_tipo="recordatorio_cita",
+        ultimo_recordatorio_en=datetime(2026, 9, 16, 18, 0, tzinfo=ZONA_BOGOTA),
+    )
+
+    assert _SE_PRESENTA not in texto
+    assert _RETOMA in texto
+
+
+def test_un_primer_contacto_de_VERDAD_sigue_presentandose():
+    """El caso normal, que es la inmensa mayoría: nadie le ha escrito nunca a esta persona."""
+    texto = prompt_de(turno_actual=1, ahora=datetime(2026, 9, 23, 17, 4, tzinfo=ZONA_BOGOTA))
+
+    assert _SE_PRESENTA in texto
+    assert _RETOMA not in texto
+
+
+def test_un_antecedente_CADUCADO_devuelve_la_presentacion():
+    """Pasados los 14 días la reactivación ya no es antecedente -- y entonces la persona sí
+    vuelve a ser alguien que no sabe con quién escribe. Las dos mitades caducan juntas, que
+    es todo el motivo de que la condición viva en una sola función."""
+    salio = datetime(2026, 9, 1, 10, 0, tzinfo=ZONA_BOGOTA)
+    tope = agentes.DIAS_QUE_UNA_REACTIVACION_SIGUE_SIENDO_ANTECEDENTE
+
+    def con(dias: int) -> str:
+        return prompt_de(
+            turno_actual=1,
+            ahora=salio + timedelta(days=dias),
+            ultimo_recordatorio_tipo="reactivacion_sin_agendar",
+            ultimo_recordatorio_en=salio,
+        )
+
+    assert _RETOMA in con(tope - 1)
+    assert _SE_PRESENTA not in con(tope - 1)
+    assert _SE_PRESENTA in con(tope + 1)
+    assert _RETOMA not in con(tope + 1)
+
+
+@pytest.mark.parametrize(
+    "tipo",
+    [
+        "recordatorio_cita",
+        "reactivacion_sin_agendar",
+        "reactivacion_cancelada",
+        "reactivacion_no_asistio",
+    ],
+)
+def test_el_saludo_y_el_antecedente_NUNCA_se_contradicen(tipo):
+    """La invariante que resume el arreglo, para los cuatro tipos que existen.
+
+    Decirle a Daniela «el paciente no sabe todavía con quién escribe» y «le escribimos
+    nosotros y esto es su respuesta» en el mismo prompt es lo que produjo el doble saludo.
+    Los dos bloques leen ahora el mismo `_antecedente_vivo`, así que no pueden discrepar --
+    y esta prueba es lo que impide que alguien los vuelva a separar.
+    """
+    texto = prompt_de(
+        turno_actual=1,
+        ahora=datetime(2026, 9, 17, 9, 0, tzinfo=ZONA_BOGOTA),
+        ultimo_recordatorio_tipo=tipo,
+        ultimo_recordatorio_en=datetime(2026, 9, 16, 18, 0, tzinfo=ZONA_BOGOTA),
+    )
+
+    assert ("YA LE ESCRIBIMOS NOSOTROS" in texto) is (_SE_PRESENTA not in texto)
+
+
+def test_en_el_turno_2_no_se_emite_ninguna_de_las_dos_ramas():
+    """La bifurcación es DENTRO del turno 1: el turno 2 no gasta ni un token en saludo,
+    tenga antecedente o no."""
+    texto = prompt_de(
+        turno_actual=2,
+        ahora=datetime(2026, 9, 17, 9, 0, tzinfo=ZONA_BOGOTA),
+        ultimo_recordatorio_tipo="reactivacion_sin_agendar",
+        ultimo_recordatorio_en=datetime(2026, 9, 16, 18, 0, tzinfo=ZONA_BOGOTA),
+    )
+
+    assert _SE_PRESENTA not in texto
+    assert _RETOMA not in texto
+
+
+def test_el_bloque_retomado_va_en_el_MISMO_sitio_que_la_presentacion():
+    """Las dos ramas son el mismo bloque, así que comparten su sitio en el orden por
+    volatilidad: entre el vocabulario y la fecha. Si una se moviera, descachearía distinto."""
+    texto = prompt_de(
+        turno_actual=1,
+        ahora=datetime(2026, 9, 17, 9, 0, tzinfo=ZONA_BOGOTA),
+        ultimo_recordatorio_tipo="reactivacion_sin_agendar",
+        ultimo_recordatorio_en=datetime(2026, 9, 16, 18, 0, tzinfo=ZONA_BOGOTA),
+    )
+
+    assert (
+        texto.index("TRATAMIENTOS QUE MAXICARE OFRECE HOY")
+        < texto.index("NO ES UN PRIMER CONTACTO")
+        < texto.index("AHORA MISMO")
+        < texto.index("YA LE ESCRIBIMOS NOSOTROS")
+    )
+
+
 def test_un_recordatorio_reciente_le_dice_a_daniela_a_que_contesta_el_paciente():
     """El mensaje lo mandó el despachador, no la conversación: el historial del agente no lo
     contiene. Sin este bloque, un «sí, confirmo» llega sin antecedente ninguno."""

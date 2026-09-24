@@ -234,6 +234,31 @@ TIPO_CANCELADA = "reactivacion_cancelada"
 TIPO_NO_ASISTIO = "reactivacion_no_asistio"
 
 TIPOS_DE_REACTIVACION = frozenset({TIPO_SIN_AGENDAR, TIPO_CANCELADA, TIPO_NO_ASISTIO})
+
+#: Cómo se llama cada tipo cuando lo tiene que leer una PERSONA, no el código.
+#:
+#: Lo usa `panel.hilo` para la voz del sistema: el doctor abre la conversación y ve al
+#: paciente contestando «Sí, me interesa» a un mensaje que no está en ninguna de las tres
+#: voces --lo mandó el despachador, no el SDK ni el webhook--, así que hasta el 23/09/2026
+#: esa respuesta colgaba de la nada. Es la tercera cara del mismo agujero que ya se tapó dos
+#: veces: para Daniela con `persistencia.ultimo_recordatorio`, y para el hilo de Telegram con
+#: el volcado del no negociable 29.
+#:
+#: **Describe el MOTIVO por el que salió, nunca el texto que decía**, y esa es la línea que
+#: no se puede cruzar. El cuerpo vive en una plantilla de Meta que este repositorio no
+#: guarda y que MaxiCare edita desde otra consola: escribir aquí una aproximación pondría en
+#: el hilo, con aspecto de transcripción, una frase que quizá no fue la que leyó el paciente.
+#: Regla 3 de CLAUDE.md -- lo que no se sabe no se rellena con algo plausible.
+#:
+#: Un tipo que no esté aquí sale con su clave cruda en vez de reventar: perder el rótulo
+#: bonito de un seguimiento nuevo es barato, y tumbar la pantalla del hilo por no tenerlo
+#: es lo contrario de lo que este dict vino a arreglar.
+ETIQUETA_DEL_TIPO = {
+    TIPO_RECORDATORIO: "Recordatorio de su cita",
+    TIPO_SIN_AGENDAR: "Reactivación · preguntó y no agendó",
+    TIPO_CANCELADA: "Reactivación · canceló su cita",
+    TIPO_NO_ASISTIO: "Reactivación · no asistió",
+}
 TIPOS_DE_SEGUIMIENTO = TIPOS_DE_REACTIVACION | {TIPO_RECORDATORIO}
 
 #: Los que el BARRIDO puede encolar hoy. `TIPO_NO_ASISTIO` no esta: sin `citas.asistio` no hay

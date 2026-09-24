@@ -414,6 +414,30 @@ def _recordatorio_caducado(cuando, ahora, *, horas: int | None = None) -> bool:
     return transcurrido > tope * 3600
 
 
+def _antecedente_vivo(contexto, ahora) -> str | None:
+    """El tipo del mensaje que le mandamos NOSOTROS y sigue contando, o `None`.
+
+    Un `getattr` y una resta, pero se extrajo porque lo preguntan DOS bloques del prompt que
+    no están juntos --la presentación y «YA LE ESCRIBIMOS NOSOTROS»-- y la respuesta tiene
+    que ser la misma en los dos. Con la condición escrita dos veces, un cambio de cota en uno
+    deja al otro saludando como si no hubiéramos escrito nunca, que es exactamente el fallo
+    que esta función se añadió para cerrar.
+
+    Cada tipo trae su propia cota y por eso no basta con `_recordatorio_caducado` a secas:
+    una reactivación vale 14 días y un recordatorio de cita 48 horas. Ver las dos constantes.
+    """
+    tipo = getattr(contexto, "ultimo_recordatorio_tipo", None)
+    if not tipo:
+        return None
+    horas = (
+        DIAS_QUE_UNA_REACTIVACION_SIGUE_SIENDO_ANTECEDENTE * 24
+        if tipo in seguimientos.TIPOS_DE_REACTIVACION
+        else None
+    )
+    cuando = getattr(contexto, "ultimo_recordatorio_en", None)
+    return None if _recordatorio_caducado(cuando, ahora, horas=horas) else tipo
+
+
 def fecha_en_palabras(momento) -> str:
     """«domingo 13 de septiembre de 2026, hacia las 08:00».
 
@@ -501,22 +525,66 @@ def instrucciones_daniela(ctx, agente) -> str:
             "y sin frenar lo que venía haciendo."
         )
 
+    # La fecha se LEE aquí --antes de su bloque, que sigue más abajo sin moverse-- porque el
+    # antecedente la necesita para saber si caducó, y la presentación necesita el antecedente.
+    # Leer no escribe: el orden del prompt no cambia ni un carácter por esto.
+    ahora = getattr(contexto, "ahora", None)
+    antecedente = _antecedente_vivo(contexto, ahora)
+
     # Presentación: solo en el turno 1, y con el mismo cuidado defensivo que la fecha. Va
     # aquí -- después del vocabulario, antes de la fecha -- porque cambia una vez por
     # conversación: menos volátil que "AHORA MISMO" (que cambia cada minuto), más volátil
     # que la lista de tratamientos.
+    #
+    # -----------------------------------------------------------------------------------
+    # Por qué el turno 1 no significa «primer contacto», y por qué eso NO era un caso raro
+    # -----------------------------------------------------------------------------------
+    # Hasta el 23/09/2026 aquí solo estaba la rama de abajo, y quien contestaba a un mensaje
+    # NUESTRO se llevaba «el paciente no sabe todavía con quién escribe». Las dos ramas se
+    # emitían juntas y decían lo contrario: esta, que es un desconocido; «YA LE ESCRIBIMOS
+    # NOSOTROS», que le acabamos de escribir y esto es su respuesta.
+    #
+    # Y colisionan SIEMPRE, no de vez en cuando. Un seguimiento sale por definición cuando ya
+    # hubo silencio --24 h para una reactivación, la víspera para un recordatorio-- y
+    # `conversacion_viva` entierra la conversación a las 24 h: son la misma ventana, así que
+    # el mensaje sale con la conversación ya muerta y la respuesta del paciente abre una
+    # NUEVA, con `turno_actual = 1` y sin una línea de historial. Medido sobre las seis
+    # reactivaciones que el sistema ha enviado en su vida: las SEIS salieron sobre una
+    # conversación ya caducada.
+    #
+    # El caso que lo destapó (conversación `19f07190`, 23/09/2026): la paciente escribió el
+    # 22 a las 16:36 y recibió «Hola, soy Daniela y hago parte del equipo de MaxiCare»; le
+    # reactivamos el 23 a las 16:37 --65 segundos después de que su conversación caducara--;
+    # pulsó «Sí, me interesa» a las 17:04 y recibió la MISMA frase otra vez. Es la única
+    # reactivación contestada que hay, así que el defecto alcanzaba al 100 % de ellas.
+    #
+    # No se arregla ampliando la ventana de `conversacion_viva`: esa ventana es de Meta y de
+    # la idempotencia, no del saludo. Lo que estaba mal era dar `turno_actual == 1` por
+    # sinónimo de «no nos conocemos», cuando el sistema sabe que sí.
     if getattr(contexto, "turno_actual", None) == 1:
-        texto = (
-            f"{texto}\n\n"
-            "PRIMER CONTACTO\n"
-            "Es el primer mensaje de esta conversación: el paciente no sabe todavía con "
-            "quién escribe. Te presentas por tu nombre y dices que haces parte del equipo "
-            "de MaxiCare, con calidez genuina -no un saludo protocolario-. En los turnos "
-            "siguientes NO vuelvas a presentarte: repetir tu nombre en cada mensaje suena "
-            "a robot."
-        )
+        if antecedente is not None:
+            texto = (
+                f"{texto}\n\n"
+                "NO ES UN PRIMER CONTACTO\n"
+                "Es el primer mensaje de ESTA conversación, pero no de esta relación: el "
+                "mensaje anterior lo mandamos nosotros y lo que acabas de recibir es su "
+                "respuesta. NO abras presentándote -decirle «soy Daniela y hago parte del "
+                "equipo de MaxiCare» a quien acaba de contestarnos suena a que nadie leyó "
+                "lo que dijo-. Salúdalo y retoma desde ahí. Si en algún momento hace falta "
+                "que sepa tu nombre, lo dices dentro de la frase y sin fórmula de "
+                "presentación."
+            )
+        else:
+            texto = (
+                f"{texto}\n\n"
+                "PRIMER CONTACTO\n"
+                "Es el primer mensaje de esta conversación: el paciente no sabe todavía con "
+                "quién escribe. Te presentas por tu nombre y dices que haces parte del equipo "
+                "de MaxiCare, con calidez genuina -no un saludo protocolario-. En los turnos "
+                "siguientes NO vuelvas a presentarte: repetir tu nombre en cada mensaje suena "
+                "a robot."
+            )
 
-    ahora = getattr(contexto, "ahora", None)
     if ahora is not None:
         texto = (
             f"{texto}\n\n"
@@ -537,7 +605,12 @@ def instrucciones_daniela(ctx, agente) -> str:
     # llegaría mudo: el mensaje lo mandó un proceso, así que no está en el historial, y un
     # «sí, confirmo» del paciente le estaría diciendo que sí a algo que Daniela no sabe que
     # se dijo. Con la línea, el «sí» tiene antecedente.
-    recordatorio = getattr(contexto, "ultimo_recordatorio_tipo", None)
+    #
+    # El tipo sale de `_antecedente_vivo`, calculado arriba, y viene ya con su caducidad
+    # aplicada: es el MISMO dato con el que la presentación decidió no saludar de cero, y
+    # tiene que serlo. Un bloque que diga «le escribimos» mientras el otro dice «no te
+    # conoce» es lo que pasaba antes del 23/09/2026.
+    recordatorio = antecedente
     cuando = getattr(contexto, "ultimo_recordatorio_en", None)
 
     # Una REACTIVACIÓN no es un recordatorio de cita, y hasta el 20/09/2026 este bloque las
@@ -554,34 +627,34 @@ def instrucciones_daniela(ctx, agente) -> str:
     # era el único tipo que existía, así que todas pasan el tipo correcto para el texto que
     # afirman. El séptimo fallo de esta rama con la misma forma -- el código decía una cosa
     # y hacía otra, en silencio.
+    #
+    # La caducidad ya no se comprueba aquí: la aplicó `_antecedente_vivo` con la cota de cada
+    # tipo, y repetirla era la segunda copia de la condición que ahora está en un solo sitio.
     if recordatorio in seguimientos.TIPOS_DE_REACTIVACION:
         if cuando is not None and cuando.tzinfo and ahora is not None and ahora.tzinfo:
             cuando = cuando.astimezone(ahora.tzinfo)
-        if not _recordatorio_caducado(
-            cuando, ahora, horas=DIAS_QUE_UNA_REACTIVACION_SIGUE_SIENDO_ANTECEDENTE * 24
-        ):
-            tratamiento = getattr(contexto, "tratamiento_pendiente", None)
-            texto = (
-                f"{texto}\n\n"
-                "YA LE ESCRIBIMOS NOSOTROS\n"
-                "A este paciente le salió un mensaje automático de seguimiento"
-                + (f", el {fecha_en_palabras(cuando)}" if cuando is not None else "")
-                + f". {_LO_QUE_DECIA_LA_REACTIVACION[recordatorio]}\n"
-                f"Traía dos botones: «{_BOTON_AFIRMATIVO[recordatorio]}» y «Ya no, "
-                "gracias». No lo escribiste "
-                "tú en esta conversación y por eso no lo ves en el historial, pero él sí lo "
-                "leyó: si te contesta que sí --con el botón o con sus palabras--, está "
-                "contestando a eso.\n"
-                "Retómalo desde ahí. NO le preguntes lo que ya te había contado: le "
-                "escribimos nosotros precisamente porque nos lo dijo, y pedirle que lo "
-                "repita es lo que hace que un mensaje nuestro parezca publicidad masiva."
-                + (
-                    f"\nLa última vez preguntó por: {tratamiento}."
-                    if tratamiento
-                    else "\nNo quedó anotado sobre qué preguntó, así que eso sí puedes "
-                    "preguntárselo -- reconociendo que le escribimos nosotros primero."
-                )
+        tratamiento = getattr(contexto, "tratamiento_pendiente", None)
+        texto = (
+            f"{texto}\n\n"
+            "YA LE ESCRIBIMOS NOSOTROS\n"
+            "A este paciente le salió un mensaje automático de seguimiento"
+            + (f", el {fecha_en_palabras(cuando)}" if cuando is not None else "")
+            + f". {_LO_QUE_DECIA_LA_REACTIVACION[recordatorio]}\n"
+            f"Traía dos botones: «{_BOTON_AFIRMATIVO[recordatorio]}» y «Ya no, "
+            "gracias». No lo escribiste "
+            "tú en esta conversación y por eso no lo ves en el historial, pero él sí lo "
+            "leyó: si te contesta que sí --con el botón o con sus palabras--, está "
+            "contestando a eso.\n"
+            "Retómalo desde ahí. NO le preguntes lo que ya te había contado: le "
+            "escribimos nosotros precisamente porque nos lo dijo, y pedirle que lo "
+            "repita es lo que hace que un mensaje nuestro parezca publicidad masiva."
+            + (
+                f"\nLa última vez preguntó por: {tratamiento}."
+                if tratamiento
+                else "\nNo quedó anotado sobre qué preguntó, así que eso sí puedes "
+                "preguntárselo -- reconociendo que le escribimos nosotros primero."
             )
+        )
 
     # `elif` y no un `return` dentro de la rama de arriba: con un `return` ahí, el bloque
     # «ESTE PACIENTE PIDIÓ NO SER CONTACTADO» que viene después dejaba de emitirse para quien
@@ -589,8 +662,9 @@ def instrucciones_daniela(ctx, agente) -> str:
     # de baja por una de ellas, y la que no puede volver a oír hablar de seguimiento.
     #
     # El tope de las 48 horas no es cosmética: nada borra nunca esas dos columnas, así que sin
-    # él el bloque no caducaría jamás. Ver `HORAS_QUE_UN_RECORDATORIO_SIGUE_SIENDO_ANTECEDENTE`.
-    elif recordatorio and not _recordatorio_caducado(cuando, ahora):
+    # él el bloque no caducaría jamás. Ver `HORAS_QUE_UN_RECORDATORIO_SIGUE_SIENDO_ANTECEDENTE`
+    # -- que es la cota que `_antecedente_vivo` ya le aplicó a este `recordatorio`.
+    elif recordatorio:
         # La columna es `TIMESTAMPTZ` y vuelve de Postgres en UTC: sin pasarla a la zona de
         # `ahora` --que siempre es la de Bogotá-- el prompt diría cinco horas de más, y «le
         # salió hacia las 23:00» sobre un recordatorio de las 18:00 es peor que no decir nada.

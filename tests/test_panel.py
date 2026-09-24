@@ -17,7 +17,15 @@ import psycopg
 import pytest
 from fastapi.testclient import TestClient
 
-from maxicare_daniela import atencion, contratos, herramientas, panel, persistencia, runtime
+from maxicare_daniela import (
+    atencion,
+    contratos,
+    herramientas,
+    panel,
+    persistencia,
+    runtime,
+    seguimientos,
+)
 from maxicare_daniela import calendario as calendario_real
 from maxicare_daniela.calendario import (
     ZONA_BOGOTA,
@@ -2057,6 +2065,160 @@ def test_el_caption_de_un_audio_MANDA_sobre_lo_que_se_entendio(conn):
 
     assert lineas[0]["texto"] == "mira esto"
     assert lineas[0]["voz"] is False, "con caption no hay transcripción que advertir"
+
+
+# -- La cuarta voz: lo que mandó el sistema por su cuenta (23/09/2026) ------------------
+
+
+def _seguimiento(conn, conversacion_id, *, tipo, cuando, enviado=True, fallo=None):
+    """Una fila de `seguimientos`, con o sin envío.
+
+    `enviado_en` se pasa a mano en vez de dejar que lo ponga `now()`: el presente de estas
+    pruebas está CLAVADO y el reloj de verdad puede ir por delante, con lo que el orden del
+    hilo dependería de la hora a la que se corra la suite. Mismo cuidado que el helper del
+    doctor, doscientas líneas más arriba.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO seguimientos"
+            " (conversacion_id, tipo, fecha_objetivo, clave_idempotencia, enviado_en,"
+            "  anulado_en, fallo)"
+            " VALUES (%s, %s, %s, %s, %s, %s, %s)",
+            (
+                conversacion_id,
+                tipo,
+                cuando,
+                f"prueba-{uuid.uuid4()}",
+                cuando if enviado else None,
+                None if enviado else cuando,
+                fallo,
+            ),
+        )
+    conn.commit()
+
+
+@pytest.mark.neon
+def test_el_hilo_ensena_el_mensaje_automatico_que_NADIE_escribio(conn):
+    """El caso medido: conversación `19f07190`, 23/09/2026.
+
+    La paciente escribió el 22, le reactivamos el 23 y pulsó «Sí, me interesa». El doctor
+    abría el hilo y encontraba esa respuesta colgando de la nada: el mensaje lo mandó el
+    despachador, así que no estaba en `mensajes_entrantes` (no lo recibió el webhook), ni en
+    `agent_messages` (no lo escribió el SDK), ni en `mensajes_del_doctor`.
+
+    Y hacen falta DOS conversaciones para reproducirlo, que es justo lo que lo hacía
+    invisible: la reactivación sale cuando ya hubo 24 h de silencio, o sea cuando
+    `conversacion_viva` ya enterró la conversación, así que cuelga de la vieja mientras la
+    respuesta abre una nueva. Solo un hilo por TELÉFONO las pone en el mismo sitio.
+    """
+    tel = _telefono_nuevo()
+    ayer = _AHORA_CONVERSACIONES - timedelta(days=1)
+
+    vieja = _conversacion(conn, tel, actualizada=ayer)
+    _entra(conn, tel, texto="Quiero consultar sobre un tratamiento.", cuando=ayer)
+    _seguimiento(
+        conn,
+        vieja,
+        tipo="reactivacion_sin_agendar",
+        cuando=_AHORA_CONVERSACIONES - timedelta(minutes=30),
+    )
+    _conversacion(conn, tel, actualizada=_AHORA_CONVERSACIONES)
+    _entra(conn, tel, texto="Sí, me interesa", cuando=_AHORA_CONVERSACIONES)
+
+    lineas = panel.hilo(conn, tel)
+
+    assert [l["quien"] for l in lineas] == ["paciente", "sistema", "paciente"], (
+        f"el mensaje automático no entró en su sitio: {[(l['quien'], l['cuando']) for l in lineas]}"
+    )
+    assert lineas[1]["autor"] == "Reactivación · preguntó y no agendó"
+    assert lineas[1]["fallo"] is None
+
+
+@pytest.mark.neon
+def test_el_hilo_dice_POR_QUE_salio_el_mensaje_y_nunca_que_decia(conn):
+    """La línea que no se puede cruzar, y por eso tiene prueba propia.
+
+    El cuerpo vive en una plantilla de Meta que este repositorio no guarda y que MaxiCare
+    edita desde otra consola. Escribir aquí una aproximación pondría en el hilo, con aspecto
+    de transcripción, una frase que quizá no fue la que leyó el paciente -- regla 3 de
+    CLAUDE.md. Lo que se afirma es que salió y por qué.
+    """
+    tel = _telefono_nuevo()
+    conv = _conversacion(conn, tel)
+    _seguimiento(
+        conn,
+        conv,
+        tipo="recordatorio_cita",
+        cuando=_AHORA_CONVERSACIONES - timedelta(hours=2),
+    )
+
+    linea = panel.hilo(conn, tel)[0]
+
+    assert linea["autor"] == "Recordatorio de su cita"
+    assert linea["texto"] == "Mensaje automático de WhatsApp."
+    # Lo que NO puede pasar: que el hilo se invente el saludo de la plantilla.
+    assert "Hola" not in linea["texto"]
+
+
+@pytest.mark.neon
+def test_un_seguimiento_ANULADO_no_aparece_en_el_hilo(conn):
+    """Lo que ocurrió contra lo que se pensó hacer.
+
+    R3 anula una fila que lleva dos horas sin poder salir, y una anulada no la vio nadie:
+    pintarla diría que a esta persona le escribimos cuando no le escribimos. Por eso el
+    filtro es `enviado_en IS NOT NULL` y no `fecha_objetivo`, que es una intención.
+    """
+    tel = _telefono_nuevo()
+    conv = _conversacion(conn, tel)
+    _seguimiento(
+        conn,
+        conv,
+        tipo="reactivacion_sin_agendar",
+        cuando=_AHORA_CONVERSACIONES - timedelta(hours=3),
+        enviado=False,
+    )
+
+    assert panel.hilo(conn, tel) == []
+
+
+@pytest.mark.neon
+def test_una_plantilla_que_meta_RECHAZO_se_ve_en_el_hilo_como_fallida(conn):
+    """Medio valor de esta voz, y el que no se pidió: la vigilancia de los rechazos.
+
+    La fila se marca ANTES de enviar (no negociable 21), así que un rechazo de Meta deja
+    `enviado_en` puesto y el `fallo` escrito. Sin esta voz, un 132000 solo se veía en un
+    Telegram de madrugada; ahora sale «NO SALIÓ» en el sitio donde el doctor va a buscar por
+    qué su paciente no contesta.
+    """
+    tel = _telefono_nuevo()
+    conv = _conversacion(conn, tel)
+    _seguimiento(
+        conn,
+        conv,
+        tipo="reactivacion_sin_agendar",
+        cuando=_AHORA_CONVERSACIONES - timedelta(hours=1),
+        fallo="132000: number of parameters does not match",
+    )
+
+    linea = panel.hilo(conn, tel)[0]
+
+    assert linea["quien"] == "sistema"
+    assert "132000" in linea["fallo"], (
+        "sin el fallo, el hilo pinta como entregado un mensaje que Meta rechazó"
+    )
+
+
+def test_un_tipo_de_seguimiento_SIN_etiqueta_no_tumba_el_hilo():
+    """Offline a propósito: el CHECK de la tabla no deja insertar un tipo inventado, así que
+    este caso solo se alcanza el día que alguien añada un tipo nuevo y olvide su etiqueta.
+
+    Perder el rótulo bonito de un seguimiento nuevo es barato. Tumbar la pantalla del hilo
+    con un `KeyError` es lo contrario de lo que esta voz vino a arreglar.
+    """
+    assert seguimientos.ETIQUETA_DEL_TIPO.get("reactivacion_del_futuro", "x") == "x"
+    # Y los cuatro que existen hoy sí la tienen: una etiqueta que falte se ve aquí.
+    for tipo in {seguimientos.TIPO_RECORDATORIO} | seguimientos.TIPOS_DE_REACTIVACION:
+        assert tipo in seguimientos.ETIQUETA_DEL_TIPO, f"«{tipo}» saldría con su clave cruda"
 
 
 @pytest.mark.neon

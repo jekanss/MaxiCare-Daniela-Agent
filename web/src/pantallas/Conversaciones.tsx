@@ -269,13 +269,37 @@ function FilaDeLaLista({
 function Burbuja({ m }: { m: MensajeDelHilo }) {
   const delPaciente = m.quien === 'paciente'
   const delDoctor = m.quien === 'doctor'
+  /* Lo mandó el despachador, no una persona. Va del lado de la clínica --salió de nuestro
+     número-- pero NO puede parecer que alguien lo escribió: sin distinguirlo, el hilo diría
+     que Daniela saludó dos veces, y quien lee tiene que poder separar lo que decidió una
+     persona de lo que salió solo. Por eso es lo único que va en gris y sin relleno. */
+  const delSistema = m.quien === 'sistema'
   const fallido = Boolean(m.fallo)
 
-  const fondo = fallido ? '#FEF2F2' : delPaciente ? '#FFFFFF' : delDoctor ? '#F5F3FF' : '#F4F1F9'
-  const borde = fallido ? '#FECACA' : delPaciente ? '#DCD8E6' : delDoctor ? '#C4B5FD' : '#D6D0E4'
+  const fondo = fallido
+    ? '#FEF2F2'
+    : delSistema
+      ? '#FFFFFF'
+      : delPaciente
+        ? '#FFFFFF'
+        : delDoctor
+          ? '#F5F3FF'
+          : '#F4F1F9'
+  const borde = fallido
+    ? '#FECACA'
+    : delSistema
+      ? '#D8D4E0'
+      : delPaciente
+        ? '#DCD8E6'
+        : delDoctor
+          ? '#C4B5FD'
+          : '#D6D0E4'
 
-  const quienDice =
-    m.quien === 'paciente' ? 'Paciente' : m.quien === 'daniela' ? 'Daniela' : (m.autor ?? 'Doctor')
+  const quienDice = delPaciente
+    ? 'Paciente'
+    : m.quien === 'daniela'
+      ? 'Daniela'
+      : (m.autor ?? (delSistema ? 'Automático' : 'Doctor'))
 
   return (
     <div className="flex" style={{ justifyContent: delPaciente ? 'flex-start' : 'flex-end' }}>
@@ -293,6 +317,24 @@ function Burbuja({ m }: { m: MensajeDelHilo }) {
             }}
           >
             Doctor · {quienDice}
+          </span>
+        )}
+        {/* El motivo por el que salió, que es lo único que el sistema sabe con certeza: el
+            cuerpo lo fija una plantilla de Meta que no se guarda aquí. Arriba y no en el pie
+            porque es lo que hace entendible la respuesta que viene debajo. */}
+        {delSistema && (
+          <span
+            style={{
+              fontFamily: MONO,
+              fontSize: '10px',
+              fontWeight: 700,
+              letterSpacing: '0.12em',
+              textTransform: 'uppercase',
+              color: fallido ? '#B91C1C' : '#6E6880',
+              textAlign: 'right',
+            }}
+          >
+            {quienDice}
           </span>
         )}
         {/* Esto NO lo escribió el paciente: lo dijo, y lo pasó a texto una máquina. Decirlo
@@ -323,11 +365,15 @@ function Burbuja({ m }: { m: MensajeDelHilo }) {
             // lo de dentro es aproximado.
             borderLeft: delDoctor && !fallido ? '3px solid #7C3AED' : undefined,
             borderRight: m.voz ? '3px dashed #9CA3AF' : undefined,
+            // Punteado entero, que es la única forma que no usa ninguna de las otras tres
+            // voces: dice «esto no lo escribió nadie» sin depender del color.
+            borderStyle: delSistema && !fallido ? 'dashed' : undefined,
             padding: '12px 14px',
-            fontSize: '14.5px',
+            fontSize: delSistema ? '13px' : '14.5px',
             fontWeight: 300,
+            fontStyle: delSistema ? 'italic' : undefined,
             lineHeight: 1.6,
-            color: '#16111F',
+            color: delSistema && !fallido ? '#6E6880' : '#16111F',
             whiteSpace: 'pre-wrap',
             overflowWrap: 'anywhere',
           }}
@@ -346,9 +392,9 @@ function Burbuja({ m }: { m: MensajeDelHilo }) {
           {/* Un mensaje que no salió lo DICE en su pie. Sin esto, el hilo mostraría el mismo
               silencio para «el doctor no escribió» y para «escribió y Meta lo rechazó». */}
           {fallido ? 'NO SALIÓ · ' : ''}
-          {/* El del doctor ya lleva su nombre arriba; repetirlo aquí solo gastaría el renglón
-              que hace legible la hora. */}
-          {delDoctor ? '' : `${quienDice} · `}
+          {/* El del doctor y el del sistema ya llevan su rótulo arriba; repetirlo aquí solo
+              gastaría el renglón que hace legible la hora. */}
+          {delDoctor || delSistema ? '' : `${quienDice} · `}
           {FMT_HORA.format(new Date(m.cuando))}
         </span>
       </div>

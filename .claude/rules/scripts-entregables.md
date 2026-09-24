@@ -170,6 +170,17 @@ argument 'group_id'`). **Quien cambie una de esas firmas corre los seis que no g
   casos_sin_resolver» por WhatsApp, el nombre interno de una tabla de la clínica que no es
   suya.
 
+**Y el tercero en discordia no es un script: es `uv run pytest -m neon`.** `test_panel.py`,
+`test_tools_neon.py` y las demás montan ese MISMO esquema `pruebas`, así que correr
+`probar_recordatorios.py` --o `probar_tools.py`-- mientras la suite de Neon está en marcha le
+borra el esquema a mitad de archivo. Medido el 23/09/2026: **44 `FAILED`, los 44 de
+`test_panel.py`**, desde una prueba intermedia hasta el final del archivo y ni uno en los
+nueve archivos siguientes -- porque la fixture `esquema` es `scope="module"` y cada módulo lo
+recrea al empezar. Ninguno era una regresión: la misma suite, repetida sola, dio 276 en
+verde. La firma para reconocerlo es esa: **los fallos se agrupan en UN archivo y se curan
+solos al repetir.** La suite tarda unos 16 minutos, y la tentación de aprovecharlos corriendo
+un entregable «que no gasta» es exactamente la trampa: no gasta tokens, pero sí esquema.
+
 - `probar_reactivacion.py` escribe en `pruebas_reactivacion_script`, propio y no compartido
   con ninguno de los otros esquemas de esta lista -- mismo motivo que `probar_sin_resolver.py`
   (dos `DROP SCHEMA ... CASCADE` sobre el mismo nombre a la vez se borran el uno al otro a

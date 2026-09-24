@@ -237,6 +237,27 @@ uv run uvicorn maxicare_daniela.runtime:app --port 8080
   de error y no uno), y **un fallo de refresco con datos ya en pantalla no los borra** —el
   hilo de Conversaciones avisa y deja leer lo que hay—.
 
+- **El hilo tiene CUATRO voces desde el 23/09/2026, y la cuarta no la escribió nadie.**
+  `quien: 'sistema'` es lo que mandó el despachador por su cuenta —un recordatorio, una
+  reactivación—, y no estaba en ninguna de las tres tablas que `panel.hilo` miraba: no lo
+  recibió el webhook, no lo escribió el SDK y no lo mandó un doctor. El síntoma era que la
+  respuesta del paciente colgaba de la nada: se abría la conversación de un lead reactivado y
+  se veía un «Sí, me interesa» sin nada encima. Cuatro cosas de esa voz:
+  - **Dice POR QUÉ salió, nunca qué decía.** El cuerpo vive en una plantilla de Meta que este
+    repositorio no guarda; el rótulo sale de `seguimientos.ETIQUETA_DEL_TIPO` y viaja en
+    `autor`. Escribir una aproximación pondría en el hilo, con aspecto de transcripción, una
+    frase que quizá no fue la que leyó el paciente (regla 3 de CLAUDE.md).
+  - **Se distingue por FORMA y no por tono** —punteada, en cursiva, sin relleno—, por lo mismo
+    que el doctor: dos grises no se distinguen en la pantalla de un consultorio, y aquí lo que
+    hay que poder separar de un vistazo es lo que decidió una persona de lo que salió solo.
+  - **Solo entra si `enviado_en` no es nulo.** Una fila que R3 anuló no la vio nadie, y
+    pintarla diría que a esta persona le escribimos cuando no le escribimos.
+  - **Su `fallo` se pinta en rojo, y ese es medio valor del bloque.** La fila se marca ANTES de
+    enviar (no negociable 21), así que un rechazo de Meta deja `enviado_en` puesto y el `fallo`
+    escrito: un 132000 era invisible en el panel y solo se veía en un Telegram de madrugada.
+  El export se la lleva sola —sale de `hilo`, que es la única fuente de las dos mitades—; lo
+  único que hubo que añadir es su nombre en `QUIEN_EN_EL_ARCHIVO`.
+
 - **`MensajeDelHilo.voz` es clínico, no decorativo.** Dice que el paciente no escribió eso:
   lo DIJO, y lo pasó a texto una máquina (migración 027). «El 46» y «el 40» suenan casi
   igual, así que quien lee una frase sobre un síntoma tiene derecho a saber de quién se fía.

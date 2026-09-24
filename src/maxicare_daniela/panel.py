@@ -22,7 +22,7 @@ from collections.abc import Sequence
 from datetime import datetime, timedelta
 from typing import Any, get_args
 
-from . import persistencia
+from . import persistencia, seguimientos
 from .calendario import ZONA_BOGOTA
 from .contratos import Tratamiento
 
@@ -768,13 +768,22 @@ def listar_conversaciones(
 
 
 def hilo(conn, telefono: str, *, limite: int | None = 60) -> list[dict[str, Any]]:
-    """Lo que se dijeron los tres, en orden. SOLO LECTURA.
+    """Lo que se dijeron los CUATRO, en orden. SOLO LECTURA.
 
     Modelado sobre `persistencia.transcripcion` --que hace esto mismo para volcarlo en el
-    hilo de Telegram-- y con una voz más: la del doctor, que desde la migración 026 sí se
-    guarda. Lo frágil, el desempaquetado del formato del SDK, NO se duplica: se llama a
+    hilo de Telegram-- y con dos voces más: la del doctor, que desde la migración 026 sí se
+    guarda, y la del SISTEMA (23/09/2026), que es lo que el despachador mandó por su cuenta
+    y no estaba en ninguna de las tres tablas que este hilo miraba. Lo frágil, el
+    desempaquetado del formato del SDK, NO se duplica: se llama a
     `persistencia.texto_de_daniela`, para que el día que suba la versión haya un solo sitio
     que arreglar.
+
+    **Va por TELÉFONO y no por conversación, y con la cuarta voz eso pasó a importar.** Una
+    conversación caduca a las 24 h y un seguimiento sale, por definición de su banda, cuando
+    ya hubo ese silencio: el mensaje automático cuelga de la conversación vieja y la
+    respuesta del paciente abre una nueva. Son dos filas de `conversaciones` y una sola
+    persona, así que solo un hilo por teléfono las pone en el mismo sitio -- que es donde
+    tienen sentido.
 
     El corte va por el FINAL. Lo que hace falta para entender qué está pasando es lo último
     que se dijeron, no cómo empezó todo hace dos meses.
@@ -856,6 +865,50 @@ def hilo(conn, telefono: str, *, limite: int | None = 60) -> list[dict[str, Any]
             }
         )
 
+    # La CUARTA voz, desde el 23/09/2026: lo que le mandó el sistema por su cuenta.
+    #
+    # Las tres de arriba salen de quien habló --el paciente por el webhook, Daniela por el
+    # SDK, el doctor por el relevo-- y un seguimiento no es ninguno de los tres: lo manda el
+    # despachador. Así que no estaba en ninguna tabla que este hilo mirase, y el doctor abría
+    # la conversación de un lead reactivado para encontrarse un «Sí, me interesa» colgando de
+    # la nada. Es el mismo agujero que ya se tapó para Daniela (`ultimo_recordatorio`) y para
+    # el hilo de Telegram (no negociable 29), visto desde la tercera puerta.
+    #
+    # `enviado_en IS NOT NULL` es lo que separa lo que ocurrió de lo que se pensó: una fila
+    # anulada por R3 --o decidida y nunca despachada-- no la vio nadie, y pintarla diría que
+    # a esta persona le escribimos cuando no le escribimos. Por eso tampoco se mira
+    # `fecha_objetivo`, que es una intención.
+    #
+    # **El `fallo` viaja y se pinta en rojo, y ahí está medio valor de este bloque.** La fila
+    # se marca ANTES de enviar (no negociable 21), así que un rechazo de Meta deja
+    # `enviado_en` puesto y `fallo` escrito: sin esta voz, un 132000 era invisible en el
+    # panel y solo se veía en un Telegram de madrugada. Ahora el doctor ve «NO SALIÓ» en el
+    # sitio donde va a buscar por qué su paciente no contesta.
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT s.tipo, s.enviado_en, s.fallo FROM seguimientos s"
+            "  JOIN conversaciones c ON c.id = s.conversacion_id"
+            " WHERE c.telefono = %s AND s.enviado_en IS NOT NULL"
+            " ORDER BY s.enviado_en DESC LIMIT %s",
+            (telefono, limite),
+        )
+        for tipo, cuando, fallo in cur.fetchall():
+            lineas.append(
+                {
+                    "quien": "sistema",
+                    # El tipo crudo como respaldo: un seguimiento nuevo sin etiqueta sale
+                    # feo, que es infinitamente mejor que tumbar el hilo con un KeyError.
+                    "autor": seguimientos.ETIQUETA_DEL_TIPO.get(tipo, tipo),
+                    # Lo que se afirma es que SALIÓ y por qué, nunca qué decía: el cuerpo
+                    # vive en una plantilla de Meta que no se guarda aquí. Ver
+                    # `seguimientos.ETIQUETA_DEL_TIPO`.
+                    "texto": "Mensaje automático de WhatsApp.",
+                    "cuando": cuando,
+                    "fallo": fallo,
+                    "voz": False,
+                }
+            )
+
     lineas.sort(key=lambda l: l["cuando"])
     recorte = lineas if limite is None else lineas[-limite:]
     return [{**linea, "cuando": linea["cuando"].isoformat()} for linea in recorte]
@@ -928,10 +981,17 @@ BOM = "﻿"
 #: Lo que se le pone a `quien` en el archivo. Las claves son las del hilo; los valores, algo
 #: que signifique lo mismo para alguien que abre el CSV en seis meses y no sabe que la agente
 #: se llama Daniela ni que `doctor` incluye a recepción.
+#:
+#: `sistema` entró con la cuarta voz del hilo (23/09/2026) y el export se la lleva sin que
+#: haya que decidir nada: sale de `hilo`, que es la única fuente de las dos mitades. Lo que
+#: sí hizo falta fue su nombre -- sin él caía en el respaldo del `.get` y una columna que
+#: dice «Daniela (automático)» al lado de otra que dice «sistema» no se lee igual. El MOTIVO
+#: por el que salió viaja en la columna siguiente, que es `autor`.
 QUIEN_EN_EL_ARCHIVO = {
     "paciente": "Paciente",
     "daniela": "Daniela (automático)",
     "doctor": "Clínica (persona)",
+    "sistema": "Envío programado",
 }
 
 
