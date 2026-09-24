@@ -776,3 +776,67 @@ de los tres dejó un error en ningún log.
 quien toque `extraer_mensajes` corre `scripts/probar_atencion.py`. Y la conducta de los otros
 dos solo se ve contra el modelo real o con un WhatsApp delante — `uv run python
 scripts/probar_plantilla.py <numero>` manda uno de verdad.
+
+## La reacción con emoji: lo que entra y no es una pregunta
+
+El 24/09/2026 Andrea Rodríguez (+57 321 998 0137) cerró su conversación —valoración agendada
+para el lunes 28— poniéndole un emoji al «Con gusto, Andrea. Nos vemos el lunes» de Daniela.
+Meta manda eso como `type: "reaction"`, con `{message_id, emoji}` dentro y sin texto. Era el
+primer y único `reaction` de la vida del sistema: 1 de 111 mensajes entrantes.
+
+Rompió tres cosas a la vez, y las tres en silencio.
+
+- **Se le respondió con un mensaje en blanco.** El turno corrió entero. Al modelo le llegó
+  «[El paciente envió algo de tipo «reaction». No trae texto.]» —la misma frase que recibiría
+  un vídeo— y no tenía nada que contestar, pero `RespuestaDaniela.mensaje_al_paciente` exige
+  `min_length=1` y **un espacio mide 1**: devolvió `" "`, Meta lo aceptó con un 200 y su
+  wamid, y la paciente recibió una burbuja vacía de la clínica. La guarda va en
+  `canales.enviar_texto` y no en el turno que lo produjo, porque la causa raíz es que el
+  contrato no promete lo que parece prometer, y porque por ese borde pasan todos los caminos
+  que le escriben a un paciente. **Lanza `ErrorDeCanal` en vez de callar**: un envío que se
+  salta en silencio queda anotado como RESPONDIDO, y la única prueba de que al paciente no le
+  llegó nada desaparece justo en el caso en que hace falta. Al lanzar, el camino de
+  `fallo_respuesta` que ya existía hace su trabajo y el caso sube al informe como un `ROTO`.
+- **El panel dijo «(archivo)».** `_marca` cae a ese default, que existe para un adjunto de
+  tipo desconocido, y una reacción no es un adjunto. La clínica leyó el hilo como «llegó una
+  radiografía y Daniela no la escaló» —el síntoma exacto de un no negociable roto (14c)— y no
+  lo era: no escalar fue correcto, porque `reaction` no está en `TIPOS_QUE_REVISA_UN_DOCTOR`
+  ni debe estarlo.
+- **Costó una corrida del modelo flagship** con once turnos de historial detrás, por un pulgar
+  arriba.
+
+El corte vive en `runtime._entregar`, con el dedupe de Meta y `/clearstate`, que es donde ya
+está la lista de razones para no atender. **Y no dentro de `atencion.atender`**: allí el
+mensaje ya habría entrado en el búfer de 20 segundos, y un grupo formado por un texto legítimo
+y una reacción no se puede descartar entero. Antes del búfer la regla es de una línea.
+
+**No atender no es no registrar.** `procesar_mensaje` corre ANTES del corte, así que la fila de
+`mensajes_entrantes` se escribe, la deduplicación por `wamid` sigue protegiendo del reintento
+de Meta, y lo que el paciente hizo sigue bajando a su hilo. Lo único que se ahorra es el turno.
+
+### Los cuatro sitios, y por qué son cuatro
+
+Una reacción se queda con `respondido_en` NULL **y** `fallo_respuesta` NULL para siempre —no
+se le contesta a propósito— y esa es exactamente la firma que buscan las consultas de «¿a
+quién no le contestamos?». Sin filtrarla en todas, el arreglo se deshace solo:
+
+| Dónde | Qué pasaba sin el filtro |
+|---|---|
+| `runtime._entregar` | el turno, el mensaje en blanco y el gasto |
+| `runtime._recoger_lo_que_quedo_sin_responder` | el barrido del siguiente arranque le abría el turno que `_entregar` acababa de ahorrarse: el mismo mensaje en blanco, media hora tarde |
+| `persistencia.contar_sin_responder` | `/salud` encendía su indicador, que lo mira una persona para decidir si algo va mal |
+| `panel` (las DOS consultas de «sin contestar») | Andrea salía en el muro «esperando respuesta» por haber puesto un emoji |
+
+`ingesta.TIPOS_QUE_NO_ABREN_TURNO` es la fuente de verdad y **no se duplica en ningún SQL**:
+entra por parámetro, mismo criterio que `archivos_del_dia` con `lectura.TIPOS_QUE_SE_LEEN`. El
+día que entre un tipo nuevo, un vocabulario copiado en una consulta seguiría contando los de
+antes y nadie lo vería, porque el fallo es que un filtro deja de filtrar.
+
+**`sticker` NO está en esa lista, a propósito.** Se descarga, se le entrega al doctor y puede
+ser la única forma en que alguien diga algo. Un pulgar arriba SOBRE un mensaje de Daniela es
+otra cosa que un sticker mandado por su cuenta.
+
+**Lo que sigue sin cubrir nadie:** `location` y `contacts` entran, no traen archivo y abren
+turno con la frase genérica. Ninguno se ha visto nunca en producción, y meterlos aquí sin un
+caso medido sería adivinar: una ubicación compartida SÍ puede ser una pregunta («¿queda cerca
+de aquí?»).

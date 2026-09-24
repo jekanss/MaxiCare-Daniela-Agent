@@ -51,6 +51,30 @@ _temas_en_curso: set[asyncio.Task] = set()
 #: un texto vacío y se perdiera el registro.
 TIPOS_CON_ARCHIVO = frozenset({"image", "document", "audio", "voice", "video", "sticker"})
 
+#: Lo que entra por el webhook y NO abre un turno de Daniela. Se registra, se deduplica y
+#: baja al hilo del doctor como cualquier otro mensaje: lo único que no ocurre es el turno.
+#:
+#: Una reacción con emoji es un acuse de recibo, no una pregunta. Medido el 24/09/2026 con
+#: Andrea Rodríguez (+57 321 998 0137), el primer y único `reaction` que el sistema ha visto
+#: en su vida --1 de 111 mensajes--: pulsó un pulgar arriba sobre el «Nos vemos el lunes» de
+#: Daniela y eso costó una corrida del modelo con once turnos de historial detrás. Al modelo
+#: le llegó «[El paciente envió algo de tipo «reaction». No trae texto.]» --la misma frase
+#: que recibiría un vídeo-- y no tenía nada que responder, pero `RespuestaDaniela` exige
+#: `min_length=1`: devolvió un espacio, y ese espacio se envió. Andrea recibió un mensaje en
+#: blanco de la clínica.
+#:
+#: Esta constante es la FUENTE DE VERDAD y no se duplica en ningún SQL. La leen los tres
+#: sitios que preguntan «¿a quién no le contestamos?» --el barrido de arranque, `/salud` y
+#: las dos consultas del panel--, que si no contarían una reacción como un paciente
+#: desatendido. Mismo criterio que `archivos_del_dia` con `lectura.TIPOS_QUE_SE_LEEN`: el
+#: vocabulario vive donde se define, porque el día que entre un tipo nuevo el fallo sería
+#: que un filtro deja de filtrar, y eso no se ve.
+#:
+#: `sticker` NO está aquí, y es deliberado: se descarga, se le entrega al doctor y puede ser
+#: la única forma en que alguien diga algo. Un pulgar arriba SOBRE un mensaje de Daniela es
+#: otra cosa que un sticker mandado por su cuenta.
+TIPOS_QUE_NO_ABREN_TURNO = frozenset({"reaction"})
+
 #: Cómo se le nombra a cada tipo delante de un doctor. Un «mandó un image» no lo lee nadie.
 NOMBRE_HUMANO = {
     "image": "una imagen",
@@ -62,6 +86,7 @@ NOMBRE_HUMANO = {
     "text": "un mensaje",
     "location": "su ubicación",
     "contacts": "un contacto",
+    "reaction": "una reacción",
 }
 
 

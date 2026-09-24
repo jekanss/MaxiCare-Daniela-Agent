@@ -298,3 +298,77 @@ def test_una_plantilla_CON_variables_sigue_mandando_su_body(monkeypatch):
             ],
         }
     ]
+
+
+# ==========================================================================================
+# Un mensaje en blanco no es un mensaje
+# ==========================================================================================
+#
+# Medido el 24/09/2026 con Andrea Rodriguez (+57 321 998 0137): el modelo devolvio
+# `mensaje_al_paciente = " "` y ese espacio salio hacia Meta, que lo acepto y lo entrego.
+# La paciente recibio un mensaje en blanco de la clinica.
+#
+# La guarda va en el BORDE y no en el camino que lo produjo, por dos razones. La primera es
+# que la causa raiz no es aquel turno: `RespuestaDaniela.mensaje_al_paciente` promete
+# `min_length=1` y un espacio mide 1, asi que el contrato no dice lo que parece decir --y
+# eso vale para cualquier turno futuro, no solo para el de una reaccion--. La segunda es que
+# por aqui pasan TODOS los caminos que le escriben a un paciente: Daniela, la frase de la
+# cuota, la confirmacion del reseteo, el relevo y los recordatorios.
+
+
+def _enviar_texto(texto: str, monkeypatch) -> list[httpx.Request]:
+    """Intenta mandar `texto` y devuelve las peticiones que salieron de verdad."""
+    peticiones: list[httpx.Request] = []
+
+    def anotar(peticion: httpx.Request) -> httpx.Response:
+        peticiones.append(peticion)
+        return httpx.Response(200, json={"messages": [{"id": "wamid.X"}]})
+
+    monkeypatch.setattr(httpx, "AsyncClient", _cliente_con(httpx.MockTransport(anotar)))
+    asyncio.run(WhatsApp("token", "123").enviar_texto("573001112233", texto))
+    return peticiones
+
+
+@pytest.mark.parametrize("en_blanco", [" ", "", "   ", "\n", "\t \n"])
+def test_no_se_le_manda_a_un_paciente_un_mensaje_en_blanco(en_blanco, monkeypatch):
+    """Lo que se cuenta son las PETICIONES, no la excepcion: que lance esta bien, pero lo
+    que importa es que no salga nada hacia Meta."""
+    peticiones: list[httpx.Request] = []
+
+    def anotar(peticion: httpx.Request) -> httpx.Response:
+        peticiones.append(peticion)
+        return httpx.Response(200, json={"messages": [{"id": "wamid.X"}]})
+
+    monkeypatch.setattr(httpx, "AsyncClient", _cliente_con(httpx.MockTransport(anotar)))
+
+    with pytest.raises(ErrorDeCanal):
+        asyncio.run(WhatsApp("token", "123").enviar_texto("573001112233", en_blanco))
+
+    assert peticiones == [], f"salio un mensaje en blanco hacia Meta ({en_blanco!r})"
+
+
+def test_lanzar_y_no_callar_es_lo_que_deja_el_rastro(monkeypatch):
+    """Por que `ErrorDeCanal` y no un `return` silencioso.
+
+    `atencion` distingue tres estados en la fila del mensaje: respondido (con fecha y
+    wamid), fallido (con motivo) y ninguno de los dos --«entro y nadie lo proceso»--. Un
+    envio que se salta sin avisar quedaria como RESPONDIDO, porque quien llama no tendria
+    forma de enterarse: la unica prueba de que al paciente no le llego nada desapareceria
+    justo en el caso en que hace falta.
+    """
+    monkeypatch.setattr(
+        httpx,
+        "AsyncClient",
+        _cliente_con(httpx.MockTransport(lambda _p: httpx.Response(200, json={}))),
+    )
+
+    with pytest.raises(ErrorDeCanal, match="en blanco"):
+        asyncio.run(WhatsApp("token", "123").enviar_texto("573001112233", " "))
+
+
+def test_un_mensaje_normal_sigue_saliendo_igual(monkeypatch):
+    """La otra mitad: sin esto, la guarda de arriba se pasa apagando los envios de verdad."""
+    peticiones = _enviar_texto("Listo, Andrea. Nos vemos el lunes.", monkeypatch)
+
+    assert len(peticiones) == 1
+    assert f"{BASE_GRAPH}/123/messages" in str(peticiones[0].url)

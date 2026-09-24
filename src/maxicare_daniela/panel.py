@@ -22,7 +22,7 @@ from collections.abc import Sequence
 from datetime import datetime, timedelta
 from typing import Any, get_args
 
-from . import persistencia, seguimientos
+from . import ingesta, persistencia, seguimientos
 from .calendario import ZONA_BOGOTA
 from .contratos import Tratamiento
 
@@ -509,6 +509,20 @@ def citas_sin_marcar(
 #: algún día viene de fuera, se pasa como `%s * interval '1 minute'`.
 MINUTOS_SIN_CONTESTAR = 5
 
+#: Lo que nunca esperó respuesta no es un paciente desatendido.
+#:
+#: Las DOS consultas de «sin contestar» --la cifra de `resumen_inicio` y el «esperando» del
+#: muro-- buscan `respondido_en IS NULL`, y una reacción con emoji tiene esa forma para
+#: siempre: no se le contesta a propósito (`ingesta.TIPOS_QUE_NO_ABREN_TURNO`). Sin este
+#: predicado, Andrea Rodríguez aparecía en el muro «esperando respuesta» por haber puesto un
+#: pulgar arriba, y la cifra de la pantalla --que una persona mira para decidir si algo va
+#: mal-- contaba un problema que no existía.
+#:
+#: Se lee de `ingesta` y no se copia, por lo mismo que `archivos_del_dia` recibe sus `tipos`:
+#: el día que entre un tipo nuevo, un vocabulario duplicado aquí seguiría contando los de
+#: antes y nadie lo notaría, porque el fallo es que un filtro deja de filtrar.
+_SIN_TURNO = sorted(ingesta.TIPOS_QUE_NO_ABREN_TURNO)
+
 #: El marcador que deja el sistema cuando no sabe cómo se llama alguien. Vive en
 #: `persistencia` y se alia aquí para no repetir el literal en dos módulos.
 _NOMBRE_PENDIENTE = persistencia.NOMBRE_PENDIENTE
@@ -576,13 +590,17 @@ def resumen_inicio(conn, *, ahora: datetime, dias: int = 30) -> dict[str, Any]:
         #    contarlos convertiría cada relevo en un paciente desatendido. Un
         #    `fallo_respuesta` que NO sea de relevo sí cuenta: al paciente no le llegó nada, y
         #    que el motivo esté anotado no cambia lo que le pasó a él.
+        #    Y el `<> ALL` saca lo que nunca esperó respuesta: una reacción con emoji tiene
+        #    `respondido_en` NULL para siempre porque no se le contesta a propósito. Ver
+        #    `_SIN_TURNO`.
         cur.execute(
             "SELECT count(*) FROM mensajes_entrantes"
             " WHERE recibido_en >= %s"
             f"   AND recibido_en < %s - interval '{MINUTOS_SIN_CONTESTAR} minutes'"
             "   AND respondido_en IS NULL"
+            "   AND tipo <> ALL(%s)"
             "   AND (fallo_respuesta IS NULL OR fallo_respuesta NOT LIKE 'relevo:%%')",
-            (desde, ahora),
+            (desde, ahora, _SIN_TURNO),
         )
         sin_contestar = cur.fetchone()[0]
 
@@ -650,6 +668,11 @@ VENTANA_RESPUESTA_HORAS = 24
 
 #: Qué se pinta cuando un mensaje del paciente no tiene texto. Un hueco en el hilo se lee
 #: como «no dijo nada», y lo que pasó es que mandó una radiografía.
+#:
+#: El default es para un adjunto de tipo desconocido --de ahí la palabra-- y `reaction` no
+#: es un adjunto: el 24/09/2026 el hilo de Andrea Rodríguez terminaba en «(archivo)» sin que
+#: hubiera llegado ninguno, y la clínica lo leyó como «llegó una radiografía y Daniela no la
+#: escaló», que es el síntoma de un no negociable roto (14c) y no lo era.
 _MARCA_POR_TIPO = {
     "audio": "(nota de voz)",
     "image": "(imagen)",
@@ -657,6 +680,7 @@ _MARCA_POR_TIPO = {
     "document": "(documento)",
     "sticker": "(sticker)",
     "location": "(ubicación)",
+    "reaction": "(reaccionó)",
 }
 
 
@@ -694,7 +718,12 @@ def listar_conversaciones(
     cualquier prueba en una que envejece, y aquí eso ya amaneció en rojo tres veces.
     """
     desde = ahora - timedelta(days=dias)
-    parametros = {"desde": desde, "ahora": ahora, "limite": limite}
+    parametros = {
+        "desde": desde,
+        "ahora": ahora,
+        "limite": limite,
+        "sin_turno": _SIN_TURNO,
+    }
 
     with conn.cursor() as cur:
         cur.execute(
@@ -716,6 +745,9 @@ def listar_conversaciones(
             # antes de anotar siquiera el fallo, con las dos columnas en NULL--, que es el
             # motivo de existir del índice de la migración 009.
             "       AND (fallo_respuesta IS NULL OR fallo_respuesta NOT LIKE 'relevo:%%')"
+            # Y lo que nunca esperó respuesta. Ver `_SIN_TURNO`: sin esto, quien reacciona
+            # con un emoji al último mensaje de Daniela sube al muro como «esperando».
+            "       AND tipo <> ALL(%(sin_turno)s)"
             "     GROUP BY telefono"
             "), viva AS ("
             "    SELECT DISTINCT ON (telefono) telefono, tomada_por, actualizada_en"

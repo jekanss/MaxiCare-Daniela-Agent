@@ -445,6 +445,23 @@ una —qué se midió, qué costó— está en la regla que cubre ese archivo.
    transacción. El export es la otra mitad: un CSV con `;` y BOM (Excel colombiano), el hilo
    COMPLETO --`panel.hilo(limite=None)`, porque el recorte a 60 que sirve en la pantalla es
    una mentira en un archivo-- y `admin` solo para llevárselo todo o por rango.
+32. **Una reacción con emoji NO abre turno, y el filtro va en CUATRO sitios o se deshace
+   solo.** `ingesta.TIPOS_QUE_NO_ABREN_TURNO` es la fuente de verdad y **no se duplica en
+   ningún SQL**: entra por parámetro, como los `tipos` de `archivos_del_dia`. El corte vive en
+   `runtime._entregar` --con el dedupe de Meta y `/clearstate`, no dentro de `atender`, donde
+   el emoji ya estaría en el búfer junto a un texto legítimo--, y los otros tres son el
+   barrido de arranque, `contar_sin_responder` de `/salud` y las DOS consultas de «sin
+   contestar» del panel: una reacción se queda con `respondido_en` NULL **y**
+   `fallo_respuesta` NULL para siempre, que es la firma de «entró y nadie lo procesó». Sin el
+   segundo, el barrido reabre el turno media hora tarde; sin los otros, el paciente sale como
+   desatendido por haber puesto un pulgar arriba. **No atender NO es no registrar**:
+   `procesar_mensaje` corre antes, así que la fila se escribe y el hilo del doctor lo ve.
+   **Y `canales.enviar_texto` se niega a mandar un texto en blanco, lanzando.** Meta lo
+   acepta --200 y su wamid-- y `min_length=1` no distingue un espacio de una palabra: el
+   24/09/2026 Andrea Rodríguez recibió una burbuja vacía de la clínica. Lanzar y no callar es
+   lo que deja el rastro: un envío saltado en silencio queda anotado como RESPONDIDO. **No
+   escalar sí fue correcto** --`reaction` no está en `TIPOS_QUE_REVISA_UN_DOCTOR`--; lo que
+   mentía era el panel, que lo pintaba «(archivo)» por el default de `_marca`.
 
 # Dónde está el resto
 

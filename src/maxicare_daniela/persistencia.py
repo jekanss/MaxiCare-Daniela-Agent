@@ -1355,8 +1355,21 @@ def mensajes_sin_responder(
         return [dict(zip(_COLUMNAS_SIN_RESPONDER, fila)) for fila in cur.fetchall()]
 
 
-def contar_sin_responder(conn, *, margen_segundos: int = 300, ventana_horas: int = 24) -> int:
+def contar_sin_responder(
+    conn,
+    *,
+    margen_segundos: int = 300,
+    ventana_horas: int = 24,
+    tipos_sin_turno: Sequence[str] = (),
+) -> int:
     """Cuántos mensajes quedaron sin respuesta y sin fallo. Para `/salud`.
+
+    `tipos_sin_turno` entra por parámetro y no se cablea aquí, igual que los `tipos` de
+    `archivos_del_dia`: la lista de lo que no abre turno vive en
+    `ingesta.TIPOS_QUE_NO_ABREN_TURNO` y es suya. Son mensajes que tienen `respondido_en`
+    NULL para siempre porque no se les contesta a propósito --una reacción con emoji-- así
+    que contarlos aquí sería inventarse un problema: este número lo mira una persona para
+    decidir si algo va mal.
 
     Dos límites, y los dos existen para que el número signifique algo:
 
@@ -1375,10 +1388,11 @@ def contar_sin_responder(conn, *, margen_segundos: int = 300, ventana_horas: int
             SELECT count(*) FROM mensajes_entrantes
              WHERE respondido_en  IS NULL
                AND fallo_respuesta IS NULL
+               AND tipo <> ALL(%s)
                AND recibido_en <= now() - make_interval(secs => %s)
                AND recibido_en >  now() - make_interval(hours => %s)
             """,
-            (margen_segundos, ventana_horas),
+            (list(tipos_sin_turno), margen_segundos, ventana_horas),
         )
         return cur.fetchone()[0]
 

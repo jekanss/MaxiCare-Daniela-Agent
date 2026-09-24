@@ -39,7 +39,7 @@ from datetime import datetime, timedelta
 import pytest
 
 from maxicare_daniela import herramientas as h
-from maxicare_daniela import persistencia
+from maxicare_daniela import ingesta, persistencia
 from maxicare_daniela.calendario import CalendarioDoble, Jornada
 from maxicare_daniela.config import cargar_dotenv
 from maxicare_daniela.contratos import ContextoDaniela, SolicitudCancelacion, SolicitudCita
@@ -1140,4 +1140,57 @@ def test_un_mensaje_sin_respuesta_y_sin_fallo_es_el_que_se_perdio(esquema):
         assert persistencia.contar_sin_responder(conn, margen_segundos=60) == 1
         assert persistencia.contar_sin_responder(conn, margen_segundos=60, ventana_horas=96) == 2, (
             "la ventana de 24 h es lo que hace que el indicador vuelva a cero solo"
+        )
+
+
+@pytest.mark.neon
+def test_lo_que_no_abre_turno_no_cuenta_como_paciente_sin_contestar(esquema):
+    """Una reaccion con emoji tiene `respondido_en` NULL para siempre.
+
+    No se le contesta a proposito (`ingesta.TIPOS_QUE_NO_ABREN_TURNO`), asi que su fila
+    queda con los dos NULL --sin respuesta y sin fallo-- que es justo la firma que estas dos
+    consultas buscan. Sin el filtro, cada pulgar arriba enciende el indicador de `/salud`
+    que una persona mira para decidir si algo va mal, y el barrido del siguiente arranque le
+    abre el turno que `_entregar` acababa de ahorrarse.
+
+    Se prueba contra Postgres y no offline porque lo que puede fallar es el SQL: `tipo <>
+    ALL(%s)` con una lista vacia tiene que seguir dejando pasar todo, o el dia que alguien
+    llame sin `tipos_sin_turno` el contador se va a cero y el indicador deja de servir.
+
+    **Mide el DELTA y no el total**, porque el fixture `esquema` es `scope="module"`: las
+    filas de las pruebas anteriores siguen en la tabla, asi que un numero absoluto aqui
+    depende de en que orden corra pytest. Es la misma colision que ya dejo dos pruebas del
+    panel en rojo durante tres commits.
+    """
+    sin_turno = sorted(ingesta.TIPOS_QUE_NO_ABREN_TURNO)
+
+    with persistencia.conectar(esquema) as conn:
+        antes_con = persistencia.contar_sin_responder(
+            conn, margen_segundos=60, tipos_sin_turno=sin_turno
+        )
+        antes_sin = persistencia.contar_sin_responder(conn, margen_segundos=60)
+
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO mensajes_entrantes (wamid, telefono, tipo, texto, recibido_en)
+                VALUES ('w.pregunta', '573002', 'text',     'cuanto vale?', now() - interval '5 minutes'),
+                       ('w.pulgar',   '573002', 'reaction', NULL,           now() - interval '5 minutes')
+                """
+            )
+        conn.commit()
+
+        despues_con = persistencia.contar_sin_responder(
+            conn, margen_segundos=60, tipos_sin_turno=sin_turno
+        )
+        despues_sin = persistencia.contar_sin_responder(conn, margen_segundos=60)
+
+        assert despues_con - antes_con == 1, (
+            "la reaccion se conto como un paciente al que nadie contesto: entraron dos "
+            "mensajes y solo uno esperaba respuesta"
+        )
+        assert despues_sin - antes_sin == 2, (
+            "sin `tipos_sin_turno` no se filtra nada, y tiene que seguir siendo asi: un "
+            "default que filtrara por su cuenta escondería mensajes de verdad el día que "
+            "la lista crezca"
         )

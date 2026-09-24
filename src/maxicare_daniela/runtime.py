@@ -1111,6 +1111,27 @@ async def _entregar(m: ingesta.MensajeEntrante) -> None:
         log.info("%s ya estaba atendido: reintento de Meta, Daniela no vuelve a contestar", m.wamid)
         return
 
+    # Lo que no es una pregunta no abre un turno.
+    #
+    # Va AQUÍ --después de `procesar_mensaje`, que es lo que registra el mensaje y lo baja al
+    # hilo del doctor-- porque no atender no puede significar no registrar: la fila se
+    # escribe igual, la deduplicación por `wamid` sigue protegiendo del reintento de Meta, y
+    # el doctor ve lo que el paciente hizo. Lo único que se ahorra es la corrida del modelo.
+    #
+    # Y no dentro de `atencion.atender`, que era la otra opción: allí el mensaje ya habría
+    # entrado en el búfer de 20 segundos, y un grupo formado por un texto legítimo y una
+    # reacción no se puede descartar entero. Antes del búfer la regla es de una línea.
+    #
+    # El caso medido está en `ingesta.TIPOS_QUE_NO_ABREN_TURNO`. `m.tipo` sale del webhook de
+    # Meta y nunca del modelo, igual que `entrada_solo_de_botones` y que la cuota de abajo.
+    if m.tipo in ingesta.TIPOS_QUE_NO_ABREN_TURNO:
+        log.info(
+            "%s es %s: se registró y se entregó, pero no abre turno",
+            m.wamid,
+            ingesta.NOMBRE_HUMANO.get(m.tipo, m.tipo),
+        )
+        return
+
     # `/clearstate`: devolver un número de pruebas al estado de primer contacto.
     #
     # Va AQUÍ, después de la deduplicación y antes del turno, por tres razones. (1) Pasada la
@@ -1335,7 +1356,13 @@ async def salud() -> dict:
             # corría con la conexión ya cerrada y `/salud` contestaba
             # `base_de_datos: "FALLA: the connection is closed"` -- el indicador de salud
             # mintiendo sobre la salud. Lo caza `test_salud_cuenta_los_mensajes_sin_responder`.
-            estado["sin_responder"] = persistencia.contar_sin_responder(conn)
+            #
+            # Y lo que no abre turno no cuenta como paciente desatendido: una reacción con
+            # emoji tiene `respondido_en` NULL para siempre porque no se le contesta a
+            # propósito, y este número lo mira una persona para decidir si algo va mal.
+            estado["sin_responder"] = persistencia.contar_sin_responder(
+                conn, tipos_sin_turno=sorted(ingesta.TIPOS_QUE_NO_ABREN_TURNO)
+            )
             # Cuántas conversaciones tiene un doctor ahora mismo. Es el número que delata un
             # relevo atascado: mientras esté por encima de cero, hay pacientes a los que
             # Daniela NO está contestando y temas abiertos de par en par. Si no baja en todo
@@ -2996,6 +3023,18 @@ async def _recoger_lo_que_quedo_sin_responder() -> int:
     # de ese arreglo. Reatender un reseteo no lo repetiría --`atender` no mira el comando--
     # pero le pasaría a Daniela el texto «/clearstate» como si fuera un paciente preguntando.
     colgados = [fila for fila in colgados if not reseteo.es_comando(fila.get("texto"))]
+
+    # Y lo que no abre turno tampoco lo abre aquí, o el ahorro de `_entregar` duraba hasta el
+    # siguiente arranque. Una reacción se queda con `respondido_en` NULL y `fallo_respuesta`
+    # NULL --nadie le contestó y nadie anotó un fallo, porque no lo hubo-- que es exactamente
+    # la firma que `mensajes_sin_responder` busca. Sin esta línea el barrido le abre el turno
+    # que `_entregar` acababa de ahorrarse y el paciente recibe su mensaje en blanco tarde.
+    #
+    # Se filtra aquí, con `/clearstate`, y no dentro de la consulta: el vocabulario de tipos
+    # vive en `ingesta` y no se cablea en un SQL de `persistencia`.
+    colgados = [
+        fila for fila in colgados if fila.get("tipo") not in ingesta.TIPOS_QUE_NO_ABREN_TURNO
+    ]
 
     if not colgados:
         return 0

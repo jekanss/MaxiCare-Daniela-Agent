@@ -104,6 +104,20 @@ def _mensaje_de_texto(wamid: str = "wamid.de.prueba.1") -> dict:
     )
 
 
+def _reaccion(wamid: str = "wamid.reaccion") -> dict:
+    """La forma real de una reacción con emoji. Meta manda `type: "reaction"`, y el cuerpo
+    trae el mensaje al que se reacciona -- no texto."""
+    return _sobre(
+        {
+            "from": "573001234567",
+            "id": wamid,
+            "timestamp": "1757700000",
+            "type": "reaction",
+            "reaction": {"message_id": "wamid.de.daniela", "emoji": "\N{THUMBS UP SIGN}"},
+        }
+    )
+
+
 def _firmar(cuerpo: bytes) -> str:
     return "sha256=" + hmac.new(APP_SECRET.encode(), cuerpo, hashlib.sha256).hexdigest()
 
@@ -249,6 +263,101 @@ def test_un_reintento_de_Meta_no_hace_que_Daniela_conteste_otra_vez(cliente, esp
     assert len(espias.atendidos) == 1, (
         "Daniela contestó a un reintento de Meta: el paciente recibe respuestas repetidas "
         "y la clínica paga una corrida del modelo por cada reintento"
+    )
+
+
+def test_una_reaccion_con_emoji_no_abre_turno(cliente, espias):
+    """El caso medido: Andrea Rodríguez, +57 321 998 0137, el 24/09/2026 a las 08:10.
+
+    Pulsó un emoji sobre el último mensaje de Daniela --«Con gusto, Andrea. Nos vemos el
+    lunes»-- y eso abrió un turno completo: al modelo le llegó «[El paciente envió algo de
+    tipo «reaction». No trae texto.]», que es la misma frase que recibiría un vídeo, y el
+    modelo hizo lo único sensato que el contrato le dejaba hacer. `RespuestaDaniela` exige
+    `min_length=1`, así que no podía callarse: devolvió `mensaje_al_paciente = " "`.
+
+    Ese espacio SE ENVIÓ. Hay `wamid_respuesta` en la fila. Andrea recibió un mensaje en
+    blanco de la clínica y la clínica pagó una corrida del modelo con once turnos de
+    historial detrás por un pulgar arriba.
+
+    Una reacción es un acuse de recibo, no un turno. El corte va en `_entregar` --con el
+    dedupe de Meta y `/clearstate`, que es donde ya vive la lista de razones para no
+    atender-- y no dentro de `atender`: ahí el emoji ya habría entrado en el búfer, y un
+    grupo con un texto legítimo y una reacción no se puede descartar entero.
+    """
+    r = _enviar(cliente, _reaccion("wamid.pulgar"))
+
+    assert r.status_code == 200
+    assert espias.atendidos == [], (
+        "una reacción con emoji abrió un turno: el paciente recibe un mensaje en blanco y "
+        "la clínica paga una corrida del modelo por un pulgar arriba"
+    )
+
+
+def test_una_reaccion_llega_igual_al_doctor(cliente, espias):
+    """La otra mitad, y es la que hace que el corte sea seguro.
+
+    No atender no puede significar no registrar: `procesar_mensaje` corre ANTES del corte,
+    así que la fila de `mensajes_entrantes` se escribe --y con ella la deduplicación por
+    `wamid`-- y lo que el paciente hizo sigue bajando a su hilo de Telegram. Lo único que
+    se ahorra es el turno.
+    """
+    _enviar(cliente, _reaccion("wamid.pulgar.2"))
+
+    assert [m.wamid for m in espias.procesados] == ["wamid.pulgar.2"], (
+        "el corte se llevó por delante el registro del mensaje"
+    )
+
+
+def test_el_barrido_de_arranque_no_reatiende_una_reaccion(monkeypatch):
+    """La puerta de atrás por la que el bug volvía media hora después.
+
+    Al no atenderla, la reacción se queda con `respondido_en` NULL y `fallo_respuesta`
+    NULL, que es la firma exacta que `mensajes_sin_responder` busca: «entró y nadie lo
+    procesó». Sin este filtro el barrido del siguiente arranque le abre el turno que
+    `_entregar` acababa de ahorrarse, y el paciente recibe su mensaje en blanco tarde.
+
+    Se filtra aquí y no en la consulta por el mismo motivo que `/clearstate`, dos líneas
+    más arriba: el vocabulario de tipos vive en `ingesta` y no se cablea en el SQL.
+    """
+    atendidos: list[str] = []
+
+    async def atender_falso(m, **_kwargs):
+        atendidos.append(m.wamid)
+        return atencion.Atendido(wamid=m.wamid, id_conversacion="conv-1", respondido=True)
+
+    monkeypatch.setattr(atencion, "atender", atender_falso)
+    monkeypatch.setattr(
+        runtime.persistencia,
+        "mensajes_sin_responder",
+        lambda conn, **_kw: [
+            {
+                "wamid": "wamid.pulgar.colgado",
+                "telefono": "573219980137",
+                "nombre_perfil": "Andrea",
+                "tipo": "reaction",
+                "texto": None,
+                "media_id": None,
+                "mime": None,
+                "recibido_en": datetime(2026, 9, 24, 8, 10),
+            }
+        ],
+    )
+
+    class ConexionFalsa:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+    monkeypatch.setattr(runtime.persistencia, "conectar", lambda *_a, **_k: ConexionFalsa())
+
+    recogidos = asyncio.run(runtime._recoger_lo_que_quedo_sin_responder())
+
+    assert recogidos == 0
+    assert atendidos == [], (
+        "el barrido de arranque le abrió turno a una reacción: el mismo mensaje en blanco, "
+        "media hora tarde"
     )
 
 

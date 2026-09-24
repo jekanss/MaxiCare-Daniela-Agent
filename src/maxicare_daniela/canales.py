@@ -216,7 +216,32 @@ class WhatsApp:
             )
 
     async def enviar_texto(self, telefono: str, texto: str) -> str:
-        """Devuelve el wamid del mensaje enviado."""
+        """Devuelve el wamid del mensaje enviado.
+
+        Un texto en blanco NO se manda, y lanza. Meta lo acepta --un cuerpo con un solo
+        espacio devuelve 200 y su wamid-- así que esto no lo para nadie más: medido el
+        24/09/2026 con Andrea Rodríguez, que recibió un mensaje vacío de la clínica porque
+        el modelo devolvió `mensaje_al_paciente = " "` y `min_length=1` no lo distingue de
+        una palabra.
+
+        Aquí y no en el camino que lo produjo, por dos razones. La causa raíz no es aquel
+        turno sino que el contrato no promete lo que parece prometer, y eso vale para
+        cualquier turno futuro. Y por este borde pasan TODOS los caminos que le escriben a
+        un paciente: Daniela, la frase de la cuota, la confirmación del reseteo, el relevo y
+        los recordatorios.
+
+        **Lanza en vez de callar, y la diferencia es la fila del mensaje.** `atencion`
+        distingue tres estados: respondido (fecha y wamid), fallido (motivo) y ninguno de
+        los dos. Un envío que se salta en silencio queda como RESPONDIDO --quien llama no
+        tendría de qué enterarse-- y la única prueba de que al paciente no le llegó nada
+        desaparece justo en el caso en que hace falta. Con la excepción, el camino de
+        `fallo_respuesta` que ya existe hace su trabajo.
+        """
+        if not texto.strip():
+            raise ErrorDeCanal(
+                f"no se manda un mensaje en blanco a {telefono}: WhatsApp lo aceptaría "
+                f"({texto!r}) y el paciente recibiría una burbuja vacía"
+            )
         cuerpo = {
             "messaging_product": "whatsapp",
             "recipient_type": "individual",

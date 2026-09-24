@@ -135,6 +135,23 @@ def test_validar_clave_rechaza_lo_que_no_es_una_clave():
     assert panel.validar_clave("carillas_esteticas") == "carillas_esteticas"
 
 
+def test_una_reaccion_no_se_pinta_como_un_archivo():
+    """Offline. El 24/09/2026 el hilo de Andrea Rodriguez terminaba en «(archivo)» y no
+    habia llegado ningun archivo: era una reaccion con emoji, y `_marca` cayo a su default.
+
+    El default existe para un adjunto de tipo desconocido --de ahi la palabra-- y una
+    reaccion no es un adjunto. Lo que costo: la clinica leyo el hilo como «llego una
+    radiografia y Daniela no la escalo», que es el sintoma de un no negociable roto (14c),
+    y no lo era.
+    """
+    assert panel._marca("reaction") != "(archivo)"
+    assert panel._marca("image") == "(imagen)"
+    assert panel._marca("video") == "(video)"
+    # El default se queda para lo que de verdad no se conoce, que es su unico trabajo.
+    assert panel._marca("contacts") == "(archivo)"
+    assert panel._marca(None) == "(archivo)"
+
+
 @pytest.mark.neon
 def test_listar_tratamientos_dice_cuales_estan_en_el_muro(conn):
     # Corrección 1 sobre el brief: el esquema `pruebas` persiste entre corridas. Sin el
