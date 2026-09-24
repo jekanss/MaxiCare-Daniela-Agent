@@ -20,6 +20,7 @@ from maxicare_daniela.persistencia import (
     CONFIGURACION_POR_DEFECTO,
     PENDIENTE_APROBACION,
     FilaConocimiento,
+    _palabras_clave,
     cargar_semilla,
     formatear_conocimiento,
 )
@@ -175,3 +176,65 @@ def test_el_aviso_del_relevo_llega_antes_que_el_cierre():
         CONFIGURACION_POR_DEFECTO["aviso_relevo_minutos"]
         < CONFIGURACION_POR_DEFECTO["cierre_relevo_minutos"]
     )
+
+
+# ==========================================================================================
+# Cómo se emparejan los nombres (23/09/2026)
+# ==========================================================================================
+#
+# La búsqueda es `concepto = %s`, y el par (tratamiento, concepto) lo tiene que ACERTAR el
+# modelo en texto libre. `_palabras_clave` es lo que cierra esa distancia, y está aquí --y no
+# en las pruebas de la cascada-- porque es pura: se puede fijar sin base y sin modelo.
+
+
+@pytest.mark.parametrize(
+    "pregunta, concepto",
+    [
+        ("formas de pago", "medios_pago"),      # el caso de Vladimir, 23/09/2026
+        ("facilidades de pago", "medios_pago"),
+        ("horarios", "horario"),                # plural: el otro caso del mismo informe
+        ("financiación", "financiacion"),       # el modelo escribe con tilde; la clave no
+        ("PRECIO", "precio"),                   # mayúsculas
+        ("medios de pago", "medios_pago"),
+    ],
+)
+def test_una_pregunta_y_su_ficha_comparten_palabra(pregunta, concepto):
+    assert _palabras_clave(pregunta) & _palabras_clave(concepto), (
+        f"«{pregunta}» no encontraría la ficha «{concepto}»"
+    )
+
+
+@pytest.mark.parametrize(
+    "pregunta, concepto",
+    [
+        ("formas de pago", "horario"),
+        ("garantia", "medios_pago"),
+        # Las vacías no emparejan NADA por sí solas: con «de» dentro, cualquier pregunta de
+        # tres palabras engancharía media base y el respaldo dejaría de ser un respaldo.
+        ("de la con", "medios_pago"),
+        ("cuota mensual", "precio"),
+    ],
+)
+def test_lo_que_no_tiene_nada_que_ver_NO_empareja(pregunta, concepto):
+    assert not (_palabras_clave(pregunta) & _palabras_clave(concepto))
+
+
+def test_una_clave_de_tres_letras_sobrevive_a_la_despluralizacion():
+    """`eps` es una fila de verdad de la base, y `rstrip('s')` la dejaría en «ep».
+
+    Por eso el plural solo se quita desde cuatro letras. Sin ese mínimo, «eps» dejaría de
+    encontrarse a sí misma, que es la peor forma de romper una búsqueda: la exacta seguiría
+    funcionando y solo fallaría el respaldo, en silencio.
+    """
+    assert "eps" in _palabras_clave("eps")
+    assert _palabras_clave("eps") & _palabras_clave("eps")
+
+
+def test_las_dos_formas_del_plural_se_guardan_juntas():
+    """No hay que acertar de qué lado está el plural: se guardan singular y plural.
+
+    `horarios` tiene que encontrar `horario`, y una ficha llamada `objeciones` tiene que
+    encontrarse preguntando «objecion». Quedarse solo con la forma corta rompería lo segundo.
+    """
+    assert {"horario", "horarios"} <= _palabras_clave("horarios")
+    assert _palabras_clave("objecion") & _palabras_clave("objeciones")

@@ -568,6 +568,13 @@ def test_un_concepto_que_falta_en_un_tratamiento_CON_fichas_deja_FALTA_DATO(monk
         return trabajo(None)
 
     monkeypatch.setattr(h.persistencia, "consultar_conocimiento", _conocimiento)
+    # El respaldo por palabra (23/09/2026) no pasa por `consultar_conocimiento`, así que sin
+    # doblarlo también esta prueba llamaría a Neon con el `None` que usa como conexión. Aquí
+    # devuelve vacío a propósito: lo que se mide es que la señal NO se borre cuando contesta
+    # un respaldo, y el que contesta en este caso es la ficha entera.
+    monkeypatch.setattr(
+        h.persistencia, "leer_conocimiento_por_palabra", lambda *_: []
+    )
     monkeypatch.setattr(h, "_con_base", _corre)
 
     texto = asyncio.run(h._consultar_base_conocimiento(ctx, "ortodoncia", "cuota_mensual"))

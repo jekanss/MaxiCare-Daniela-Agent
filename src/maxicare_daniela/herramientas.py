@@ -509,9 +509,9 @@ async def _consultar_base_conocimiento(
 
     def trabajo(conn) -> str:
         # ------------------------------------------------------------------------------
-        # La consulta EXACTA, y los tres respaldos.
+        # La consulta EXACTA, y los cuatro respaldos.
         #
-        # Ninguno de los tres inventa nada: los cuatro devuelven filas que MaxiCare aprobó,
+        # Ninguno inventa nada: los cinco devuelven filas que MaxiCare aprobó,
         # y si ninguna existe sale el literal `SIN DATO DOCUMENTADO` de siempre. Lo que
         # cambian es el ALCANCE de la búsqueda, porque el modelo tiene que acertar el par
         # (tratamiento, concepto) con el que se guardó el dato, y ese par es texto libre.
@@ -569,18 +569,21 @@ async def _consultar_base_conocimiento(
             if hay_dato(respaldo):
                 return respaldo
 
-        # Respaldo 2 -- el que ya existía: la ficha entera del tratamiento. El concepto
-        # exacto no estaba; devolver más información aprobada del mismo tratamiento es
-        # seguro, y lo que nunca se hace es rellenar el hueco con una estimación.
-        if pregunta:
-            entera = persistencia.consultar_conocimiento(conn, tratamiento)
-            if hay_dato(entera):
-                return entera
-
-        # Respaldo 3 -- el tratamiento no tiene NI UNA ficha, y `_general` sí sabe algo de
-        # él por su nombre. Ese es el caso de `valoracion`. La condición «ni una ficha» no
-        # cuesta una consulta extra: es exactamente lo que acaba de decir el respaldo 2 --o
-        # la consulta exacta, cuando el modelo no mandó concepto--.
+        # Respaldo 2 -- `_general` sabe algo del tratamiento POR SU NOMBRE. Ese es el caso de
+        # `valoracion`, que desde la 020 es clave de tratamiento y no tiene ni una ficha.
+        #
+        # **Iba el ÚLTIMO hasta el 23/09/2026, y subió aquí el día que llegó el respaldo por
+        # palabra.** Su sitio de antes se justificaba en que su condición --«el tratamiento no
+        # tiene NI UNA ficha»-- ya la había contestado la ficha entera, así que no costaba una
+        # consulta. Cierto, y dejó de importar: puesto detrás del respaldo por palabra,
+        # `valoracion`/`precio` lo interceptaba «precio» y devolvía `_general`/`politica_precios`
+        # en vez del valor de la valoración. Se midió antes de subirlo, y es exactamente la
+        # regresión del 22/09 --dos escalamientos por un precio que la clínica tenía escrito--
+        # vuelta a abrir por la puerta de al lado.
+        #
+        # El orden que queda tiene una regla en vez de una lista: **primero todo lo EXACTO,
+        # después lo aproximado.** Cuesta una consulta más cuando el tratamiento sí tiene
+        # fichas; a cambio, ninguna coincidencia parcial puede pisar a una exacta.
         if not general:
             respaldo = persistencia.consultar_conocimiento(
                 conn, persistencia.TRATAMIENTO_GENERAL, tratamiento
@@ -588,7 +591,44 @@ async def _consultar_base_conocimiento(
             if hay_dato(respaldo):
                 return respaldo
 
-        # Los cuatro vacíos. Vuelve el `SIN DATO DOCUMENTADO` de la consulta exacta, que es
+        # La ficha entera se pide AQUÍ aunque el respaldo 4 sea el que la devuelve, porque
+        # antes de eso decide si el respaldo 3 tiene derecho a existir. Una sola consulta
+        # para las dos cosas.
+        entera = persistencia.consultar_conocimiento(conn, tratamiento) if pregunta else ""
+        dice_algo = hay_dato(entera)
+
+        # Respaldo 3 -- por PALABRA, en el tratamiento y en `_general` a la vez. Llegó el
+        # 23/09/2026 y va DELANTE de la ficha entera, porque la ficha entera es lo que le
+        # tapaba la boca: `implantes`/«formas de pago» encontraba los catorce conceptos de
+        # implantes --ninguno sobre pagos-- y cortaba la cascada antes de mirar en `_general`.
+        # El detalle y la medición, en `persistencia.leer_conocimiento_por_palabra`.
+        #
+        # **`dice_algo` NO es una optimización: es lo que mantiene MUDA a la endodoncia.**
+        # Un tratamiento sin NI UNA ficha no es uno que se nos olvidó documentar -- es uno
+        # sobre el que MaxiCare decidió no decir nada (sección 2.12 del documento maestro:
+        # endodoncia y prótesis, sin precio ni garantía, «no debe publicarse ninguna cifra»).
+        # Y ese literal `SIN DATO DOCUMENTADO` es lo que le ORDENA al modelo no estimar y
+        # escalar; cualquier cosa que lo sustituya apaga la orden. Medido contra la base real
+        # antes de poner esta condición: `endodoncia`/`precio` devolvía
+        # `_general`/`politica_precios` --por la palabra «precio»--, que no lleva cifras pero
+        # tampoco es el literal, así que Daniela dejaba de escalar sobre el tratamiento que
+        # más falta le hace. Es exactamente lo que avisa `.claude/rules/base-conocimiento.md`:
+        # un respaldo que empieza a COMPLETAR huecos en vez de a buscarlos.
+        if pregunta and dice_algo:
+            filas = persistencia.leer_conocimiento_por_palabra(conn, tratamiento, pregunta)
+            if filas:
+                return persistencia.formatear_conocimiento(
+                    filas, tratamiento=tratamiento, concepto=pregunta
+                )
+
+        # Respaldo 4 -- el que ya existía: la ficha entera del tratamiento. El concepto
+        # exacto no estaba; devolver más información aprobada del mismo tratamiento es
+        # seguro, y lo que nunca se hace es rellenar el hueco con una estimación. El último
+        # porque es el más ancho de los cuatro: contesta con todo lo que hay.
+        if dice_algo:
+            return entera
+
+        # Los cinco vacíos. Vuelve el `SIN DATO DOCUMENTADO` de la consulta exacta, que es
         # el que nombra lo que el paciente preguntó de verdad.
         return texto
 

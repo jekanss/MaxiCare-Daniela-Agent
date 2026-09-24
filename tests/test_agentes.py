@@ -762,6 +762,85 @@ def test_en_el_turno_2_no_se_emite_ninguna_de_las_dos_ramas():
     assert _RETOMA not in texto
 
 
+@pytest.mark.parametrize(
+    "hora, esperado",
+    [
+        (0, "buenos días"), (7, "buenos días"), (11, "buenos días"),
+        (12, "buenas tardes"), (15, "buenas tardes"), (17, "buenas tardes"),
+        (18, "buenas noches"), (21, "buenas noches"), (23, "buenas noches"),
+    ],
+)
+def test_el_saludo_cambia_con_la_franja_del_dia(hora, esperado):
+    """Las tres franjas y sus dos fronteras, que es donde se rompería un `>` por un `>=`.
+
+    Se calcula en Python en vez de dejárselo deducir al modelo: «buenos días» a las nueve de
+    la noche es la primera frase que lee un paciente, y la deduciría bien casi siempre.
+    """
+    momento = datetime(2026, 9, 24, hora, 30, tzinfo=ZONA_BOGOTA)
+
+    assert agentes.saludo_del_momento(momento) == esperado
+
+
+def test_la_franja_viaja_en_AHORA_MISMO_y_no_en_el_bloque_del_saludo():
+    """Dónde va no es estética: es caché.
+
+    «AHORA MISMO» ya cambia cada hora --`fecha_en_palabras` lo trunca justo para eso--, así
+    que el saludo no descachea nada nuevo. Metido en «PRIMER CONTACTO» partiría en tres un
+    bloque que hoy es idéntico para todos los pacientes, y por delante de la fecha.
+    """
+    texto = prompt_de(turno_actual=1, ahora=datetime(2026, 9, 24, 21, 0, tzinfo=ZONA_BOGOTA))
+
+    assert "A esta hora se saluda con «buenas noches»." in texto
+    assert texto.index("A esta hora se saluda") > texto.index(_SE_PRESENTA), (
+        "la franja se coló en el bloque de la presentación: eso lo parte en tres por caché"
+    )
+
+
+def test_el_saludo_le_dice_que_pregunte_como_esta_y_que_se_presente():
+    """Lo que pidió MaxiCare el 23/09/2026: saludo con la hora, «¿cómo estás?» y después la
+    presentación. Antes abría con «Hola, soy Daniela...» a cualquier hora y sin preguntar."""
+    texto = prompt_de(turno_actual=1, ahora=datetime(2026, 9, 24, 21, 0, tzinfo=ZONA_BOGOTA))
+
+    assert "el saludo del momento del día que te dice AHORA MISMO" in texto
+    assert "le preguntas cómo está" in texto
+    assert "haces parte del equipo de MaxiCare" in texto
+
+
+def test_si_hay_bloque_de_saludo_hay_bloque_de_hora():
+    """La invariante que sostiene que el saludo pueda remitir a «AHORA MISMO» sin comprobar.
+
+    `ContextoDaniela.ahora` es `datetime` y no `datetime | None` --lleva `default_factory`--,
+    así que un contexto de verdad siempre trae reloj; y sin contexto no se emite ninguno de
+    los dos bloques. Quien haga esa hora opcional deja al modelo buscando una franja que no
+    está, que es justo pedirle que invente la hora. Esta prueba se pondría roja ese día.
+
+    La escrita a mano no basta: un `contexto()` sin `ahora` ya cae al reloj de verdad, que es
+    la trampa de las fechas de este proyecto. Por eso se prueba el caso SIN contexto también.
+    """
+    for hecho in (prompt_de(turno_actual=1), prompt_de(turno_actual=1, ahora=None)):
+        assert (_SE_PRESENTA in hecho) is ("AHORA MISMO" in hecho)
+
+    sin_contexto = asyncio.run(
+        agentes.daniela.get_system_prompt(RunContextWrapper(context=None))
+    )
+    assert _SE_PRESENTA not in sin_contexto
+    assert "AHORA MISMO" not in sin_contexto
+
+
+def test_quien_retoma_TAMPOCO_saluda_a_deshora():
+    """La franja vale para las dos ramas: no presentarse no significa no saludar."""
+    texto = prompt_de(
+        turno_actual=1,
+        ahora=datetime(2026, 9, 24, 9, 0, tzinfo=ZONA_BOGOTA),
+        ultimo_recordatorio_tipo="reactivacion_sin_agendar",
+        ultimo_recordatorio_en=datetime(2026, 9, 23, 17, 0, tzinfo=ZONA_BOGOTA),
+    )
+
+    assert _RETOMA in texto
+    assert "el saludo del momento del día que te dice AHORA MISMO" in texto
+    assert "A esta hora se saluda con «buenos días»." in texto
+
+
 def test_el_bloque_retomado_va_en_el_MISMO_sitio_que_la_presentacion():
     """Las dos ramas son el mismo bloque, así que comparten su sitio en el orden por
     volatilidad: entre el vocabulario y la fecha. Si una se moviera, descachearía distinto."""

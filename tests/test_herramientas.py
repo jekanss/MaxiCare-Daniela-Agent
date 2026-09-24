@@ -146,6 +146,33 @@ def _base_falsa_de(fichas: dict[tuple[str, str], str]):
     return _consultar
 
 
+def _busqueda_falsa_de(fichas: dict[tuple[str, str], str]):
+    """Un doble de `persistencia.leer_conocimiento_por_palabra` sobre el mismo diccionario.
+
+    Hace falta uno SEGUNDO, y esa es la trampa de este andamio: el respaldo por palabra no
+    pasa por `consultar_conocimiento`, así que doblar solo aquella dejaba a la cascada
+    llamando a Neon con el `object()` que estas pruebas usan como conexión. Lo cazó
+    `test_la_ficha_entera_sigue_siendo_el_respaldo_cuando_lo_general_no_sabe` con un
+    `AttributeError`, que es la forma ruidosa de enterarse; la silenciosa habría sido un
+    doble que dijera «no hay» a todo y dejara el respaldo nuevo sin probar.
+
+    Reusa la función REAL de partir en palabras --no la reimplementa-- porque lo que estas
+    pruebas fijan es la cascada, no el emparejado: duplicarlo aquí dejaría pasar un cambio de
+    criterio en `_palabras_clave` con toda la tanda en verde.
+    """
+
+    def _buscar(conn, tratamiento, concepto):
+        buscadas = persistencia._palabras_clave(concepto)
+        ambitos = {tratamiento, persistencia.TRATAMIENTO_GENERAL}
+        return [
+            persistencia.FilaConocimiento(tr, c, t, True)
+            for (tr, c), t in sorted(fichas.items())
+            if tr in ambitos and persistencia._palabras_clave(c) & buscadas
+        ]
+
+    return _buscar
+
+
 VALORACION = (
     "La valoración tiene un valor de $40.000, y ese valor se abona al tratamiento que el "
     "paciente necesite y se realice después."
@@ -159,6 +186,9 @@ def _preguntar(monkeypatch, fichas, tratamiento, concepto):
         return trabajo(object())
 
     monkeypatch.setattr(persistencia, "consultar_conocimiento", _base_falsa_de(fichas))
+    monkeypatch.setattr(
+        persistencia, "leer_conocimiento_por_palabra", _busqueda_falsa_de(fichas)
+    )
     monkeypatch.setattr(h, "_con_base", _corre)
     return ctx, asyncio.run(h._consultar_base_conocimiento(ctx, tratamiento, concepto))
 
@@ -234,6 +264,113 @@ def test_la_ficha_entera_sigue_siendo_el_respaldo_cuando_lo_general_no_sabe(monk
 
     assert "$3.500.000" in texto
     assert "Transversal" not in texto, "el respaldo por concepto no debe colar lo que no se pidió"
+
+
+#: Las fichas con las que se mide el respaldo por palabra. Son las claves REALES de la base
+#: de MaxiCare, con el contenido cambiado: `medios_pago` y `horario` existen así, y son
+#: exactamente los dos nombres que Daniela no acertó el 23/09/2026.
+_COMO_LA_BASE_REAL = {
+    ("_general", "medios_pago"): "Efectivo, Bre-B, Daviplata o Nequi. Tarjeta con 5% extra.",
+    ("_general", "financiacion"): "Solo ortodoncia. Para lo demás NO hay financiación.",
+    ("_general", "horario"): "Lunes a viernes de 8:00 a 17:00.",
+    ("_general", "politica_precios"): "Informar únicamente las tarifas del catálogo.",
+    ("implantes", "precio"): "Fase quirúrgica $1.900.000.",
+    ("implantes", "duracion"): "Seis meses entre fase y fase.",
+}
+
+
+@pytest.mark.parametrize(
+    "tratamiento, pregunta, esperado",
+    [
+        # El caso literal del 23/09/2026: Vladimir preguntó por implantes «y si tienen
+        # facilidades de pago», y el hueco se anotó como si la clínica no tuviera el dato.
+        ("_general", "formas de pago", "MEDIOS_PAGO"),
+        ("implantes", "formas de pago", "MEDIOS_PAGO"),
+        ("implantes", "facilidades de pago", "MEDIOS_PAGO"),
+        # El otro caso del mismo informe, que es un plural y nada más.
+        ("_general", "horarios", "HORARIO"),
+        # El modelo escribe como se habla; las claves se guardan sin tildes.
+        ("_general", "financiación", "FINANCIACION"),
+    ],
+)
+def test_el_nombre_de_la_ficha_ya_no_hay_que_acertarlo_entero(
+    monkeypatch, tratamiento, pregunta, esperado
+):
+    """La búsqueda es `concepto = %s`, y el par lo tiene que ACERTAR el modelo en texto libre.
+
+    Medido en producción el 23/09/2026: «formas de pago» no encuentra `medios_pago` y
+    «horarios» no encuentra `horario`. El primero se salvó por la ficha entera de `_general`;
+    el mismo caso sobre un tratamiento con fichas propias no se salvaba, porque esa ficha
+    entera contesta y corta la cascada antes de mirar en `_general`.
+    """
+    _, texto = _preguntar(monkeypatch, _COMO_LA_BASE_REAL, tratamiento, pregunta)
+
+    assert f"[{esperado.replace('_', ' ')}]" in texto
+    assert "SIN DATO" not in texto
+
+
+def test_la_ficha_entera_del_tratamiento_ya_no_tapa_lo_que_solo_sabe_general(monkeypatch):
+    """El agujero que cerró el respaldo por palabra, en una sola prueba.
+
+    `implantes` TIENE fichas, así que el respaldo de la ficha entera contesta --con precio y
+    duración, ninguno sobre pagos-- y cortaba la búsqueda antes de llegar a `_general`. El
+    paciente recibía información abundante y ni una palabra de lo que preguntó.
+    """
+    _, texto = _preguntar(monkeypatch, _COMO_LA_BASE_REAL, "implantes", "formas de pago")
+
+    assert "Bre-B" in texto
+    assert "$1.900.000" not in texto, (
+        "volvió a contestar con la ficha entera de implantes, que no dice nada de pagos"
+    )
+
+
+def test_una_coincidencia_EXACTA_le_gana_a_una_por_palabra(monkeypatch):
+    """El orden de la cascada en una frase: primero todo lo exacto, después lo aproximado.
+
+    Es la regresión que se midió al escribir esto. Con el respaldo por palabra delante de
+    `_general`/<tratamiento>, `valoracion`/`precio` lo interceptaba la palabra «precio» y
+    devolvía `politica_precios` -- en vez de los $40.000 de `_general`/`valoracion`, que es
+    el caso que ese respaldo existe para resolver desde el 22/09/2026.
+    """
+    _, texto = _preguntar(
+        monkeypatch,
+        {**_COMO_LA_BASE_REAL, ("_general", "valoracion"): VALORACION},
+        "valoracion",
+        "precio",
+    )
+
+    assert "$40.000" in texto
+    assert "POLITICA PRECIOS" not in texto
+
+
+def test_un_tratamiento_MUDO_no_lo_desmudece_una_palabra_suelta(monkeypatch):
+    """La guarda que mantiene callada a la endodoncia, y por qué no es una optimización.
+
+    Un tratamiento sin NI UNA ficha no es uno que se olvidó documentar: es uno sobre el que
+    MaxiCare decidió no decir nada (sección 2.12). Sin esta guarda, `endodoncia`/`precio`
+    engancha `_general`/`politica_precios` por la palabra «precio». No lleva cifras, pero
+    sustituye el literal `SIN DATO DOCUMENTADO` -- que es lo que ORDENA no estimar y escalar.
+    Medido contra la base real antes de ponerla.
+    """
+    _, texto = _preguntar(monkeypatch, _COMO_LA_BASE_REAL, "endodoncia", "precio")
+
+    assert texto.startswith("SIN DATO DOCUMENTADO")
+    assert "POLITICA PRECIOS" not in texto
+
+
+def test_el_respaldo_por_palabra_TAMPOCO_borra_el_hueco_de_la_medicion(monkeypatch):
+    """Lo mismo que ya valía para los otros tres: la señal sale de la consulta EXACTA.
+
+    Que Daniela encuentre el dato no significa que la ficha se llame como la gente pregunta.
+    El informe tiene que seguir viendo `falta_dato:_general:formas de pago` para que alguien
+    pueda decidir renombrarla o darle un alias.
+    """
+    ctx, texto = _preguntar(monkeypatch, _COMO_LA_BASE_REAL, "_general", "formas de pago")
+
+    assert "Bre-B" in texto
+    assert [(s.concepto, s.hubo_dato) for s in ctx.turno.senales] == [
+        ("formas de pago", False)
+    ]
 
 
 def test_endodoncia_sigue_MUDA_con_los_tres_respaldos_puestos(monkeypatch):

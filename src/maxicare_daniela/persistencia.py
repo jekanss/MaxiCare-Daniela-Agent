@@ -30,6 +30,8 @@ from __future__ import annotations
 
 import json
 import logging
+import re
+import unicodedata
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -562,6 +564,89 @@ def consultar_conocimiento(conn, tratamiento: str, concepto: str | None = None) 
     """Lo que la tool `consultar_base_conocimiento` va a envolver en la fase 3."""
     filas = leer_conocimiento(conn, tratamiento, concepto)
     return formatear_conocimiento(filas, tratamiento=tratamiento, concepto=concepto)
+
+
+#: Las que aparecen en cualquier pregunta y no distinguen una ficha de otra. Sin ellas, «de»
+#: emparejaría todo con todo y el respaldo por palabra devolvería la base entera.
+_PALABRAS_VACIAS = frozenset(
+    {"del", "las", "los", "una", "uno", "por", "para", "con", "que", "cual", "cuales",
+     "como", "sobre", "tiene", "tienen", "hay", "son", "esta", "este", "sus"}
+)
+
+
+def _palabras_clave(texto: str) -> set[str]:
+    """Las palabras con las que se puede emparejar un concepto, sin tildes y sin plural.
+
+    Tres normalizaciones, y cada una salió de un caso real de la base:
+
+    - **Sin tildes**, porque las claves se guardan sin ellas (`financiacion`) y el modelo
+      escribe como se habla (`financiación`).
+    - **Sin plural, y se guardan TODAS las formas**: el 23/09/2026 Daniela preguntó por
+      `horarios` y la fila se llama `horario`. Guardarlas juntas evita tener que acertar de
+      qué lado está el plural, que cambia según quién escriba. Se quitan la `s` **y** el
+      `es`, porque en español el plural de una palabra acabada en consonante añade las dos
+      letras: sin el segundo caso, `objeciones` --que es una fila de verdad-- se quedaba en
+      «objecione» y no se encontraba preguntando «objecion». Lo cazó su prueba.
+    - **Solo desde tres letras**, y las formas cortas solo desde cuatro y cinco: «eps» es una
+      clave de verdad y recortarla la dejaría en «ep».
+
+    Las formas de más --«preci» de «precios»-- no ensucian nada: no son palabras, así que no
+    emparejan con ningún concepto real, y el que las produce empareja igual por la forma
+    buena. Sobrar es el lado barato de equivocarse aquí; faltar deja una ficha inalcanzable.
+
+    Se mira el CONCEPTO y nunca el contenido. Con el contenido, «pago» emparejaría también
+    el precio de la ortodoncia --que menciona pagos por control-- y el respaldo pasaría de
+    devolver la ficha correcta a devolver media base.
+    """
+    plano = unicodedata.normalize("NFD", texto.lower())
+    plano = "".join(c for c in plano if unicodedata.category(c) != "Mn")
+    sueltas = {p for p in re.split(r"[^0-9a-zñ]+", plano) if len(p) > 2}
+    sueltas -= _PALABRAS_VACIAS
+    cortas = {p[:-1] for p in sueltas if len(p) > 3 and p.endswith("s")}
+    cortas |= {p[:-2] for p in sueltas if len(p) > 4 and p.endswith("es")}
+    return sueltas | cortas
+
+
+def leer_conocimiento_por_palabra(
+    conn, tratamiento: str, concepto: str
+) -> list[FilaConocimiento]:
+    """Las fichas de ese tratamiento --o generales-- cuyo concepto comparte una palabra.
+
+    El respaldo que cierra la distancia entre cómo se llama una ficha y cómo la pide el
+    modelo. `leer_conocimiento` compara con `=`, así que «formas de pago» no encuentra
+    `medios_pago` ni «horarios» encuentra `horario`, y el par (tratamiento, concepto) es
+    texto libre que el modelo tiene que ACERTAR.
+
+    **Lo que costaba, medido el 23/09/2026 en producción.** Vladimir preguntó por dos
+    implantes «y si tienen facilidades de pago». Daniela consultó `_general`/«formas de
+    pago», no acertó el nombre, y el hueco quedó anotado como si la clínica no tuviera el
+    dato -- lo tiene, aprobado, en `_general`/`medios_pago` y `_general`/`financiacion`. Ese
+    caso se salvó por el respaldo de la ficha entera, pero el de al lado no: preguntando
+    `implantes`/«formas de pago», la ficha entera de implantes SÍ existe, así que contesta
+    --con sus catorce conceptos, ninguno sobre pagos-- y corta la búsqueda antes de mirar en
+    `_general`. Por eso este respaldo va DELANTE de aquel.
+
+    **Busca en el tratamiento y en `_general` a la vez**, que es la otra mitad: un concepto
+    como el pago, el horario o la sede no vive bajo ningún tratamiento y nunca va a estar en
+    su ficha. No inventa nada -- devuelve filas que MaxiCare aprobó, igual que los otros tres
+    respaldos; lo único que cambia es cómo se encuentran.
+
+    Medido sobre las 137 filas aprobadas de la base real: «formas de pago» devuelve UNA
+    (`medios_pago`), «horarios» devuelve UNA (`horario`). No es una red que arrastre medio
+    catálogo.
+    """
+    buscadas = _palabras_clave(concepto)
+    if not buscadas:
+        return []
+
+    ambitos = [tratamiento] if tratamiento == TRATAMIENTO_GENERAL else [
+        tratamiento,
+        TRATAMIENTO_GENERAL,
+    ]
+    filas = [f for ambito in ambitos for f in leer_conocimiento(conn, ambito)]
+    # El orden importa poco, pero el del tratamiento va primero por venir antes en `ambitos`:
+    # ante dos fichas que empatan, la del tratamiento consultado es la más específica.
+    return [f for f in filas if _palabras_clave(f.concepto) & buscadas]
 
 
 #: La clave de `configuracion` donde la 029 dejo escrito desde cuando cuentan los casos de

@@ -466,6 +466,27 @@ def fecha_en_palabras(momento) -> str:
     )
 
 
+#: Las tres franjas del saludo colombiano, por la hora a la que EMPIEZA cada una.
+#:
+#: Se calcula en Python y no se le pide al modelo que lo deduzca de la hora. Deducirlo es
+#: trivial y por eso mismo saldría bien casi siempre, que es la peor clase de casi: «buenos
+#: días» a las nueve de la noche es la primera frase que lee un paciente y lo delata entero.
+#: Mismo criterio que `fecha_en_palabras`, que tampoco le pide que resuelva el calendario.
+_FRANJAS = ((18, "buenas noches"), (12, "buenas tardes"), (0, "buenos días"))
+
+
+def saludo_del_momento(momento) -> str:
+    """«buenos días» · «buenas tardes» · «buenas noches», por la hora de Bogotá.
+
+    Viaja DENTRO del bloque «AHORA MISMO» y no en el de la presentación, y eso es dinero: ese
+    bloque ya cambia cada hora --`fecha_en_palabras` lo trunca justo para eso--, así que el
+    saludo no descachea nada que no estuviera descacheado ya. Metido en «PRIMER CONTACTO»
+    --donde se usa-- partiría en tres un bloque que hoy es idéntico para todos los pacientes,
+    y lo partiría por delante de la fecha, que es el prefijo que más caro sale perder.
+    """
+    return next(nombre for desde, nombre in _FRANJAS if momento.hour >= desde)
+
+
 def instrucciones_daniela(ctx, agente) -> str:
     """Las instrucciones de siempre, con el vocabulario vivo y la fecha pegados AL FINAL.
 
@@ -562,6 +583,16 @@ def instrucciones_daniela(ctx, agente) -> str:
     # la idempotencia, no del saludo. Lo que estaba mal era dar `turno_actual == 1` por
     # sinónimo de «no nos conocemos», cuando el sistema sabe que sí.
     if getattr(contexto, "turno_actual", None) == 1:
+        # Las dos ramas remiten a «AHORA MISMO» para la franja del saludo, y pueden hacerlo
+        # sin comprobar nada: `ContextoDaniela.ahora` es `datetime` y no `datetime | None`
+        # --tiene `default_factory`--, así que un contexto de verdad SIEMPRE trae reloj, y sin
+        # contexto no se emite ninguno de los dos bloques. Quien haga esa hora opcional deja
+        # al modelo buscando un bloque que no está, que es pedirle que la invente; lo fija
+        # `test_si_hay_bloque_de_saludo_hay_bloque_de_hora`.
+        con_hora = (
+            "Abres con el saludo del momento del día que te dice AHORA MISMO y le preguntas "
+            "cómo está, "
+        )
         if antecedente is not None:
             texto = (
                 f"{texto}\n\n"
@@ -570,8 +601,8 @@ def instrucciones_daniela(ctx, agente) -> str:
                 "mensaje anterior lo mandamos nosotros y lo que acabas de recibir es su "
                 "respuesta. NO abras presentándote -decirle «soy Daniela y hago parte del "
                 "equipo de MaxiCare» a quien acaba de contestarnos suena a que nadie leyó "
-                "lo que dijo-. Salúdalo y retoma desde ahí. Si en algún momento hace falta "
-                "que sepa tu nombre, lo dices dentro de la frase y sin fórmula de "
+                f"lo que dijo-. {con_hora}y retomas desde ahí. Si en algún momento hace "
+                "falta que sepa tu nombre, lo dices dentro de la frase y sin fórmula de "
                 "presentación."
             )
         else:
@@ -579,10 +610,16 @@ def instrucciones_daniela(ctx, agente) -> str:
                 f"{texto}\n\n"
                 "PRIMER CONTACTO\n"
                 "Es el primer mensaje de esta conversación: el paciente no sabe todavía con "
-                "quién escribe. Te presentas por tu nombre y dices que haces parte del equipo "
-                "de MaxiCare, con calidez genuina -no un saludo protocolario-. En los turnos "
-                "siguientes NO vuelvas a presentarte: repetir tu nombre en cada mensaje suena "
-                "a robot."
+                f"quién escribe. {con_hora}te presentas por tu nombre y dices que haces "
+                "parte del equipo de MaxiCare, y sigues con lo que te haya preguntado. Así:\n"
+                "«Hola, buenas tardes, ¿cómo estás? Soy Daniela y hago parte del equipo de "
+                "MaxiCare. Claro, cuéntame qué tratamiento te interesa o qué te gustaría "
+                "mejorar.»\n"
+                "Ese es el molde, no un texto que se copia: la última frase depende de lo "
+                "que te haya escrito, y a quien ya te dijo qué quiere no le preguntas otra "
+                "vez. Con calidez genuina -no un saludo protocolario-. En los turnos "
+                "siguientes NO vuelvas a presentarte: repetir tu nombre en cada mensaje "
+                "suena a robot."
             )
 
     if ahora is not None:
@@ -590,6 +627,7 @@ def instrucciones_daniela(ctx, agente) -> str:
             f"{texto}\n\n"
             "AHORA MISMO\n"
             f"Hoy es {fecha_en_palabras(ahora)}, hora de Bogotá.\n"
+            f"A esta hora se saluda con «{saludo_del_momento(ahora)}».\n"
             "Con eso resuelves tú las fechas relativas —«el próximo 16 de septiembre», «este "
             "viernes», «mañana»— a la próxima ocurrencia futura, y las pasas a las tools en "
             "ISO completo. No preguntes el año si se deduce sin ambigüedad. Pregunta solo el "

@@ -45,29 +45,68 @@ sección.
 Una fila `aprobado: false` **sin** `nota_pendiente` es una fila que nadie va a
 resolver, porque nadie sabe qué preguntarle a MaxiCare. El test lo impide.
 
-# Cómo se BUSCA: cuatro pasos, y ninguno inventa
+# Cómo se BUSCA: cinco pasos, y ninguno inventa
 
 Guardar el dato no basta: el modelo tiene que acertar el par `(tratamiento, concepto)` con
 el que se guardó, y ese par es texto libre. `herramientas._consultar_base_conocimiento`
-prueba cuatro y se queda con el primero que traiga algo aprobado:
+prueba cinco y se queda con el primero que traiga algo aprobado:
 
 | # | Consulta | Para qué |
 |---|---|---|
 | 1 | `(tratamiento, concepto)` | lo que el modelo pidió |
 | 2 | `(_general, concepto)` | el mismo concepto, como hecho general |
-| 3 | `(tratamiento, *)` | la ficha entera: el concepto no estaba, pero el tratamiento sí |
-| 4 | `(_general, tratamiento)` | el tratamiento no tiene NI UNA ficha y `_general` sabe de él |
+| 3 | `(_general, tratamiento)` | el tratamiento no tiene NI UNA ficha y `_general` sabe de él |
+| 4 | por PALABRA, en el tratamiento **y** en `_general` | la ficha existe y se llama de otra forma |
+| 5 | `(tratamiento, *)` | la ficha entera: el concepto no estaba, pero el tratamiento sí |
 
-El 4 se lee mejor como el tercer intento de los tres respaldos, pero va al final porque su
-condición —«ni una ficha»— es exactamente lo que acaba de contestar el 3. Así no cuesta una
-consulta extra.
+**El orden tiene una regla, no es una lista: primero todo lo EXACTO, después lo aproximado**,
+y de lo aproximado, lo más estrecho antes que lo más ancho. El 3 estuvo el último hasta el
+23/09/2026 —su condición, «ni una ficha», ya la contestaba el 5, así que no costaba una
+consulta— y subió el día que llegó el 4: detrás de una coincidencia parcial,
+`valoracion`/`precio` lo interceptaba la palabra «precio» y devolvía `_general`/`politica_precios`
+en vez de los $40.000. Es la regresión del 22/09 reabierta por la puerta de al lado, y se
+midió antes de subirlo.
 
-**Lo que hace segura la ampliación es que ninguno de los cuatro inventa**: los cuatro
+**Lo que hace segura la ampliación es que ninguno de los cinco inventa**: los cinco
 devuelven filas que MaxiCare aprobó, o el `SIN DATO DOCUMENTADO` de siempre. Endodoncia y
-prótesis siguen mudas con los cuatro puestos, y hay una prueba que lo fija
-(`test_endodoncia_sigue_MUDA_con_los_tres_respaldos_puestos`). Si algún día un respaldo
-empieza a completar huecos en vez de a buscarlos, esa prueba es la que tiene que ponerse en
-rojo.
+prótesis siguen mudas con los cinco puestos, y lo fijan dos pruebas
+(`test_endodoncia_sigue_MUDA_con_los_tres_respaldos_puestos` —el nombre envejeció, el caso
+no— y `test_un_tratamiento_MUDO_no_lo_desmudece_una_palabra_suelta`). Si algún día un
+respaldo empieza a completar huecos en vez de a buscarlos, esas son las que tienen que
+ponerse en rojo.
+
+## El paso 4: por qué existe, y la guarda que lo hace seguro
+
+La búsqueda es `concepto = %s`. Igualdad exacta, sin `ILIKE` y sin normalizar: **«formas de
+pago» no encuentra `medios_pago`, y «horarios» no encuentra `horario`.**
+
+Medido en producción el 23/09/2026. Vladimir preguntó por dos implantes «y si tienen
+facilidades de pago». Daniela consultó `_general`/«formas de pago», no acertó el nombre, y el
+informe de «sin resolver» lo contó como que la clínica no tenía el dato — lo tiene, aprobado,
+en `_general`/`medios_pago` y `_general`/`financiacion`. Ese caso se salvó por el paso 5,
+porque `_general` tiene quince fichas y entre ellas iba la buena. **El de al lado no se
+salvaba**: preguntando `implantes`/«formas de pago», la ficha entera de implantes SÍ existe,
+así que contesta —con sus catorce conceptos, ninguno sobre pagos— y corta la cascada antes de
+mirar en `_general`. Por eso el 4 va delante del 5.
+
+`persistencia._palabras_clave` normaliza tres cosas, cada una por un caso de la base real:
+sin tildes (`financiación` → `financiacion`), sin plural en sus dos formas españolas
+(`horarios` → `horario`, `objeciones` → `objecion`) y solo desde tres letras, porque `eps` es
+una clave de verdad. **Se mira el CONCEPTO y nunca el contenido**: con el contenido, «pago»
+engancharía también el precio de la ortodoncia —que menciona pagos por control— y el respaldo
+pasaría de devolver la ficha correcta a devolver media base. Medido sobre las 137 filas
+aprobadas: «formas de pago» devuelve UNA, «horarios» devuelve UNA.
+
+**Y la guarda: el paso 4 solo entra si el tratamiento consultado dice ALGO.** No es una
+optimización, es lo que mantiene muda a la endodoncia. Un tratamiento sin ni una ficha no es
+uno que se olvidó documentar: es uno sobre el que MaxiCare decidió no decir nada (sección
+2.12). Sin esa condición, `endodoncia`/`precio` engancha `_general`/`politica_precios` por la
+palabra «precio»; no lleva cifras, pero sustituye el literal `SIN DATO DOCUMENTADO`, que es
+justo lo que ordena no estimar y escalar. Se midió contra la base real antes de ponerla.
+
+Lo que el paso 4 **no** resuelve es un sinónimo que no comparta ninguna palabra: si la fila se
+llamara `condiciones_economicas`, «formas de pago» seguiría sin encontrarla. Para eso harían
+falta alias que la clínica escriba desde el panel, y no están hechos.
 
 **Por qué el 2 y el 4 existen, medido el 22/09/2026 en producción.** Un paciente preguntó
 «¿en qué punto se encuentran y qué vale la consulta?». Daniela contestó la dirección y, del
