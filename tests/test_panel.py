@@ -3574,3 +3574,48 @@ def test_las_sondas_son_solo_de_admin():
         assert TestClient(runtime.app).post("/api/estado/sondas").status_code == 403
     finally:
         runtime.app.dependency_overrides.clear()
+
+
+@pytest.mark.neon
+def test_guardar_desde_la_ruta_REFRESCA_los_globals_del_proceso(esquema, monkeypatch):
+    """La mitad del diseño que no se ve en la base.
+
+    `aviso_relevo_minutos` y `cierre_relevo_minutos` los leen de `runtime._relevo_minutos`
+    --un global que solo se llena al arrancar-- el barrido de relevos, las dos ramas del
+    webhook de Telegram y la ruta de conversaciones del panel. Sin el refresco tras el commit,
+    el valor nuevo se guarda, la pantalla lo enseña, y el relevo sigue cerrando con el viejo
+    hasta el próximo despliegue. Sin un error en ningún log.
+
+    La conexión va monkeypatcheada al esquema `pruebas`: esta ruta usa `config.database_url`,
+    que desde el 21/09/2026 es la base que atiende pacientes.
+    """
+    monkeypatch.setattr(persistencia, "conectar", lambda url: psycopg.connect(esquema))
+    runtime.app.dependency_overrides[runtime.usuario_actual] = _como("admin")
+    try:
+        cliente = TestClient(runtime.app)
+        antes = cliente.get("/api/configuracion").json()["valores"]["cierre_relevo_minutos"]
+        nuevo = antes + 5
+        try:
+            r = cliente.patch("/api/configuracion", json={"cierre_relevo_minutos": nuevo})
+            assert r.status_code == 200
+            assert r.json()["valores"]["cierre_relevo_minutos"] == nuevo
+            assert runtime._relevo_minutos["cierre_relevo_minutos"] == nuevo
+        finally:
+            cliente.patch("/api/configuracion", json={"cierre_relevo_minutos": antes})
+    finally:
+        runtime.app.dependency_overrides.clear()
+
+
+@pytest.mark.neon
+def test_la_ruta_traduce_una_invariante_rota_a_un_400_legible(esquema, monkeypatch):
+    """No un 500: el usuario tiene que poder leer qué combinación no vale."""
+    monkeypatch.setattr(persistencia, "conectar", lambda url: psycopg.connect(esquema))
+    runtime.app.dependency_overrides[runtime.usuario_actual] = _como("admin")
+    try:
+        r = TestClient(runtime.app).patch(
+            "/api/configuracion", json={"aviso_relevo_minutos": 1400}
+        )
+        assert r.status_code == 400
+        assert "aviso" in r.json()["detalle"].lower()
+    finally:
+        runtime.app.dependency_overrides.clear()
