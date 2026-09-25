@@ -1383,6 +1383,12 @@ def _entero_de_configuracion(clave: str, valor: Any) -> int:
     texto `'True'`, que `persistencia.leer_configuracion` descarta EN SILENCIO en su
     `int(valor)`: la clínica se quedaría sin domingos sin un error en ningún log. La
     migración 012 ya avisó de esto por escrito; aquí se hace cumplir.
+
+    **Y el camino que esto protege es el de PYTHON, no el de HTTP.** Por la ruta, Pydantic en
+    modo laxo convierte un `true` de JSON en `1` antes de llegar aquí, así que por ahí se
+    guardaría bien. Lo que llega crudo es lo que llama a esta función directamente: un script,
+    una migración de datos, una consola. Quien «simplifique» esta guarda creyendo que el 422
+    del modelo ya la cubre, se lleva por delante el único camino que la necesita.
     """
     if clave not in CLAVES_EDITABLES:
         raise ValueError(f"'{clave}' no es una perilla que el panel pueda cambiar.")

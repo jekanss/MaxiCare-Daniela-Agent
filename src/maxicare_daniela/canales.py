@@ -370,15 +370,23 @@ class WhatsApp:
         """
         try:
             async with httpx.AsyncClient(timeout=TIMEOUT_NORMAL) as cliente:
+                # El `access_token` va en la CABECERA y no en la query, como en los otros
+                # cinco sitios de esta clase. En la URL acabaría en el log del contenedor el
+                # día que la llamada falle: el mensaje de `raise_for_status()` de httpx
+                # incluye la URL entera, y quien la registra es el `log.exception` de abajo.
                 r = await cliente.get(
                     f"{BASE_GRAPH}/debug_token",
-                    params={"input_token": self._token, "access_token": self._token},
+                    headers=self._cabeceras,
+                    params={"input_token": self._token},
                 )
             if r.status_code != 200:
                 return []
             datos = r.json().get("data", {})
-        except Exception:  # noqa: BLE001
-            log.exception("no se pudo derivar el WABA del token")
+        except Exception as e:  # noqa: BLE001
+            # El TIPO, no el mensaje: `input_token` SÍ tiene que ir en la query --la Graph API
+            # no lo acepta de otra forma, porque es el token que se inspecciona-- así que el
+            # mensaje de un error de httpx lo llevaría dentro y acabaría en el log.
+            log.warning("no se pudo derivar el WABA del token (%s)", type(e).__name__)
             return []
         ids: list[str] = []
         for permiso in datos.get("granular_scopes", []):
@@ -410,12 +418,19 @@ class WhatsApp:
                 async with httpx.AsyncClient(timeout=TIMEOUT_NORMAL) as cliente:
                     r = await cliente.get(
                         f"{BASE_GRAPH}/{waba}/message_templates",
-                        params={"access_token": self._token, "limit": 50},
+                        headers=self._cabeceras,
+                        params={"limit": 50},
                     )
                     r.raise_for_status()
                     datos = r.json()
-            except Exception:  # noqa: BLE001 -- una sonda no puede tumbar la pantalla
-                log.exception("no se pudieron leer las plantillas del WABA %s", waba)
+            except Exception as e:  # noqa: BLE001 -- una sonda no puede tumbar la pantalla
+                # El TIPO del error, nunca su mensaje: el de `raise_for_status()` lleva la URL
+                # entera dentro, y con el token en la query eso lo escribía en el log del
+                # contenedor justo el día que el token falla. Ahora va en la cabecera y esto
+                # es el cinturón por si alguien lo devuelve a la query.
+                log.warning(
+                    "no se pudieron leer las plantillas del WABA %s (%s)", waba, type(e).__name__
+                )
                 continue
             for p in datos.get("data", []):
                 plantillas.append(

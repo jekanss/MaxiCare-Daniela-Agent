@@ -451,3 +451,43 @@ def test_el_estado_del_webhook_es_vacio_si_telegram_dice_que_no(monkeypatch):
     monkeypatch.setattr(httpx, "AsyncClient", _cliente_con(httpx.MockTransport(responder)))
 
     assert _correr(Telegram("token", -1001).estado_del_webhook()) == {}
+
+
+def test_la_autorizacion_de_las_sondas_va_en_la_CABECERA_y_no_en_la_url(monkeypatch):
+    """Como los otros cinco sitios de esta clase que hablan con Graph.
+
+    En la query string el token acaba en el log del contenedor justo el día que falla: el
+    mensaje de `raise_for_status()` de httpx lleva la URL entera dentro. Es la misma lección
+    que ya se pagó con `/salud`, que dejó de devolver el texto del error de psycopg porque
+    llevaba credenciales de Neon.
+
+    **`debug_token` es la excepción y no se puede evitar**: su `input_token` es el token que
+    se INSPECCIONA, y la Graph API no lo acepta de otra forma. Lo que se hace con él es lo
+    otro: que nada registre el mensaje de un error de esa llamada (ver el `log.warning` con
+    `type(e).__name__` en `_waba_ids`).
+    """
+    urls: list[str] = []
+    cabeceras: list[dict] = []
+
+    def responder(peticion: httpx.Request) -> httpx.Response:
+        urls.append(str(peticion.url))
+        cabeceras.append(dict(peticion.headers))
+        if "debug_token" in str(peticion.url):
+            return httpx.Response(200, json={"data": {"granular_scopes": [
+                {"scope": "whatsapp_business_management", "target_ids": ["waba1"]},
+            ]}})
+        return httpx.Response(200, json={"data": []})
+
+    monkeypatch.setattr(httpx, "AsyncClient", _cliente_con(httpx.MockTransport(responder)))
+
+    _correr(WhatsApp("token-secretisimo", "123").estado_de_plantillas())
+
+    assert len(urls) == 2, urls
+    # Las dos autorizan por cabecera.
+    assert all(c.get("authorization") == "Bearer token-secretisimo" for c in cabeceras)
+    # Ninguna lleva `access_token=` en la URL, que es lo que la volvía registrable.
+    assert not any("access_token" in u for u in urls), urls
+    # Y la de plantillas --la única con `raise_for_status()`-- no lleva el token de ninguna
+    # forma. La de `debug_token` sí, por lo que dice el docstring.
+    plantillas = next(u for u in urls if "message_templates" in u)
+    assert "token-secretisimo" not in plantillas, plantillas

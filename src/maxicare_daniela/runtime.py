@@ -3691,11 +3691,17 @@ async def api_estado(quien: dict = Depends(usuario_actual)) -> dict:
                 "sin_responder": persistencia.contar_sin_responder(
                     conn, tipos_sin_turno=ingesta.TIPOS_QUE_NO_ABREN_TURNO
                 ),
+                # La señal de alarma del no negociable 14: entró y no llegó al doctor. La
+                # publica `/salud`, que es pública y la mira Docker; aquí la ve una persona.
+                "sin_entregar": persistencia.contar_sin_entregar(conn),
                 "relevos_abiertos": persistencia.contar_relevos_abiertos(conn),
             }
             cola = {
-                "recordatorios_por_despachar": len(
-                    persistencia.seguimientos_por_despachar(conn, ahora, limite=200)
+                # `contar_seguimientos_por_despachar` y NO `seguimientos_por_despachar`: esa
+                # otra hace `FOR UPDATE ... SKIP LOCKED` para repartir trabajo, y contar con
+                # ella le robaría filas al despachador de recordatorios.
+                "recordatorios_por_despachar": persistencia.contar_seguimientos_por_despachar(
+                    conn, ahora=ahora
                 ),
                 "reactivaciones_hoy": persistencia.contar_comprometidos_hoy(conn, ahora=ahora),
             }
@@ -3756,7 +3762,15 @@ async def api_sondas_de_estado(quien: dict = Depends(exigir_rol("admin"))) -> di
     except Exception as e:  # noqa: BLE001
         salida["whatsapp"] = {"error": str(e)}
     try:
-        salida["telegram"] = await _telegram.estado_del_webhook()
+        # `{}` es «no se pudo averiguar», no «no hay webhook». Pasarlo tal cual dejaba a la
+        # pantalla pintando «URL registrada: — NO HAY —» sobre un token revocado, y quien lo
+        # lea corre `configurar_webhook_telegram.py --url` --que rompe el `getUpdates` de
+        # `obtener_chat_telegram.py`-- mientras el problema de verdad sigue invisible. La
+        # diferencia la conserva el servidor y no el front, que es donde ya está la frase.
+        webhook = await _telegram.estado_del_webhook()
+        salida["telegram"] = webhook or {
+            "error": "Telegram no contestó o rechazó la consulta. Revisa el token del bot."
+        }
     except Exception as e:  # noqa: BLE001
         salida["telegram"] = {"error": str(e)}
     log.info("%s sondeó el estado de Meta y Telegram", quien["usuario"])

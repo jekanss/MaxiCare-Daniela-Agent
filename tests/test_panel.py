@@ -3619,3 +3619,124 @@ def test_la_ruta_traduce_una_invariante_rota_a_un_400_legible(esquema, monkeypat
         assert "aviso" in r.json()["detalle"].lower()
     finally:
         runtime.app.dependency_overrides.clear()
+
+
+def test_el_estado_trae_TODAS_las_cifras_con_la_base_sana(monkeypatch):
+    """El camino FELIZ de `/api/estado`, que es el que faltaba.
+
+    Las otras dos pruebas de esta ruta monkeypatchean `conectar` para que REVIENTE, así que
+    ninguna llega a ejecutar las cinco consultas. Con eso, un `TypeError` en cualquiera de
+    ellas --por ejemplo llamar a una función con un argumento keyword-only en posicional--
+    lo traga el `except` de la ruta, la pantalla enseña «sin dato» en tres tarjetas, la
+    tarjeta de la base sigue diciendo «Responde» y la suite entera se queda en verde.
+
+    Es el mismo modo de fallo del no negociable 28: verde por el motivo equivocado.
+    """
+    monkeypatch.setattr(persistencia, "conectar", lambda url: _ConexionFalsaSinResolver())
+    monkeypatch.setattr(persistencia, "citas_sin_evento_calendar", lambda conn, *, ahora: 2)
+    monkeypatch.setattr(persistencia, "contar_sin_responder", lambda conn, **k: 1)
+    monkeypatch.setattr(persistencia, "contar_sin_entregar", lambda conn: 3)
+    monkeypatch.setattr(persistencia, "contar_relevos_abiertos", lambda conn: 4)
+    monkeypatch.setattr(
+        persistencia, "contar_seguimientos_por_despachar", lambda conn, *, ahora: 5
+    )
+    monkeypatch.setattr(persistencia, "contar_comprometidos_hoy", lambda conn, *, ahora: 6)
+    monkeypatch.setattr(persistencia, "gasto_del_dia", lambda conn: 1.25)
+
+    runtime.app.dependency_overrides[runtime.usuario_actual] = _como("admin")
+    try:
+        cuerpo = TestClient(runtime.app).get("/api/estado").json()
+    finally:
+        runtime.app.dependency_overrides.clear()
+
+    assert cuerpo["base"] == {"ok": True, "citas_sin_calendar": 2}
+    assert cuerpo["atencion"] == {"sin_responder": 1, "sin_entregar": 3, "relevos_abiertos": 4}
+    assert cuerpo["cola"] == {"recordatorios_por_despachar": 5, "reactivaciones_hoy": 6}
+    assert cuerpo["gasto"]["usd_hoy"] == 1.25
+
+
+def test_contar_la_cola_NO_usa_la_consulta_del_despachador(monkeypatch):
+    """`seguimientos_por_despachar` hace `FOR UPDATE ... SKIP LOCKED`: está escrita para
+    repartir trabajo, no para contarlo. Si la pantalla la llamara, abrirla tomaría el candado
+    del lote y el despachador saltaría esas filas en el ciclo que coincidiera --recordatorios
+    de citas reales retrasados por mirar un panel--."""
+    def no_deberia(*a, **k):
+        raise AssertionError("la pantalla de estado no puede tomar el candado del despachador")
+
+    monkeypatch.setattr(persistencia, "conectar", lambda url: _ConexionFalsaSinResolver())
+    monkeypatch.setattr(persistencia, "seguimientos_por_despachar", no_deberia)
+    monkeypatch.setattr(persistencia, "citas_sin_evento_calendar", lambda conn, *, ahora: 0)
+    monkeypatch.setattr(persistencia, "contar_sin_responder", lambda conn, **k: 0)
+    monkeypatch.setattr(persistencia, "contar_sin_entregar", lambda conn: 0)
+    monkeypatch.setattr(persistencia, "contar_relevos_abiertos", lambda conn: 0)
+    monkeypatch.setattr(
+        persistencia, "contar_seguimientos_por_despachar", lambda conn, *, ahora: 0
+    )
+    monkeypatch.setattr(persistencia, "contar_comprometidos_hoy", lambda conn, *, ahora: 0)
+    monkeypatch.setattr(persistencia, "gasto_del_dia", lambda conn: 0.0)
+
+    runtime.app.dependency_overrides[runtime.usuario_actual] = _como("admin")
+    try:
+        cuerpo = TestClient(runtime.app).get("/api/estado").json()
+    finally:
+        runtime.app.dependency_overrides.clear()
+
+    assert cuerpo["cola"]["recordatorios_por_despachar"] == 0
+
+
+def test_una_sonda_que_no_supo_NO_se_pinta_como_que_no_hay_webhook(monkeypatch):
+    """`estado_del_webhook` devuelve `{}` cuando no se pudo averiguar, y su docstring dice por
+    qué no devuelve `{"url": ""}`: eso afirmaría que el webhook NO está puesto, que es otra
+    cosa. La ruta tiene que conservar esa diferencia, porque quien lea «NO HAY» irá a correr
+    `configurar_webhook_telegram.py --url`, que rompe el `getUpdates` de
+    `obtener_chat_telegram.py`, mientras el problema real --un token revocado-- sigue ahí."""
+    async def no_supo(*a, **k):
+        return {}
+
+    async def plantillas(*a, **k):
+        return []
+
+    async def calidad(*a, **k):
+        return {}
+
+    monkeypatch.setattr(runtime._telegram, "estado_del_webhook", no_supo)
+    monkeypatch.setattr(runtime._whatsapp, "estado_de_plantillas", plantillas)
+    monkeypatch.setattr(runtime._whatsapp, "calidad_del_numero", calidad)
+    runtime.app.dependency_overrides[runtime.usuario_actual] = _como("admin")
+    try:
+        cuerpo = TestClient(runtime.app).post("/api/estado/sondas").json()
+    finally:
+        runtime.app.dependency_overrides.clear()
+
+    assert "error" in cuerpo["telegram"], cuerpo["telegram"]
+    assert "url" not in cuerpo["telegram"]
+
+
+@pytest.mark.neon
+def test_las_dos_consultas_nuevas_de_estado_corren_contra_Neon(conn):
+    """El SQL de `contar_seguimientos_por_despachar` y `contar_sin_entregar` no lo ejercita
+    ninguna prueba offline: las del camino feliz de `/api/estado` las doblan enteras. Un
+    nombre de columna equivocado devolvería un `UndefinedColumn` que el `except` de la ruta
+    se traga, y la pantalla diría «sin dato» para siempre con la base sana.
+
+    Esto no comprueba cuánto devuelven --eso depende de lo que haya-- sino que la consulta
+    existe, se parsea y el tipo es el prometido."""
+    ahora = datetime.now(ZONA_BOGOTA)
+    assert isinstance(persistencia.contar_seguimientos_por_despachar(conn, ahora=ahora), int)
+    assert isinstance(persistencia.contar_sin_entregar(conn), int)
+
+
+@pytest.mark.neon
+def test_contar_la_cola_no_deja_la_fila_bloqueada(conn):
+    """La diferencia con `seguimientos_por_despachar`, comprobada y no supuesta: si esta
+    función tomara el candado, el `FOR UPDATE NOWAIT` de otra conexión sobre las mismas filas
+    fallaría. Es lo que separa «contar» de «repartir trabajo»."""
+    ahora = datetime.now(ZONA_BOGOTA)
+    persistencia.contar_seguimientos_por_despachar(conn, ahora=ahora)
+    with psycopg.connect(_url_de_pruebas()) as otra, otra.cursor() as cur:
+        # Si la primera hubiera bloqueado, esto lanzaría `LockNotAvailable`.
+        cur.execute(
+            "SELECT id FROM seguimientos WHERE enviado_en IS NULL AND anulado_en IS NULL "
+            "FOR UPDATE NOWAIT"
+        )
+        cur.fetchall()

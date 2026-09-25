@@ -665,7 +665,7 @@ export type EstadoDelSistema = {
   base: { ok: boolean; citas_sin_calendar: number | null }
   calendario: { clase: string }
   frenos: { daniela_responde: boolean; leer_archivos: boolean; transcribir_audio: boolean }
-  atencion: { sin_responder?: number; relevos_abiertos?: number }
+  atencion: { sin_responder?: number; sin_entregar?: number; relevos_abiertos?: number }
   cola: { recordatorios_por_despachar?: number; reactivaciones_hoy?: number }
   relevo: { secreto_del_webhook: boolean; tema_general: number | null }
   evaluador: { fallos_en_la_ventana: number }

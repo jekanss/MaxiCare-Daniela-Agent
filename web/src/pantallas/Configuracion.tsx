@@ -25,11 +25,14 @@ import { BOTON, CAMPO, ESTILO_CAMPO, MONO, Rotulo, SG } from '@/componentes/Pane
  *    nadie tocó bloqueara el cambio de la que sí.
  *
  * 2. `atiende_domingo` SON DOS BOTONES, NUNCA UNA CASILLA. El valor es `0` o `1` en una
- *    columna de TEXTO, y el `checked` de una casilla viaja como booleano JSON: `true` se
- *    guardaría como la cadena 'True', que `leer_configuracion` descarta EN SILENCIO en su
- *    `int(valor)`. La clínica se quedaría sin domingos sin un error en ningún log. El
- *    servidor también lo rechaza (`panel._entero_de_configuracion`), pero el sitio donde ese
- *    booleano NACE es este, y aquí es donde no tiene que existir.
+ *    columna de TEXTO, y el `checked` de una casilla viaja como booleano JSON. Hoy eso no
+ *    rompe nada --Pydantic en modo laxo convierte `true` en `1` antes de que el valor llegue
+ *    a la base-- y ese es justo el motivo de no apoyarse en ello: la corrección dependería de
+ *    un modo de coerción de una librería, y el día que se ponga en estricto, `'True'` acaba
+ *    en la columna y `leer_configuracion` lo descarta EN SILENCIO en su `int(valor)`. La
+ *    clínica sin domingos y sin un error en ningún log. Dos botones que escriben `0` o `1`
+ *    hacen que ese booleano no llegue a existir, que es más barato que confiar en quien lo
+ *    traduzca.
  *
  * 3. LOS RANGOS VIENEN DEL SERVIDOR, no escritos aquí. Con dos copias, el `min` del campo y
  *    el 422 del servidor discrepan el día que uno de los dos cambie, y el usuario ve un campo
@@ -95,7 +98,18 @@ const GRUPOS: { titulo: string; nota: string; claves: string[] }[] = [
   },
 ]
 
-const CLAVES_DE_HORARIO = ['hora_apertura', 'hora_cierre', 'hora_cierre_sabado']
+/* Las cuatro que hacen que Daniela OFREZCA horarios distintos de los que RECITA.
+ *
+ * `atiende_domingo` va aquí y no es un añadido por simetría: encender el domingo es el cambio
+ * que más se aleja de la ficha `_general/horario`, que dice «Lunes a viernes… Sábados…» y no
+ * menciona el domingo por ninguna parte. Sin el aviso, la clínica abre los domingos, Daniela
+ * ofrece cupos ese día, y a quien pregunte «¿abren el domingo?» le contesta que no. */
+const CLAVES_DE_HORARIO = [
+  'hora_apertura',
+  'hora_cierre',
+  'hora_cierre_sabado',
+  'atiende_domingo',
+]
 
 export default function Configuracion({ alCaducarSesion }: Props) {
   const [datos, setDatos] = useState<Datos | null>(null)

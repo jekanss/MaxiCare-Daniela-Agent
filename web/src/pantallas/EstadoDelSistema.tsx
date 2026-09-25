@@ -263,6 +263,19 @@ export default function EstadoDelSistema({ alCaducarSesion }: Props) {
                 tono={atencion.sin_responder ? 'ojo' : atencion.sin_responder === 0 ? 'bien' : 'mudo'}
                 nota="Últimas 24 h. Vuelve a cero solo."
               />
+              {/* La señal de alarma del no negociable 14, y la que más caro sale perder: un
+                  archivo clínico que entró y no llegó al doctor. `/salud` la publica desde
+                  siempre, pero eso lo mira Docker, no una persona. */}
+              <Tarjeta
+                titulo="Sin entregar al doctor"
+                valor={cifra(atencion.sin_entregar)}
+                tono={atencion.sin_entregar ? 'mal' : atencion.sin_entregar === 0 ? 'bien' : 'mudo'}
+                nota={
+                  atencion.sin_entregar
+                    ? 'Entraron y el reenvío a Telegram falló. Puede haber una radiografía ahí.'
+                    : undefined
+                }
+              />
               <Tarjeta
                 titulo="Relevos abiertos"
                 valor={cifra(atencion.relevos_abiertos)}
