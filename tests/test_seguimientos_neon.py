@@ -756,6 +756,32 @@ def test_una_cita_pasada_no_se_puede_confirmar(conexion_pruebas, cita_de_prueba)
     )
 
 
+def test_el_recordatorio_de_una_cita_MOVIDA_sigue_confirmandola(conexion_pruebas, cita_de_prueba):
+    """El límite conocido, documentado en vez de callado (`.claude/rules/pruebas.md`).
+
+    Al reprogramar, el recordatorio viejo queda ANULADO con su `enviado_en` puesto, porque ya
+    había salido. La consulta no filtra `anulado_en`, así que ese botón sigue teniendo camino:
+    el paciente pulsa «Confirmar» sobre un mensaje que hablaba de la hora vieja y recibe la
+    hora NUEVA, que es justo lo que no sabía. Con el filtro puesto no haría nada.
+    """
+    id_cita, id_conv = cita_de_prueba
+    _despachado(
+        conexion_pruebas,
+        id_conversacion=id_conv,
+        id_cita=id_cita,
+        clave="rec-de-cita-movida",
+        enviado_en=_AHORA - timedelta(hours=2),
+    )
+    persistencia.anular_seguimientos_de_cita(
+        conexion_pruebas, id_cita, motivo="cita_reprogramada"
+    )
+
+    cita = persistencia.cita_del_ultimo_recordatorio(conexion_pruebas, _TELEFONO, ahora=_AHORA)
+
+    assert cita is not None, "el botón del recordatorio de una cita movida se quedó sin camino"
+    assert str(cita["id"]) == str(id_cita)
+
+
 def test_una_cita_cancelada_no_se_puede_confirmar(conexion_pruebas, cita_de_prueba):
     """Confirmar una cita cancelada devolvería al paciente a una hora que ya es de otro."""
     id_cita, id_conv = cita_de_prueba

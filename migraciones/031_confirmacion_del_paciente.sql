@@ -26,3 +26,15 @@
 -- =========================================================================================
 
 ALTER TABLE citas ADD COLUMN IF NOT EXISTS confirmada_por_paciente_en TIMESTAMPTZ;
+
+-- Y el índice que necesita la consulta nueva. `cita_del_ultimo_recordatorio` une
+-- `seguimientos` con `citas` por `cita_id` para saber de qué cita habla el botón, y
+-- `seguimientos` no tenía ni un índice sobre esa columna: los tres que hay (la 017 y los dos
+-- de la 023) van por `fecha_objetivo` y por `enviado_en`, que es lo que necesita el
+-- despachador. Sin este, cada pulsación de «Confirmar» recorre la tabla entera.
+--
+-- Hoy no se notaría --la tabla es pequeña-- y por eso se pone ahora: crece una fila por cita
+-- y otra por reactivación, así que el día que se note ya será tarde y el síntoma será «los
+-- botones tardan», que nadie va a atribuir a esto.
+CREATE INDEX IF NOT EXISTS ix_seguimientos_por_cita ON seguimientos (cita_id)
+    WHERE cita_id IS NOT NULL;

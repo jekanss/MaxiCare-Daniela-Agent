@@ -1965,6 +1965,13 @@ def cita_del_ultimo_recordatorio(
     ventana de tiempo sobre el envío: un botón pulsado tres días tarde apunta a una cita que
     ya pasó, y esa condición lo descarta sola. Confirmar una cita cancelada sería peor que no
     hacer nada -- le diría al paciente que lo esperan a una hora que ya es de otro.
+
+    **Tampoco se filtra por `anulado_en IS NULL`, y esto sí es una decisión.** Cuando una cita
+    se reprograma, su recordatorio viejo queda anulado (`anular_seguimientos_de_cita`) con su
+    `enviado_en` puesto, porque ya había salido. Un paciente que pulsa «Confirmar» sobre ese
+    mensaje --que hablaba de la hora VIEJA-- acaba confirmando la cita con su hora NUEVA, y
+    eso es lo correcto: la respuesta le dice la hora real, que es justo lo que no sabe. Con el
+    filtro puesto, el botón de un recordatorio de una cita movida no haría nada.
     """
     with conn.cursor() as cur:
         cur.execute(
