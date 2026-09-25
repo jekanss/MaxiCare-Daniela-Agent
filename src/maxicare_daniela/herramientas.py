@@ -1453,6 +1453,30 @@ async def _reprogramar_cita(ctx: ContextoDaniela, id_cita: str, nuevo_inicio: st
             persistencia.liberar_cupo(conn, reserva_vieja)
 
     await _con_base(ctx, aplicar)
+
+    # El aviso, con las DOS horas. Está AQUÍ y no más arriba por una razón que MaxiCare pidió
+    # por escrito: una reprogramación que queda a medias no se comunica como hecha. Se cumple
+    # por construcción y no con un `if` --esta línea solo se alcanza cuando la cita nueva ya
+    # está en Neon y en Calendar y el cupo viejo está liberado--, así que subirla «para no
+    # repetir código» rompería la promesa sin romper ninguna prueba. La que lo impide es
+    # `test_una_reprogramacion_que_revienta_no_avisa_de_nada`.
+    # Mismo `try` que en `_cancelar_cita`, y con la misma consecuencia si falta: la cita ya
+    # está movida en Neon y en Calendar, y el paciente acabaría yendo a la hora vieja.
+    try:
+        from . import aviso_citas
+
+        aviso_citas.avisar_movimiento_en_segundo_plano(
+            aviso_citas.MovimientoDeAgenda(
+                asunto=aviso_citas.ASUNTO_CAMBIADA,
+                nombre_paciente=cita["nombre_completo"],
+                telefono_paciente=cita["telefono"],
+                tratamiento=cita["tratamiento"],
+                cuando=aviso_citas.cuando_un_cambio(cita["inicio"], destino),
+            )
+        )
+    except Exception:  # noqa: BLE001 -- se pierde un aviso, nunca una reprogramación
+        log.exception("la cita %s quedó reprogramada; solo falló el aviso", id_cita)
+
     # Las DOS horas, y la vieja no es un adorno: confirmar un cambio exige decir de dónde a
     # dónde, y `ctx.turno` se vacía en cada turno, así que la hora anterior --autorizada
     # cuando se agendó-- ya no lo está. Sin nombrarla aquí, `sin_hora_no_verificada` bloqueaba
@@ -1541,6 +1565,32 @@ async def _cancelar_cita(ctx: ContextoDaniela, solicitud: SolicitudCancelacion) 
             persistencia.liberar_cupo(conn, cita["reserva_id"])
 
     await _con_base(ctx, aplicar)
+
+    # El aviso al doctor cuelga de la TOOL y no del botón «No puedo asistir» del
+    # recordatorio: al doctor le cambia la agenda igual si el paciente lo pidió escribiendo, y
+    # colgarlo del botón dejaría mudo el camino por el que hoy pasa casi todo.
+    #
+    # Va DESPUÉS de `aplicar`, así que cuando sale, el cupo ya está libre y el evento ya no
+    # está en Calendar. Nada de lo que pase aquí puede tumbar la cancelación: la tarea es de
+    # fondo, no propaga, y con la plantilla sin aprobar decide igual y no manda nada.
+    # El `try` es el mismo de `_crear_cita` y aquí duele más: cuando esto corre, la cita YA
+    # está cancelada y el cupo YA está libre. Sin él, un fallo al preparar el aviso se lleva
+    # el texto de la tool, el paciente recibe la respuesta de emergencia y se queda creyendo
+    # que su cita sigue en pie -- camino de una clínica donde su hora ya es de otro.
+    try:
+        from . import aviso_citas
+
+        aviso_citas.avisar_movimiento_en_segundo_plano(
+            aviso_citas.MovimientoDeAgenda(
+                asunto=aviso_citas.ASUNTO_NO_ASISTIRA,
+                nombre_paciente=cita["nombre_completo"],
+                telefono_paciente=cita["telefono"],
+                tratamiento=cita["tratamiento"],
+                cuando=aviso_citas.cuando_una_cita(cita["inicio"]),
+            )
+        )
+    except Exception:  # noqa: BLE001 -- se pierde un aviso, nunca una cancelación
+        log.exception("la cita %s quedó cancelada; solo falló el aviso", solicitud.id_cita)
 
     # La hora cancelada va en el texto y queda autorizada, por lo mismo que en `reprogramar`:
     # «tu cita del martes a las 9 quedó cancelada» es la frase natural, y sin autorizarla

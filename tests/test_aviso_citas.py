@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pytest
 
@@ -22,7 +22,7 @@ from maxicare_daniela import aviso_citas
 from maxicare_daniela import herramientas as h
 from maxicare_daniela import persistencia
 from maxicare_daniela.calendario import CalendarioDoble
-from maxicare_daniela.contratos import ContextoDaniela, SolicitudCita
+from maxicare_daniela.contratos import ContextoDaniela, SolicitudCancelacion, SolicitudCita
 
 #: Clavados, como `tests/test_herramientas.py::AHORA` y por lo mismo: `ContextoDaniela.ahora`
 #: cae al reloj de verdad si nadie se lo da, y una fecha que envejece ya ha puesto esta suite
@@ -397,6 +397,189 @@ def test_si_el_aviso_revienta_la_cita_se_crea_igual(monkeypatch):
 
     assert "Cita confirmada" in texto
     assert "cita-nueva" in texto
+
+
+# ==========================================================================================
+# El viaje entero, desde `cancelar_cita` y `reprogramar_cita`
+# ==========================================================================================
+#
+# El aviso cuelga de las TOOLS y no del botón del recordatorio. Al doctor le cambia la agenda
+# igual si el paciente lo pidió escribiendo que si pulsó «No puedo asistir», y colgarlo del
+# botón dejaría mudo el camino por el que hoy pasa casi todo.
+
+CITA_EN_LA_BASE = {
+    "id": "cita-1",
+    "reserva_id": 5,
+    "conversacion_id": "conv-1",
+    "paciente_id": None,
+    "nombre_completo": "Ana Gómez",
+    "telefono": "573001112233",
+    "tratamiento": "limpieza",
+    "inicio": INICIO,
+    "duracion_minutos": 60,
+    "evento_calendar_id": None,
+    "estado": "confirmada",
+}
+
+
+def _movimientos_espiados(monkeypatch) -> list:
+    """Se espía `avisar_movimiento_en_segundo_plano` y no el canal: lo que se prueba aquí es
+    que la tool DECIDE avisar y con qué datos. Que el envío salga ya lo cubren las pruebas de
+    arriba, sin montar media tool para repetirlo."""
+    vistos: list = []
+    monkeypatch.setattr(
+        aviso_citas, "avisar_movimiento_en_segundo_plano", lambda mov: vistos.append(mov)
+    )
+    return vistos
+
+
+def _ctx_de_la_cita():
+    return contexto(identidad_verificada=True, id_paciente=None)
+
+
+def test_cancelar_avisa_a_los_doctores_de_que_no_vendra(monkeypatch):
+    """La clínica recupera la hora, y alguien tiene que enterarse de que quedó libre."""
+    movimientos = _movimientos_espiados(monkeypatch)
+    pasos: list[int] = []
+
+    async def base_falsa(_ctx, trabajo):
+        pasos.append(1)
+        return CITA_EN_LA_BASE if len(pasos) == 1 else None
+
+    monkeypatch.setattr(h, "_con_base", base_falsa)
+
+    asyncio.run(
+        h._cancelar_cita(
+            _ctx_de_la_cita(),
+            SolicitudCancelacion(id_cita="cita-1", motivo=None, clave_idempotencia="cita-1"),
+        )
+    )
+
+    (mov,) = movimientos
+    assert mov.asunto == aviso_citas.ASUNTO_NO_ASISTIRA
+    assert mov.nombre_paciente == "Ana Gómez"
+    assert mov.telefono_paciente == "573001112233"
+    assert mov.tratamiento == "limpieza"
+    assert mov.cuando == "lunes 21 de septiembre a las 10:00 a. m."
+
+
+def test_una_cita_ya_cancelada_no_vuelve_a_avisar(monkeypatch):
+    """`_cancelar_cita` sale antes por su propia guarda. Sin esto, dos intentos del modelo
+    sobre la misma cita despertarían al doctor dos veces por lo mismo."""
+    movimientos = _movimientos_espiados(monkeypatch)
+
+    async def base_falsa(_ctx, _trabajo):
+        return {**CITA_EN_LA_BASE, "estado": "cancelada"}
+
+    monkeypatch.setattr(h, "_con_base", base_falsa)
+
+    asyncio.run(
+        h._cancelar_cita(
+            _ctx_de_la_cita(),
+            SolicitudCancelacion(id_cita="cita-1", motivo=None, clave_idempotencia="cita-1"),
+        )
+    )
+
+    assert movimientos == []
+
+
+def test_reprogramar_avisa_con_LAS_DOS_horas(monkeypatch):
+    """Un cambio de agenda que no diga de dónde a dónde obliga al doctor a ir a buscarlo."""
+    movimientos = _movimientos_espiados(monkeypatch)
+    destino = INICIO + timedelta(days=1, hours=5)  # martes 22, 3:00 p. m.
+    pasos: list[int] = []
+
+    async def base_falsa(_ctx, trabajo):
+        pasos.append(1)
+        if len(pasos) == 1:
+            return ("ok", CITA_EN_LA_BASE, (6, 1), [])
+        return None
+
+    monkeypatch.setattr(h, "_con_base", base_falsa)
+
+    asyncio.run(h._reprogramar_cita(_ctx_de_la_cita(), "cita-1", destino.isoformat()))
+
+    (mov,) = movimientos
+    assert mov.asunto == aviso_citas.ASUNTO_CAMBIADA
+    assert mov.cuando == (
+        "antes: lunes 21 de septiembre, 10:00 a. m. · "
+        "ahora: martes 22 de septiembre, 3:00 p. m."
+    )
+
+
+def test_una_reprogramacion_que_revienta_no_avisa_de_nada(monkeypatch):
+    """Lo que MaxiCare pidió por escrito: si el cambio queda a medias, no se comunica.
+
+    Se cumple por construcción y no por un `if`: el aviso está DESPUÉS de `aplicar`, así que
+    una excepción ahí no llega nunca a la línea que avisa. Esta prueba es lo que impide que
+    alguien lo suba por encima «para no repetir código».
+    """
+    movimientos = _movimientos_espiados(monkeypatch)
+    destino = INICIO + timedelta(days=1)
+    pasos: list[int] = []
+
+    async def base_falsa(_ctx, trabajo):
+        pasos.append(1)
+        if len(pasos) == 1:
+            return ("ok", CITA_EN_LA_BASE, (6, 1), [])
+        raise RuntimeError("Neon se cayó a mitad del movimiento")
+
+    monkeypatch.setattr(h, "_con_base", base_falsa)
+
+    with pytest.raises(RuntimeError):
+        asyncio.run(h._reprogramar_cita(_ctx_de_la_cita(), "cita-1", destino.isoformat()))
+
+    assert movimientos == []
+
+
+def _aviso_que_revienta(monkeypatch):
+    def revienta(_mov):
+        raise RuntimeError("el aviso no se pudo ni preparar")
+
+    monkeypatch.setattr(aviso_citas, "avisar_movimiento_en_segundo_plano", revienta)
+
+
+def test_si_el_aviso_revienta_la_cancelacion_se_confirma_igual(monkeypatch):
+    """La misma frontera que `test_si_el_aviso_revienta_la_cita_se_crea_igual`, y aquí duele
+    más: cuando esto corre, la cita YA está cancelada y el cupo YA está libre. Sin el `try`,
+    el paciente recibiría el mensaje de emergencia y se quedaría creyendo que su cita sigue
+    en pie, camino de una clínica donde su hora ya es de otro."""
+    _aviso_que_revienta(monkeypatch)
+    pasos: list[int] = []
+
+    async def base_falsa(_ctx, trabajo):
+        pasos.append(1)
+        return CITA_EN_LA_BASE if len(pasos) == 1 else None
+
+    monkeypatch.setattr(h, "_con_base", base_falsa)
+
+    texto = asyncio.run(
+        h._cancelar_cita(
+            _ctx_de_la_cita(),
+            SolicitudCancelacion(id_cita="cita-1", motivo=None, clave_idempotencia="cita-1"),
+        )
+    )
+
+    assert "cancelada" in texto
+
+
+def test_si_el_aviso_revienta_la_reprogramacion_se_confirma_igual(monkeypatch):
+    """Y aquí el paciente acabaría yendo a la hora vieja, que es la cita movida sin avisar."""
+    _aviso_que_revienta(monkeypatch)
+    destino = INICIO + timedelta(days=1)
+    pasos: list[int] = []
+
+    async def base_falsa(_ctx, trabajo):
+        pasos.append(1)
+        if len(pasos) == 1:
+            return ("ok", CITA_EN_LA_BASE, (6, 1), [])
+        return None
+
+    monkeypatch.setattr(h, "_con_base", base_falsa)
+
+    texto = asyncio.run(h._reprogramar_cita(_ctx_de_la_cita(), "cita-1", destino.isoformat()))
+
+    assert "reprogramada" in texto
 
 
 def test_la_tarea_del_aviso_tiene_una_referencia_fuerte(monkeypatch):
