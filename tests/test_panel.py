@@ -3508,3 +3508,69 @@ def test_cuenta_las_citas_futuras_que_no_llegaron_a_google(conn):
             cur.execute("DELETE FROM citas WHERE id = ANY(%s)", (creadas,))
             cur.execute("DELETE FROM conversaciones WHERE id = %s", (conversacion,))
         conn.commit()
+
+
+def test_el_estado_carga_aunque_neon_este_caido(monkeypatch):
+    """La pantalla que existe para saber qué está roto tiene que cargar justo cuando algo lo
+    está. 200 con `base.ok = False`, nunca un 500."""
+    def revienta(*a, **k):
+        raise RuntimeError("Neon no contesta")
+
+    monkeypatch.setattr(persistencia, "conectar", revienta)
+    runtime.app.dependency_overrides[runtime.usuario_actual] = _como("admin")
+    try:
+        r = TestClient(runtime.app).get("/api/estado")
+        assert r.status_code == 200
+        cuerpo = r.json()
+        assert cuerpo["base"]["ok"] is False
+        assert cuerpo["frenos"]["daniela_responde"] in (True, False)
+    finally:
+        runtime.app.dependency_overrides.clear()
+
+
+def test_el_gasto_no_viaja_a_quien_no_es_admin(monkeypatch):
+    """No se esconde en pantalla: no viaja. Un botón que desaparece no es un control."""
+    def revienta(*a, **k):
+        raise RuntimeError("Neon no contesta")
+
+    monkeypatch.setattr(persistencia, "conectar", revienta)
+    runtime.app.dependency_overrides[runtime.usuario_actual] = _como("recepcion")
+    try:
+        r = TestClient(runtime.app).get("/api/estado")
+        # El 200 va primero a propósito: sin él, esta prueba pasa contra una ruta que no
+        # existe --un 404 tampoco trae esas claves-- y no probaría nada.
+        assert r.status_code == 200
+        cuerpo = r.json()
+        assert "frenos" in cuerpo
+        assert "gasto" not in cuerpo
+        assert "entorno" not in cuerpo
+    finally:
+        runtime.app.dependency_overrides.clear()
+
+
+def test_una_sonda_caida_no_tumba_a_la_otra(monkeypatch):
+    """Que la Graph API no conteste no puede dejar sin respuesta lo de Telegram."""
+    async def revienta(*a, **k):
+        raise RuntimeError("Meta no contesta")
+
+    async def webhook(*a, **k):
+        return {"url": "https://x/webhook/telegram", "pendientes": 0, "ultimo_error": None}
+
+    monkeypatch.setattr(runtime._whatsapp, "estado_de_plantillas", revienta)
+    monkeypatch.setattr(runtime._telegram, "estado_del_webhook", webhook)
+    runtime.app.dependency_overrides[runtime.usuario_actual] = _como("admin")
+    try:
+        cuerpo = TestClient(runtime.app).post("/api/estado/sondas").json()
+        assert "error" in cuerpo["whatsapp"]
+        assert cuerpo["telegram"]["url"].endswith("/webhook/telegram")
+    finally:
+        runtime.app.dependency_overrides.clear()
+
+
+def test_las_sondas_son_solo_de_admin():
+    """Dos llamadas a terceros no las dispara cualquiera que abra la pantalla."""
+    runtime.app.dependency_overrides[runtime.usuario_actual] = _como("doctor")
+    try:
+        assert TestClient(runtime.app).post("/api/estado/sondas").status_code == 403
+    finally:
+        runtime.app.dependency_overrides.clear()

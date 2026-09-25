@@ -1325,6 +1325,27 @@ def _marcar_reseteo_respondido(wamid: str, wamid_respuesta: str) -> None:
 # ==========================================================================================
 
 
+def _variables_que_faltan() -> list[str]:
+    """Las seis credenciales sin las que el sistema no puede hacer su trabajo.
+
+    Extraída de `/salud` para que la pantalla de Estado del sistema use la MISMA lista:
+    escrita dos veces, el día que entre una séptima variable una de las dos se queda corta
+    y nadie lo ve. Lo que cambia entre las dos es quién puede leerla, no cuál es.
+    """
+    return [
+        nombre
+        for nombre, valor in (
+            ("MAXICARE_WHATSAPP_TOKEN", config.whatsapp_token),
+            ("MAXICARE_WHATSAPP_PHONE_NUMBER_ID", config.whatsapp_phone_number_id),
+            ("MAXICARE_WHATSAPP_VERIFY_TOKEN", config.whatsapp_verify_token),
+            ("WHATSAPP_APP_SECRET", config.whatsapp_app_secret),
+            ("MAXICARE_TELEGRAM_BOT_TOKEN", config.telegram_bot_token),
+            ("MAXICARE_TELEGRAM_CHAT_DOCTORES", config.telegram_chat_doctores),
+        )
+        if not valor
+    ]
+
+
 @app.get("/salud")
 async def salud() -> dict:
     """Dice qué falta, no solo si está vivo.
@@ -1383,18 +1404,7 @@ async def salud() -> dict:
         log.error("la base de datos no responde en /salud: %s", e)
         estado["base_de_datos"] = "FALLA"
 
-    faltantes = [
-        nombre
-        for nombre, valor in (
-            ("MAXICARE_WHATSAPP_TOKEN", config.whatsapp_token),
-            ("MAXICARE_WHATSAPP_PHONE_NUMBER_ID", config.whatsapp_phone_number_id),
-            ("MAXICARE_WHATSAPP_VERIFY_TOKEN", config.whatsapp_verify_token),
-            ("WHATSAPP_APP_SECRET", config.whatsapp_app_secret),
-            ("MAXICARE_TELEGRAM_BOT_TOKEN", config.telegram_bot_token),
-            ("MAXICARE_TELEGRAM_CHAT_DOCTORES", config.telegram_chat_doctores),
-        )
-        if not valor
-    ]
+    faltantes = _variables_que_faltan()
     # La LISTA va al log; hacia fuera sale solo si está completa o no.
     #
     # `{"faltan": ["WHATSAPP_APP_SECRET", ...]}` en un endpoint público es un mapa de
@@ -3644,6 +3654,113 @@ async def _parar_analisis() -> None:
         await _tarea_de_analisis
     except (asyncio.CancelledError, Exception):  # noqa: BLE001
         pass
+
+
+# ------------------------------------------------------------------------------------------
+# Panel: estado del sistema
+# ------------------------------------------------------------------------------------------
+
+
+@app.get("/api/estado")
+async def api_estado(quien: dict = Depends(usuario_actual)) -> dict:
+    """La salud operativa, con detalle. Exige sesión, y por eso puede decir lo que `/salud`
+    calla: aquella es pública --la consumen el healthcheck de Docker y `desplegar.sh`-- y
+    nunca revela ni el texto del error de base ni qué credenciales faltan.
+
+    **`/salud` no se toca y sigue siendo la que mira Docker.** Esta es otra cosa.
+
+    **El bloque de base va en su propio `try` y nada más depende de él.** Una pantalla de
+    diagnóstico que no carga cuando la base está caída no sirve para lo único que existe.
+
+    El gasto y las variables que faltan **no viajan** si quien pregunta no es admin: no se
+    esconden en pantalla, no se mandan. Un botón que desaparece no es un control de acceso.
+    """
+    es_admin = quien["rol"] == "admin"
+    ahora = datetime.now(ZONA_BOGOTA)
+    base: dict[str, Any] = {"ok": False, "citas_sin_calendar": None}
+    atencion_: dict[str, Any] = {}
+    cola: dict[str, Any] = {}
+    gasto: float | None = None
+    try:
+        with persistencia.conectar(config.database_url) as conn:
+            base = {
+                "ok": True,
+                "citas_sin_calendar": persistencia.citas_sin_evento_calendar(conn, ahora=ahora),
+            }
+            atencion_ = {
+                "sin_responder": persistencia.contar_sin_responder(
+                    conn, tipos_sin_turno=ingesta.TIPOS_QUE_NO_ABREN_TURNO
+                ),
+                "relevos_abiertos": persistencia.contar_relevos_abiertos(conn),
+            }
+            cola = {
+                "recordatorios_por_despachar": len(
+                    persistencia.seguimientos_por_despachar(conn, ahora, limite=200)
+                ),
+                "reactivaciones_hoy": persistencia.contar_comprometidos_hoy(conn, ahora=ahora),
+            }
+            if es_admin:
+                gasto = persistencia.gasto_del_dia(conn)
+    except Exception as e:  # noqa: BLE001 -- ver el docstring: cargar incompleta es el punto
+        log.warning("la pantalla de estado no pudo leer la base: %s", e)
+
+    salida: dict[str, Any] = {
+        "base": base,
+        "calendario": {"clase": type(_calendario).__name__},
+        "frenos": {
+            "daniela_responde": config.daniela_responde,
+            "leer_archivos": config.leer_archivos,
+            "transcribir_audio": config.transcribir_audio,
+        },
+        "atencion": atencion_,
+        "cola": cola,
+        "relevo": {
+            "secreto_del_webhook": bool(config.telegram_webhook_secret),
+            "tema_general": _tema_general,
+        },
+        "evaluador": {
+            # En memoria del proceso, no en la base: un despliegue lo borra. Quien lo pinte
+            # lo rotula «desde el último arranque», nunca «hoy», o el contador miente.
+            "fallos_en_la_ventana": guardrails.fallos_recientes_de_evaluador(),
+        },
+    }
+    if es_admin:
+        salida["gasto"] = {"usd_hoy": gasto, "umbral_usd": config.alerta_gasto_diario_usd}
+        salida["entorno"] = {"faltan": _variables_que_faltan()}
+    return salida
+
+
+@app.post("/api/estado/sondas")
+async def api_sondas_de_estado(quien: dict = Depends(exigir_rol("admin"))) -> dict:
+    """Pregunta en vivo a Meta y a Telegram. Lo que hoy solo se ve abriendo una terminal.
+
+    **Detrás de un botón y no en la carga de la pantalla.** Si esto corriera al abrir, una
+    caída de Meta dejaría sin cargar la pantalla que existe para saber qué está roto, que es
+    el fallo más tonto posible en una herramienta de diagnóstico.
+
+    **Es POST aunque no escriba en la base**: hace dos llamadas a terceros, así que no puede
+    dispararse con un prefetch del navegador ni quedar cacheada.
+
+    **Cada bloque en su propio `try`**: que la Graph API no conteste no puede dejar sin
+    respuesta lo de Telegram.
+
+    El secreto del webhook sale de `config` y NO de Telegram: `getWebhookInfo` no lo reporta,
+    así que son dos hechos distintos y se enseñan por separado.
+    """
+    salida: dict[str, Any] = {"secreto_del_webhook": bool(config.telegram_webhook_secret)}
+    try:
+        salida["whatsapp"] = {
+            "plantillas": await _whatsapp.estado_de_plantillas(),
+            "calidad": await _whatsapp.calidad_del_numero(),
+        }
+    except Exception as e:  # noqa: BLE001
+        salida["whatsapp"] = {"error": str(e)}
+    try:
+        salida["telegram"] = await _telegram.estado_del_webhook()
+    except Exception as e:  # noqa: BLE001
+        salida["telegram"] = {"error": str(e)}
+    log.info("%s sondeó el estado de Meta y Telegram", quien["usuario"])
+    return salida
 
 
 # ------------------------------------------------------------------------------------------
