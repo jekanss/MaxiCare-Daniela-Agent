@@ -8,7 +8,6 @@ import Pruebas from '@/pantallas/Pruebas'
 import Tratamientos from '@/pantallas/Tratamientos'
 import SinResolver from '@/pantallas/SinResolver'
 import Leads from '@/pantallas/Leads'
-import PantallaPendiente from '@/pantallas/Pendiente'
 import CambiarContrasena from '@/componentes/CambiarContrasena'
 import { CargandoPantalla } from '@/componentes/Estado'
 import { salir, sesionActual, type Sesion } from '@/api'
@@ -206,9 +205,7 @@ export default function App() {
             ir('conversaciones')
           }}
         />
-      ) : (
-        <PantallaPendiente seccion={seccion} />
-      )}
+      ) : null}
       </div>
     </div>
   )

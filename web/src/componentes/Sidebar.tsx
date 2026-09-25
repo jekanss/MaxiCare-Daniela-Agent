@@ -20,7 +20,6 @@ export type SeccionId =
   | 'agenda'
   | 'leads'
   | 'tratamientos'
-  | 'metricas'
   | 'estado'
   | 'configuracion'
   | 'pruebas'
@@ -29,8 +28,6 @@ export type Seccion = {
   id: SeccionId
   etiqueta: string
   icono: ReactNode
-  /** La fase del plan que la construye. `null` = ya está construida. */
-  fase: number | null
 }
 
 /* Los iconos son trazos, no emojis: un emoji lo dibuja el sistema operativo y cambia de
@@ -55,14 +52,14 @@ function Icono({ children }: { children: ReactNode }) {
   )
 }
 
-/* Las nueve secciones de la especificación del producto, en el orden en que las puso el
- * diseño. Las que todavía no existen NO se esconden del menú: se muestran con su estado
- * vacío diciendo qué fase las construye.
+/* Las ocho secciones de la especificación del producto, en el orden en que las puso el
+ * diseño. Desde el 25/09/2026 están TODAS construidas.
  *
- * Esconderlas daría una navegación «limpia» que miente sobre el tamaño del producto; un
- * enlace que no lleva a ninguna parte sería peor. Un destino que explica qué falta es lo
- * único honesto de los tres -- y la especificación lo pide literalmente: «cada pantalla
- * tiene un estado vacío que explica qué falta». */
+ * Aquí vivió hasta esa fecha un comentario que explicaba por qué las secciones sin
+ * construir no se escondían del menú, y por qué cada una llevaba el rótulo de la fase que
+ * la iba a construir. Se fue con ellas: «Métricas» la eliminó MaxiCare, «Estado del
+ * sistema» y «Configuración» se construyeron, y el cartel al que llevaban
+ * --`pantallas/Pendiente.tsx`-- se borró porque ya no lo alcanzaba nadie. */
 export const SECCIONES: Seccion[] = [
   {
     id: 'inicio',
@@ -73,7 +70,6 @@ export const SECCIONES: Seccion[] = [
         <path d="M6.5 10v10h11V10" />
       </Icono>
     ),
-    fase: null,
   },
   {
     id: 'conversaciones',
@@ -84,7 +80,6 @@ export const SECCIONES: Seccion[] = [
         <path d="M9 15.5h8l4 3v-8" />
       </Icono>
     ),
-    fase: null,
   },
   {
     id: 'bandeja',
@@ -94,7 +89,6 @@ export const SECCIONES: Seccion[] = [
         <path d="M4 5h16v11H9l-5 4z" />
       </Icono>
     ),
-    fase: null,
   },
   {
     id: 'agenda',
@@ -105,7 +99,6 @@ export const SECCIONES: Seccion[] = [
         <path d="M4 10h16M9 3v4M15 3v4" />
       </Icono>
     ),
-    fase: null,
   },
   {
     id: 'leads',
@@ -117,7 +110,6 @@ export const SECCIONES: Seccion[] = [
         <path d="M16 7.2a3.2 3.2 0 0 1 0 6M18 20c0-2.6-1-4.4-2.6-5.2" />
       </Icono>
     ),
-    fase: null,
   },
   {
     id: 'tratamientos',
@@ -128,20 +120,6 @@ export const SECCIONES: Seccion[] = [
         <path d="M7 20c-2 0-3-2.6-3-6.5S6 4 9 5.4L12 7l3-1.6C18 4 20 9.6 20 13.5S19 20 17 20" />
       </Icono>
     ),
-    fase: null,
-  },
-  {
-    id: 'metricas',
-    etiqueta: 'Métricas',
-    icono: (
-      <Icono>
-        <path d="M4 20h16" />
-        <rect x="5" y="12" width="3.6" height="5" />
-        <rect x="10.2" y="8" width="3.6" height="9" />
-        <rect x="15.4" y="4.6" width="3.6" height="12.4" />
-      </Icono>
-    ),
-    fase: 9,
   },
   {
     id: 'estado',
@@ -151,7 +129,6 @@ export const SECCIONES: Seccion[] = [
         <path d="M3 12h4l2.5-6 4 13L16 12h5" />
       </Icono>
     ),
-    fase: 7,
   },
 ]
 
@@ -164,7 +141,6 @@ export const CONFIGURACION: Seccion = {
       <path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1" />
     </Icono>
   ),
-  fase: 8,
 }
 
 export const PRUEBAS: Seccion = {
@@ -176,7 +152,6 @@ export const PRUEBAS: Seccion = {
       <path d="M8.6 3h6.8" />
     </Icono>
   ),
-  fase: null,
 }
 
 function iniciales(nombre: string): string {
@@ -249,14 +224,6 @@ function Boton({
       {seccion.icono}
       <span className="flex-1 truncate">{seccion.etiqueta}</span>
       {insignia}
-      {seccion.fase !== null && (
-        <span
-          style={{ fontFamily: MONO, fontSize: 10, color: '#6E6880' }}
-          title={`La construye la fase ${seccion.fase}`}
-        >
-          F{seccion.fase}
-        </span>
-      )}
     </button>
   )
 }
