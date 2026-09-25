@@ -1073,3 +1073,27 @@ def test_el_aviso_de_fallidos_no_tumba_el_ciclo_si_telegram_falla(monkeypatch):
     monkeypatch.setattr(runtime, "_telegram", _TelegramRoto())
 
     asyncio.run(runtime._avisar_de_recordatorios_fallidos(1))  # no propaga
+
+
+# ==========================================================================================
+# Los tres botones del recordatorio
+# ==========================================================================================
+
+
+def test_los_tres_rotulos_del_recordatorio_son_los_que_meta_aprobo():
+    """El código compara contra el LITERAL, así que tocarlos tiene que doler.
+
+    Un rótulo aprobado con otra grafía --«No puedo asistir.» con punto, «Confirmar cita»--
+    deja ese botón sin camino: el mensaje se atiende como texto libre, no falla nada y no lo
+    ve nadie. Esta prueba es lo único que convierte ese cambio en algo visible.
+    """
+    assert s.BOTONES_DEL_RECORDATORIO == (
+        "Confirmar",
+        "Necesito cambiarla",
+        "No puedo asistir",
+    )
+
+
+def test_los_rotulos_no_se_repiten():
+    """Dos botones con el mismo rótulo harían indistinguibles dos intenciones opuestas."""
+    assert len(set(s.BOTONES_DEL_RECORDATORIO)) == 3

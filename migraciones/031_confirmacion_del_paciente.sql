@@ -1,0 +1,28 @@
+-- =========================================================================================
+-- Que el paciente haya confirmado su cita deja de ser invisible
+--
+-- `citas.estado` arranca en 'confirmada' por DEFAULT desde la 001, así que esa palabra nunca
+-- significó que el paciente dijera nada: significa que la cita existe y que no está
+-- cancelada. Hasta hoy no había nadie diciéndolo -- los dos quick replies que Meta aprobó en
+-- `recordatorio_cita` el 20/09/2026 entraban al turno como texto y se perdían ahí -- y desde
+-- que el recordatorio lleva tres botones sí lo hay.
+--
+-- NULLABLE y sin default a propósito. `NULL` es «no ha dicho nada», que es distinto de «dijo
+-- que no» -- eso último ya es `estado = 'cancelada'` con su `motivo_cancelacion`. Un BOOLEAN
+-- con default `false` haría esas dos cosas indistinguibles, y son justamente la diferencia
+-- entre llamar a un paciente y no llamarlo: al que no ha contestado se le llama, al que
+-- canceló no.
+--
+-- TIMESTAMPTZ y no BOOLEAN por lo mismo que `enviado_en` o `respondido_en`: la hora a la que
+-- confirmó es la mitad del dato. «Confirmó ayer a las 18:05» y «confirmó hace diez minutos»
+-- valen distinto para quien mira la agenda de mañana.
+--
+-- **Es también la deduplicación del aviso al doctor.** `marcar_cita_confirmada` actualiza con
+-- `WHERE confirmada_por_paciente_en IS NULL` y devuelve el `rowcount`: Meta reintenta los
+-- webhooks y un paciente impaciente pulsa el botón dos veces, y sin esa guarda cada toque
+-- costaría tres WhatsApps de plantilla a tres personas por la misma cita. Quien decide es
+-- Postgres y no un `if` que lea antes de escribir, por lo mismo que en `toca_avisar_cuota`:
+-- dos webhooks simultáneos pasarían los dos por esa lectura.
+-- =========================================================================================
+
+ALTER TABLE citas ADD COLUMN IF NOT EXISTS confirmada_por_paciente_en TIMESTAMPTZ;

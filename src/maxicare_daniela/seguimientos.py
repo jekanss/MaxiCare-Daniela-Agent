@@ -235,6 +235,25 @@ TIPO_NO_ASISTIO = "reactivacion_no_asistio"
 
 TIPOS_DE_REACTIVACION = frozenset({TIPO_SIN_AGENDAR, TIPO_CANCELADA, TIPO_NO_ASISTIO})
 
+#: Los rótulos EXACTOS de los tres quick replies que Meta aprobó en `recordatorio_cita`.
+#:
+#: Van aquí y no en `runtime` porque son de la plantilla, y la plantilla es de este módulo.
+#: **El código compara contra el literal**, tildes incluidas: un rótulo aprobado con otra
+#: grafía --«No puedo asistir.» con punto, «Confirmar cita»-- deja ese botón sin camino y el
+#: mensaje se atiende como texto libre. No falla nada y no lo ve nadie, así que están en un
+#: solo sitio de `src/` y los vigila `test_los_tres_rotulos_del_recordatorio_son_los_que_
+#: meta_aprobo`. `scripts/probar_plantilla.py` los DOBLA a mano a propósito, para que quien
+#: mire el teléfono compare contra algo escrito aparte y no contra la misma cadena.
+#:
+#: Solo el primero tiene camino propio en el código (`runtime._entregar`): los otros dos
+#: entran al turno como cualquier texto y los atiende Daniela. «No puedo asistir» NO cancela
+#: nada por sí solo --cancelar libera el cupo, borra el evento de Calendar y es irreversible
+#: en el mismo minuto-- así que ella lo confirma antes.
+BOTON_CONFIRMAR = "Confirmar"
+BOTON_CAMBIAR = "Necesito cambiarla"
+BOTON_NO_ASISTIR = "No puedo asistir"
+BOTONES_DEL_RECORDATORIO = (BOTON_CONFIRMAR, BOTON_CAMBIAR, BOTON_NO_ASISTIR)
+
 #: Cómo se llama cada tipo cuando lo tiene que leer una PERSONA, no el código.
 #:
 #: Lo usa `panel.hilo` para la voz del sistema: el doctor abre la conversación y ve al

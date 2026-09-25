@@ -1943,6 +1943,83 @@ def leer_cita(conn, id_cita: str) -> dict[str, Any] | None:
     return dict(zip(columnas, fila))
 
 
+def cita_del_ultimo_recordatorio(
+    conn, telefono: str, *, ahora: datetime
+) -> dict[str, Any] | None:
+    """La cita de la que habla el último recordatorio que se le despachó a ese número.
+
+    Un quick reply no dice de qué cita habla: solo trae su rótulo («Confirmar»). Esto es lo
+    que lo convierte en una cita concreta, y sin ello el botón no puede hacer nada.
+
+    Va por TELÉFONO, como `ultimo_recordatorio`, `_es_ajena` y `citas_activas_de_telefono`:
+    `seguimientos` cuelga de la conversación, que dura 24 h, y el recordatorio de la víspera
+    sale de una conversación distinta de aquella en la que el paciente pulsa el botón.
+
+    **No se filtra por `fallo IS NULL`**, aunque la fila se marca ANTES de enviar (no
+    negociable 21) y puede acabar con `enviado_en` puesto Y `fallo` con contenido. Si el
+    envío falló de verdad, el paciente no recibió el botón y no puede haber pulsado nada; y
+    si falló el primer intento y salió el reintento, la fila conserva el `fallo` viejo.
+    Filtrar por él dejaría sin camino justo al paciente cuyo recordatorio costó dos intentos.
+
+    La cita tiene que seguir VIVA y en el FUTURO, y eso es lo que hace innecesaria una
+    ventana de tiempo sobre el envío: un botón pulsado tres días tarde apunta a una cita que
+    ya pasó, y esa condición lo descarta sola. Confirmar una cita cancelada sería peor que no
+    hacer nada -- le diría al paciente que lo esperan a una hora que ya es de otro.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT c.id, c.nombre_completo, c.telefono, c.tratamiento, c.inicio, c.estado,
+                   c.confirmada_por_paciente_en
+              FROM seguimientos s
+              JOIN citas c ON c.id = s.cita_id
+             WHERE c.telefono = %s
+               AND s.tipo = %s
+               AND s.enviado_en IS NOT NULL
+               AND c.estado IN ('confirmada', 'reprogramada')
+               AND c.inicio >= %s
+             ORDER BY s.enviado_en DESC
+             LIMIT 1
+            """,
+            (telefono, "recordatorio_cita", ahora),
+        )
+        fila = cur.fetchone()
+    if not fila:
+        return None
+    columnas = (
+        "id", "nombre_completo", "telefono", "tratamiento", "inicio", "estado",
+        "confirmada_por_paciente_en",
+    )
+    return dict(zip(columnas, fila))
+
+
+def marcar_cita_confirmada(conn, id_cita: str, *, cuando: datetime) -> bool:
+    """Deja constancia de que el paciente confirmó. Devuelve si ESTA llamada cambió algo.
+
+    El `IS NULL` del WHERE no es una optimización: **es la deduplicación del aviso al
+    doctor.** Meta reintenta los webhooks y un paciente impaciente pulsa el botón dos veces;
+    confirmar de nuevo es inocuo, pero tres WhatsApps de plantilla a tres personas por la
+    misma cita no lo es. Quien lo decide es Postgres con el `rowcount`, no un `if` que lea
+    antes de escribir: dos webhooks simultáneos pasarían los dos por esa lectura antes de que
+    ninguno escribiera. Mismo criterio que `toca_avisar_cuota`.
+
+    No toca `estado`: una cita confirmada por el paciente sigue siendo 'confirmada', que es
+    lo que ya era. Lo que cambia es que ahora se sabe que él lo dijo.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE citas
+               SET confirmada_por_paciente_en = %s, actualizada_en = now()
+             WHERE id = %s AND confirmada_por_paciente_en IS NULL
+            """,
+            (cuando, id_cita),
+        )
+        cambio = cur.rowcount > 0
+    conn.commit()
+    return cambio
+
+
 def citas_activas_de_telefono(
     conn, telefono: str, *, desde: datetime, limite: int = 5
 ) -> list[dict[str, Any]]:

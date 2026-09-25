@@ -627,3 +627,148 @@ def test_un_telefono_sin_fila_de_contacto_no_cuenta_como_baja(conexion_pruebas):
     fila = next(f for f in filas if str(f["conversacion_id"]) == id_conv)
 
     assert fila["no_contactar"] is False
+
+
+# ==========================================================================================
+# La confirmación del paciente: de qué cita habla el botón, y que solo cuente una vez
+# ==========================================================================================
+#
+# El presente va CLAVADO (`_AHORA`), como en las pruebas offline: `cita_de_prueba` siembra
+# una cita el 16/09/2026, y una prueba que dependiera del reloj de la máquina la vería
+# pasada desde el día siguiente. Ya le costó doce pruebas rojas a este proyecto el
+# 16/09/2026.
+
+_AHORA = datetime(2026, 9, 15, 9, 0, tzinfo=ZONA_BOGOTA)
+_TELEFONO = "573000000099"  # el mismo que siembra `cita_de_prueba`
+
+
+def _despachado(conn, *, id_conversacion, id_cita, clave, enviado_en):
+    """Un recordatorio que YA salió. `enviado_en` es lo que lo hace elegible."""
+    persistencia.insertar_seguimiento(
+        conn,
+        id_conversacion=id_conversacion,
+        tipo="recordatorio_cita",
+        fecha_objetivo=enviado_en,
+        clave_idempotencia=clave,
+        cita_id=id_cita,
+    )
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE seguimientos SET enviado_en = %s WHERE clave_idempotencia = %s",
+            (enviado_en, clave),
+        )
+    conn.commit()
+
+
+def _otra_cita(conn, id_conversacion, *, inicio):
+    """Una segunda cita del MISMO teléfono, para el caso de las dos citas futuras."""
+    return persistencia.registrar_cita(
+        conn,
+        reserva_id=None,
+        conversacion_id=id_conversacion,
+        paciente_id=None,
+        nombre_completo="Paciente De Seguimiento",
+        telefono=_TELEFONO,
+        tratamiento="ortodoncia",
+        inicio=inicio,
+        duracion_minutos=60,
+        evento_calendar_id=None,
+    )
+
+
+def test_confirmar_dos_veces_solo_cuenta_la_primera(conexion_pruebas, cita_de_prueba):
+    """El segundo toque no puede costar un segundo aviso a tres doctores.
+
+    Meta reintenta los webhooks y un paciente impaciente pulsa dos veces. Quien deduplica es
+    el `IS NULL` del UPDATE, no un `if` que lea antes de escribir.
+    """
+    id_cita, _ = cita_de_prueba
+
+    assert persistencia.marcar_cita_confirmada(conexion_pruebas, id_cita, cuando=_AHORA) is True
+    assert persistencia.marcar_cita_confirmada(conexion_pruebas, id_cita, cuando=_AHORA) is False
+
+
+def test_con_dos_citas_futuras_se_confirma_la_del_ultimo_recordatorio(
+    conexion_pruebas, cita_de_prueba
+):
+    """No la más próxima ni la más lejana: la del recordatorio que el paciente está mirando."""
+    proxima, id_conv = cita_de_prueba
+    lejana = _otra_cita(
+        conexion_pruebas, id_conv, inicio=datetime(2026, 9, 20, 11, 0, tzinfo=ZONA_BOGOTA)
+    )
+    _despachado(
+        conexion_pruebas,
+        id_conversacion=id_conv,
+        id_cita=lejana,
+        clave="rec-lejana",
+        enviado_en=_AHORA - timedelta(hours=5),
+    )
+    _despachado(
+        conexion_pruebas,
+        id_conversacion=id_conv,
+        id_cita=proxima,
+        clave="rec-proxima",
+        enviado_en=_AHORA - timedelta(hours=1),
+    )
+
+    cita = persistencia.cita_del_ultimo_recordatorio(conexion_pruebas, _TELEFONO, ahora=_AHORA)
+
+    assert cita is not None
+    assert str(cita["id"]) == str(proxima)
+    assert cita["tratamiento"] == "limpieza"
+
+
+def test_un_recordatorio_sin_despachar_no_da_cita(conexion_pruebas, cita_de_prueba):
+    """Si no salió, el paciente no vio ningún botón que pulsar."""
+    id_cita, id_conv = cita_de_prueba
+    persistencia.insertar_seguimiento(
+        conexion_pruebas,
+        id_conversacion=id_conv,
+        tipo="recordatorio_cita",
+        fecha_objetivo=_AHORA,
+        clave_idempotencia="rec-sin-enviar",
+        cita_id=id_cita,
+    )
+
+    assert (
+        persistencia.cita_del_ultimo_recordatorio(conexion_pruebas, _TELEFONO, ahora=_AHORA)
+        is None
+    )
+
+
+def test_una_cita_pasada_no_se_puede_confirmar(conexion_pruebas, cita_de_prueba):
+    """El botón pulsado tres días tarde. Por esto no hace falta una ventana sobre el envío."""
+    id_cita, id_conv = cita_de_prueba
+    _despachado(
+        conexion_pruebas,
+        id_conversacion=id_conv,
+        id_cita=id_cita,
+        clave="rec-vieja",
+        enviado_en=_AHORA - timedelta(hours=2),
+    )
+    despues_de_la_cita = datetime(2026, 9, 17, 9, 0, tzinfo=ZONA_BOGOTA)
+
+    assert (
+        persistencia.cita_del_ultimo_recordatorio(
+            conexion_pruebas, _TELEFONO, ahora=despues_de_la_cita
+        )
+        is None
+    )
+
+
+def test_una_cita_cancelada_no_se_puede_confirmar(conexion_pruebas, cita_de_prueba):
+    """Confirmar una cita cancelada devolvería al paciente a una hora que ya es de otro."""
+    id_cita, id_conv = cita_de_prueba
+    _despachado(
+        conexion_pruebas,
+        id_conversacion=id_conv,
+        id_cita=id_cita,
+        clave="rec-cancelada",
+        enviado_en=_AHORA - timedelta(hours=1),
+    )
+    persistencia.marcar_cita_cancelada(conexion_pruebas, id_cita, motivo="prueba")
+
+    assert (
+        persistencia.cita_del_ultimo_recordatorio(conexion_pruebas, _TELEFONO, ahora=_AHORA)
+        is None
+    )
