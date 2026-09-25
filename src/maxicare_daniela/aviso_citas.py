@@ -143,6 +143,87 @@ def parametros_de(cita: CitaNueva) -> list[str]:
     ]
 
 
+# ==========================================================================================
+# El movimiento de agenda: confirmó, no vendrá, o cambió de hora
+# ==========================================================================================
+
+#: Lo que va en el primer hueco de `movimiento_agenda`. Son texto para un doctor, no claves:
+#: si mañana la clínica quiere que diga otra cosa, se cambia aquí y no en el Business Manager.
+#: Esa es toda la ventaja de haber aprobado UNA plantilla en vez de tres.
+ASUNTO_CONFIRMADA = "Confirmó su cita"
+ASUNTO_NO_ASISTIRA = "No podrá asistir"
+ASUNTO_CAMBIADA = "Cambió su cita"
+
+
+@dataclass(frozen=True)
+class MovimientoDeAgenda:
+    """Un cambio en la agenda del que el doctor tiene que enterarse hoy.
+
+    Hermana de `CitaNueva` y con las mismas renuncias: ni id de cita, ni de conversación, ni
+    nada clínico. Esto sale por WhatsApp, o sea por un canal que no es el expediente.
+
+    `cuando` llega ya ESCRITO y no como fecha, que es la única diferencia de forma con
+    `CitaNueva`. Un cambio de hora necesita decir de dónde a dónde --dos fechas-- y una
+    confirmación una sola; con huecos separados haría falta una plantilla por caso, que es
+    justo lo que esta evita. Lo arman `cuando_una_cita` y `cuando_un_cambio`.
+    """
+
+    asunto: str
+    nombre_paciente: str
+    telefono_paciente: str
+    tratamiento: str
+    cuando: str
+
+
+def cuando_una_cita(inicio: datetime) -> str:
+    """«lunes 21 de septiembre a las 10:00 a. m.»"""
+    local = _en_bogota(inicio)
+    return f"{fecha_en_palabras(local)} a las {hora_en_palabras(local)}"
+
+
+def cuando_un_cambio(antes: datetime, despues: datetime) -> str:
+    """«antes: lunes 21 de septiembre, 10:00 a. m. · ahora: martes 22..., 3:00 p. m.»
+
+    En UN renglón, y no es estética: un salto de línea dentro de un parámetro hace que Meta
+    rechace el mensaje entero. Las dos horas van porque confirmar un cambio exige decir de
+    dónde a dónde -- es el mismo motivo por el que `herramientas._reprogramar_cita` nombra la
+    hora vieja en su texto (no negociable 13).
+    """
+    viejo, nuevo = _en_bogota(antes), _en_bogota(despues)
+    return (
+        f"antes: {fecha_en_palabras(viejo)}, {hora_en_palabras(viejo)} · "
+        f"ahora: {fecha_en_palabras(nuevo)}, {hora_en_palabras(nuevo)}"
+    )
+
+
+def _en_un_renglon(valor: str) -> str:
+    """Un hueco con un salto de línea no cuesta un renglón: cuesta el mensaje entero.
+
+    El nombre y el tratamiento salen de la base, donde los escribió el modelo a partir de lo
+    que tecleó el paciente. Un nombre con un salto dentro es raro, no imposible, y perdería
+    el aviso completo sin que nadie supiera por qué.
+    """
+    return " ".join((valor or "").split())
+
+
+def parametros_de_movimiento(mov: MovimientoDeAgenda) -> list[str]:
+    """Los CINCO huecos, en el orden en que Meta los aprobó.
+
+    Mismo contrato que `parametros_de` y la misma advertencia: cambiar este orden no cambia
+    la plantilla, manda otro dato en otro hueco y el doctor lee un teléfono donde esperaba la
+    hora.
+
+        {{1}} asunto · {{2}} nombre · {{3}} teléfono · {{4}} tratamiento · {{5}} cuándo
+    """
+    return [
+        _en_un_renglon(mov.asunto),
+        _o_pendiente(_en_un_renglon(mov.nombre_paciente)),
+        _o_pendiente(_en_un_renglon(mov.telefono_paciente)),
+        _o_pendiente(_en_un_renglon(mov.tratamiento)),
+        _en_un_renglon(mov.cuando),
+    ]
+
+
 @dataclass(frozen=True)
 class Ajustes:
     """A quién se avisa y con qué. `whatsapp` en `None` o `plantilla` vacía apagan el envío."""
@@ -171,22 +252,53 @@ def ajustes_del_entorno() -> Ajustes:
     dentro de una tarea de fondo: un `RuntimeError` ahí no lo vería nadie. Sin ajustes, el
     aviso cae solo en el modo «decide y no manda», que es el lado inocuo de equivocarse.
     """
+    config, canal = _config_y_canal("cita nueva")
+    if config is None:
+        return Ajustes(whatsapp=None, doctores=WHATSAPP_DOCTORES, plantilla="", idioma="es")
+    return Ajustes(
+        whatsapp=canal,
+        doctores=config.whatsapp_doctores,
+        plantilla=config.plantilla_cita_nueva,
+        idioma=config.plantilla_cita_nueva_idioma,
+    )
+
+
+def _config_y_canal(que_es: str) -> tuple[Config | None, Any | None]:
+    """La lectura que comparten los dos avisos. **Nunca lanza**, por lo mismo que arriba.
+
+    Los campos se leen luego uno a uno y no con `getattr(config, nombre)`: un nombre de campo
+    escrito como cadena no lo caza ni el type checker ni una prueba, y el precio de
+    equivocarse es mandar la plantilla del otro aviso.
+    """
     try:
         config = Config.desde_entorno()
     except Exception:  # noqa: BLE001 -- ver el docstring: aquí no hay a quién propagarle nada
-        log.exception("no se pudo leer la configuración del aviso de cita nueva")
-        return Ajustes(whatsapp=None, doctores=WHATSAPP_DOCTORES, plantilla="", idioma="es")
+        log.exception("no se pudo leer la configuración del aviso de %s", que_es)
+        return None, None
 
     canal = (
         WhatsApp(config.whatsapp_token, config.whatsapp_phone_number_id)
         if config.whatsapp_token and config.whatsapp_phone_number_id
         else None
     )
+    return config, canal
+
+
+def ajustes_del_movimiento() -> Ajustes:
+    """Los del aviso de movimiento de agenda, con SU plantilla.
+
+    No comparte `plantilla` con `ajustes_del_entorno` a propósito: son dos aprobaciones
+    distintas de Meta y se encienden por separado. El día que una de las dos se caiga o haya
+    que apagarla, la otra sigue avisando.
+    """
+    config, canal = _config_y_canal("movimiento de agenda")
+    if config is None:
+        return Ajustes(whatsapp=None, doctores=WHATSAPP_DOCTORES, plantilla="", idioma="es")
     return Ajustes(
         whatsapp=canal,
         doctores=config.whatsapp_doctores,
-        plantilla=config.plantilla_cita_nueva,
-        idioma=config.plantilla_cita_nueva_idioma,
+        plantilla=config.plantilla_movimiento_agenda,
+        idioma=config.plantilla_movimiento_agenda_idioma,
     )
 
 
@@ -208,15 +320,64 @@ async def avisar(
     -- uno mal escrito en el `.env`, un doctor que bloqueó el número de la clínica -- se
     llevaría por delante el aviso del otro, que es el que sí habría llegado.
     """
-    valores = parametros_de(cita)
+    return await _mandar_a_todos(
+        parametros_de(cita),
+        whatsapp=whatsapp,
+        doctores=doctores,
+        plantilla=plantilla,
+        idioma=idioma,
+        que_es="cita nueva",
+    )
 
+
+async def avisar_movimiento(
+    mov: MovimientoDeAgenda,
+    *,
+    whatsapp: Any | None,
+    doctores: Sequence[str],
+    plantilla: str,
+    idioma: str = "es",
+) -> int:
+    """Manda el aviso de movimiento a cada doctor. Devuelve cuántos salieron, y no propaga.
+
+    Cuando esto corre, lo que cambió la agenda YA ocurrió: la cita está confirmada, o
+    cancelada con su cupo liberado, o movida en Neon y en Calendar. A partir de ese punto un
+    fallo de Meta es un doctor que no se entera, y deshacer el cambio para no perder el aviso
+    es el intercambio que este proyecto prohíbe.
+    """
+    return await _mandar_a_todos(
+        parametros_de_movimiento(mov),
+        whatsapp=whatsapp,
+        doctores=doctores,
+        plantilla=plantilla,
+        idioma=idioma,
+        que_es="movimiento de agenda",
+    )
+
+
+async def _mandar_a_todos(
+    valores: list[str],
+    *,
+    whatsapp: Any | None,
+    doctores: Sequence[str],
+    plantilla: str,
+    idioma: str,
+    que_es: str,
+) -> int:
+    """Las tres garantías de este módulo, en un solo sitio.
+
+    Vive aparte porque son GARANTÍAS y no comodidad: duplicarlas por aviso es duplicar la
+    forma de romperlas. Lo único que cambia entre los dos llamadores es qué parámetros manda
+    y cómo se llama en el log.
+    """
     if not plantilla or whatsapp is None or not doctores:
         # La decisión se toma igual y queda escrita. Es lo que permite desplegar esto hoy,
-        # con la plantilla todavía sin aprobar, y comprobar en producción que avisa de las
-        # citas correctas antes de que salga un solo WhatsApp.
+        # con la plantilla todavía sin aprobar, y comprobar en producción que avisa de lo
+        # correcto antes de que salga un solo WhatsApp.
         log.info(
-            "aviso de cita nueva DECIDIDO y no enviado (plantilla o canal sin configurar): "
+            "aviso de %s DECIDIDO y no enviado (plantilla o canal sin configurar): "
             "destinatarios=%s plantilla=%r parametros=%s",
+            que_es,
             list(doctores),
             plantilla,
             valores,
@@ -231,7 +392,7 @@ async def avisar(
             )
             enviados += 1
         except Exception:  # noqa: BLE001 -- el otro doctor tiene que enterarse igual
-            log.exception("no se pudo avisar de la cita nueva a %s", telefono)
+            log.exception("no se pudo avisar de %s a %s", que_es, telefono)
 
     return enviados
 
@@ -298,6 +459,52 @@ def avisar_en_segundo_plano(cita: CitaNueva) -> asyncio.Task | None:
     except RuntimeError:
         log.exception(
             "no hay bucle de eventos para avisar de la cita de %s", cita.nombre_paciente
+        )
+        return None
+
+    _avisos_vivos.add(tarea)
+    tarea.add_done_callback(_avisos_vivos.discard)
+    return tarea
+
+
+async def _avisar_movimiento_con_los_ajustes_vivos(mov: MovimientoDeAgenda) -> int:
+    """El cuerpo de la tarea de fondo del movimiento, que **no puede lanzar**.
+
+    Mismo razonamiento que su hermana: nadie va a mirar el resultado de esta tarea, y una
+    excepción que se escapara saldría como un «exception was never retrieved» sin el paciente
+    ni el asunto dentro, o sea sin nada con lo que ir a mirar qué aviso se perdió.
+    """
+    try:
+        ajustes = ajustes_del_movimiento()
+        return await avisar_movimiento(
+            mov,
+            whatsapp=ajustes.whatsapp,
+            doctores=ajustes.doctores,
+            plantilla=ajustes.plantilla,
+            idioma=ajustes.idioma,
+        )
+    except Exception:  # noqa: BLE001 -- el cambio de agenda ya ocurrió y manda él
+        log.exception(
+            "la agenda de %s ya cambió (%s); solo falló el aviso a los doctores",
+            mov.nombre_paciente,
+            mov.asunto,
+        )
+        return 0
+
+
+def avisar_movimiento_en_segundo_plano(mov: MovimientoDeAgenda) -> asyncio.Task | None:
+    """Programa el aviso del movimiento y devuelve de inmediato.
+
+    Lo que se gana es del PACIENTE, como en `avisar_en_segundo_plano`: estas llamadas cuelgan
+    del final de una tool o del camino que le contesta a quien pulsó «Confirmar», y dos
+    llamadas a la Graph API metidas ahí son dos llamadas que el paciente pasa esperando por
+    algo que no es suyo.
+    """
+    try:
+        tarea = asyncio.create_task(_avisar_movimiento_con_los_ajustes_vivos(mov))
+    except RuntimeError:
+        log.exception(
+            "no hay bucle de eventos para avisar del movimiento de %s", mov.nombre_paciente
         )
         return None
 

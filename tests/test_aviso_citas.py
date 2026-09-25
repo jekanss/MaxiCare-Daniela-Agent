@@ -422,3 +422,160 @@ def test_la_tarea_del_aviso_tiene_una_referencia_fuerte(monkeypatch):
     assert vistas == [1], "la tarea no quedó sostenida mientras corría"
     # Y el `add_done_callback` la saca al terminar, así que el `set` no crece sin límite.
     assert aviso_citas.tareas_en_vuelo() == ()
+
+
+# ==========================================================================================
+# El movimiento de agenda: confirmó, no vendrá o cambió de hora
+# ==========================================================================================
+#
+# UNA sola plantilla para los tres casos, con el asunto en el primer hueco. Lo que eso compra
+# es que la redacción viva en Python: cambiarla es un commit y no un trámite de 24 h con
+# Meta. Lo que cuesta es que el ORDEN de los huecos vuelve a ser lo único que puede dejar el
+# aviso ilegible sin romper ninguna prueba de integración, así que se comprueba igual que el
+# de `CitaNueva`.
+
+OTRO_INICIO = datetime(2026, 9, 22, 15, 0, tzinfo=h.ZONA_BOGOTA)
+
+
+def movimiento(**cambios) -> "aviso_citas.MovimientoDeAgenda":
+    base = dict(
+        asunto=aviso_citas.ASUNTO_CONFIRMADA,
+        nombre_paciente="Ana Gómez",
+        telefono_paciente="573001112233",
+        tratamiento="limpieza",
+        cuando=aviso_citas.cuando_una_cita(INICIO),
+    )
+    base.update(cambios)
+    return aviso_citas.MovimientoDeAgenda(**base)
+
+
+def enviar_movimiento(whatsapp, *, plantilla="movimiento_agenda", idioma="es", **cambios) -> int:
+    return asyncio.run(
+        aviso_citas.avisar_movimiento(
+            movimiento(**cambios),
+            whatsapp=whatsapp,
+            doctores=DOCTORES,
+            plantilla=plantilla,
+            idioma=idioma,
+        )
+    )
+
+
+def test_los_cinco_huecos_del_movimiento_van_en_el_orden_que_meta_aprobo():
+    """Con el orden cambiado, el doctor lee un teléfono donde esperaba la hora."""
+    assert aviso_citas.parametros_de_movimiento(movimiento()) == [
+        "Confirmó su cita",
+        "Ana Gómez",
+        "573001112233",
+        "limpieza",
+        "lunes 21 de septiembre a las 10:00 a. m.",
+    ]
+
+
+def test_los_tres_asuntos_dicen_lo_que_paso_sin_leer_el_cuerpo():
+    """Son texto para un doctor, no claves: se leen en la primera línea del aviso."""
+    assert aviso_citas.ASUNTO_CONFIRMADA == "Confirmó su cita"
+    assert aviso_citas.ASUNTO_NO_ASISTIRA == "No podrá asistir"
+    assert aviso_citas.ASUNTO_CAMBIADA == "Cambió su cita"
+
+
+def test_un_cambio_lleva_las_DOS_horas_y_en_un_solo_renglon():
+    """Confirmar un cambio exige decir de dónde a dónde, y Meta rechaza el salto de línea."""
+    cuando = aviso_citas.cuando_un_cambio(INICIO, OTRO_INICIO)
+
+    assert "lunes 21 de septiembre" in cuando
+    assert "martes 22 de septiembre" in cuando
+    assert "10:00 a. m." in cuando and "3:00 p. m." in cuando
+    assert "\n" not in cuando
+
+
+def test_ningun_hueco_lleva_saltos_de_linea():
+    """Un hueco con un salto de línea no cuesta un renglón: cuesta el mensaje entero.
+
+    El nombre sale de `pacientes`, que lo escribió el modelo desde lo que tecleó el paciente:
+    un «Ana\\nGómez» es raro, pero no es imposible, y perdería el aviso entero.
+    """
+    huecos = aviso_citas.parametros_de_movimiento(
+        movimiento(nombre_paciente="Ana\nGómez", tratamiento="limpieza\r\nprofunda")
+    )
+
+    for hueco in huecos:
+        assert "\n" not in hueco and "\r" not in hueco
+    assert huecos[1] == "Ana Gómez"
+
+
+def test_un_hueco_vacio_del_movimiento_sale_como_PENDIENTE():
+    """Meta rechaza el mensaje ENTERO si un parámetro va vacío, no solo ese renglón."""
+    huecos = aviso_citas.parametros_de_movimiento(movimiento(nombre_paciente="   "))
+
+    assert huecos[1] == "PENDIENTE"
+
+
+def test_el_movimiento_sale_a_LOS_DOS_doctores():
+    whatsapp = WhatsAppFalso()
+
+    assert enviar_movimiento(whatsapp) == 2
+    assert [e["telefono"] for e in whatsapp.enviados] == list(DOCTORES)
+    assert {e["plantilla"] for e in whatsapp.enviados} == {"movimiento_agenda"}
+
+
+def test_un_destinatario_que_falla_no_se_lleva_a_los_otros():
+    """El `try` va DENTRO del bucle: un número mal escrito en el .env no calla a los demás."""
+    whatsapp = WhatsAppFalso(falla_en=(DOCTORES[0],))
+
+    assert enviar_movimiento(whatsapp) == 1
+    assert [e["telefono"] for e in whatsapp.enviados] == [DOCTORES[1]]
+
+
+def test_sin_plantilla_el_movimiento_se_decide_y_no_se_manda(caplog):
+    """Es lo que permite desplegar hoy, con la plantilla todavía sin aprobar."""
+    whatsapp = WhatsAppFalso()
+
+    with caplog.at_level(logging.INFO, logger="maxicare_daniela.aviso_citas"):
+        assert enviar_movimiento(whatsapp, plantilla="") == 0
+
+    assert whatsapp.enviados == []
+    assert "Confirmó su cita" in caplog.text
+
+
+def test_el_movimiento_no_propaga_si_meta_esta_caida():
+    """La cita ya está movida cuando esto corre: un fallo de Meta no puede deshacerla."""
+    whatsapp = WhatsAppFalso(falla_en=DOCTORES)
+
+    assert enviar_movimiento(whatsapp) == 0
+
+
+def test_la_tarea_del_movimiento_tiene_una_referencia_fuerte(monkeypatch):
+    """`asyncio` solo guarda las tareas en un `WeakSet`: sin esto, el recolector se la lleva."""
+    vistas = []
+
+    async def _dentro():
+        monkeypatch.setattr(
+            aviso_citas,
+            "ajustes_del_movimiento",
+            lambda: aviso_citas.Ajustes(
+                whatsapp=WhatsAppFalso(), doctores=DOCTORES, plantilla="x", idioma="es"
+            ),
+        )
+        tarea = aviso_citas.avisar_movimiento_en_segundo_plano(movimiento())
+        vistas.append(len(aviso_citas.tareas_en_vuelo()))
+        await tarea
+
+    asyncio.run(_dentro())
+
+    assert vistas == [1], "la tarea no quedó sostenida mientras corría"
+    assert aviso_citas.tareas_en_vuelo() == ()
+
+
+def test_los_ajustes_del_movimiento_salen_de_su_propia_variable(monkeypatch):
+    """No comparte plantilla con el aviso de cita nueva: son dos aprobaciones distintas."""
+    monkeypatch.setenv("MAXICARE_DATABASE_URL", "postgresql://x/y")
+    monkeypatch.setenv("MAXICARE_WHATSAPP_TOKEN", "t")
+    monkeypatch.setenv("MAXICARE_WHATSAPP_PHONE_NUMBER_ID", "1")
+    monkeypatch.setenv("MAXICARE_PLANTILLA_MOVIMIENTO_AGENDA", "movimiento_agenda")
+    monkeypatch.setenv("MAXICARE_PLANTILLA_CITA_NUEVA", "cita_nueva_doctores")
+
+    ajustes = aviso_citas.ajustes_del_movimiento()
+
+    assert ajustes.plantilla == "movimiento_agenda"
+    assert ajustes.idioma == "es"

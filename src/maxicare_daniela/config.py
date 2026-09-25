@@ -765,6 +765,22 @@ class Config:
     #: `plantilla_recordatorio_idioma`, que ya pagó esta lección.
     plantilla_cita_nueva_idioma: str = "es"
 
+    #: La plantilla que avisa de un MOVIMIENTO de agenda: el paciente confirmó, no vendrá o
+    #: cambió de hora. UNA sola para los tres casos, con el asunto en el primer hueco.
+    #:
+    #: Tres plantillas se leerían mejor --el doctor sabría qué pasó por el encabezado-- y
+    #: costarían tres aprobaciones de Meta en vez de una, con cada retoque de redacción
+    #: volviendo a pasar por revisión. Con el asunto como DATO, la redacción vive en Python:
+    #: el día que la clínica quiera que diga otra cosa es un commit, no un trámite de 24 h.
+    #:
+    #: Vacía --su default-- apaga el envío y deja el log de lo que se habría mandado, igual
+    #: que `plantilla_cita_nueva`. PENDIENTE hasta que Meta la apruebe.
+    plantilla_movimiento_agenda: str = ""
+
+    #: Como `plantilla_cita_nueva_idioma`: si no coincide al carácter con la traducción
+    #: registrada, Meta rechaza el envío entero con el 132001.
+    plantilla_movimiento_agenda_idioma: str = "es"
+
     @classmethod
     def desde_entorno(cls) -> Config:
         return cls(
@@ -846,6 +862,10 @@ class Config:
             plantilla_cita_nueva=_opcional("MAXICARE_PLANTILLA_CITA_NUEVA"),
             plantilla_cita_nueva_idioma=_opcional(
                 "MAXICARE_PLANTILLA_CITA_NUEVA_IDIOMA", "es"
+            ),
+            plantilla_movimiento_agenda=_opcional("MAXICARE_PLANTILLA_MOVIMIENTO_AGENDA"),
+            plantilla_movimiento_agenda_idioma=_opcional(
+                "MAXICARE_PLANTILLA_MOVIMIENTO_AGENDA_IDIOMA", "es"
             ),
         )
 
