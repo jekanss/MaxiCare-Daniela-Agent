@@ -31,6 +31,7 @@ from maxicare_daniela import agentes
 from maxicare_daniela import config
 from maxicare_daniela import contratos
 from maxicare_daniela import guardrails as g
+from maxicare_daniela import seguimientos
 from maxicare_daniela.calendario import ZONA_BOGOTA, CalendarioDoble
 from maxicare_daniela.contratos import ContextoDaniela, LecturaArchivo, RespuestaDaniela
 
@@ -875,6 +876,46 @@ def test_un_recordatorio_reciente_le_dice_a_daniela_a_que_contesta_el_paciente()
     # El último de todos: es el más volátil y el más raro. Delante de la fecha descachearía
     # el prefijo de TODOS los pacientes de esa hora.
     assert texto.index("AHORA MISMO") < texto.index("YA LE ESCRIBIMOS NOSOTROS")
+
+
+def test_el_prompt_enumera_los_TRES_botones_del_recordatorio_de_cita():
+    """La asimetría que dejó de ser inocua el día que el recordatorio pasó a tres botones.
+
+    Para las tres plantillas de reactivación el prompt ya enumeraba sus dos rótulos; para el
+    recordatorio de cita no, así que Daniela sabía que había salido un recordatorio pero no
+    qué leyó el paciente. Con dos botones daba igual --el corchete de `atencion` le dice cuál
+    pulsó--; con tres, uno de ellos pide CANCELAR, y eso es irreversible.
+    """
+    ctx = contexto(
+        ahora=datetime(2026, 9, 17, 9, 0, tzinfo=ZONA_BOGOTA),
+        ultimo_recordatorio_tipo="recordatorio_cita",
+        ultimo_recordatorio_en=datetime(2026, 9, 16, 18, 0, tzinfo=ZONA_BOGOTA),
+    )
+
+    texto = asyncio.run(agentes.daniela.get_system_prompt(RunContextWrapper(context=ctx)))
+
+    for rotulo in seguimientos.BOTONES_DEL_RECORDATORIO:
+        assert rotulo in texto, f"el prompt no nombra el botón «{rotulo}»"
+
+
+def test_el_prompt_le_prohibe_cancelar_sin_confirmarlo_antes():
+    """Cancelar libera el cupo, borra el evento de Calendar y deja la hora libre para otro en
+    el mismo minuto. Un dedo que roza el botón en el bus no se puede deshacer.
+
+    Es la mitad que el código NO puede garantizar: «No puedo asistir» no tiene camino propio
+    en `runtime._entregar` justamente para que pase por aquí. Si esta instrucción se cae, el
+    botón vuelve a ser una cancelación de un toque, con el modelo decidiendo.
+    """
+    ctx = contexto(
+        ahora=datetime(2026, 9, 17, 9, 0, tzinfo=ZONA_BOGOTA),
+        ultimo_recordatorio_tipo="recordatorio_cita",
+        ultimo_recordatorio_en=datetime(2026, 9, 16, 18, 0, tzinfo=ZONA_BOGOTA),
+    )
+
+    texto = asyncio.run(agentes.daniela.get_system_prompt(RunContextWrapper(context=ctx)))
+
+    bloque = texto[texto.index("YA LE ESCRIBIMOS NOSOTROS") :]
+    assert "confírmaselo antes de cancelar" in bloque
 
 
 def test_un_recordatorio_viejo_deja_de_ser_antecedente():

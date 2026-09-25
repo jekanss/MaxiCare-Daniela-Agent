@@ -720,6 +720,31 @@ def instrucciones_daniela(ctx, agente) -> str:
             "«no puedo», se refiere a la cita de la que hablaba ese mensaje. Si lo que "
             "quiere es mover o cancelar, consulta sus citas antes de prometer nada."
         )
+        # Los rótulos, y solo para el recordatorio de cita: es el único tipo no-reactivación
+        # que existe hoy, pero este `elif` los atrapa a todos, y un tipo futuro con otros
+        # botones leería aquí una lista que no es la suya.
+        #
+        # Hasta el 25/09/2026 esta rama no los nombraba y la de arriba sí. Con dos botones
+        # daba igual --el corchete de `atencion._entrada_para_el_modelo` le dice cuál pulsó--;
+        # con tres, uno de ellos pide CANCELAR, y eso libera el cupo y borra el evento del
+        # doctor en el mismo minuto. Que Daniela confirme antes es la mitad que el código no
+        # puede garantizar: «No puedo asistir» no tiene camino propio en `runtime._entregar`
+        # justamente para que pase por aquí.
+        if recordatorio == seguimientos.TIPO_RECORDATORIO:
+            texto = (
+                f"{texto}\n"
+                f"Traía tres botones: «{seguimientos.BOTON_CONFIRMAR}», "
+                f"«{seguimientos.BOTON_CAMBIAR}» y «{seguimientos.BOTON_NO_ASISTIR}». "
+                f"El primero lo atiende el sistema solo, así que casi nunca te llegará; si "
+                "te llega es que su cita ya pasó o ya estaba cancelada, y entonces lo que "
+                "toca es mirar sus citas y no dar nada por hecho.\n"
+                f"Si pulsó «{seguimientos.BOTON_NO_ASISTIR}» --o te lo dice con sus "
+                "palabras--: cancelar libera su hora y otro paciente se la puede quedar en "
+                "minutos, así que confírmaselo antes de cancelar. Dile qué cita vas a "
+                "cancelar, con su día y su hora, y espera a que te conteste que sí. Y si en "
+                "realidad puede otro día, reprográmasela en vez de cancelar: así no pierde "
+                "su lugar."
+            )
 
     # El párrafo estático de más arriba dice "cuando el contexto dice que este paciente
     # pidió no ser contactado" -- y sin este bloque esa frase es inerte: `Runner.run` solo

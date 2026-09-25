@@ -95,7 +95,7 @@ class _Plantilla(NamedTuple):
     variable: str
     huecos: int
     header: str
-    botones: tuple[str, str]
+    botones: tuple[str, ...]
 
 
 #: Las cuatro, con el header y los botones EXACTOS de `docs/plantillas-meta-reactivacion.md`.
@@ -109,7 +109,9 @@ _PLANTILLAS: dict[str, _Plantilla] = {
         variable="MAXICARE_PLANTILLA_RECORDATORIO",
         huecos=4,
         header="Recordatorio de su cita",
-        botones=("Confirmar", "Necesito cambiarla"),
+        # TRES desde el 25/09/2026. El tercero es lo unico que un paciente que no puede
+        # venir podia hacer solo escribiendolo a mano.
+        botones=("Confirmar", "Necesito cambiarla", "No puedo asistir"),
     ),
     "sin_agendar": _Plantilla(
         tipo=seguimientos.TIPO_SIN_AGENDAR,
@@ -336,7 +338,8 @@ async def _enviar(
 
     print(f"  OK: Meta aceptó el envío. wamid={wamid}")
     print(f"  Mira el teléfono. Tiene que llegar con el header '{spec.header}'")
-    print(f"  y los dos botones '{spec.botones[0]}' y '{spec.botones[1]}'.")
+    rotulos = " y ".join(f"'{b}'" for b in spec.botones)
+    print(f"  y los {len(spec.botones)} botones {rotulos}.")
     print("  Cuatro cosas que SOLO se ven ahí y no en la consola de Meta: que las tildes")
     print("  lleguen bien, que el header aparezca, que los botones traigan ese rótulo exacto,")
     print("  y que el nombre esté en el hueco que le toca.")
