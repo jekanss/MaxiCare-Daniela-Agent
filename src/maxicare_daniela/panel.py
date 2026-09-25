@@ -1333,3 +1333,178 @@ def listar_leads(
             }
         )
     return lista
+
+
+# ------------------------------------------------------------------------------------------
+# Configuración operativa
+# ------------------------------------------------------------------------------------------
+
+#: Las trece perillas que el panel deja tocar, con su rango. El rango se comprueba aquí y
+#: otra vez en el modelo Pydantic de la ruta: el de arriba da un 422 legible al formulario,
+#: este protege a quien llame a la función desde un script.
+#:
+#: `tope_diario_reactivacion` y `max_reactivaciones_12m` admiten `0` a propósito: es la forma
+#: de frenar la reactivación desde la pantalla sin tocar el `.env` del VPS.
+CLAVES_EDITABLES: dict[str, tuple[int, int]] = {
+    "capacidad_por_hora": (1, 6),
+    "duracion_cita_minutos": (15, 180),
+    "hora_apertura": (0, 23),
+    "hora_cierre": (0, 23),
+    "hora_cierre_sabado": (0, 23),
+    "atiende_domingo": (0, 1),
+    "aviso_relevo_minutos": (5, 1440),
+    "cierre_relevo_minutos": (10, 1440),
+    "hora_recordatorio_vispera": (0, 23),
+    "horas_minimas_para_recordar": (1, 48),
+    "tope_diario_reactivacion": (0, 50),
+    "max_reactivaciones_12m": (0, 24),
+    "max_seguimientos_fallidos": (1, 10),
+}
+
+#: Las dos que se VEN y no se editan. El texto es lo que lee quien busca la perilla y no la
+#: encuentra: esconderlas haría que la buscara en vano.
+CLAVES_FIJAS: dict[str, str] = {
+    "telegram_topic_general": (
+        "La fija la migración 005. Un valor equivocado manda los escalamientos a un tema "
+        "que no existe, y Telegram acepta el envío sin error: nadie los lee y nadie se entera."
+    ),
+    "medicion_sin_resolver_desde": (
+        "La escribe la migración 029 una sola vez. Es desde cuándo cuentan los casos de «sin "
+        "resolver»; reescribirla borraría el sentido de «3 veces» en esa pantalla."
+    ),
+}
+
+
+def _entero_de_configuracion(clave: str, valor: Any) -> int:
+    """El valor que va a la tabla, o `ValueError`.
+
+    **Un booleano NO vale, ni siquiera para `atiende_domingo`.** `True` pasa cualquier
+    `isinstance(v, int)` --en Python un bool ES un int-- y acabaría en la columna como el
+    texto `'True'`, que `persistencia.leer_configuracion` descarta EN SILENCIO en su
+    `int(valor)`: la clínica se quedaría sin domingos sin un error en ningún log. La
+    migración 012 ya avisó de esto por escrito; aquí se hace cumplir.
+    """
+    if clave not in CLAVES_EDITABLES:
+        raise ValueError(f"'{clave}' no es una perilla que el panel pueda cambiar.")
+    if isinstance(valor, bool) or not isinstance(valor, int):
+        raise ValueError(f"'{clave}' tiene que ser un número entero, no {type(valor).__name__}.")
+    minimo, maximo = CLAVES_EDITABLES[clave]
+    if not minimo <= valor <= maximo:
+        raise ValueError(f"'{clave}' tiene que estar entre {minimo} y {maximo}.")
+    return valor
+
+
+def _comprobar_invariantes(resultante: dict[str, int]) -> None:
+    """Las tres reglas que solo se ven mirando dos perillas juntas.
+
+    `resultante` es lo que va a quedar en la tabla: lo que llega en la petición mezclado con
+    lo que ya había. Validar solo lo que llega deja pasar la combinación rota.
+    """
+    aviso = resultante.get("aviso_relevo_minutos")
+    cierre = resultante.get("cierre_relevo_minutos")
+    if aviso is not None and cierre is not None and aviso >= cierre:
+        raise ValueError(
+            f"El aviso del relevo ({aviso} min) tiene que ir ANTES del cierre ({cierre} min), "
+            "o se avisaría de un relevo que ya se cerró solo."
+        )
+
+    apertura = resultante.get("hora_apertura")
+    for clave, nombre in (("hora_cierre", "entre semana"), ("hora_cierre_sabado", "el sábado")):
+        hora_cierre = resultante.get(clave)
+        if apertura is not None and hora_cierre is not None and hora_cierre <= apertura:
+            raise ValueError(
+                f"La hora de cierre {nombre} ({hora_cierre}) tiene que ser posterior a la de "
+                f"apertura ({apertura})."
+            )
+
+
+def configuracion_editable(conn) -> dict[str, Any]:
+    """Lo que la pantalla de Configuración necesita para dibujarse.
+
+    Lee la tabla y no `CONFIGURACION_POR_DEFECTO`: los defaults son el respaldo de un arranque
+    en frío, no lo que está guardado.
+    """
+    valores: dict[str, int] = {}
+    descripciones: dict[str, str] = {}
+    actualizado: dict[str, str | None] = {}
+    fijas: list[dict[str, str]] = []
+    with conn.cursor() as cur:
+        cur.execute("SELECT clave, valor, descripcion, actualizado_en FROM configuracion")
+        for clave, valor, descripcion, cuando in cur.fetchall():
+            if clave in CLAVES_EDITABLES:
+                try:
+                    valores[clave] = int(valor)
+                except (TypeError, ValueError):
+                    # Una fila corrupta no puede dejar la pantalla en blanco: se cae al
+                    # default y el resto de las perillas se siguen pudiendo editar.
+                    valores[clave] = persistencia.CONFIGURACION_POR_DEFECTO.get(clave, 0)
+                descripciones[clave] = descripcion
+                actualizado[clave] = cuando.isoformat() if cuando else None
+            elif clave in CLAVES_FIJAS:
+                fijas.append({"clave": clave, "valor": valor, "por_que": CLAVES_FIJAS[clave]})
+    return {
+        "valores": valores,
+        "descripciones": descripciones,
+        "actualizado_en": actualizado,
+        "rangos": {c: list(r) for c, r in CLAVES_EDITABLES.items()},
+        "fijas": sorted(fijas, key=lambda f: f["clave"]),
+    }
+
+
+def guardar_configuracion(conn, cambios: dict[str, int], *, usuario: str) -> dict[str, Any]:
+    """Escribe las perillas que de verdad cambian, cada una con su fila de bitácora.
+
+    Tres cosas que no son obvias:
+
+    1. **UPDATE, nunca INSERT.** Las trece filas existen desde su migración y `descripcion` es
+       NOT NULL: un INSERT desde la pantalla tendría que inventarse una descripción. Si una
+       clave no está en la tabla es un error del despliegue, y se dice.
+    2. **`actualizado_en` se pone a mano.** El DEFAULT de la columna solo actúa en el INSERT.
+    3. **El valor va a la bitácora tal cual**, no traducido a palabras como los booleanos de
+       `cambiar_tratamiento`: aquí la columna guarda un entero en texto, y '0' es lo que de
+       verdad quedó escrito.
+
+    El `rollback` del camino de error no es decorativo: sin él, el `SELECT ... FOR UPDATE` de
+    más abajo deja la transacción --y sus bloqueos-- abiertos sobre una conexión que quien
+    llamó puede seguir usando.
+    """
+    limpios = {clave: _entero_de_configuracion(clave, valor) for clave, valor in cambios.items()}
+    if not limpios:
+        return configuracion_editable(conn)
+
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT clave, valor FROM configuracion WHERE clave = ANY(%s) FOR UPDATE",
+                (list(CLAVES_EDITABLES),),
+            )
+            actuales: dict[str, int] = {}
+            for clave, valor in cur.fetchall():
+                try:
+                    actuales[clave] = int(valor)
+                except (TypeError, ValueError):
+                    continue
+
+            faltan = [c for c in limpios if c not in actuales]
+            if faltan:
+                raise ValueError(
+                    f"La base no tiene la fila de {', '.join(sorted(faltan))}. Corre "
+                    "scripts/inicializar_base.py antes de tocar la configuración."
+                )
+
+            _comprobar_invariantes({**actuales, **limpios})
+
+            for clave, valor in limpios.items():
+                if actuales[clave] == valor:
+                    continue
+                cur.execute(
+                    "UPDATE configuracion SET valor = %s, actualizado_en = now() WHERE clave = %s",
+                    (str(valor), clave),
+                )
+                _anotar(cur, tabla="configuracion", clave=clave,
+                        anterior=str(actuales[clave]), nuevo=str(valor), usuario=usuario)
+    except Exception:
+        conn.rollback()
+        raise
+    conn.commit()
+    return configuracion_editable(conn)

@@ -3349,3 +3349,124 @@ def test_leads_lo_ve_recepcion_porque_no_escribe_nada():
         "/api/leads ganó un exigir_rol: si ahora escribe algo, revisa que la pantalla no "
         "siga prometiendo que solo informa"
     )
+
+
+# ==========================================================================================
+# Configuración operativa
+# ==========================================================================================
+
+
+def test_las_trece_claves_editables_y_ni_una_mas():
+    """Las dos fijas no pueden colarse en la lista editable: `telegram_topic_general` manda
+    los escalamientos a un tema que no existe, y `medicion_sin_resolver_desde` es la única
+    clave no entera de la tabla."""
+    assert len(panel.CLAVES_EDITABLES) == 13
+    assert "telegram_topic_general" not in panel.CLAVES_EDITABLES
+    assert "medicion_sin_resolver_desde" not in panel.CLAVES_EDITABLES
+    assert set(panel.CLAVES_FIJAS) == {"telegram_topic_general", "medicion_sin_resolver_desde"}
+
+
+def test_toda_clave_editable_existe_en_los_defaults():
+    """Una clave editable que no esté en la tabla no se puede escribir: `guardar_configuracion`
+    hace UPDATE, nunca INSERT."""
+    for clave in panel.CLAVES_EDITABLES:
+        assert clave in persistencia.CONFIGURACION_POR_DEFECTO, clave
+
+
+def test_el_aviso_del_relevo_no_puede_pasar_del_cierre():
+    """Se comprueba contra el estado RESULTANTE, no contra el que llega: subir solo el aviso
+    es válido campo a campo y deja avisando de un relevo que ya se cerró."""
+    with pytest.raises(ValueError, match="aviso"):
+        panel._comprobar_invariantes({"aviso_relevo_minutos": 200, "cierre_relevo_minutos": 180})
+
+
+def test_el_cierre_tiene_que_ir_despues_de_la_apertura():
+    with pytest.raises(ValueError, match="cierre"):
+        panel._comprobar_invariantes({"hora_apertura": 18, "hora_cierre": 17,
+                                      "hora_cierre_sabado": 15})
+
+
+def test_una_combinacion_sana_de_invariantes_no_se_queja():
+    panel._comprobar_invariantes({
+        "aviso_relevo_minutos": 120, "cierre_relevo_minutos": 180,
+        "hora_apertura": 8, "hora_cierre": 17, "hora_cierre_sabado": 15,
+    })
+
+
+@pytest.mark.neon
+def test_guardar_configuracion_escribe_valor_y_bitacora(conn):
+    antes = persistencia.leer_configuracion(conn)["capacidad_por_hora"]
+    nuevo = antes + 1
+    try:
+        panel.guardar_configuracion(conn, {"capacidad_por_hora": nuevo}, usuario="prueba")
+
+        assert persistencia.leer_configuracion(conn)["capacidad_por_hora"] == nuevo
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT valor_anterior, valor_nuevo, usuario FROM cambios_configuracion "
+                "WHERE tabla = 'configuracion' AND clave = 'capacidad_por_hora' "
+                "ORDER BY id DESC LIMIT 1"
+            )
+            assert cur.fetchone() == (str(antes), str(nuevo), "prueba")
+    finally:
+        panel.guardar_configuracion(conn, {"capacidad_por_hora": antes}, usuario="prueba")
+
+
+@pytest.mark.neon
+def test_guardar_lo_mismo_no_escribe_ni_una_fila(conn):
+    """Abrir la pantalla y pulsar Guardar sin tocar nada no puede dejar trece filas."""
+    actual = persistencia.leer_configuracion(conn)
+    cambios = {c: actual[c] for c in panel.CLAVES_EDITABLES if c in actual}
+    with conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM cambios_configuracion")
+        antes = cur.fetchone()[0]
+
+    panel.guardar_configuracion(conn, cambios, usuario="prueba")
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM cambios_configuracion")
+        assert cur.fetchone()[0] == antes
+
+
+@pytest.mark.neon
+def test_una_invariante_rota_no_deja_nada_a_medias(conn):
+    """La transacción entera o nada: si el aviso choca con el cierre, tampoco se guarda la
+    capacidad que venía en la misma petición."""
+    antes = persistencia.leer_configuracion(conn)
+    with pytest.raises(ValueError):
+        panel.guardar_configuracion(
+            conn,
+            {"capacidad_por_hora": antes["capacidad_por_hora"] + 1,
+             "aviso_relevo_minutos": 999},
+            usuario="prueba",
+        )
+    assert persistencia.leer_configuracion(conn) == antes
+
+
+@pytest.mark.neon
+def test_atiende_domingo_no_acepta_un_booleano(conn):
+    """Un `true` de JSON acabaría en la columna como 'True' y `leer_configuracion` lo
+    descartaría en silencio: la clínica sin domingos y sin un error en ningún log."""
+    with pytest.raises(ValueError, match="entero"):
+        panel.guardar_configuracion(conn, {"atiende_domingo": True}, usuario="prueba")
+
+
+def test_la_ruta_de_configuracion_rechaza_una_clave_desconocida():
+    """422 y no un 200 que la ignore: una perilla que se pierde en silencio es
+    indistinguible de una que se guardó."""
+    runtime.app.dependency_overrides[runtime.usuario_actual] = _como("admin")
+    try:
+        r = TestClient(runtime.app).patch("/api/configuracion", json={"capacidad_por_hroa": 3})
+        assert r.status_code == 422
+    finally:
+        runtime.app.dependency_overrides.clear()
+
+
+def test_solo_admin_cambia_la_configuracion():
+    for rol in ("doctor", "recepcion"):
+        runtime.app.dependency_overrides[runtime.usuario_actual] = _como(rol)
+        try:
+            r = TestClient(runtime.app).patch("/api/configuracion", json={"capacidad_por_hora": 3})
+            assert r.status_code == 403, rol
+        finally:
+            runtime.app.dependency_overrides.clear()
