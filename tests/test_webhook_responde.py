@@ -1314,3 +1314,183 @@ def test_el_barrido_de_arranque_NO_pasa_por_la_deduplicacion(monkeypatch):
         "de Meta y el paciente seguiría sin respuesta"
     )
     assert runtime._EN_VUELO == set()
+
+
+# ==========================================================================================
+# «Confirmar»: el único de los tres botones que no necesita a Daniela
+# ==========================================================================================
+#
+# Lo ejecuta el CÓDIGO por la lección del no negociable 14c: cuando algo tiene que pasar
+# siempre, pedírselo al prompt es pedir un favor. De los ocho archivos que este sistema
+# recibió en su vida, ninguno hizo escalar a Daniela sola pese a que se daba por hecho.
+
+
+def _boton(texto: str, wamid: str = "wamid.boton") -> dict:
+    """La forma real de un quick reply. Meta manda `type: "button"` y el rótulo en
+    `button.text`, no en `text.body` -- mirar solo ahí deja el turno mudo (no negociable 23)."""
+    return _sobre(
+        {
+            "from": "573001234567",
+            "id": wamid,
+            "timestamp": "1757700000",
+            "type": "button",
+            "button": {"payload": texto, "text": texto},
+        }
+    )
+
+
+CITA_DEL_RECORDATORIO = {
+    "id": "cita-7",
+    "nombre_completo": "Ana Gómez",
+    "telefono": "573001234567",
+    "tratamiento": "limpieza",
+    "inicio": datetime(2026, 9, 26, 10, 0, tzinfo=runtime.ZONA_BOGOTA),
+    "estado": "confirmada",
+    "confirmada_por_paciente_en": None,
+}
+
+
+class EspiaDeConfirmacion:
+    def __init__(self) -> None:
+        #: La prueba la pone a `None` para el caso «no hay cita que confirmar».
+        self.cita: dict | None = dict(CITA_DEL_RECORDATORIO)
+        self.confirmadas: list[str] = []
+        self.avisos: list = []
+        self.textos: list[tuple[str, str]] = []
+        self.respondidos: list[tuple[str, str]] = []
+
+
+@pytest.fixture
+def confirmacion(monkeypatch) -> EspiaDeConfirmacion:
+    espia = EspiaDeConfirmacion()
+
+    class ConexionFalsa:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+    def marcar(_conn, id_cita, *, cuando):
+        # Replica el `WHERE confirmada_por_paciente_en IS NULL`: la segunda vez no cambia
+        # nada, y eso es lo que impide el segundo aviso a tres doctores.
+        nueva = id_cita not in espia.confirmadas
+        espia.confirmadas.append(id_cita)
+        return nueva
+
+    class WhatsAppFalso:
+        async def enviar_texto(self, telefono, texto):
+            espia.textos.append((telefono, texto))
+            return "wamid.salida"
+
+    monkeypatch.setattr(runtime.persistencia, "conectar", lambda *_a, **_k: ConexionFalsa())
+    monkeypatch.setattr(
+        runtime.persistencia,
+        "cita_del_ultimo_recordatorio",
+        lambda _conn, telefono, *, ahora: espia.cita,
+    )
+    monkeypatch.setattr(runtime.persistencia, "marcar_cita_confirmada", marcar)
+    monkeypatch.setattr(
+        runtime.persistencia,
+        "marcar_respondido",
+        lambda _conn, wamid, *, wamid_respuesta: espia.respondidos.append(
+            (wamid, wamid_respuesta)
+        ),
+    )
+    monkeypatch.setattr(runtime, "_whatsapp", WhatsAppFalso())
+    monkeypatch.setattr(
+        runtime.aviso_citas,
+        "avisar_movimiento_en_segundo_plano",
+        lambda mov: espia.avisos.append(mov),
+    )
+    return espia
+
+
+def test_confirmar_marca_la_cita_avisa_y_NO_abre_turno(cliente, espias, confirmacion):
+    """Lo que este camino compra: el registro y el aviso están garantizados, y un botón a
+    secas no cuesta una corrida del modelo."""
+    r = _enviar(cliente, _boton("Confirmar", "wamid.confirmo"))
+
+    assert r.status_code == 200
+    assert espias.atendidos == [], "un «Confirmar» a secas pagó una corrida del modelo"
+    assert confirmacion.confirmadas == ["cita-7"]
+    (aviso,) = confirmacion.avisos
+    assert aviso.asunto == "Confirmó su cita"
+    assert aviso.nombre_paciente == "Ana Gómez"
+    assert aviso.cuando == "sábado 26 de septiembre a las 10:00 a. m."
+
+
+def test_confirmar_le_contesta_al_paciente_con_su_hora(cliente, espias, confirmacion):
+    """Sin turno no hay modelo, así que la frase la pone el código -- y lleva la hora dentro
+    para que el paciente vea que el sistema entendió de qué cita hablaba."""
+    _enviar(cliente, _boton("Confirmar", "wamid.confirmo.2"))
+
+    (destino, texto) = confirmacion.textos[0]
+    assert destino == "573001234567"
+    assert "sábado 26 de septiembre a las 10:00 a. m." in texto
+    assert texto.strip(), "un texto en blanco lo rechaza `enviar_texto` desde el 24/09/2026"
+
+
+def test_confirmar_se_anota_como_respondido(cliente, espias, confirmacion):
+    """O el panel pinta como desatendido a quien acaba de confirmar su cita.
+
+    `respondido_en` NULL y `fallo_respuesta` NULL es la firma de «entró y nadie lo procesó»
+    (no negociable 32): sin esto, el barrido del siguiente arranque le abre el turno que este
+    camino acaba de ahorrarse.
+    """
+    _enviar(cliente, _boton("Confirmar", "wamid.confirmo.3"))
+
+    assert confirmacion.respondidos == [("wamid.confirmo.3", "wamid.salida")]
+
+
+def test_confirmar_dos_veces_avisa_UNA_sola(cliente, espias, confirmacion):
+    """Meta reintenta los webhooks y un paciente impaciente pulsa dos veces. Tres WhatsApps
+    de plantilla a tres personas por la misma cita es justo el ruido que el no negociable 26
+    existe para evitar, entrando por otra puerta."""
+    _enviar(cliente, _boton("Confirmar", "wamid.confirmo.a"))
+    _enviar(cliente, _boton("Confirmar", "wamid.confirmo.b"))
+
+    assert len(confirmacion.avisos) == 1
+    assert len(confirmacion.textos) == 2, "al paciente se le contesta las dos veces"
+
+
+def test_un_rotulo_con_otra_grafia_sigue_hasta_daniela(cliente, espias, confirmacion):
+    """El riesgo número uno de todo esto: si Meta aprueba «Confirmar cita» y el código
+    compara «Confirmar», el botón se queda sin camino. Lo que NO puede pasar es que además
+    se trague el mensaje: sigue hasta Daniela, que al menos contestará algo."""
+    _enviar(cliente, _boton("Confirmar cita", "wamid.raro"))
+
+    assert confirmacion.confirmadas == []
+    assert [m.wamid for m in espias.atendidos] == ["wamid.raro"]
+
+
+def test_sin_cita_que_confirmar_el_mensaje_sigue_su_camino(cliente, espias, confirmacion):
+    """El botón pulsado tres días tarde, o sobre una cita ya cancelada. No se inventa nada."""
+    confirmacion.cita = None
+
+    _enviar(cliente, _boton("Confirmar", "wamid.tarde"))
+
+    assert confirmacion.avisos == []
+    assert [m.wamid for m in espias.atendidos] == ["wamid.tarde"]
+
+
+def test_NO_PUEDO_ASISTIR_si_abre_turno(cliente, espias, confirmacion):
+    """El otro botón NO tiene camino propio, y es deliberado.
+
+    Cancelar libera el cupo, borra el evento de Calendar y deja la hora disponible para otro
+    en el mismo minuto. Un dedo que roza el botón en el bus no se puede deshacer, así que lo
+    atiende Daniela y pregunta antes. Esta prueba es lo que impide que alguien lo «complete»
+    dándole un atajo como el de «Confirmar».
+    """
+    _enviar(cliente, _boton("No puedo asistir", "wamid.no.puedo"))
+
+    assert confirmacion.confirmadas == []
+    assert [m.wamid for m in espias.atendidos] == ["wamid.no.puedo"]
+
+
+def test_el_boton_llega_igual_al_doctor(cliente, espias, confirmacion):
+    """No atender no puede significar no registrar, igual que con la reacción: la fila se
+    escribe, la dedupe por `wamid` sigue protegiendo, y el hilo del doctor lo ve."""
+    _enviar(cliente, _boton("Confirmar", "wamid.registro"))
+
+    assert [m.wamid for m in espias.procesados] == ["wamid.registro"]

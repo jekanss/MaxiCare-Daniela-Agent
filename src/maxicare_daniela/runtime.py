@@ -58,6 +58,7 @@ from . import (
     analista,
     atencion,
     autenticacion,
+    aviso_citas,
     barrido,
     consumo,
     contratos,
@@ -1193,6 +1194,34 @@ async def _entregar(m: ingesta.MensajeEntrante) -> None:
         )
         return
 
+    # ------------------------------------------------------------------------------------
+    # «Confirmar»: el único de los tres botones del recordatorio que no necesita a Daniela
+    # ------------------------------------------------------------------------------------
+    #
+    # Va AQUÍ, en el último lugar de la lista con la que este módulo ya decide si un mensaje
+    # se atiende, y las dos posiciones importan:
+    #
+    #  - **Después del dedupe de Meta.** Confirmar dos veces es inocuo --lo impide el
+    #    `IS NULL` de `marcar_cita_confirmada`-- pero avisar al doctor tres veces no lo es, y
+    #    Meta reintenta los webhooks.
+    #  - **Después de la cuota.** Cada confirmación cuesta tres WhatsApps de plantilla, así
+    #    que el perímetro tiene que seguir siendo un techo real. Quien ya disparó la cuota
+    #    está haciendo algo que no es confirmar una cita.
+    #
+    # Lo ejecuta el CÓDIGO y no el modelo por la lección del no negociable 14c: cuando algo
+    # tiene que pasar siempre, pedírselo al prompt es pedir un favor. `m.tipo` sale del
+    # webhook de Meta y nunca del modelo, igual que `entrada_solo_de_botones`.
+    #
+    # Los otros dos botones NO tienen atajo, y es deliberado: «Necesito cambiarla» es una
+    # conversación entera, y «No puedo asistir» pide algo irreversible --liberar el cupo y
+    # borrar el evento de Calendar-- que Daniela confirma antes de hacer.
+    #
+    # Si no encuentra cita que confirmar no se traga el mensaje: devuelve `False` y el turno
+    # sigue su camino hasta Daniela, que es el lado barato de equivocarse.
+    if m.tipo == "button" and (m.texto or "").strip() == seguimientos.BOTON_CONFIRMAR:
+        if await _confirmar_la_cita_del_recordatorio(m):
+            return
+
     try:
         atendido = await atencion.atender(
             m,
@@ -1310,14 +1339,97 @@ async def _avisar_del_reseteo(telefono: str, texto: str, *, wamid: str | None = 
     if wamid is None or respuesta is None:
         return
     try:
-        await asyncio.to_thread(_marcar_reseteo_respondido, wamid, respuesta)
+        await asyncio.to_thread(_marcar_respondido_sin_turno, wamid, respuesta)
     except Exception:  # noqa: BLE001
         log.warning("no se pudo anotar la confirmación del reseteo de %s", wamid, exc_info=True)
 
 
-def _marcar_reseteo_respondido(wamid: str, wamid_respuesta: str) -> None:
+def _marcar_respondido_sin_turno(wamid: str, wamid_respuesta: str) -> None:
+    """Para los caminos que le contestan al paciente SIN pasar por `atencion.atender`.
+
+    Son dos: `/clearstate` y el botón «Confirmar». Los dos mandan un texto de su cuenta, así
+    que los dos tienen que dejar la fila anotada -- si no, quedan con `respondido_en` NULL y
+    `fallo_respuesta` NULL, que es la firma de «entró y nadie lo procesó» y hace que el
+    barrido del siguiente arranque los reatienda.
+    """
     with persistencia.conectar(config.database_url) as conn:
         persistencia.marcar_respondido(conn, wamid, wamid_respuesta=wamid_respuesta)
+
+
+async def _confirmar_la_cita_del_recordatorio(m: ingesta.MensajeEntrante) -> bool:
+    """Marca la cita, avisa al doctor y le contesta al paciente. Devuelve si cortó el turno.
+
+    **Nunca lanza.** Un fallo aquí no puede dejar al paciente sin respuesta: se registra, se
+    devuelve `False`, y el mensaje sigue hasta Daniela como cualquier otro. Es el mismo
+    criterio con el que `cuotas.revisar` falla abierto -- una defensa que tumba turnos es la
+    caída que pretendía evitar.
+    """
+    ahora = datetime.now(ZONA_BOGOTA)
+    try:
+        cita, es_nueva = await asyncio.to_thread(_confirmar_en_la_base, m.telefono, ahora)
+    except Exception:  # noqa: BLE001 -- ver el docstring
+        log.exception("no se pudo confirmar la cita de %s; sigue hasta Daniela", m.telefono)
+        return False
+
+    if cita is None:
+        log.info(
+            "%s pulsó «%s» y no tiene ninguna cita futura que confirmar; lo atiende Daniela",
+            m.telefono,
+            m.texto,
+        )
+        return False
+
+    # El aviso solo si la confirmación es NUEVA. El `IS NULL` del UPDATE es lo que impide que
+    # el segundo toque --o el reintento de Meta-- cueste tres WhatsApps más. Al paciente se le
+    # contesta igual las dos veces: él no tiene por qué saber que ya lo había pulsado.
+    if es_nueva:
+        aviso_citas.avisar_movimiento_en_segundo_plano(
+            aviso_citas.MovimientoDeAgenda(
+                asunto=aviso_citas.ASUNTO_CONFIRMADA,
+                nombre_paciente=cita["nombre_completo"],
+                telefono_paciente=cita["telefono"],
+                tratamiento=cita["tratamiento"],
+                cuando=aviso_citas.cuando_una_cita(cita["inicio"]),
+            )
+        )
+
+    # La frase la pone el código porque aquí no hay turno ni modelo. Lleva la hora dentro
+    # para que el paciente vea que el sistema entendió de qué cita hablaba -- un «gracias» a
+    # secas no distingue la cita confirmada de la del mes que viene. No pasa por
+    # `sin_hora_no_verificada`: ese guardrail mira lo que escribe el modelo, y esta hora sale
+    # de la base en esta misma llamada.
+    texto = (
+        f"¡Gracias por confirmar! Te esperamos el "
+        f"{aviso_citas.cuando_una_cita(cita['inicio'])}. "
+        "Si algo cambia, escríbenos por aquí."
+    )
+    try:
+        respuesta = await _whatsapp.enviar_texto(m.telefono, texto)
+    except Exception:  # noqa: BLE001 -- la cita ya quedó confirmada y el doctor ya lo sabe
+        log.exception(
+            "la cita de %s quedó confirmada; solo falló el acuse al paciente", m.telefono
+        )
+        return True
+
+    try:
+        await asyncio.to_thread(_marcar_respondido_sin_turno, m.wamid, respuesta)
+    except Exception:  # noqa: BLE001
+        log.warning("no se pudo anotar la confirmación de %s", m.wamid, exc_info=True)
+    return True
+
+
+def _confirmar_en_la_base(telefono: str, ahora: datetime) -> tuple[dict | None, bool]:
+    """La parte que habla con Neon, en un hilo. Devuelve la cita y si ESTA llamada la marcó.
+
+    Las dos consultas comparten conexión a propósito: son una sola decisión --de qué cita
+    habla el botón y si ya estaba confirmada-- y abrir dos conexiones contra Neon cuesta
+    600 ms cada una.
+    """
+    with persistencia.conectar(config.database_url) as conn:
+        cita = persistencia.cita_del_ultimo_recordatorio(conn, telefono, ahora=ahora)
+        if cita is None:
+            return None, False
+        return cita, persistencia.marcar_cita_confirmada(conn, cita["id"], cuando=ahora)
 
 
 # ==========================================================================================
