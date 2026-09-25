@@ -532,6 +532,34 @@ def test_una_reprogramacion_que_revienta_no_avisa_de_nada(monkeypatch):
     assert movimientos == []
 
 
+def test_reprogramar_a_la_MISMA_hora_no_avisa_de_nada(monkeypatch):
+    """Sin esto, repetir la misma reprogramación manda un segundo «Cambió su cita» idéntico.
+
+    `_cancelar_cita` ya tiene su guarda (`estado == 'cancelada'` sale antes del aviso) y esta
+    no la tenía. La clave de idempotencia de `tomar_cupo` --`ctx.clave("reprogramar", id_cita,
+    destino)`-- NO lleva componente de turno, así que repetir el mismo movimiento devuelve la
+    misma reserva, `aplicar` termina sin excepción, y el aviso salía otra vez.
+
+    Un aviso duplicado no engaña a nadie --dice la verdad-- pero es ruido en el canal por el
+    que la clínica se entera de lo que cambia, y ese canal tiene que poder leerse.
+    """
+    movimientos = _movimientos_espiados(monkeypatch)
+    pasos: list[int] = []
+
+    async def base_falsa(_ctx, trabajo):
+        pasos.append(1)
+        if len(pasos) == 1:
+            return ("ok", CITA_EN_LA_BASE, (6, 1), [])
+        return None
+
+    monkeypatch.setattr(h, "_con_base", base_falsa)
+
+    # El destino ES la hora que ya tiene la cita.
+    asyncio.run(h._reprogramar_cita(_ctx_de_la_cita(), "cita-1", INICIO.isoformat()))
+
+    assert movimientos == []
+
+
 def _aviso_que_revienta(monkeypatch):
     def revienta(_mov):
         raise RuntimeError("el aviso no se pudo ni preparar")

@@ -1462,20 +1462,28 @@ async def _reprogramar_cita(ctx: ContextoDaniela, id_cita: str, nuevo_inicio: st
     # `test_una_reprogramacion_que_revienta_no_avisa_de_nada`.
     # Mismo `try` que en `_cancelar_cita`, y con la misma consecuencia si falta: la cita ya
     # está movida en Neon y en Calendar, y el paciente acabaría yendo a la hora vieja.
-    try:
-        from . import aviso_citas
+    #
+    # Y la guarda de la hora, que es el equivalente al `estado == 'cancelada'` de
+    # `_cancelar_cita`: la clave de `tomar_cupo` --`ctx.clave("reprogramar", id_cita,
+    # destino)`-- NO lleva componente de turno, así que repetir el mismo movimiento devuelve
+    # la misma reserva y `aplicar` termina sin excepción. Sin esto salía un segundo «Cambió su
+    # cita» idéntico, y con las dos horas iguales dentro: «antes lunes 10:00 · ahora lunes
+    # 10:00», un aviso que dice que nada cambió.
+    if destino != cita["inicio"]:
+        try:
+            from . import aviso_citas
 
-        aviso_citas.avisar_movimiento_en_segundo_plano(
-            aviso_citas.MovimientoDeAgenda(
-                asunto=aviso_citas.ASUNTO_CAMBIADA,
-                nombre_paciente=cita["nombre_completo"],
-                telefono_paciente=cita["telefono"],
-                tratamiento=cita["tratamiento"],
-                cuando=aviso_citas.cuando_un_cambio(cita["inicio"], destino),
+            aviso_citas.avisar_movimiento_en_segundo_plano(
+                aviso_citas.MovimientoDeAgenda(
+                    asunto=aviso_citas.ASUNTO_CAMBIADA,
+                    nombre_paciente=cita["nombre_completo"],
+                    telefono_paciente=cita["telefono"],
+                    tratamiento=cita["tratamiento"],
+                    cuando=aviso_citas.cuando_un_cambio(cita["inicio"], destino),
+                )
             )
-        )
-    except Exception:  # noqa: BLE001 -- se pierde un aviso, nunca una reprogramación
-        log.exception("la cita %s quedó reprogramada; solo falló el aviso", id_cita)
+        except Exception:  # noqa: BLE001 -- se pierde un aviso, nunca una reprogramación
+            log.exception("la cita %s quedó reprogramada; solo falló el aviso", id_cita)
 
     # Las DOS horas, y la vieja no es un adorno: confirmar un cambio exige decir de dónde a
     # dónde, y `ctx.turno` se vacía en cada turno, así que la hora anterior --autorizada

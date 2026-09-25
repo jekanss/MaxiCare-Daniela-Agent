@@ -1358,6 +1358,11 @@ class EspiaDeConfirmacion:
         self.avisos: list = []
         self.textos: list[tuple[str, str]] = []
         self.respondidos: list[tuple[str, str]] = []
+        self.fallos: list[tuple[str, str]] = []
+        #: La pone la prueba del acuse que no sale: Meta caído, un timeout.
+        self.whatsapp_revienta = False
+        #: El doctor que tiene el relevo, o `None` si lo tiene Daniela.
+        self.tomada_por: str | None = None
 
 
 @pytest.fixture
@@ -1380,10 +1385,27 @@ def confirmacion(monkeypatch) -> EspiaDeConfirmacion:
 
     class WhatsAppFalso:
         async def enviar_texto(self, telefono, texto):
+            if espia.whatsapp_revienta:
+                raise RuntimeError("Meta no acepta el envío")
             espia.textos.append((telefono, texto))
             return "wamid.salida"
 
     monkeypatch.setattr(runtime.persistencia, "conectar", lambda *_a, **_k: ConexionFalsa())
+    monkeypatch.setattr(
+        runtime.persistencia,
+        "marcar_fallo_respuesta",
+        lambda _conn, wamid, *, motivo: espia.fallos.append((wamid, motivo)),
+    )
+    monkeypatch.setattr(
+        runtime.persistencia,
+        "conversacion_viva",
+        lambda _conn, telefono, **_k: ("conv-1", 3, True, 0),
+    )
+    monkeypatch.setattr(
+        runtime.persistencia,
+        "conversacion_tomada",
+        lambda _conn, _id_conversacion: espia.tomada_por,
+    )
     monkeypatch.setattr(
         runtime.persistencia,
         "cita_del_ultimo_recordatorio",
@@ -1494,3 +1516,50 @@ def test_el_boton_llega_igual_al_doctor(cliente, espias, confirmacion):
     _enviar(cliente, _boton("Confirmar", "wamid.registro"))
 
     assert [m.wamid for m in espias.procesados] == ["wamid.registro"]
+
+
+def test_si_el_acuse_no_sale_queda_ANOTADO_como_fallo(cliente, espias, confirmacion):
+    """Sin esto el mensaje se queda con `respondido_en` NULL **y** `fallo_respuesta` NULL, que
+    es la firma de «entró y nadie lo procesó» (no negociable 32) sobre un mensaje que sí se
+    procesó: la cita quedó confirmada y el doctor ya lo sabe.
+
+    Lo que costaba: el panel pinta como desatendido a quien confirmó, `/salud` lo cuenta en
+    `sin_responder`, y el barrido del siguiente arranque le abre un turno del modelo a un
+    botón cuya cita ya está confirmada. Es el mismo patrón que `atencion._anotar_resultado`.
+    """
+    confirmacion.whatsapp_revienta = True
+
+    _enviar(cliente, _boton("Confirmar", "wamid.sin.acuse"))
+
+    assert confirmacion.confirmadas == ["cita-7"], "la cita tiene que quedar confirmada igual"
+    assert len(confirmacion.avisos) == 1, "y el doctor tiene que enterarse igual"
+    assert confirmacion.respondidos == []
+    (wamid, motivo) = confirmacion.fallos[0]
+    assert wamid == "wamid.sin.acuse"
+    assert "confirmada" in motivo
+
+
+def test_durante_un_relevo_el_boton_NO_le_habla_al_paciente(cliente, espias, confirmacion):
+    """`tomada_por` puesto significa DANIELA CALLADA (no negociable 15), y este atajo no
+    pasaba por `atencion.atender`, que es donde vive esa comprobación.
+
+    El caso: un doctor tomó la conversación y está escribiéndole al paciente por el hilo de
+    Telegram. El paciente, en medio de esa charla, pulsa «Confirmar» sobre el recordatorio que
+    sigue visible más arriba en su chat. La cita se marca y el doctor se entera --las dos cosas
+    correctas-- pero un «¡Gracias por confirmar!» automático apareciendo en medio de una
+    conversación que está sosteniendo una persona es exactamente lo que el relevo existe para
+    impedir.
+
+    Se anota con un `fallo_respuesta` que empieza por `relevo:` **sin ser un fallo**, que es
+    la convención que el no negociable 15 ya fija para este caso.
+    """
+    confirmacion.tomada_por = "doctor-1"
+
+    _enviar(cliente, _boton("Confirmar", "wamid.en.relevo"))
+
+    assert confirmacion.confirmadas == ["cita-7"], "la cita se confirma igual"
+    assert len(confirmacion.avisos) == 1, "y el doctor se entera igual"
+    assert confirmacion.textos == [], "Daniela habló en medio de un relevo"
+    assert espias.atendidos == [], "y tampoco puede caer al turno normal"
+    (_wamid, motivo) = confirmacion.fallos[0]
+    assert motivo.startswith("relevo:")

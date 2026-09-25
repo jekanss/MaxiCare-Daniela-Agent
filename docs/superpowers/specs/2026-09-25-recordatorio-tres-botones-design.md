@@ -141,6 +141,28 @@ Sin esto el mensaje queda con `respondido_en` NULL y `fallo_respuesta` NULL, que
 de «entró y nadie lo procesó» (no negociable 32): el panel pintaría al paciente como
 desatendido y `contar_sin_responder` de `/salud` lo contaría, por haber confirmado su cita.
 
+**Y si el acuse NO sale, se anota `fallo_respuesta`.** Mismo patrón que
+`atencion._anotar_resultado`. Sin él, un Meta caído dejaba la fila con las dos columnas en
+NULL sobre un mensaje que sí se procesó —la cita confirmada, el doctor avisado— y el barrido
+del siguiente arranque le abría un turno del modelo a un botón cuya cita ya estaba
+confirmada.
+
+### Durante un relevo, la cita se confirma y Daniela no habla
+
+`conversaciones.tomada_por` puesto significa **Daniela callada** (no negociable 15), y esa
+comprobación vive dentro de `atencion.atender` — por donde este camino no pasa. Un paciente
+que pulsa «Confirmar» mientras un doctor le está escribiendo por el hilo recibiría un
+«¡Gracias por confirmar!» automático en medio de una conversación humana, que es exactamente
+lo que el relevo existe para impedir.
+
+Así que con relevo activo: **la cita se marca y el doctor recibe su aviso** —eso es lo que él
+quiere saber, y perder una confirmación porque alguien está hablando sería peor— y **no se le
+contesta al paciente**, dejando un `fallo_respuesta` que empieza por `relevo:` sin ser un
+fallo, que es la convención que el turno normal ya usa para este caso.
+
+El relevo se consulta **después** de marcar la cita: un doctor hablando no es razón para
+perder la confirmación, solo para no contestar.
+
 ## Decisión 2 — «No puedo asistir» NO cancela al primer toque
 
 Cancelar es irreversible por partida triple: libera el cupo de `reservas`, borra el evento de
@@ -173,6 +195,14 @@ medias, no hay aviso que mandar porque no se llega ahí.
 hereda tal cual la disciplina de `aviso_citas`: tarea de fondo propia, `try` por destinatario
 dentro del bucle, nunca propaga, y con la plantilla sin configurar **decide igual y no manda
 nada**, dejando en el log a quién se le habría escrito y con qué.
+
+Y las dos guardas que impiden avisar dos veces de lo mismo, una por tool:
+
+- `_cancelar_cita` sale antes por la suya (`estado == 'cancelada'`).
+- `_reprogramar_cita` **solo avisa si la hora cambió**. La clave de idempotencia de
+  `tomar_cupo` no lleva componente de turno, así que repetir el mismo movimiento devuelve la
+  misma reserva y termina sin excepción: sin esta guarda salía un segundo «Cambió su cita»
+  con las dos horas iguales dentro, un aviso que dice que nada cambió.
 
 ## Cambios en la base: migración 031
 

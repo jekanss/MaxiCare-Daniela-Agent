@@ -1366,7 +1366,9 @@ async def _confirmar_la_cita_del_recordatorio(m: ingesta.MensajeEntrante) -> boo
     """
     ahora = datetime.now(ZONA_BOGOTA)
     try:
-        cita, es_nueva = await asyncio.to_thread(_confirmar_en_la_base, m.telefono, ahora)
+        cita, es_nueva, tomada_por = await asyncio.to_thread(
+            _confirmar_en_la_base, m.telefono, ahora
+        )
     except Exception:  # noqa: BLE001 -- ver el docstring
         log.exception("no se pudo confirmar la cita de %s; sigue hasta Daniela", m.telefono)
         return False
@@ -1393,6 +1395,22 @@ async def _confirmar_la_cita_del_recordatorio(m: ingesta.MensajeEntrante) -> boo
             )
         )
 
+    # DANIELA CALLADA durante un relevo, y este camino no pasa por `atencion.atender`, que es
+    # donde vive esa comprobación (no negociable 15). La cita se marca y el doctor se entera
+    # --las dos cosas correctas, y de hecho es lo que él quiere saber-- pero un «¡Gracias por
+    # confirmar!» automático apareciendo en medio de una conversación que está sosteniendo una
+    # persona es exactamente lo que el relevo existe para impedir.
+    #
+    # Se anota con un `fallo_respuesta` que empieza por `relevo:` SIN ser un fallo, que es la
+    # convención que ya usa el turno normal para este mismo caso.
+    if tomada_por is not None:
+        log.info(
+            "%s confirmó su cita durante un relevo: se marcó y se avisó, sin contestarle",
+            m.telefono,
+        )
+        await _anotar_sin_contestar(m.wamid, f"relevo:{tomada_por}:confirmó con el botón")
+        return True
+
     # La frase la pone el código porque aquí no hay turno ni modelo. Lleva la hora dentro
     # para que el paciente vea que el sistema entendió de qué cita hablaba -- un «gracias» a
     # secas no distingue la cita confirmada de la del mes que viene. No pasa por
@@ -1409,6 +1427,13 @@ async def _confirmar_la_cita_del_recordatorio(m: ingesta.MensajeEntrante) -> boo
         log.exception(
             "la cita de %s quedó confirmada; solo falló el acuse al paciente", m.telefono
         )
+        # Y se ANOTA como fallo. Sin esto la fila queda con `respondido_en` NULL **y**
+        # `fallo_respuesta` NULL, que es la firma de «entró y nadie lo procesó» (no negociable
+        # 32) sobre un mensaje que sí se procesó: el panel pintaría como desatendido a quien
+        # confirmó su cita, `/salud` lo contaría, y el barrido del siguiente arranque le
+        # abriría un turno del modelo a un botón cuya cita ya está confirmada. Mismo patrón
+        # que `atencion._anotar_resultado`.
+        await _anotar_sin_contestar(m.wamid, "cita confirmada; no salió el acuse al paciente")
         return True
 
     try:
@@ -1418,18 +1443,45 @@ async def _confirmar_la_cita_del_recordatorio(m: ingesta.MensajeEntrante) -> boo
     return True
 
 
-def _confirmar_en_la_base(telefono: str, ahora: datetime) -> tuple[dict | None, bool]:
-    """La parte que habla con Neon, en un hilo. Devuelve la cita y si ESTA llamada la marcó.
+async def _anotar_sin_contestar(wamid: str, motivo: str) -> None:
+    """Deja el motivo por el que a este mensaje no se le contestó. No propaga.
 
-    Las dos consultas comparten conexión a propósito: son una sola decisión --de qué cita
-    habla el botón y si ya estaba confirmada-- y abrir dos conexiones contra Neon cuesta
-    600 ms cada una.
+    Los dos casos que la llaman ya hicieron lo importante --la cita está confirmada y el
+    doctor avisado--, así que un fallo al anotar no puede deshacer nada ni lanzar.
+    """
+    try:
+        await asyncio.to_thread(_marcar_fallo_sin_turno, wamid, motivo)
+    except Exception:  # noqa: BLE001
+        log.warning("no se pudo anotar el motivo de %s", wamid, exc_info=True)
+
+
+def _marcar_fallo_sin_turno(wamid: str, motivo: str) -> None:
+    with persistencia.conectar(config.database_url) as conn:
+        persistencia.marcar_fallo_respuesta(conn, wamid, motivo=motivo)
+
+
+def _confirmar_en_la_base(
+    telefono: str, ahora: datetime
+) -> tuple[dict | None, bool, str | None]:
+    """La parte que habla con Neon, en un hilo.
+
+    Devuelve la cita, si ESTA llamada la marcó, y qué doctor tiene el relevo (o `None`).
+
+    Las tres consultas comparten conexión a propósito: son una sola decisión --de qué cita
+    habla el botón, si ya estaba confirmada, y si Daniela puede hablar-- y abrir una conexión
+    contra Neon cuesta 600 ms medidos desde Bogotá.
+
+    El relevo se consulta DESPUÉS de marcar la cita, y el orden importa: un doctor hablando
+    con el paciente no es razón para perder su confirmación, solo para no contestarle.
     """
     with persistencia.conectar(config.database_url) as conn:
         cita = persistencia.cita_del_ultimo_recordatorio(conn, telefono, ahora=ahora)
         if cita is None:
-            return None, False
-        return cita, persistencia.marcar_cita_confirmada(conn, cita["id"], cuando=ahora)
+            return None, False, None
+        es_nueva = persistencia.marcar_cita_confirmada(conn, cita["id"], cuando=ahora)
+        viva = persistencia.conversacion_viva(conn, telefono)
+        tomada_por = persistencia.conversacion_tomada(conn, viva[0]) if viva else None
+        return cita, es_nueva, tomada_por
 
 
 # ==========================================================================================
