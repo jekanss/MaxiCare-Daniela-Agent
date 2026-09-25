@@ -51,7 +51,7 @@ from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request, R
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from starlette.exceptions import HTTPException as HTTPExceptionStarlette
 
 from . import (
@@ -3644,6 +3644,76 @@ async def _parar_analisis() -> None:
         await _tarea_de_analisis
     except (asyncio.CancelledError, Exception):  # noqa: BLE001
         pass
+
+
+# ------------------------------------------------------------------------------------------
+# Panel: configuración operativa
+# ------------------------------------------------------------------------------------------
+
+
+class CambioDeConfiguracion(BaseModel):
+    """Solo las perillas que cambian.
+
+    `extra='forbid'` es la mitad del contrato: sin él, una clave mal escrita en el formulario
+    se descartaría en silencio y el usuario vería un 200 sobre un cambio que no ocurrió.
+
+    Los rangos están aquí Y en `panel.CLAVES_EDITABLES`, a propósito: este da el 422 legible
+    al formulario antes de abrir una conexión, aquel protege a quien llame a la función desde
+    un script. Si algún día divergen, manda `panel`, que es quien escribe.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    capacidad_por_hora: int | None = Field(default=None, ge=1, le=6)
+    duracion_cita_minutos: int | None = Field(default=None, ge=15, le=180)
+    hora_apertura: int | None = Field(default=None, ge=0, le=23)
+    hora_cierre: int | None = Field(default=None, ge=0, le=23)
+    hora_cierre_sabado: int | None = Field(default=None, ge=0, le=23)
+    atiende_domingo: int | None = Field(default=None, ge=0, le=1)
+    aviso_relevo_minutos: int | None = Field(default=None, ge=5, le=1440)
+    cierre_relevo_minutos: int | None = Field(default=None, ge=10, le=1440)
+    hora_recordatorio_vispera: int | None = Field(default=None, ge=0, le=23)
+    horas_minimas_para_recordar: int | None = Field(default=None, ge=1, le=48)
+    tope_diario_reactivacion: int | None = Field(default=None, ge=0, le=50)
+    max_reactivaciones_12m: int | None = Field(default=None, ge=0, le=24)
+    max_seguimientos_fallidos: int | None = Field(default=None, ge=1, le=10)
+
+
+@app.get("/api/configuracion")
+async def api_configuracion(quien: dict = Depends(usuario_actual)) -> dict:
+    """Solo lectura para cualquier rol: recepción puede necesitar saber a qué hora cierra la
+    clínica según el sistema. `es_admin` es para que la pantalla enseñe los campos apagados a
+    quien no puede escribir -- el control de verdad está en el PATCH."""
+    with persistencia.conectar(config.database_url) as conn:
+        datos = panel.configuracion_editable(conn)
+    return {**datos, "es_admin": quien["rol"] == "admin"}
+
+
+@app.patch("/api/configuracion")
+async def api_guardar_configuracion(
+    cuerpo: CambioDeConfiguracion, quien: dict = Depends(exigir_rol("admin"))
+) -> dict:
+    """Guarda y RELEE los globals del proceso.
+
+    Sin el refresco final, `aviso_relevo_minutos` y `cierre_relevo_minutos` se quedarían en el
+    valor del arranque para los CUATRO sitios que beben de `_relevo_minutos` --el barrido de
+    relevos, las dos ramas del webhook de Telegram y la ruta de conversaciones-- mientras el
+    turno de Daniela ya usaría el nuevo. En desacuerdo consigo mismo, que es peor que viejo.
+
+    Es el mismo patrón que `_refrescar_vocabulario` tras tocar un tratamiento, y por la misma
+    razón: que no haga falta reiniciar nada.
+    """
+    cambios = {c: v for c, v in cuerpo.model_dump().items() if v is not None}
+    try:
+        with persistencia.conectar(config.database_url) as conn:
+            datos = panel.guardar_configuracion(conn, cambios, usuario=quien["usuario"])
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+    _cargar_configuracion_operativa()
+    if cambios:
+        log.info("%s cambió la configuración: %s", quien["usuario"], cambios)
+    return {**datos, "es_admin": True}
 
 
 # ------------------------------------------------------------------------------------------
