@@ -4660,6 +4660,28 @@ def anotar_consumo(
         raise
 
 
+def citas_sin_evento_calendar(conn, *, ahora: datetime) -> int:
+    """Citas futuras y vivas que nunca llegaron a Google Calendar.
+
+    Es el hecho medible que sustituye a la «última sincronización», que no existe: la
+    reconciliación corre bajo demanda --cuando alguien abre la Agenda o cuando un paciente
+    pregunta por su cita-- y no guarda la hora.
+
+    **Los DOS estados vivos, no solo `'confirmada'`.** Una reprogramada es una cita a la que
+    el paciente va a ir, y reprogramar es justo la operación que más veces toca Google:
+    dejarla fuera escondería el caso que más se rompe. `'cancelada'` sí queda fuera, porque
+    que no tenga evento es lo correcto.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT count(*) FROM citas "
+            "WHERE evento_calendar_id IS NULL AND inicio >= %s "
+            "AND estado IN ('confirmada', 'reprogramada')",
+            (ahora,),
+        )
+        return int(cur.fetchone()[0])
+
+
 def gasto_del_dia(conn) -> float:
     """Cuantos dolares lleva gastados el dia de HOY, en la zona del servidor.
 

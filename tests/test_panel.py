@@ -3470,3 +3470,41 @@ def test_solo_admin_cambia_la_configuracion():
             assert r.status_code == 403, rol
         finally:
             runtime.app.dependency_overrides.clear()
+
+
+@pytest.mark.neon
+def test_cuenta_las_citas_futuras_que_no_llegaron_a_google(conn):
+    """Una cita futura sin `evento_calendar_id` es una que el paciente tiene confirmada y la
+    clínica no ve en su agenda. Las canceladas no cuentan --que no tengan evento es lo
+    correcto-- y las reprogramadas SÍ, que es a lo que el paciente va a ir."""
+    ahora = datetime.now(ZONA_BOGOTA)
+    conversacion = persistencia.asegurar_conversacion(
+        conn, telefono="+570000000001", canal="web"
+    )
+    antes = persistencia.citas_sin_evento_calendar(conn, ahora=ahora)
+    creadas = []
+    try:
+        with conn.cursor() as cur:
+            for estado, cuando in (
+                ("confirmada", ahora + timedelta(days=1)),
+                ("reprogramada", ahora + timedelta(days=2)),
+                ("cancelada", ahora + timedelta(days=3)),
+                ("confirmada", ahora - timedelta(days=1)),
+            ):
+                cita = uuid.uuid4()
+                creadas.append(cita)
+                cur.execute(
+                    "INSERT INTO citas (id, conversacion_id, nombre_completo, telefono, "
+                    "tratamiento, inicio, duracion_minutos, evento_calendar_id, estado) "
+                    "VALUES (%s, %s, 'Sonda', '+570000000001', 'valoracion', %s, 60, NULL, %s)",
+                    (cita, conversacion, cuando, estado),
+                )
+            conn.commit()
+
+        # Solo la confirmada y la reprogramada, las dos futuras: +2.
+        assert persistencia.citas_sin_evento_calendar(conn, ahora=ahora) == antes + 2
+    finally:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM citas WHERE id = ANY(%s)", (creadas,))
+            cur.execute("DELETE FROM conversaciones WHERE id = %s", (conversacion,))
+        conn.commit()

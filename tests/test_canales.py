@@ -30,7 +30,7 @@ import asyncio
 import httpx
 import pytest
 
-from maxicare_daniela.canales import BASE_GRAPH, ErrorDeCanal, WhatsApp
+from maxicare_daniela.canales import BASE_GRAPH, ErrorDeCanal, Telegram, WhatsApp
 
 MEDIA_ID = "media-de-prueba"
 URL_TEMPORAL = "https://lookaside.fbsbx.com/whatsapp_business/attachments/algo"
@@ -372,3 +372,82 @@ def test_un_mensaje_normal_sigue_saliendo_igual(monkeypatch):
 
     assert len(peticiones) == 1
     assert f"{BASE_GRAPH}/123/messages" in str(peticiones[0].url)
+
+
+# ==========================================================================================
+# Las dos sondas de la pantalla de Estado del sistema
+# ==========================================================================================
+
+
+def _correr(corrutina):
+    return asyncio.run(corrutina)
+
+
+def test_las_plantillas_salen_vacias_si_no_se_puede_derivar_el_waba(monkeypatch):
+    """Mismo contrato que `calidad_del_numero`: vacío significa «no se sabe», nunca «no hay
+    ninguna». Una pantalla que pinte «0 plantillas» sobre un token caducado estaría diciendo
+    que Meta las rechazó todas."""
+
+    def sin_permisos(peticion: httpx.Request) -> httpx.Response:
+        return httpx.Response(400, json={"error": {"message": "token invalido"}})
+
+    monkeypatch.setattr(httpx, "AsyncClient", _cliente_con(httpx.MockTransport(sin_permisos)))
+
+    assert _correr(WhatsApp("token", "123").estado_de_plantillas()) == []
+
+
+def test_las_plantillas_se_juntan_de_todos_los_waba_del_token(monkeypatch):
+    """El proyecto guarda el `phone_number_id` y no el id de la cuenta de negocio, así que el
+    WABA sale del propio token. Un token con dos cuentas devuelve las de las dos."""
+
+    def responder(peticion: httpx.Request) -> httpx.Response:
+        url = str(peticion.url)
+        if "debug_token" in url:
+            return httpx.Response(200, json={"data": {"granular_scopes": [
+                {"scope": "whatsapp_business_management", "target_ids": ["waba1", "waba2"]},
+                {"scope": "pages_messaging", "target_ids": ["no-es-un-waba"]},
+            ]}})
+        cual = "waba1" if "/waba1/" in url else "waba2"
+        return httpx.Response(200, json={"data": [
+            {"name": f"plantilla_{cual}", "status": "APPROVED", "language": "es"},
+        ]})
+
+    monkeypatch.setattr(httpx, "AsyncClient", _cliente_con(httpx.MockTransport(responder)))
+
+    plantillas = _correr(WhatsApp("token", "123").estado_de_plantillas())
+
+    assert [p["nombre"] for p in plantillas] == ["plantilla_waba1", "plantilla_waba2"]
+    assert {p["estado"] for p in plantillas} == {"APPROVED"}
+
+
+def test_el_estado_del_webhook_trae_la_url_y_el_ultimo_error(monkeypatch):
+    """`last_error_message` es lo más útil cuando algo no funciona: un 403 ahí significa que
+    el secreto del `.env` no coincide con el que Telegram tiene registrado."""
+
+    def responder(peticion: httpx.Request) -> httpx.Response:
+        assert "getWebhookInfo" in str(peticion.url)
+        return httpx.Response(200, json={"ok": True, "result": {
+            "url": "https://daniela.maxicarecol.com/webhook/telegram",
+            "pending_update_count": 3,
+            "last_error_message": "Wrong response from the webhook: 403 Forbidden",
+        }})
+
+    monkeypatch.setattr(httpx, "AsyncClient", _cliente_con(httpx.MockTransport(responder)))
+
+    estado = _correr(Telegram("token", -1001).estado_del_webhook())
+
+    assert estado["url"].endswith("/webhook/telegram")
+    assert estado["pendientes"] == 3
+    assert "403" in estado["ultimo_error"]
+
+
+def test_el_estado_del_webhook_es_vacio_si_telegram_dice_que_no(monkeypatch):
+    """`{}` es «no se sabe». Devolver `{"url": ""}` diría que el webhook NO está puesto, que
+    es una afirmación distinta y apagaría el relevo a ojos de quien mira la pantalla."""
+
+    def responder(peticion: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"ok": False, "description": "Unauthorized"})
+
+    monkeypatch.setattr(httpx, "AsyncClient", _cliente_con(httpx.MockTransport(responder)))
+
+    assert _correr(Telegram("token", -1001).estado_del_webhook()) == {}

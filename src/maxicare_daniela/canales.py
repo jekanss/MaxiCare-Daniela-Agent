@@ -16,6 +16,7 @@ from __future__ import annotations
 import logging
 import mimetypes
 from dataclasses import dataclass
+from typing import Any
 
 import httpx
 
@@ -358,6 +359,73 @@ class WhatsApp:
         except Exception:  # noqa: BLE001 -- un fallo aquí no puede tumbar el barrido
             log.exception("no se pudo leer la calidad del número en Meta")
             return {}
+
+    async def _waba_ids(self) -> list[str]:
+        """Los WABA que este token puede tocar, sacados del propio token.
+
+        El proyecto guarda el `phone_number_id` pero no el id de la cuenta de negocio, y
+        listar plantillas cuelga de la cuenta y no del número. `debug_token` lo dice sin
+        pedir un secreto más: los `granular_scopes` de un token de usuario de sistema traen
+        los ids de destino.
+        """
+        try:
+            async with httpx.AsyncClient(timeout=TIMEOUT_NORMAL) as cliente:
+                r = await cliente.get(
+                    f"{BASE_GRAPH}/debug_token",
+                    params={"input_token": self._token, "access_token": self._token},
+                )
+            if r.status_code != 200:
+                return []
+            datos = r.json().get("data", {})
+        except Exception:  # noqa: BLE001
+            log.exception("no se pudo derivar el WABA del token")
+            return []
+        ids: list[str] = []
+        for permiso in datos.get("granular_scopes", []):
+            if permiso.get("scope") in (
+                "whatsapp_business_messaging",
+                "whatsapp_business_management",
+            ):
+                ids.extend(permiso.get("target_ids", []))
+        return list(dict.fromkeys(ids))
+
+    async def estado_de_plantillas(self) -> list[dict[str, str]]:
+        """Qué plantillas tiene Meta y en qué estado. Una LECTURA: no cuesta ni gasta cupo.
+
+        Vivía solo en `scripts/probar_plantilla.py`, con la firma escrita a mano. Una
+        plantilla rechazada es de las pocas cosas que se rompen sin ruido --el despachador
+        sigue encolando y Meta sigue negándose-- y hasta hoy solo se veía abriendo una
+        terminal.
+
+        Devuelve TODAS las del WABA y no solo las que el `.env` nombra, a propósito: la
+        pregunta que se hace delante de esta pantalla es «¿qué tengo aprobado?», y una lista
+        filtrada por lo que el `.env` ya sabe no puede contestarla.
+
+        Mismo contrato que `calidad_del_numero`: lista vacía si no se pudo averiguar. Quien
+        llama la trata como «no se sabe», nunca como «no hay ninguna».
+        """
+        plantillas: list[dict[str, str]] = []
+        for waba in await self._waba_ids():
+            try:
+                async with httpx.AsyncClient(timeout=TIMEOUT_NORMAL) as cliente:
+                    r = await cliente.get(
+                        f"{BASE_GRAPH}/{waba}/message_templates",
+                        params={"access_token": self._token, "limit": 50},
+                    )
+                    r.raise_for_status()
+                    datos = r.json()
+            except Exception:  # noqa: BLE001 -- una sonda no puede tumbar la pantalla
+                log.exception("no se pudieron leer las plantillas del WABA %s", waba)
+                continue
+            for p in datos.get("data", []):
+                plantillas.append(
+                    {
+                        "nombre": p.get("name", ""),
+                        "estado": p.get("status", ""),
+                        "idioma": p.get("language", ""),
+                    }
+                )
+        return plantillas
 
     async def subir_media(self, archivo: ArchivoDescargado) -> str:
         """Sube los bytes a Meta y devuelve el `media_id`. La primera mitad del relevo.
@@ -853,6 +921,38 @@ class Telegram:
             return "abierto"
         log.warning("no se pudo comprobar el tema %s: %s", tema_id, datos.get("description"))
         return None
+
+    async def estado_del_webhook(self) -> dict[str, Any]:
+        """Lo que Telegram dice del webhook del relevo.
+
+        `getWebhookInfo` es solo LECTURA y no rompe nada. Lo que rompe el `getUpdates` de
+        `scripts/obtener_chat_telegram.py` es llamar a `setWebhook`, y aquí no se llama.
+
+        **No dice si hay `secret_token`, y no hay forma de averiguarlo desde aquí.** Por eso
+        esta función no devuelve ningún campo que lo insinúe: quien pinte esto tiene que
+        enseñar por separado «la URL está puesta» --esto-- y «el secreto está configurado en
+        este proceso» --`config.telegram_webhook_secret`--. La única prueba de que el secreto
+        COINCIDE es que `ultimo_error` no traiga un 403.
+
+        Mismo contrato que las otras sondas de esta clase: `{}` si no se pudo averiguar.
+        """
+        try:
+            async with httpx.AsyncClient(timeout=TIMEOUT_NORMAL) as cliente:
+                r = await cliente.get(self._url("getWebhookInfo"))
+            datos = r.json()
+        except (httpx.HTTPError, ValueError):
+            log.warning("no se pudo consultar el webhook de Telegram")
+            return {}
+        if not datos.get("ok"):
+            log.warning("Telegram rechazó getWebhookInfo: %s", datos.get("description"))
+            return {}
+        info = datos.get("result", {})
+        return {
+            "url": info.get("url") or "",
+            "pendientes": int(info.get("pending_update_count", 0) or 0),
+            # Donde aparece un 403 si el secreto del `.env` no coincide con el registrado.
+            "ultimo_error": info.get("last_error_message") or None,
+        }
 
     async def aviso_sigue_puesto(self, mensaje_id: int, teclado: dict) -> bool | None:
         """¿Ese mensaje sigue en el grupo? `None` si no se pudo averiguar.
