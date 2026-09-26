@@ -88,6 +88,18 @@ respondía de verdad y dejaba la fila con `respondido_en` NULL: el barrido le ha
 Daniela el texto «/clearstate» como si fuera un paciente preguntando. Ahora
 `_avisar_del_reseteo` lo anota, y el barrido además los descarta por si acaso.
 
+- **Un archivo BORRADO no desaparece del VPS solo, y tumbó un despliegue el 26/09/2026.**
+  `tar -xzf` sobre un directorio que ya existe añade y sobrescribe, pero **nunca borra** lo
+  que el paquete ya no trae. Al fundir las pantallas de Estado y Configuración se eliminó
+  `web/src/pantallas/Pendiente.tsx`; el archivo siguió en el servidor desde el despliegue
+  anterior, y `tsc --noEmit` lo compiló dentro de Docker contra un tipo que ya no tenía el
+  campo `fase`. El build murió en el VPS con `TS2339` sobre un archivo que **en el
+  repositorio no existe**, y el `npm run build` local había pasado limpio minutos antes.
+  Ahora el script borra `src migraciones datos scripts web` antes de extraer, y valida el
+  paquete con `tar -tzf` **antes** de borrar nada: un `scp` truncado no puede dejar el
+  servidor sin código. Era la primera vez que el proyecto borraba un archivo de `web/`; en
+  `src/` el mismo defecto sería peor, porque un módulo muerto que nadie importa no rompe
+  ningún build y se queda ahí para siempre.
 - **`desplegar.sh` empaqueta a mano lo que el Dockerfile copia, y ya se desincronizó una
   vez.** El script es de la fase 2; el Dockerfile creció su etapa de Node en la fase 5 y el
   tar nunca creció con él, así que **todo lo construido entre la fase 2 y la 8 se quedó sin

@@ -95,6 +95,23 @@ echo "==> Desempaquetando y construyendo"
 ssh "$VPS" bash -s <<EOF
 set -euo pipefail
 cd '$DESTINO'
+
+# Un archivo BORRADO del repositorio no desaparece del VPS solo, y eso rompio un despliegue
+# el 26/09/2026. \`tar -xzf\` sobre un directorio que ya existe anade y sobrescribe, pero no
+# borra nunca lo que el paquete ya no trae: \`web/src/pantallas/Pendiente.tsx\` --eliminado al
+# fundir las pantallas de Estado y Configuracion-- sobrevivio del despliegue anterior, y
+# \`tsc --noEmit\` lo compilo dentro de Docker contra un tipo que ya no tiene el campo que el
+# usaba. El build murio en el VPS con un error de TypeScript sobre un archivo que en el
+# repositorio no existe, que es de las pistas mas desorientadoras posibles.
+#
+# Era la primera vez que este proyecto borraba un archivo de \`web/\`. En \`src/\` el mismo
+# defecto es peor y mas silencioso: un modulo viejo que nadie importa no rompe el build,
+# se queda ahi, y un \`from .x import y\` que vuelva a existir un dia resucita codigo muerto.
+#
+# Se valida el paquete ANTES de borrar nada: \`tar -tzf\` lee el archivo entero y falla si
+# vino truncado, asi que un scp a medias no deja el servidor sin codigo.
+tar -tzf paquete.tar.gz >/dev/null
+rm -rf src migraciones datos scripts web
 tar -xzf paquete.tar.gz && rm -f paquete.tar.gz
 
 # La red la crea el compose de /opt/sinpiloto. Si no existe, Traefik tampoco esta corriendo
