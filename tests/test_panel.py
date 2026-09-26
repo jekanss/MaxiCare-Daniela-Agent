@@ -3349,3 +3349,394 @@ def test_leads_lo_ve_recepcion_porque_no_escribe_nada():
         "/api/leads ganó un exigir_rol: si ahora escribe algo, revisa que la pantalla no "
         "siga prometiendo que solo informa"
     )
+
+
+# ==========================================================================================
+# Configuración operativa
+# ==========================================================================================
+
+
+def test_las_trece_claves_editables_y_ni_una_mas():
+    """Las dos fijas no pueden colarse en la lista editable: `telegram_topic_general` manda
+    los escalamientos a un tema que no existe, y `medicion_sin_resolver_desde` es la única
+    clave no entera de la tabla."""
+    assert len(panel.CLAVES_EDITABLES) == 13
+    assert "telegram_topic_general" not in panel.CLAVES_EDITABLES
+    assert "medicion_sin_resolver_desde" not in panel.CLAVES_EDITABLES
+    assert set(panel.CLAVES_FIJAS) == {"telegram_topic_general", "medicion_sin_resolver_desde"}
+
+
+def test_toda_clave_editable_existe_en_los_defaults():
+    """Una clave editable que no esté en la tabla no se puede escribir: `guardar_configuracion`
+    hace UPDATE, nunca INSERT."""
+    for clave in panel.CLAVES_EDITABLES:
+        assert clave in persistencia.CONFIGURACION_POR_DEFECTO, clave
+
+
+def test_el_aviso_del_relevo_no_puede_pasar_del_cierre():
+    """Se comprueba contra el estado RESULTANTE, no contra el que llega: subir solo el aviso
+    es válido campo a campo y deja avisando de un relevo que ya se cerró."""
+    with pytest.raises(ValueError, match="aviso"):
+        panel._comprobar_invariantes({"aviso_relevo_minutos": 200, "cierre_relevo_minutos": 180})
+
+
+def test_el_cierre_tiene_que_ir_despues_de_la_apertura():
+    with pytest.raises(ValueError, match="cierre"):
+        panel._comprobar_invariantes({"hora_apertura": 18, "hora_cierre": 17,
+                                      "hora_cierre_sabado": 15})
+
+
+def test_una_combinacion_sana_de_invariantes_no_se_queja():
+    panel._comprobar_invariantes({
+        "aviso_relevo_minutos": 120, "cierre_relevo_minutos": 180,
+        "hora_apertura": 8, "hora_cierre": 17, "hora_cierre_sabado": 15,
+    })
+
+
+@pytest.mark.neon
+def test_guardar_configuracion_escribe_valor_y_bitacora(conn):
+    antes = persistencia.leer_configuracion(conn)["capacidad_por_hora"]
+    nuevo = antes + 1
+    try:
+        panel.guardar_configuracion(conn, {"capacidad_por_hora": nuevo}, usuario="prueba")
+
+        assert persistencia.leer_configuracion(conn)["capacidad_por_hora"] == nuevo
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT valor_anterior, valor_nuevo, usuario FROM cambios_configuracion "
+                "WHERE tabla = 'configuracion' AND clave = 'capacidad_por_hora' "
+                "ORDER BY id DESC LIMIT 1"
+            )
+            assert cur.fetchone() == (str(antes), str(nuevo), "prueba")
+    finally:
+        panel.guardar_configuracion(conn, {"capacidad_por_hora": antes}, usuario="prueba")
+
+
+@pytest.mark.neon
+def test_guardar_lo_mismo_no_escribe_ni_una_fila(conn):
+    """Abrir la pantalla y pulsar Guardar sin tocar nada no puede dejar trece filas."""
+    actual = persistencia.leer_configuracion(conn)
+    cambios = {c: actual[c] for c in panel.CLAVES_EDITABLES if c in actual}
+    with conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM cambios_configuracion")
+        antes = cur.fetchone()[0]
+
+    panel.guardar_configuracion(conn, cambios, usuario="prueba")
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM cambios_configuracion")
+        assert cur.fetchone()[0] == antes
+
+
+@pytest.mark.neon
+def test_una_invariante_rota_no_deja_nada_a_medias(conn):
+    """La transacción entera o nada: si el aviso choca con el cierre, tampoco se guarda la
+    capacidad que venía en la misma petición."""
+    antes = persistencia.leer_configuracion(conn)
+    with pytest.raises(ValueError):
+        panel.guardar_configuracion(
+            conn,
+            {"capacidad_por_hora": antes["capacidad_por_hora"] + 1,
+             "aviso_relevo_minutos": 999},
+            usuario="prueba",
+        )
+    assert persistencia.leer_configuracion(conn) == antes
+
+
+@pytest.mark.neon
+def test_atiende_domingo_no_acepta_un_booleano(conn):
+    """Un `true` de JSON acabaría en la columna como 'True' y `leer_configuracion` lo
+    descartaría en silencio: la clínica sin domingos y sin un error en ningún log."""
+    with pytest.raises(ValueError, match="entero"):
+        panel.guardar_configuracion(conn, {"atiende_domingo": True}, usuario="prueba")
+
+
+def test_la_ruta_de_configuracion_rechaza_una_clave_desconocida():
+    """422 y no un 200 que la ignore: una perilla que se pierde en silencio es
+    indistinguible de una que se guardó."""
+    runtime.app.dependency_overrides[runtime.usuario_actual] = _como("admin")
+    try:
+        r = TestClient(runtime.app).patch("/api/configuracion", json={"capacidad_por_hroa": 3})
+        assert r.status_code == 422
+    finally:
+        runtime.app.dependency_overrides.clear()
+
+
+def test_solo_admin_cambia_la_configuracion():
+    for rol in ("doctor", "recepcion"):
+        runtime.app.dependency_overrides[runtime.usuario_actual] = _como(rol)
+        try:
+            r = TestClient(runtime.app).patch("/api/configuracion", json={"capacidad_por_hora": 3})
+            assert r.status_code == 403, rol
+        finally:
+            runtime.app.dependency_overrides.clear()
+
+
+@pytest.mark.neon
+def test_cuenta_las_citas_futuras_que_no_llegaron_a_google(conn):
+    """Una cita futura sin `evento_calendar_id` es una que el paciente tiene confirmada y la
+    clínica no ve en su agenda. Las canceladas no cuentan --que no tengan evento es lo
+    correcto-- y las reprogramadas SÍ, que es a lo que el paciente va a ir."""
+    ahora = datetime.now(ZONA_BOGOTA)
+    conversacion = persistencia.asegurar_conversacion(
+        conn, telefono="+570000000001", canal="web"
+    )
+    antes = persistencia.citas_sin_evento_calendar(conn, ahora=ahora)
+    creadas = []
+    try:
+        with conn.cursor() as cur:
+            for estado, cuando in (
+                ("confirmada", ahora + timedelta(days=1)),
+                ("reprogramada", ahora + timedelta(days=2)),
+                ("cancelada", ahora + timedelta(days=3)),
+                ("confirmada", ahora - timedelta(days=1)),
+            ):
+                cita = uuid.uuid4()
+                creadas.append(cita)
+                cur.execute(
+                    "INSERT INTO citas (id, conversacion_id, nombre_completo, telefono, "
+                    "tratamiento, inicio, duracion_minutos, evento_calendar_id, estado) "
+                    "VALUES (%s, %s, 'Sonda', '+570000000001', 'valoracion', %s, 60, NULL, %s)",
+                    (cita, conversacion, cuando, estado),
+                )
+            conn.commit()
+
+        # Solo la confirmada y la reprogramada, las dos futuras: +2.
+        assert persistencia.citas_sin_evento_calendar(conn, ahora=ahora) == antes + 2
+    finally:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM citas WHERE id = ANY(%s)", (creadas,))
+            cur.execute("DELETE FROM conversaciones WHERE id = %s", (conversacion,))
+        conn.commit()
+
+
+def test_el_estado_carga_aunque_neon_este_caido(monkeypatch):
+    """La pantalla que existe para saber qué está roto tiene que cargar justo cuando algo lo
+    está. 200 con `base.ok = False`, nunca un 500."""
+    def revienta(*a, **k):
+        raise RuntimeError("Neon no contesta")
+
+    monkeypatch.setattr(persistencia, "conectar", revienta)
+    runtime.app.dependency_overrides[runtime.usuario_actual] = _como("admin")
+    try:
+        r = TestClient(runtime.app).get("/api/estado")
+        assert r.status_code == 200
+        cuerpo = r.json()
+        assert cuerpo["base"]["ok"] is False
+        assert cuerpo["frenos"]["daniela_responde"] in (True, False)
+    finally:
+        runtime.app.dependency_overrides.clear()
+
+
+def test_el_gasto_no_viaja_a_quien_no_es_admin(monkeypatch):
+    """No se esconde en pantalla: no viaja. Un botón que desaparece no es un control."""
+    def revienta(*a, **k):
+        raise RuntimeError("Neon no contesta")
+
+    monkeypatch.setattr(persistencia, "conectar", revienta)
+    runtime.app.dependency_overrides[runtime.usuario_actual] = _como("recepcion")
+    try:
+        r = TestClient(runtime.app).get("/api/estado")
+        # El 200 va primero a propósito: sin él, esta prueba pasa contra una ruta que no
+        # existe --un 404 tampoco trae esas claves-- y no probaría nada.
+        assert r.status_code == 200
+        cuerpo = r.json()
+        assert "frenos" in cuerpo
+        assert "gasto" not in cuerpo
+        assert "entorno" not in cuerpo
+    finally:
+        runtime.app.dependency_overrides.clear()
+
+
+def test_una_sonda_caida_no_tumba_a_la_otra(monkeypatch):
+    """Que la Graph API no conteste no puede dejar sin respuesta lo de Telegram."""
+    async def revienta(*a, **k):
+        raise RuntimeError("Meta no contesta")
+
+    async def webhook(*a, **k):
+        return {"url": "https://x/webhook/telegram", "pendientes": 0, "ultimo_error": None}
+
+    monkeypatch.setattr(runtime._whatsapp, "estado_de_plantillas", revienta)
+    monkeypatch.setattr(runtime._telegram, "estado_del_webhook", webhook)
+    runtime.app.dependency_overrides[runtime.usuario_actual] = _como("admin")
+    try:
+        cuerpo = TestClient(runtime.app).post("/api/estado/sondas").json()
+        assert "error" in cuerpo["whatsapp"]
+        assert cuerpo["telegram"]["url"].endswith("/webhook/telegram")
+    finally:
+        runtime.app.dependency_overrides.clear()
+
+
+def test_las_sondas_son_solo_de_admin():
+    """Dos llamadas a terceros no las dispara cualquiera que abra la pantalla."""
+    runtime.app.dependency_overrides[runtime.usuario_actual] = _como("doctor")
+    try:
+        assert TestClient(runtime.app).post("/api/estado/sondas").status_code == 403
+    finally:
+        runtime.app.dependency_overrides.clear()
+
+
+@pytest.mark.neon
+def test_guardar_desde_la_ruta_REFRESCA_los_globals_del_proceso(esquema, monkeypatch):
+    """La mitad del diseño que no se ve en la base.
+
+    `aviso_relevo_minutos` y `cierre_relevo_minutos` los leen de `runtime._relevo_minutos`
+    --un global que solo se llena al arrancar-- el barrido de relevos, las dos ramas del
+    webhook de Telegram y la ruta de conversaciones del panel. Sin el refresco tras el commit,
+    el valor nuevo se guarda, la pantalla lo enseña, y el relevo sigue cerrando con el viejo
+    hasta el próximo despliegue. Sin un error en ningún log.
+
+    La conexión va monkeypatcheada al esquema `pruebas`: esta ruta usa `config.database_url`,
+    que desde el 21/09/2026 es la base que atiende pacientes.
+    """
+    monkeypatch.setattr(persistencia, "conectar", lambda url: psycopg.connect(esquema))
+    runtime.app.dependency_overrides[runtime.usuario_actual] = _como("admin")
+    try:
+        cliente = TestClient(runtime.app)
+        antes = cliente.get("/api/configuracion").json()["valores"]["cierre_relevo_minutos"]
+        nuevo = antes + 5
+        try:
+            r = cliente.patch("/api/configuracion", json={"cierre_relevo_minutos": nuevo})
+            assert r.status_code == 200
+            assert r.json()["valores"]["cierre_relevo_minutos"] == nuevo
+            assert runtime._relevo_minutos["cierre_relevo_minutos"] == nuevo
+        finally:
+            cliente.patch("/api/configuracion", json={"cierre_relevo_minutos": antes})
+    finally:
+        runtime.app.dependency_overrides.clear()
+
+
+@pytest.mark.neon
+def test_la_ruta_traduce_una_invariante_rota_a_un_400_legible(esquema, monkeypatch):
+    """No un 500: el usuario tiene que poder leer qué combinación no vale."""
+    monkeypatch.setattr(persistencia, "conectar", lambda url: psycopg.connect(esquema))
+    runtime.app.dependency_overrides[runtime.usuario_actual] = _como("admin")
+    try:
+        r = TestClient(runtime.app).patch(
+            "/api/configuracion", json={"aviso_relevo_minutos": 1400}
+        )
+        assert r.status_code == 400
+        assert "aviso" in r.json()["detalle"].lower()
+    finally:
+        runtime.app.dependency_overrides.clear()
+
+
+def test_el_estado_trae_TODAS_las_cifras_con_la_base_sana(monkeypatch):
+    """El camino FELIZ de `/api/estado`, que es el que faltaba.
+
+    Las otras dos pruebas de esta ruta monkeypatchean `conectar` para que REVIENTE, así que
+    ninguna llega a ejecutar las cinco consultas. Con eso, un `TypeError` en cualquiera de
+    ellas --por ejemplo llamar a una función con un argumento keyword-only en posicional--
+    lo traga el `except` de la ruta, la pantalla enseña «sin dato» en tres tarjetas, la
+    tarjeta de la base sigue diciendo «Responde» y la suite entera se queda en verde.
+
+    Es el mismo modo de fallo del no negociable 28: verde por el motivo equivocado.
+    """
+    monkeypatch.setattr(persistencia, "conectar", lambda url: _ConexionFalsaSinResolver())
+    monkeypatch.setattr(persistencia, "citas_sin_evento_calendar", lambda conn, *, ahora: 2)
+    monkeypatch.setattr(persistencia, "contar_sin_responder", lambda conn, **k: 1)
+    monkeypatch.setattr(persistencia, "contar_sin_entregar", lambda conn: 3)
+    monkeypatch.setattr(persistencia, "contar_relevos_abiertos", lambda conn: 4)
+    monkeypatch.setattr(
+        persistencia, "contar_seguimientos_por_despachar", lambda conn, *, ahora: 5
+    )
+    monkeypatch.setattr(persistencia, "contar_comprometidos_hoy", lambda conn, *, ahora: 6)
+    monkeypatch.setattr(persistencia, "gasto_del_dia", lambda conn: 1.25)
+
+    runtime.app.dependency_overrides[runtime.usuario_actual] = _como("admin")
+    try:
+        cuerpo = TestClient(runtime.app).get("/api/estado").json()
+    finally:
+        runtime.app.dependency_overrides.clear()
+
+    assert cuerpo["base"] == {"ok": True, "citas_sin_calendar": 2}
+    assert cuerpo["atencion"] == {"sin_responder": 1, "sin_entregar": 3, "relevos_abiertos": 4}
+    assert cuerpo["cola"] == {"recordatorios_por_despachar": 5, "reactivaciones_hoy": 6}
+    assert cuerpo["gasto"]["usd_hoy"] == 1.25
+
+
+def test_contar_la_cola_NO_usa_la_consulta_del_despachador(monkeypatch):
+    """`seguimientos_por_despachar` hace `FOR UPDATE ... SKIP LOCKED`: está escrita para
+    repartir trabajo, no para contarlo. Si la pantalla la llamara, abrirla tomaría el candado
+    del lote y el despachador saltaría esas filas en el ciclo que coincidiera --recordatorios
+    de citas reales retrasados por mirar un panel--."""
+    def no_deberia(*a, **k):
+        raise AssertionError("la pantalla de estado no puede tomar el candado del despachador")
+
+    monkeypatch.setattr(persistencia, "conectar", lambda url: _ConexionFalsaSinResolver())
+    monkeypatch.setattr(persistencia, "seguimientos_por_despachar", no_deberia)
+    monkeypatch.setattr(persistencia, "citas_sin_evento_calendar", lambda conn, *, ahora: 0)
+    monkeypatch.setattr(persistencia, "contar_sin_responder", lambda conn, **k: 0)
+    monkeypatch.setattr(persistencia, "contar_sin_entregar", lambda conn: 0)
+    monkeypatch.setattr(persistencia, "contar_relevos_abiertos", lambda conn: 0)
+    monkeypatch.setattr(
+        persistencia, "contar_seguimientos_por_despachar", lambda conn, *, ahora: 0
+    )
+    monkeypatch.setattr(persistencia, "contar_comprometidos_hoy", lambda conn, *, ahora: 0)
+    monkeypatch.setattr(persistencia, "gasto_del_dia", lambda conn: 0.0)
+
+    runtime.app.dependency_overrides[runtime.usuario_actual] = _como("admin")
+    try:
+        cuerpo = TestClient(runtime.app).get("/api/estado").json()
+    finally:
+        runtime.app.dependency_overrides.clear()
+
+    assert cuerpo["cola"]["recordatorios_por_despachar"] == 0
+
+
+def test_una_sonda_que_no_supo_NO_se_pinta_como_que_no_hay_webhook(monkeypatch):
+    """`estado_del_webhook` devuelve `{}` cuando no se pudo averiguar, y su docstring dice por
+    qué no devuelve `{"url": ""}`: eso afirmaría que el webhook NO está puesto, que es otra
+    cosa. La ruta tiene que conservar esa diferencia, porque quien lea «NO HAY» irá a correr
+    `configurar_webhook_telegram.py --url`, que rompe el `getUpdates` de
+    `obtener_chat_telegram.py`, mientras el problema real --un token revocado-- sigue ahí."""
+    async def no_supo(*a, **k):
+        return {}
+
+    async def plantillas(*a, **k):
+        return []
+
+    async def calidad(*a, **k):
+        return {}
+
+    monkeypatch.setattr(runtime._telegram, "estado_del_webhook", no_supo)
+    monkeypatch.setattr(runtime._whatsapp, "estado_de_plantillas", plantillas)
+    monkeypatch.setattr(runtime._whatsapp, "calidad_del_numero", calidad)
+    runtime.app.dependency_overrides[runtime.usuario_actual] = _como("admin")
+    try:
+        cuerpo = TestClient(runtime.app).post("/api/estado/sondas").json()
+    finally:
+        runtime.app.dependency_overrides.clear()
+
+    assert "error" in cuerpo["telegram"], cuerpo["telegram"]
+    assert "url" not in cuerpo["telegram"]
+
+
+@pytest.mark.neon
+def test_las_dos_consultas_nuevas_de_estado_corren_contra_Neon(conn):
+    """El SQL de `contar_seguimientos_por_despachar` y `contar_sin_entregar` no lo ejercita
+    ninguna prueba offline: las del camino feliz de `/api/estado` las doblan enteras. Un
+    nombre de columna equivocado devolvería un `UndefinedColumn` que el `except` de la ruta
+    se traga, y la pantalla diría «sin dato» para siempre con la base sana.
+
+    Esto no comprueba cuánto devuelven --eso depende de lo que haya-- sino que la consulta
+    existe, se parsea y el tipo es el prometido."""
+    ahora = datetime.now(ZONA_BOGOTA)
+    assert isinstance(persistencia.contar_seguimientos_por_despachar(conn, ahora=ahora), int)
+    assert isinstance(persistencia.contar_sin_entregar(conn), int)
+
+
+@pytest.mark.neon
+def test_contar_la_cola_no_deja_la_fila_bloqueada(conn):
+    """La diferencia con `seguimientos_por_despachar`, comprobada y no supuesta: si esta
+    función tomara el candado, el `FOR UPDATE NOWAIT` de otra conexión sobre las mismas filas
+    fallaría. Es lo que separa «contar» de «repartir trabajo»."""
+    ahora = datetime.now(ZONA_BOGOTA)
+    persistencia.contar_seguimientos_por_despachar(conn, ahora=ahora)
+    with psycopg.connect(_url_de_pruebas()) as otra, otra.cursor() as cur:
+        # Si la primera hubiera bloqueado, esto lanzaría `LockNotAvailable`.
+        cur.execute(
+            "SELECT id FROM seguimientos WHERE enviado_en IS NULL AND anulado_en IS NULL "
+            "FOR UPDATE NOWAIT"
+        )
+        cur.fetchall()

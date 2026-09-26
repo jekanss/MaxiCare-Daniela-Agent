@@ -8,7 +8,8 @@ import Pruebas from '@/pantallas/Pruebas'
 import Tratamientos from '@/pantallas/Tratamientos'
 import SinResolver from '@/pantallas/SinResolver'
 import Leads from '@/pantallas/Leads'
-import PantallaPendiente from '@/pantallas/Pendiente'
+import Configuracion from '@/pantallas/Configuracion'
+import EstadoDelSistema from '@/pantallas/EstadoDelSistema'
 import CambiarContrasena from '@/componentes/CambiarContrasena'
 import { CargandoPantalla } from '@/componentes/Estado'
 import { salir, sesionActual, type Sesion } from '@/api'
@@ -206,9 +207,16 @@ export default function App() {
             ir('conversaciones')
           }}
         />
-      ) : (
-        <PantallaPendiente seccion={seccion} />
-      )}
+      ) : activa === 'configuracion' ? (
+        // Escribe, y solo `admin` --lo comprueba `exigir_rol` en el PATCH, no el botón que
+        // esta pantalla esconde--. Como Tratamientos y Agenda, puede toparse con un 401 a
+        // mitad de la tarde y vuelve al ingreso por el mismo camino.
+        <Configuracion alCaducarSesion={() => setSesion(null)} />
+      ) : activa === 'estado' ? (
+        // De solo lectura salvo el botón de sondas, que no escribe en la base. Vuelve al
+        // ingreso por el mismo camino que las demás si la sesión caduca.
+        <EstadoDelSistema alCaducarSesion={() => setSesion(null)} />
+      ) : null}
       </div>
     </div>
   )

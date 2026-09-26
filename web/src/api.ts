@@ -623,3 +623,71 @@ export async function leerLeads(): Promise<{
 }> {
   return pedir<{ leads: Lead[]; desde: string; dias: number; usuario: string }>('/api/leads')
 }
+
+// ------------------------------------------------------------------------------------------
+// Configuración operativa
+// ------------------------------------------------------------------------------------------
+
+export type Configuracion = {
+  valores: Record<string, number>
+  descripciones: Record<string, string>
+  actualizado_en: Record<string, string | null>
+  /** `[minimo, maximo]` por clave. Sale del servidor para que la pantalla no tenga su propia
+   *  copia de los rangos: con dos copias, el `min` del campo y el 422 del servidor discrepan
+   *  el día que uno cambie. */
+  rangos: Record<string, [number, number]>
+  /** Las que se VEN y no se editan, con el porqué. Esconderlas haría que alguien buscara en
+   *  vano la perilla del tema General. */
+  fijas: { clave: string; valor: string; por_que: string }[]
+  es_admin: boolean
+}
+
+export async function leerConfiguracion(): Promise<Configuracion> {
+  return pedir<Configuracion>('/api/configuracion')
+}
+
+/** Solo las perillas que cambian. El servidor rechaza una clave desconocida con 422: una que
+ *  se perdiera en silencio sería indistinguible de una guardada. */
+export async function guardarConfiguracion(
+  cambios: Record<string, number>,
+): Promise<Configuracion> {
+  return pedir<Configuracion>('/api/configuracion', {
+    method: 'PATCH',
+    body: JSON.stringify(cambios),
+  })
+}
+
+// ------------------------------------------------------------------------------------------
+// Estado del sistema
+// ------------------------------------------------------------------------------------------
+
+export type EstadoDelSistema = {
+  base: { ok: boolean; citas_sin_calendar: number | null }
+  calendario: { clase: string }
+  frenos: { daniela_responde: boolean; leer_archivos: boolean; transcribir_audio: boolean }
+  atencion: { sin_responder?: number; sin_entregar?: number; relevos_abiertos?: number }
+  cola: { recordatorios_por_despachar?: number; reactivaciones_hoy?: number }
+  relevo: { secreto_del_webhook: boolean; tema_general: number | null }
+  evaluador: { fallos_en_la_ventana: number }
+  /** Solo si eres admin. No se esconde en pantalla: no viaja. */
+  gasto?: { usd_hoy: number | null; umbral_usd: number }
+  entorno?: { faltan: string[] }
+}
+
+export type SondasDelSistema = {
+  secreto_del_webhook: boolean
+  whatsapp:
+    | { plantillas: { nombre: string; estado: string; idioma: string }[]; calidad: Record<string, string> }
+    | { error: string }
+  telegram: { url: string; pendientes: number; ultimo_error: string | null } | { error: string }
+}
+
+export async function leerEstado(): Promise<EstadoDelSistema> {
+  return pedir<EstadoDelSistema>('/api/estado')
+}
+
+/** POST aunque no escriba nada: son dos llamadas a terceros y no pueden dispararse con un
+ *  prefetch del navegador ni quedar cacheadas. */
+export async function sondearEstado(): Promise<SondasDelSistema> {
+  return pedir<SondasDelSistema>('/api/estado/sondas', { method: 'POST' })
+}

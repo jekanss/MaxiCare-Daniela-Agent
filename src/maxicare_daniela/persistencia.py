@@ -4744,6 +4744,65 @@ def anotar_consumo(
         raise
 
 
+def contar_seguimientos_por_despachar(conn, *, ahora: datetime) -> int:
+    """Cuántas filas de la cola están vencidas y sin despachar.
+
+    **No es `seguimientos_por_despachar` con un `count` encima, y esa diferencia importa.**
+    Aquella hace `FOR UPDATE ... SKIP LOCKED` porque está escrita para REPARTIR trabajo entre
+    despachadores: llamarla desde una pantalla tomaría el candado de ese lote, y el
+    despachador de recordatorios saltaría esas filas en el ciclo que coincidiera --un
+    recordatorio de una cita real retrasado porque alguien abrió un panel--.
+
+    Tampoco lleva tope: un `limite` aquí recortaría el número en silencio, y el número ES la
+    respuesta.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT count(*) FROM seguimientos "
+            "WHERE enviado_en IS NULL AND anulado_en IS NULL AND fecha_objetivo <= %s",
+            (ahora,),
+        )
+        return int(cur.fetchone()[0])
+
+
+def contar_sin_entregar(conn) -> int:
+    """Mensajes que entraron y NO llegaron al doctor, con su fallo escrito.
+
+    La señal de alarma es `reenviado_en` NULL y no `telegram_message_id` NULL (no negociable
+    14): desde que un texto baja mudo al tema de su paciente, lo segundo es el estado NORMAL.
+    Es la misma consulta que `/salud` publica como `sin_entregar`, y está aquí para que las
+    dos la hagan igual.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT count(*) FROM mensajes_entrantes "
+            "WHERE reenviado_en IS NULL AND fallo IS NOT NULL"
+        )
+        return int(cur.fetchone()[0])
+
+
+def citas_sin_evento_calendar(conn, *, ahora: datetime) -> int:
+    """Citas futuras y vivas que nunca llegaron a Google Calendar.
+
+    Es el hecho medible que sustituye a la «última sincronización», que no existe: la
+    reconciliación corre bajo demanda --cuando alguien abre la Agenda o cuando un paciente
+    pregunta por su cita-- y no guarda la hora.
+
+    **Los DOS estados vivos, no solo `'confirmada'`.** Una reprogramada es una cita a la que
+    el paciente va a ir, y reprogramar es justo la operación que más veces toca Google:
+    dejarla fuera escondería el caso que más se rompe. `'cancelada'` sí queda fuera, porque
+    que no tenga evento es lo correcto.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT count(*) FROM citas "
+            "WHERE evento_calendar_id IS NULL AND inicio >= %s "
+            "AND estado IN ('confirmada', 'reprogramada')",
+            (ahora,),
+        )
+        return int(cur.fetchone()[0])
+
+
 def gasto_del_dia(conn) -> float:
     """Cuantos dolares lleva gastados el dia de HOY, en la zona del servidor.
 

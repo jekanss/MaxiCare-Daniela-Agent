@@ -51,7 +51,7 @@ from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request, R
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from starlette.exceptions import HTTPException as HTTPExceptionStarlette
 
 from . import (
@@ -1489,6 +1489,27 @@ def _confirmar_en_la_base(
 # ==========================================================================================
 
 
+def _variables_que_faltan() -> list[str]:
+    """Las seis credenciales sin las que el sistema no puede hacer su trabajo.
+
+    Extraída de `/salud` para que la pantalla de Estado del sistema use la MISMA lista:
+    escrita dos veces, el día que entre una séptima variable una de las dos se queda corta
+    y nadie lo ve. Lo que cambia entre las dos es quién puede leerla, no cuál es.
+    """
+    return [
+        nombre
+        for nombre, valor in (
+            ("MAXICARE_WHATSAPP_TOKEN", config.whatsapp_token),
+            ("MAXICARE_WHATSAPP_PHONE_NUMBER_ID", config.whatsapp_phone_number_id),
+            ("MAXICARE_WHATSAPP_VERIFY_TOKEN", config.whatsapp_verify_token),
+            ("WHATSAPP_APP_SECRET", config.whatsapp_app_secret),
+            ("MAXICARE_TELEGRAM_BOT_TOKEN", config.telegram_bot_token),
+            ("MAXICARE_TELEGRAM_CHAT_DOCTORES", config.telegram_chat_doctores),
+        )
+        if not valor
+    ]
+
+
 @app.get("/salud")
 async def salud() -> dict:
     """Dice qué falta, no solo si está vivo.
@@ -1547,18 +1568,7 @@ async def salud() -> dict:
         log.error("la base de datos no responde en /salud: %s", e)
         estado["base_de_datos"] = "FALLA"
 
-    faltantes = [
-        nombre
-        for nombre, valor in (
-            ("MAXICARE_WHATSAPP_TOKEN", config.whatsapp_token),
-            ("MAXICARE_WHATSAPP_PHONE_NUMBER_ID", config.whatsapp_phone_number_id),
-            ("MAXICARE_WHATSAPP_VERIFY_TOKEN", config.whatsapp_verify_token),
-            ("WHATSAPP_APP_SECRET", config.whatsapp_app_secret),
-            ("MAXICARE_TELEGRAM_BOT_TOKEN", config.telegram_bot_token),
-            ("MAXICARE_TELEGRAM_CHAT_DOCTORES", config.telegram_chat_doctores),
-        )
-        if not valor
-    ]
+    faltantes = _variables_que_faltan()
     # La LISTA va al log; hacia fuera sale solo si está completa o no.
     #
     # `{"faltan": ["WHATSAPP_APP_SECRET", ...]}` en un endpoint público es un mapa de
@@ -3808,6 +3818,197 @@ async def _parar_analisis() -> None:
         await _tarea_de_analisis
     except (asyncio.CancelledError, Exception):  # noqa: BLE001
         pass
+
+
+# ------------------------------------------------------------------------------------------
+# Panel: estado del sistema
+# ------------------------------------------------------------------------------------------
+
+
+@app.get("/api/estado")
+async def api_estado(quien: dict = Depends(usuario_actual)) -> dict:
+    """La salud operativa, con detalle. Exige sesión, y por eso puede decir lo que `/salud`
+    calla: aquella es pública --la consumen el healthcheck de Docker y `desplegar.sh`-- y
+    nunca revela ni el texto del error de base ni qué credenciales faltan.
+
+    **`/salud` no se toca y sigue siendo la que mira Docker.** Esta es otra cosa.
+
+    **El bloque de base va en su propio `try` y nada más depende de él.** Una pantalla de
+    diagnóstico que no carga cuando la base está caída no sirve para lo único que existe.
+
+    El gasto y las variables que faltan **no viajan** si quien pregunta no es admin: no se
+    esconden en pantalla, no se mandan. Un botón que desaparece no es un control de acceso.
+    """
+    es_admin = quien["rol"] == "admin"
+    ahora = datetime.now(ZONA_BOGOTA)
+    base: dict[str, Any] = {"ok": False, "citas_sin_calendar": None}
+    atencion_: dict[str, Any] = {}
+    cola: dict[str, Any] = {}
+    gasto: float | None = None
+    try:
+        with persistencia.conectar(config.database_url) as conn:
+            base = {
+                "ok": True,
+                "citas_sin_calendar": persistencia.citas_sin_evento_calendar(conn, ahora=ahora),
+            }
+            atencion_ = {
+                "sin_responder": persistencia.contar_sin_responder(
+                    conn, tipos_sin_turno=ingesta.TIPOS_QUE_NO_ABREN_TURNO
+                ),
+                # La señal de alarma del no negociable 14: entró y no llegó al doctor. La
+                # publica `/salud`, que es pública y la mira Docker; aquí la ve una persona.
+                "sin_entregar": persistencia.contar_sin_entregar(conn),
+                "relevos_abiertos": persistencia.contar_relevos_abiertos(conn),
+            }
+            cola = {
+                # `contar_seguimientos_por_despachar` y NO `seguimientos_por_despachar`: esa
+                # otra hace `FOR UPDATE ... SKIP LOCKED` para repartir trabajo, y contar con
+                # ella le robaría filas al despachador de recordatorios.
+                "recordatorios_por_despachar": persistencia.contar_seguimientos_por_despachar(
+                    conn, ahora=ahora
+                ),
+                "reactivaciones_hoy": persistencia.contar_comprometidos_hoy(conn, ahora=ahora),
+            }
+            if es_admin:
+                gasto = persistencia.gasto_del_dia(conn)
+    except Exception as e:  # noqa: BLE001 -- ver el docstring: cargar incompleta es el punto
+        log.warning("la pantalla de estado no pudo leer la base: %s", e)
+
+    salida: dict[str, Any] = {
+        "base": base,
+        "calendario": {"clase": type(_calendario).__name__},
+        "frenos": {
+            "daniela_responde": config.daniela_responde,
+            "leer_archivos": config.leer_archivos,
+            "transcribir_audio": config.transcribir_audio,
+        },
+        "atencion": atencion_,
+        "cola": cola,
+        "relevo": {
+            "secreto_del_webhook": bool(config.telegram_webhook_secret),
+            "tema_general": _tema_general,
+        },
+        "evaluador": {
+            # En memoria del proceso, no en la base: un despliegue lo borra. Quien lo pinte
+            # lo rotula «desde el último arranque», nunca «hoy», o el contador miente.
+            "fallos_en_la_ventana": guardrails.fallos_recientes_de_evaluador(),
+        },
+    }
+    if es_admin:
+        salida["gasto"] = {"usd_hoy": gasto, "umbral_usd": config.alerta_gasto_diario_usd}
+        salida["entorno"] = {"faltan": _variables_que_faltan()}
+    return salida
+
+
+@app.post("/api/estado/sondas")
+async def api_sondas_de_estado(quien: dict = Depends(exigir_rol("admin"))) -> dict:
+    """Pregunta en vivo a Meta y a Telegram. Lo que hoy solo se ve abriendo una terminal.
+
+    **Detrás de un botón y no en la carga de la pantalla.** Si esto corriera al abrir, una
+    caída de Meta dejaría sin cargar la pantalla que existe para saber qué está roto, que es
+    el fallo más tonto posible en una herramienta de diagnóstico.
+
+    **Es POST aunque no escriba en la base**: hace dos llamadas a terceros, así que no puede
+    dispararse con un prefetch del navegador ni quedar cacheada.
+
+    **Cada bloque en su propio `try`**: que la Graph API no conteste no puede dejar sin
+    respuesta lo de Telegram.
+
+    El secreto del webhook sale de `config` y NO de Telegram: `getWebhookInfo` no lo reporta,
+    así que son dos hechos distintos y se enseñan por separado.
+    """
+    salida: dict[str, Any] = {"secreto_del_webhook": bool(config.telegram_webhook_secret)}
+    try:
+        salida["whatsapp"] = {
+            "plantillas": await _whatsapp.estado_de_plantillas(),
+            "calidad": await _whatsapp.calidad_del_numero(),
+        }
+    except Exception as e:  # noqa: BLE001
+        salida["whatsapp"] = {"error": str(e)}
+    try:
+        # `{}` es «no se pudo averiguar», no «no hay webhook». Pasarlo tal cual dejaba a la
+        # pantalla pintando «URL registrada: — NO HAY —» sobre un token revocado, y quien lo
+        # lea corre `configurar_webhook_telegram.py --url` --que rompe el `getUpdates` de
+        # `obtener_chat_telegram.py`-- mientras el problema de verdad sigue invisible. La
+        # diferencia la conserva el servidor y no el front, que es donde ya está la frase.
+        webhook = await _telegram.estado_del_webhook()
+        salida["telegram"] = webhook or {
+            "error": "Telegram no contestó o rechazó la consulta. Revisa el token del bot."
+        }
+    except Exception as e:  # noqa: BLE001
+        salida["telegram"] = {"error": str(e)}
+    log.info("%s sondeó el estado de Meta y Telegram", quien["usuario"])
+    return salida
+
+
+# ------------------------------------------------------------------------------------------
+# Panel: configuración operativa
+# ------------------------------------------------------------------------------------------
+
+
+class CambioDeConfiguracion(BaseModel):
+    """Solo las perillas que cambian.
+
+    `extra='forbid'` es la mitad del contrato: sin él, una clave mal escrita en el formulario
+    se descartaría en silencio y el usuario vería un 200 sobre un cambio que no ocurrió.
+
+    Los rangos están aquí Y en `panel.CLAVES_EDITABLES`, a propósito: este da el 422 legible
+    al formulario antes de abrir una conexión, aquel protege a quien llame a la función desde
+    un script. Si algún día divergen, manda `panel`, que es quien escribe.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    capacidad_por_hora: int | None = Field(default=None, ge=1, le=6)
+    duracion_cita_minutos: int | None = Field(default=None, ge=15, le=180)
+    hora_apertura: int | None = Field(default=None, ge=0, le=23)
+    hora_cierre: int | None = Field(default=None, ge=0, le=23)
+    hora_cierre_sabado: int | None = Field(default=None, ge=0, le=23)
+    atiende_domingo: int | None = Field(default=None, ge=0, le=1)
+    aviso_relevo_minutos: int | None = Field(default=None, ge=5, le=1440)
+    cierre_relevo_minutos: int | None = Field(default=None, ge=10, le=1440)
+    hora_recordatorio_vispera: int | None = Field(default=None, ge=0, le=23)
+    horas_minimas_para_recordar: int | None = Field(default=None, ge=1, le=48)
+    tope_diario_reactivacion: int | None = Field(default=None, ge=0, le=50)
+    max_reactivaciones_12m: int | None = Field(default=None, ge=0, le=24)
+    max_seguimientos_fallidos: int | None = Field(default=None, ge=1, le=10)
+
+
+@app.get("/api/configuracion")
+async def api_configuracion(quien: dict = Depends(usuario_actual)) -> dict:
+    """Solo lectura para cualquier rol: recepción puede necesitar saber a qué hora cierra la
+    clínica según el sistema. `es_admin` es para que la pantalla enseñe los campos apagados a
+    quien no puede escribir -- el control de verdad está en el PATCH."""
+    with persistencia.conectar(config.database_url) as conn:
+        datos = panel.configuracion_editable(conn)
+    return {**datos, "es_admin": quien["rol"] == "admin"}
+
+
+@app.patch("/api/configuracion")
+async def api_guardar_configuracion(
+    cuerpo: CambioDeConfiguracion, quien: dict = Depends(exigir_rol("admin"))
+) -> dict:
+    """Guarda y RELEE los globals del proceso.
+
+    Sin el refresco final, `aviso_relevo_minutos` y `cierre_relevo_minutos` se quedarían en el
+    valor del arranque para los CUATRO sitios que beben de `_relevo_minutos` --el barrido de
+    relevos, las dos ramas del webhook de Telegram y la ruta de conversaciones-- mientras el
+    turno de Daniela ya usaría el nuevo. En desacuerdo consigo mismo, que es peor que viejo.
+
+    Es el mismo patrón que `_refrescar_vocabulario` tras tocar un tratamiento, y por la misma
+    razón: que no haga falta reiniciar nada.
+    """
+    cambios = {c: v for c, v in cuerpo.model_dump().items() if v is not None}
+    try:
+        with persistencia.conectar(config.database_url) as conn:
+            datos = panel.guardar_configuracion(conn, cambios, usuario=quien["usuario"])
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+    _cargar_configuracion_operativa()
+    if cambios:
+        log.info("%s cambió la configuración: %s", quien["usuario"], cambios)
+    return {**datos, "es_admin": True}
 
 
 # ------------------------------------------------------------------------------------------
