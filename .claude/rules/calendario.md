@@ -81,6 +81,75 @@ El `CLAUDE.md` raíz lleva la regla en una línea. Aquí está el porqué.
 - **No hay caché de bloqueos, y es deliberado.** Cada consulta le pregunta a Google, que es
   lo que hace que borrar el evento libere la hora sin sincronizar nada. Los pasos 6b y 6c de
   `probar_calendario.py` existen para cazar a quien meta uno «para bajar la latencia».
+- **El socket se muere solo, y hasta el 2/10/2026 no había ni un reintento.** El servicio se
+  construye UNA vez al arrancar (`runtime._construir_el_calendario`) y `httplib2` guarda la
+  conexión en keep-alive. Tras unos minutos sin tráfico Google la cierra por su lado y la
+  primera llamada siguiente muere al escribir. Medido con una paciente delante, conversación
+  `156ab45c` (+57 319 661 5042):
+
+  ```
+  17:39:17  consultar_disponibilidad  -> OK, se le ofrecen 12:00, 1:00 y 2:00 del sábado
+  17:44:xx  «Este sabado a las dos esta bien»
+            crear_cita -> _bloqueo_que_tapa -> bloqueos() -> BrokenPipeError
+  ```
+
+  Cinco minutos de silencio bastaron. No había `num_retries` en ningún `.execute()` ni nada
+  que rehiciera el cliente, así que un hipo de red de milisegundos se convirtió en el turno
+  entero perdido. Cuatro cosas de `_con_un_reintento` que no se pueden mover:
+
+  - **Rehace el servicio, no solo repite la llamada.** Comprobado contra la httplib2
+    instalada (0.32.0): su `_conn_request` solo reintenta con `ENETUNREACH` y
+    `EADDRNOTAVAIL`, y para cualquier otro `socket.error` hace `raise` **sin cerrar la
+    conexión**. El socket muerto se queda en su caché con `conn.sock` puesto, así que el
+    `if conn.sock is None: conn.connect()` del intento siguiente no reconecta. Reintentar sin
+    rehacer es gastar dos veces para fallar igual, y la prueba que lo fija cuenta cuántos
+    servicios se construyeron.
+  - **`events.insert` se queda FUERA.** Es la única llamada no idempotente del módulo y la
+    API no acepta clave de idempotencia: si la petición sí llegó y lo que se perdió fue la
+    respuesta, el reintento crea un segundo evento — dos citas sobre la misma hora en el
+    calendario del doctor, puestas por el sistema que existe para que eso no pase. Tampoco le
+    hace falta: `_bloqueo_que_tapa` acaba de leer por ese mismo socket microsegundos antes.
+    El resto sí reintenta porque es idempotente: un `get` y un `list` son lecturas, un `patch`
+    con cuerpo fijo deja el evento igual, y un `delete` repetido es el 404 que `YA_NO_EXISTE`
+    ya cuenta como éxito.
+  - **Un timeout NO está en `SOCKET_MUERTO`, y es la ausencia que importa.** Un
+    `BrokenPipeError` dice que la petición no llegó; un timeout no dice nada, así que repetir
+    una escritura tras uno puede duplicarla. Tampoco entran un 500 ni una credencial
+    caducada: no se arreglan rehaciendo el socket y reintentarlos gasta el minuto del turno.
+  - **No traduce nada.** Cada método conserva su propio `except`, y de eso cuelgan las dos
+    conductas que leen un código de estado: el 404 que `obtener_evento` lee como «lo borraron»
+    —lo que hace que `_sincronizar_con_calendar` se entere— y el mismo 404 que
+    `eliminar_evento` cuenta como éxito. Un reintento que lo tradujera todo a
+    `ErrorDeCalendario` se llevaría las dos por delante sin dejar nada rojo.
+
+  Lo que esto NO arregla: Calendar caído de verdad. Para eso está el punto siguiente.
+- **Si el sondeo previo no se puede hacer, no se agenda — pero el turno ya no muere.**
+  `_bloqueo_que_tapa` corre ANTES de tomar el cupo, y `crear_cita` es la única tool con
+  `failure_error_function=None`. Las dos cosas juntas significaban que un fallo ahí mataba la
+  corrida: `UserError`, `conversacion.responder` dejándolo subir a propósito, mensaje seguro
+  al paciente y un `[user]` sin respuesta en `agent_messages` (el trinquete del no negociable
+  28). Y el `failure_error_function=None` está justificado por escrito para otra cosa —«cuando
+  el cupo **ya está tomado**»—, que aquí todavía no ha pasado: no hay nada apartado, nada que
+  liberar y ninguna cita a medias.
+
+  Hoy devuelve un texto del tipo 1, y lo que lo hace seguro son tres cerrojos, no uno:
+
+  | | Qué sostiene |
+  |---|---|
+  | el texto | «la cita NO quedó agendada: no existe. NO le confirmes esta hora ni ninguna otra» |
+  | `sin_hora_no_verificada` | el camino no autoriza NI UNA hora, así que el guardrail bloquea la confirmación (no negociable 13) |
+  | `calendario_sin_verificar` | `conversacion.responder` escala por CÓDIGO, no porque el texto lo pida |
+
+  **El segundo es el que no se puede aflojar.** Si alguien le añade un `horas_autorizadas |=`
+  «para que Daniela pueda explicarse mejor», el texto pasa a ser lo único que separa al
+  paciente de una cita que no existe. Y el tercero existe porque el segundo tiene un hueco
+  conocido: si `consultar_disponibilidad` ya autorizó esa hora antes en el MISMO turno, el
+  guardrail no distingue «te ofrezco las 2» de «te agendé a las 2». Ahí lo que queda es que un
+  humano esté mirando, y eso no puede depender de que el modelo obedezca una frase.
+
+  `reprogramar_cita` no lleva nada de esto: tiene su propia `failure_error_function`, así que
+  un fallo ahí ya llegaba al modelo como texto («NO le confirmes ningún horario nuevo: la cita
+  sigue como estaba») sin matar la corrida.
 - **Para una cita que YA existe, manda Calendar.** Es donde está el doctor que va a atender,
   y mover la cita arrastrándola con el ratón es el gesto natural — nadie va a abrir el panel
   después para repetirlo. El cliente lo hizo el 14/09/2026, movió su cita al día siguiente, y

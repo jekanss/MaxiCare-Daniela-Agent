@@ -37,6 +37,16 @@ ya está tomado y Calendar se cae, la corrida debe MORIR. Si el modelo recibiera
 podría decidir confirmarle la cita al paciente de todos modos, y el paciente llegaría a una
 clínica donde nadie lo espera.
 
+**Y esa frase se lee como está escrita: «cuando el cupo YA está tomado».** El sondeo previo
+--`_bloqueo_que_tapa`, que corre antes de apartar nada-- lleva su propio `except` desde el
+2/10/2026 y devuelve un texto de los del tipo 1. Ahí no hay cupo que liberar ni cita a medias
+que el modelo pudiera confirmar por error, así que dejar subir el error no protegía nada y
+costaba el turno entero: el 1/10/2026 un socket rancio de Google le costó a una paciente
+quince horas de silencio por una hora que ya había elegido. El texto no autoriza ninguna hora
+--`sin_hora_no_verificada` sigue siendo el segundo cerrojo-- y el turno queda marcado para
+escalar por código (`DatosDelTurno.calendario_sin_verificar`). Lo que sigue muriendo es todo
+lo que pase DESPUÉS de `tomar_cupo`.
+
 ------------------------------------------------------------------------------------------
 Cómo se prueban
 ------------------------------------------------------------------------------------------
@@ -286,6 +296,30 @@ def _texto_bloqueado(inicio: datetime, bloqueo: Bloqueo) -> str:
         f"Esa hora ({_formatear_hora(inicio)}) no está disponible: el doctor la tiene "
         "apartada en su calendario. NO la agendes y no insistas con ella. Consulta la "
         "disponibilidad y ofrécele al paciente lo que salga de ahí."
+    )
+
+
+def _texto_sin_verificar_el_calendario() -> str:
+    """Lo que el modelo lee cuando Google no contestó al comprobar la hora. RESULTADO.
+
+    Es un fallo del SISTEMA con forma de fallo previsto, y eso es deliberado: lo que importa
+    aquí no es contar qué se rompió sino decir qué NO hacer, como las nueve
+    `failure_error_function` de este módulo. El texto no nombra Google ni el socket -- al
+    modelo le sobra, y lo único que necesita saber es que no hay cita y que no puede
+    inventarse una.
+
+    **No se autoriza ninguna hora, y no es un olvido.** `sin_hora_no_verificada` (no negociable
+    13) es el segundo cerrojo que impide que el modelo confirme esta cita de todos modos, y
+    registrar la hora aquí lo abriría. Esto vale incluso si `consultar_disponibilidad` ya la
+    autorizó antes en este mismo turno: ahí el guardrail ya no puede distinguir «te ofrezco las
+    2» de «te agendé a las 2», y por eso la tercera pata es `calendario_sin_verificar`, que
+    pone a un humano delante de la conversación.
+    """
+    return (
+        "No se pudo comprobar si el doctor tiene esa hora apartada, así que la cita NO quedó "
+        "agendada: no existe. NO le confirmes esta hora ni ninguna otra, y NO le digas que "
+        "está agendada ni que lo estará. Dile que estás confirmando ese horario y que le "
+        "escribes en un momento, y escala a los doctores."
     )
 
 
@@ -972,7 +1006,25 @@ async def _crear_cita(ctx: ContextoDaniela, solicitud: SolicitudCita) -> str:
     # Google Calendar es la fuente de la disponibilidad, y eso vale también en el momento de
     # escribir. Ver `_bloqueo_que_tapa`: sin esto, una hora que el doctor apartó se podía
     # agendar igual y el evento acababa encima de su cirugía.
-    bloqueo = await _bloqueo_que_tapa(ctx, inicio)
+    #
+    # Y este `except` es la frontera del `failure_error_function=None` de esta tool, que el
+    # docstring del módulo acota a «cuando el cupo **ya está tomado**». Aquí todavía no hay
+    # cupo: nada apartado, nada que liberar y ninguna cita a medias que el modelo pudiera
+    # confirmar por error. Lo único que costaba dejarlo subir era el turno entero --y con él el
+    # `[user]` sin respuesta en el historial, el trinquete del no negociable 28--, que es lo
+    # que le pasó a Sandy Nariño el 1/10/2026 por un socket rancio de Google.
+    #
+    # Lo que NO cambia: sin leer el calendario no se agenda. No se sabe si el doctor apartó esa
+    # hora, y `_bloqueo_que_tapa` existe justo para no agendar a ciegas.
+    try:
+        bloqueo = await _bloqueo_que_tapa(ctx, inicio)
+    except ErrorDeCalendario as e:
+        log.error("no se pudo comprobar el calendario antes de agendar: %s", e)
+        # Para que un humano se entere pase lo que pase: el texto de abajo acaba en «escala a
+        # los doctores» y eso es una instrucción que el modelo puede desobedecer. Ver
+        # `DatosDelTurno.calendario_sin_verificar`.
+        ctx.turno.calendario_sin_verificar = True
+        return _texto_sin_verificar_el_calendario()
     if bloqueo is not None:
         return _texto_bloqueado(inicio, bloqueo)
 

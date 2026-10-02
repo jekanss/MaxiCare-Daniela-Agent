@@ -347,3 +347,249 @@ def test_el_calendario_caido_no_finge_ser_un_calendario_que_funciona():
 
     assert isinstance(caido, Calendario), "tiene que cumplir el Protocol o las tools no lo aceptan"
     assert not isinstance(caido, CalendarioDoble)
+
+
+# ==========================================================================================
+# El socket muerto
+#
+# El cliente de Google se construye UNA vez al arrancar el proceso y httplib2 guarda la
+# conexión en keep-alive. Tras unos minutos sin tráfico, Google la cierra por su lado y la
+# primera llamada siguiente muere con `BrokenPipeError`.
+#
+# Y httplib2 0.32.0 NO la cierra al fallar: su `_conn_request` solo reintenta con
+# `ENETUNREACH` y `EADDRNOTAVAIL`, y para lo demás hace `raise` sin tocar la conexión. Así
+# que el socket muerto se queda en su caché y un reintento a secas volvería a chocar con él.
+# Por eso el reintento REHACE el servicio, y por eso estas pruebas cuentan cuántos servicios
+# se construyeron.
+# ==========================================================================================
+
+
+class ErrorDeGoogle(Exception):
+    """Lo que `googleapiclient` lanza: una excepción con `status_code`.
+
+    `HttpError` de verdad exige un objeto de respuesta de httplib2 para construirse, y lo
+    único que este módulo le pregunta es el `status_code` (`getattr(e, "status_code", None)`).
+    """
+
+    def __init__(self, status_code: int) -> None:
+        super().__init__(f"HTTP {status_code}")
+        self.status_code = status_code
+
+
+class _Peticion:
+    def __init__(self, servicio, nombre):
+        self._servicio = servicio
+        self._nombre = nombre
+
+    def execute(self):
+        return self._servicio.responder(self._nombre)
+
+
+class _Coleccion:
+    def __init__(self, servicio, prefijo):
+        self._servicio = servicio
+        self._prefijo = prefijo
+
+    def __getattr__(self, metodo):
+        def arma(**argumentos):
+            self._servicio.argumentos.append((f"{self._prefijo}.{metodo}", argumentos))
+            return _Peticion(self._servicio, f"{self._prefijo}.{metodo}")
+
+        return arma
+
+
+class ServicioFalso:
+    """Doble del objeto que devuelve `build(...)`. Reproduce la cadena que usa el módulo:
+    `servicio.events().list(**kw).execute()`.
+
+    El `guion` es una lista de resultados en orden: un `dict` se devuelve y una excepción se
+    lanza. Agotado el guion devuelve `{}`, que para `events.list` significa «ninguna página
+    más».
+    """
+
+    def __init__(self, guion=None) -> None:
+        self.guion = list(guion or [])
+        #: Qué se le pidió, en orden: `events.list`, `events.insert`...
+        self.llamadas: list[str] = []
+        self.argumentos: list[tuple[str, dict]] = []
+
+    def events(self):
+        return _Coleccion(self, "events")
+
+    def calendars(self):
+        return _Coleccion(self, "calendars")
+
+    def responder(self, nombre):
+        self.llamadas.append(nombre)
+        resultado = self.guion.pop(0) if self.guion else {}
+        if isinstance(resultado, BaseException):
+            raise resultado
+        return resultado
+
+
+def calendario_con_servicios(monkeypatch, *guiones):
+    """Un `CalendarioGoogle` de verdad con servicios doblados detrás.
+
+    Un guion por servicio: el primero es el que se construye al arrancar --y atiende además
+    la comprobación de acceso del constructor, que se le pone delante aquí-- y los siguientes
+    son los que `build` entrega cada vez que el módulo REHACE el servicio.
+
+    `entregados` es lo que mide si se rehizo: con un solo elemento, no se rehizo nunca.
+    """
+    from maxicare_daniela.calendario import CalendarioGoogle
+
+    servicios = [ServicioFalso(guion) for guion in guiones]
+    servicios[0].guion.insert(0, {})  # la lectura real que hace el constructor
+    entregados: list[ServicioFalso] = []
+
+    def build_falso(*_a, **_k):
+        siguiente = (
+            servicios[len(entregados)] if len(entregados) < len(servicios) else ServicioFalso()
+        )
+        entregados.append(siguiente)
+        return siguiente
+
+    monkeypatch.setattr("googleapiclient.discovery.build", build_falso)
+    # La clave privada de `cuenta_de_servicio()` no es una clave de verdad --no debe serlo--
+    # así que cargarla reventaría antes de llegar a lo que se quiere medir.
+    monkeypatch.setattr(
+        "google.oauth2.service_account.Credentials.from_service_account_info",
+        lambda *_a, **_k: object(),
+    )
+
+    calendario = CalendarioGoogle(sa_b64=cuenta_de_servicio(), calendario_id="x@gmail.com")
+    return calendario, entregados
+
+
+def test_un_socket_muerto_al_consultar_bloqueos_se_reintenta_UNA_vez(monkeypatch):
+    """El caso Sandy Nariño (+57 319 661 5042), 1/10/2026 17:44 de Bogotá.
+
+    La paciente eligió «este sábado a las dos», `crear_cita` llamó a `_bloqueo_que_tapa`, y
+    `bloqueos()` murió con `BrokenPipeError`: el socket llevaba cinco minutos sin usarse --la
+    última llamada buena fue a las 17:39:17-- y Google ya lo había cerrado. No había ni un
+    reintento en todo el módulo, así que un hipo de red de milisegundos le costó a la
+    paciente 15 h 34 min de silencio.
+    """
+    calendario, entregados = calendario_con_servicios(
+        monkeypatch,
+        [BrokenPipeError(32, "Broken pipe")],
+        [{"items": [evento()]}],
+    )
+
+    bloqueos = calendario.bloqueos(LUNES_9, LUNES_9 + timedelta(hours=3))
+
+    assert len(bloqueos) == 1, "el reintento tenía que devolver el bloqueo del doctor"
+    assert len(entregados) == 2, "el servicio NO se rehizo: el reintento choca con el mismo socket"
+
+
+def test_el_reintento_no_es_infinito(monkeypatch):
+    """UNA vez, como `relevo.activar` (no negociable 19). Si el segundo intento también cae,
+    es que Google no está, y eso ya no es un socket rancio: se traduce y sube."""
+    calendario, entregados = calendario_con_servicios(
+        monkeypatch,
+        [BrokenPipeError(32, "Broken pipe")],
+        [BrokenPipeError(32, "Broken pipe")],
+    )
+
+    with pytest.raises(ErrorDeCalendario) as e:
+        calendario.bloqueos(LUNES_9, LUNES_9 + timedelta(hours=3))
+
+    assert "consultar los bloqueos" in str(e.value)
+    assert len(entregados) == 2, "se rehízo más de una vez"
+
+
+def test_un_fallo_que_NO_es_un_socket_muerto_no_se_reintenta(monkeypatch):
+    """Un 500 de Google, una credencial caducada o un timeout no se arreglan rehaciendo el
+    socket, y reintentarlos solo gasta el minuto que tiene el turno.
+
+    **El timeout es el que importa de esta lista y por eso está aquí:** no dice que la
+    petición no llegara, así que repetir una ESCRITURA tras un timeout puede duplicarla.
+    """
+    for fallo in (ErrorDeGoogle(500), TimeoutError("se agotó el tiempo"), ValueError("raro")):
+        calendario, entregados = calendario_con_servicios(monkeypatch, [fallo])
+
+        with pytest.raises(ErrorDeCalendario):
+            calendario.bloqueos(LUNES_9, LUNES_9 + timedelta(hours=3))
+
+        assert len(entregados) == 1, f"{type(fallo).__name__} no tenía que rehacer el servicio"
+
+
+def test_crear_evento_NO_reintenta_porque_insertar_dos_veces_son_DOS_citas(monkeypatch):
+    """La excepción, y es la que decide el empate.
+
+    `events.insert` es la única llamada de este módulo que no es idempotente: la API no
+    acepta clave de idempotencia, así que si la petición SÍ llegó a Google y lo que se perdió
+    fue la respuesta, el reintento crea un segundo evento. Dos citas en el calendario del
+    doctor sobre la misma hora, puestas por el sistema que existe para que eso no pase.
+
+    El resto sí reintenta --un `get` y un `list` son lecturas, un `patch` con cuerpo fijo deja
+    el evento igual, y un `delete` repetido es un 404 que este módulo ya cuenta como éxito--.
+    Y `crear_evento` no lo necesita: `_bloqueo_que_tapa` acaba de leer el calendario por el
+    mismo socket microsegundos antes, así que llega caliente.
+    """
+    calendario, entregados = calendario_con_servicios(
+        monkeypatch,
+        [BrokenPipeError(32, "Broken pipe")],
+    )
+
+    with pytest.raises(ErrorDeCalendario) as e:
+        calendario.crear_evento(inicio=LUNES_9, duracion_minutos=60, titulo="Valoración")
+
+    assert "crear el evento" in str(e.value)
+    assert len(entregados) == 1, "se reintentó un insert: puede dejar dos eventos"
+
+
+def test_las_otras_tres_llamadas_idempotentes_tambien_reintentan(monkeypatch):
+    """`mover_evento` (su lectura y su `patch`), `eliminar_evento` y `obtener_evento`.
+
+    Sin esto, el socket rancio se cobraría una reprogramación o una cancelación en vez de una
+    cita nueva, y el paciente oiría «no se pudo» por lo mismo que aquí ya no pasa.
+    """
+    calendario, entregados = calendario_con_servicios(
+        monkeypatch,
+        [BrokenPipeError(32, "Broken pipe")],
+        [
+            {
+                "start": {"dateTime": "2026-09-14T09:00:00-05:00"},
+                "end": {"dateTime": "2026-09-14T10:00:00-05:00"},
+            },
+            {},  # el patch
+        ],
+    )
+    calendario.mover_evento("evt-1", inicio=LUNES_9 + timedelta(days=1))
+    assert len(entregados) == 2
+
+    calendario, entregados = calendario_con_servicios(
+        monkeypatch, [BrokenPipeError(32, "Broken pipe")], [{}]
+    )
+    calendario.eliminar_evento("evt-1")
+    assert len(entregados) == 2
+
+    calendario, entregados = calendario_con_servicios(
+        monkeypatch,
+        [BrokenPipeError(32, "Broken pipe")],
+        [
+            {
+                "start": {"dateTime": "2026-09-14T09:00:00-05:00"},
+                "end": {"dateTime": "2026-09-14T10:00:00-05:00"},
+            }
+        ],
+    )
+    assert calendario.obtener_evento("evt-1") is not None
+    assert len(entregados) == 2
+
+
+def test_el_reintento_no_se_come_el_404_que_significa_que_ya_no_existe(monkeypatch):
+    """La mitad que un reintento mal puesto rompería en silencio.
+
+    `obtener_evento` devuelve `None` SOLO con un 404 o un 410 --«lo borraron»--, y quien
+    pregunta cancela la cita al oírlo. `eliminar_evento` cuenta ese mismo 404 como éxito. Si
+    el reintento tradujera todo a `ErrorDeCalendario`, las dos conductas desaparecerían y
+    `_sincronizar_con_calendar` dejaría de enterarse de que el doctor borró el evento.
+    """
+    calendario, entregados = calendario_con_servicios(monkeypatch, [ErrorDeGoogle(404)])
+    assert calendario.obtener_evento("evt-borrado") is None
+    assert len(entregados) == 1
+
+    calendario, _ = calendario_con_servicios(monkeypatch, [ErrorDeGoogle(410)])
+    calendario.eliminar_evento("evt-borrado")  # no lanza: lo que se quería es que no exista

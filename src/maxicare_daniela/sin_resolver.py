@@ -242,6 +242,7 @@ def casos_del_turno(
     escalado_por: str | None,
     motivo: str | None,
     frase: str | None,
+    escalo_el_reventon: bool = False,
 ) -> list[Caso]:
     """Todo lo que este turno deja en el informe. Lista vacia es lo normal.
 
@@ -262,6 +263,13 @@ def casos_del_turno(
        para un solo mensaje.
     4. **Un `motivo` que describe un tripwire no es un `ROTO`.** `conversacion.responder`
        escribe ese hecho en dos sitios a la vez, `tripwires` y `fallo`.
+    5. **Un escalamiento que lo causó el reventón se cuenta DENTRO del `ROTO`**, por lo mismo
+       que los dos de arriba: el reventón es la causa y el aviso al doctor el síntoma. Lo
+       dice `escalo_el_reventon`, y tiene que decirlo quien llama: desde aquí, un
+       `dato_faltante` que pidió el modelo y el `dato_faltante` sintético que pone `atencion`
+       cuando el turno revienta son exactamente la misma cadena. Sin esta rama, el reventón
+       que SÍ avisa --que es lo que hace desde el caso Sandy Nariño del 1/10/2026-- abriría
+       un `humano:dato_faltante` junto al `roto:X`: dos tarjetas para una historia.
     """
     casos: list[Caso] = []
     hubo_escalamiento = escalado_por is not None and escalado_por != "ninguno"
@@ -309,7 +317,11 @@ def casos_del_turno(
         )
 
     # 3. El escalamiento a secas: urgencia, queja, excepcion comercial. Nada mas lo explica.
-    if hubo_escalamiento and not huecos and not nombres:
+    #
+    #    `escalo_el_reventon` lo deja fuera porque entonces SÍ hay algo que lo explica, y es
+    #    el `ROTO` de abajo. Un `humano:dato_faltante` al lado del `roto:UserError` serían dos
+    #    tarjetas para el mismo turno, y la cuenta de interrupciones saldría doble.
+    if hubo_escalamiento and not huecos and not nombres and not escalo_el_reventon:
         casos.append(
             Caso(huella=huella_humano(escalado_por), tipo="HUMANO", escalo=1, ejemplo=frase)
         )
@@ -323,6 +335,18 @@ def casos_del_turno(
     #    lo que el paciente habia escrito. Sin ella el analista recibe «lo que escribieron los
     #    pacientes: (ninguno)» justo en la tarjeta que mas contexto necesita.
     if motivo and not motivo.startswith((PREFIJO_RELEVO, PREFIJO_TRIPWIRE)):
-        casos.append(Caso(huella=huella_roto(motivo), tipo="ROTO", ejemplo=frase))
+        # Y aquí se cuenta la interrupción que causó el propio reventón, con la misma
+        # precedencia que arriba: si hubo hueco o guardrail, el `escalo` ya está contado en su
+        # tarjeta y esta se queda en 0. El `N` de «se interrumpió al doctor N de M veces»
+        # tiene que ser cierto (no negociable 26) y contarse UNA vez.
+        cuenta = escalo_el_reventon and hubo_escalamiento and not huecos and not nombres
+        casos.append(
+            Caso(
+                huella=huella_roto(motivo),
+                tipo="ROTO",
+                escalo=1 if cuenta else 0,
+                ejemplo=frase,
+            )
+        )
 
     return casos

@@ -552,6 +552,18 @@ class DatosDelTurno:
     #: la misma razón que la baja comercial (25) y la deduplicación de escalamientos (26): que
     #: un doctor vea una radiografía no puede depender de que el modelo obedezca una frase.
     hubo_archivo_para_revisar: bool = False
+    #: Si una tool de escritura no pudo COMPROBAR el calendario antes de apartar nada.
+    #:
+    #: Lo pone `herramientas._crear_cita` cuando `_bloqueo_que_tapa` se cae: sin leer Google no
+    #: se puede saber si el doctor apartó esa hora, así que la cita no se agenda y el paciente
+    #: queda esperando una confirmación que nadie va a poder darle. La tool le devuelve al
+    #: modelo un texto que acaba en «escala a los doctores», y esta bandera es lo que hace que
+    #: eso NO dependa de que obedezca -- mismo criterio que `hubo_archivo_para_revisar` (14c),
+    #: la baja comercial (25) y la deduplicación (26).
+    #:
+    #: No la pone `reprogramar_cita`: esa tool tiene su propia `failure_error_function`, así que
+    #: un fallo ahí ya llega al modelo como texto sin matar la corrida.
+    calendario_sin_verificar: bool = False
     #: Lo que se consultó a la base de conocimiento en este turno, con dato o sin él. De aquí
     #: salen los casos `FALTA_DATO`, y el tratamiento con el que se enriquece la huella de un
     #: guardrail. Mismo ciclo de vida que `cifras_autorizadas`: se vacía cada turno, porque
@@ -568,6 +580,7 @@ class DatosDelTurno:
         self.hubo_adjunto = False
         self.menciona_sintomas = False
         self.hubo_archivo_para_revisar = False
+        self.calendario_sin_verificar = False
         self.senales = []
 
 

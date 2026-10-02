@@ -54,11 +54,12 @@ from __future__ import annotations
 
 import base64
 import binascii
+import http.client
 import json
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, time, timedelta, timezone
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Callable, Protocol, runtime_checkable
 
 log = logging.getLogger(__name__)
 
@@ -392,6 +393,28 @@ YA_NO_EXISTE = frozenset({404, 410})
 #: citado en mitad de una cirugía.
 POR_PAGINA = 2500
 
+#: Los fallos que significan «el socket que teníamos guardado ya estaba muerto», y NADA más.
+#:
+#: El cliente se construye una vez al arrancar el proceso y `httplib2` guarda la conexión en
+#: keep-alive. Tras unos minutos sin tráfico Google la cierra por su lado, y la primera
+#: llamada siguiente muere al escribir. Medido el 1/10/2026 con una paciente delante: la
+#: última llamada buena fue a las 17:39:17 y la de las 17:44 dio `BrokenPipeError`.
+#:
+#: **Un timeout NO está en la lista, y es la ausencia que importa.** Un `BrokenPipeError` dice
+#: que la petición no llegó; un timeout no dice nada, así que repetir una escritura tras uno
+#: puede duplicarla. Tampoco entran un 500 ni una credencial caducada: no se arreglan
+#: rehaciendo el socket y reintentarlos solo gasta el minuto que tiene el turno.
+#:
+#: `RemoteDisconnected` hereda de `BadStatusLine` y de `ConnectionResetError`, así que ya está
+#: cubierto dos veces; se deja implícito para no sugerir que la lista es una enumeración.
+SOCKET_MUERTO = (
+    BrokenPipeError,
+    ConnectionResetError,
+    ConnectionAbortedError,
+    http.client.BadStatusLine,
+    http.client.CannotSendRequest,
+)
+
 
 def decodificar_cuenta_de_servicio(sa_b64: str) -> dict[str, Any]:
     """El base64 de `MAXICARE_GOOGLE_SA_B64` de vuelta a un diccionario, o un error claro.
@@ -550,13 +573,10 @@ class CalendarioGoogle:
             credenciales = service_account.Credentials.from_service_account_info(
                 datos, scopes=list(ALCANCE)
             )
-            # `static_discovery=True` usa el descriptor que viene dentro del paquete: sin
-            # esto, construir el servicio saldría a internet a buscarlo, y un arranque
-            # dependería de una segunda red además de la de la API.
-            self._servicio = build(
-                "calendar", "v3", credentials=credenciales,
-                static_discovery=True, cache_discovery=False,
-            )
+            # Se guardan para poder REHACER el servicio cuando el socket guardado se muere.
+            # Ver `_con_un_reintento`.
+            self._credenciales = credenciales
+            self._servicio = self._construir_el_servicio()
         except (GoogleAuthError, ValueError) as e:
             raise ErrorDeCalendario(
                 f"La cuenta de servicio no se pudo cargar: {type(e).__name__}. Suele ser "
@@ -579,6 +599,67 @@ class CalendarioGoogle:
             raise ErrorDeCalendario(
                 f"No se pudo llegar a Google Calendar al arrancar: {e}"
             ) from e
+
+    # -- el socket rancio ---------------------------------------------------------------
+
+    def _construir_el_servicio(self) -> Any:
+        """El cliente de Google, nuevo. Sin red: no sale a buscar nada.
+
+        `static_discovery=True` usa el descriptor que viene dentro del paquete; sin esto,
+        construir el servicio saldría a internet a buscarlo y un arranque dependería de una
+        segunda red además de la de la API. Eso es también lo que hace que rehacerlo en mitad
+        de un turno sea barato: lo único que se tira es el `httplib2.Http` con sus
+        conexiones.
+        """
+        from googleapiclient.discovery import build
+
+        return build(
+            "calendar", "v3", credentials=self._credenciales,
+            static_discovery=True, cache_discovery=False,
+        )
+
+    def _con_un_reintento(self, arma_peticion: Callable[[Any], Any]) -> Any:
+        """Corre la petición y, si el socket guardado estaba muerto, REHACE el servicio y la
+        repite UNA vez.
+
+        -------------------------------------------------------------------------------------
+        Por qué rehacer y no reintentar a secas
+        -------------------------------------------------------------------------------------
+
+        Comprobado contra la `httplib2` instalada (0.32.0): su `_conn_request` solo reintenta
+        con `ENETUNREACH` y `EADDRNOTAVAIL`, y para cualquier otro `socket.error` hace `raise`
+        **sin cerrar la conexión**. El socket muerto se queda en su caché con `conn.sock`
+        puesto, así que el `if conn.sock is None: conn.connect()` del intento siguiente no
+        reconecta y la segunda llamada choca con el mismo socket. Reintentar sin rehacer es
+        gastar dos veces para fallar igual.
+
+        -------------------------------------------------------------------------------------
+        Lo que este método NO hace, y es deliberado
+        -------------------------------------------------------------------------------------
+
+        **No traduce nada.** Cada método conserva su propio `except`, y eso es lo que mantiene
+        en pie las dos conductas que cuelgan de un código de estado: el 404 que `obtener_evento`
+        lee como «lo borraron» --y que hace que `_sincronizar_con_calendar` se entere-- y el
+        mismo 404 que `eliminar_evento` cuenta como éxito. Un reintento que lo tradujera todo a
+        `ErrorDeCalendario` se llevaría las dos por delante sin dejar nada rojo.
+
+        **Recibe una fábrica y no una petición ya armada**, porque el segundo intento tiene que
+        salir del servicio NUEVO. Con la petición hecha, el reintento viajaría por el cliente
+        que acabamos de tirar.
+
+        **UNA vez.** Mismo criterio que `relevo.activar` con un hilo muerto (no negociable 19):
+        si el segundo intento también cae, Google no está, y eso ya no es un socket rancio.
+        """
+        try:
+            return arma_peticion(self._servicio).execute()
+        except SOCKET_MUERTO as e:
+            log.warning(
+                "el socket guardado de Google estaba muerto (%s); se rehace el cliente y se "
+                "reintenta UNA vez",
+                type(e).__name__,
+            )
+            self._servicio = self._construir_el_servicio()
+            return arma_peticion(self._servicio).execute()
 
     # -- lo que se le dice a `herramientas.py` cuando Google falla ----------------------
 
@@ -615,6 +696,16 @@ class CalendarioGoogle:
             # consulta de disponibilidad y taparía el cupo que todavía queda libre.
             "extendedProperties": {"private": {CLAVE_ORIGEN: VALOR_ORIGEN}},
         }
+        # **La única llamada del módulo que NO pasa por `_con_un_reintento`, y es la decisión
+        # que importa de todo este párrafo.** `events.insert` no es idempotente y la API no
+        # acepta clave de idempotencia: si la petición sí llegó a Google y lo que se perdió fue
+        # la respuesta, el reintento crea un SEGUNDO evento. Dos citas sobre la misma hora en
+        # el calendario del doctor, puestas por el sistema que existe para que eso no pase, y
+        # el principio que decide los empates las prefiere no puestas.
+        #
+        # Tampoco le hace falta: `herramientas._bloqueo_que_tapa` acaba de leer el calendario
+        # por este mismo socket microsegundos antes, así que aquí llega caliente. El socket
+        # rancio se paga en esa lectura, que sí reintenta.
         try:
             creado = (
                 self._servicio.events()
@@ -641,10 +732,8 @@ class CalendarioGoogle:
         """
         destino = inicio if inicio.tzinfo else inicio.replace(tzinfo=ZONA_BOGOTA)
         try:
-            actual = (
-                self._servicio.events()
-                .get(calendarId=self._calendario_id, eventId=evento_id)
-                .execute()
+            actual = self._con_un_reintento(
+                lambda s: s.events().get(calendarId=self._calendario_id, eventId=evento_id)
             )
         except Exception as e:
             raise self._traducir(e, "leer el evento que se iba a mover") from e
@@ -661,18 +750,23 @@ class CalendarioGoogle:
             "start": {"dateTime": destino.isoformat(), "timeZone": ZONA_GOOGLE},
             "end": {"dateTime": (destino + duracion).isoformat(), "timeZone": ZONA_GOOGLE},
         }
+        # Reintentable: el cuerpo es fijo, así que aplicarlo dos veces deja el evento igual.
         try:
-            self._servicio.events().patch(
-                calendarId=self._calendario_id, eventId=evento_id, body=cuerpo
-            ).execute()
+            self._con_un_reintento(
+                lambda s: s.events().patch(
+                    calendarId=self._calendario_id, eventId=evento_id, body=cuerpo
+                )
+            )
         except Exception as e:
             raise self._traducir(e, "mover el evento") from e
 
     def eliminar_evento(self, evento_id: str) -> None:
+        # Reintentable, y lo que lo hace idempotente es el `YA_NO_EXISTE` de dos líneas más
+        # abajo: borrar dos veces es un 404 que este módulo ya cuenta como éxito.
         try:
-            self._servicio.events().delete(
-                calendarId=self._calendario_id, eventId=evento_id
-            ).execute()
+            self._con_un_reintento(
+                lambda s: s.events().delete(calendarId=self._calendario_id, eventId=evento_id)
+            )
         except Exception as e:
             if getattr(e, "status_code", None) in YA_NO_EXISTE:
                 # Éxito, no error: lo que se quería es que no exista, y no existe.
@@ -695,10 +789,8 @@ class CalendarioGoogle:
         que saber que no está.
         """
         try:
-            evento = (
-                self._servicio.events()
-                .get(calendarId=self._calendario_id, eventId=evento_id)
-                .execute()
+            evento = self._con_un_reintento(
+                lambda s: s.events().get(calendarId=self._calendario_id, eventId=evento_id)
             )
         except Exception as e:
             if getattr(e, "status_code", None) in YA_NO_EXISTE:
@@ -730,9 +822,8 @@ class CalendarioGoogle:
         encontrados: list[Bloqueo] = []
         while True:
             try:
-                respuesta = (
-                    self._servicio.events()
-                    .list(
+                respuesta = self._con_un_reintento(
+                    lambda s, pagina=pagina: s.events().list(
                         calendarId=self._calendario_id,
                         timeMin=desde.astimezone(ZONA_BOGOTA).isoformat(),
                         timeMax=hasta.astimezone(ZONA_BOGOTA).isoformat(),
@@ -741,7 +832,6 @@ class CalendarioGoogle:
                         maxResults=POR_PAGINA,
                         pageToken=pagina,
                     )
-                    .execute()
                 )
             except Exception as e:
                 raise self._traducir(e, "consultar los bloqueos") from e

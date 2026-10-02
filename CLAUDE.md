@@ -74,6 +74,23 @@ una —qué se midió, qué costó— está en la regla que cubre ese archivo.
 1. **Si el calendario no arranca, Daniela queda con `CalendarioCaido`, NUNCA con
    `CalendarioDoble`.** El doble dice que sí a todo y le confirma al paciente una cita que
    no existe: llega a una clínica donde nadie lo espera.
+1b. **El cliente de Google reintenta UNA vez un socket muerto, y `events.insert` NO.** El
+   servicio se construye una vez al arrancar y `httplib2` guarda la conexión en keep-alive;
+   tras unos minutos sin tráfico Google la cierra y la llamada siguiente muere con
+   `BrokenPipeError` (1/10/2026, con una paciente eligiendo hora). `_con_un_reintento`
+   **rehace el servicio** antes de repetir, porque la httplib2 instalada (0.32.0) no cierra
+   la conexión al fallar y un reintento a secas choca con el mismo socket. El `insert` queda
+   fuera: no es idempotente y la API no acepta clave, así que una respuesta perdida crearía
+   DOS eventos sobre la misma hora. Y **un timeout no entra en la lista**: no dice que la
+   petición no llegara. El detalle, en `.claude/rules/calendario.md`.
+1c. **El `failure_error_function=None` de `crear_cita` cubre lo de DESPUÉS del cupo, no el
+   sondeo previo.** `_bloqueo_que_tapa` corre antes de apartar nada: ahí no hay cita a medias
+   que proteger, y dejar subir el error costaba el turno entero más un `[user]` sin respuesta
+   en el historial (el trinquete del 28). Hoy devuelve texto —«no se pudo comprobar, la cita
+   NO quedó agendada, no confirmes ninguna hora»— y **no autoriza ni una hora**, que es lo que
+   deja en pie el cerrojo del 13. La tercera pata es `DatosDelTurno.calendario_sin_verificar`:
+   `conversacion.responder` escala por CÓDIGO, como la radiografía del 14c, porque «escala a
+   los doctores» dentro de un texto es una instrucción y se puede desobedecer.
 2. **Ninguna clave de idempotencia la escribe el modelo.** Las cuatro las arma el código con
    `ctx.clave(...)`. Con la del modelo, dos pacientes salían confirmados sobre un solo cupo.
 3. **El candado de `atencion.py` va por TELÉFONO y `_leer_estado` va DENTRO.** Sacar la
@@ -334,8 +351,15 @@ una —qué se midió, qué costó— está en la regla que cubre ese archivo.
    que se calla NO se
    cuenta como interrupción**: `_avisar_a_doctores` devuelve un booleano que viaja en
    `Resultado.doctor_avisado` hasta `atencion`, porque la pantalla imprime «se interrumpió al
-   doctor N de M veces» y ese N tiene que ser cierto. Es la misma mentira que ya evita el
-   camino del reventón, por la otra puerta.
+   doctor N de M veces» y ese N tiene que ser cierto. **Y el camino del reventón avisa
+   igual, desde el 2/10/2026**: hasta entonces no avisaba a nadie --`conversacion.responder`
+   lanza antes de llegar a `al_escalar`-- y al paciente se le mandaba igual el `MENSAJE_SEGURO`
+   que le promete que el doctor le escribe. Promesa falsa y nadie detrás: Sandy Nariño esperó
+   15 h 34 min hasta que un doctor entró por su cuenta. Ahora `atencion` llama a `al_escalar`
+   desde su propio `except`, hereda las dos guardas de arriba, y lo que cuenta el informe sigue
+   siendo solo el aviso que SALIÓ. Ese escalamiento se cuenta DENTRO de la tarjeta `ROTO`
+   (`sin_resolver.casos_del_turno(escalo_el_reventon=True)`), nunca en un `humano:` aparte: dos
+   tarjetas para una historia es lo que esa tabla existe para no romper.
 
 27. **El perímetro de coste falla ABIERTO, así que su ausencia no se ve en ningún log.**
    `cuotas.revisar` atrapa toda excepción y deja pasar --deliberado: un freno que tumba turnos

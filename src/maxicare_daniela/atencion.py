@@ -509,17 +509,23 @@ def _anotar_resultado(
     escalado_por: str | None = None,
     frase: str | None = None,
     telefono: str = "",
+    escalo_el_reventon: bool = False,
 ) -> None:
     """El segundo bloque de base: qué pasó con la respuesta. Nunca propaga.
 
     Un fallo escribiendo esto importa --de aquí sale «¿a quién no le contestamos?»-- pero
     importa menos que reventar un turno al que el paciente ya recibió su respuesta.
 
-    Los cinco últimos son lo que este turno deja en el informe de «sin resolver», y van con
+    Los seis últimos son lo que este turno deja en el informe de «sin resolver», y van con
     default porque los caminos de error llegan aquí sin la mitad de ellos: un turno que
     reventó antes de correr no tiene `tripwires`, y el mensaje que entra durante un relevo no
     tiene turno siquiera. Un default por argumento es también lo que deja intactas las
     llamadas de los scripts de `scripts/`, que doblan esta firma a mano.
+
+    `escalo_el_reventon` dice que el escalamiento que viaja en `escalado_por` lo causó el
+    turno al romperse, y no el modelo pidiéndolo. Desde `sin_resolver` las dos cosas son la
+    misma cadena --`"dato_faltante"`--, así que tiene que decirlo quien lo sabe: sin él, el
+    aviso del reventón abriría su propia tarjeta junto al `ROTO` que ya cuenta esa historia.
     """
     senales = senales or []
     tripwires = tripwires or []
@@ -577,6 +583,7 @@ def _anotar_resultado(
                 escalado_por=escalado_por,
                 motivo=motivo,
                 frase=frase,
+                escalo_el_reventon=escalo_el_reventon,
             ):
                 # Uno por uno, y cada uno con su red. `registrar_caso` hace `rollback` y
                 # propaga, así que sin este `try` el primero que falla mata el bucle: un
@@ -1437,10 +1444,14 @@ async def atender(
             tripwires = resultado.tripwires
             # Aquí el escalamiento sí ocurrió: `al_escalar` corrió y el doctor está avisado.
             # Salvo que `al_escalar` diga que NO interrumpió a nadie --el asunto ya estaba
-            # delante del doctor sin responder, o Telegram lo rechazó--. Es la misma razón
-            # por la que el camino del reventón de abajo pone `None`: la pantalla del cliente
-            # imprime «Se interrumpió al doctor N de M veces», y ese N tiene que ser cierto.
+            # delante del doctor sin responder, o Telegram lo rechazó--. El criterio es el
+            # mismo que aplica el camino del reventón de abajo, que desde el 2/10/2026
+            # también avisa: solo cuenta el aviso que SALIÓ, porque la pantalla del cliente
+            # imprime «Se interrumpió al doctor N de M veces» y ese N tiene que ser cierto.
             escalamiento_real = escalado_por if resultado.doctor_avisado is not False else None
+            # El turno corrió: si escaló, lo pidió el modelo. Lo que el informe tiene que
+            # contar aquí es el ASUNTO (`humano:clinico`), no un fallo que no hubo.
+            escalo_el_reventon = False
         except Exception as e:  # noqa: BLE001
             # `responder` ya traduce lo que lanza el SDK, pero no lo que lanza una tool con un
             # bug ni un fallo de red a mitad de turno. El silencio es la única respuesta que
@@ -1451,14 +1462,48 @@ async def atender(
             # No hubo `Resultado` que preguntar. Las señales sí sobreviven: viven en el
             # contexto, y una consulta sin dato que ocurrió antes del reventón ocurrió igual.
             tripwires = []
-            # Y el escalamiento NO ocurrió. Ese `"dato_faltante"` es un marcador sintético de
-            # este camino --lo lee `Atendido` y el log-- pero `conversacion.responder` lanzó
-            # antes de llegar a `al_escalar`: ningún doctor fue avisado. Pasárselo al informe
-            # abría un `humano:dato_faltante` con `escalo=1` ADEMÁS del `roto:X` --dos
-            # tarjetas para una historia, que es la regla que esta tabla existe para no
-            # romper-- y la pantalla imprimía «se interrumpió al doctor 1 de N veces» sobre
-            # una interrupción que no existió: un número falso en la pantalla del cliente.
+            # Y el escalamiento se hace AQUÍ, porque `conversacion.responder` lanzó antes de
+            # llegar a `al_escalar`. Hasta el 2/10/2026 no se hacía en ninguna parte, y eso
+            # convertía este camino en el peor del sistema: al paciente se le manda
+            # `MENSAJE_SEGURO` --«Ya le paso tu mensaje y te escribe apenas pueda»-- y nadie
+            # se lo pasaba a nadie. Cero filas en `escalamientos`, cero Telegram, y como
+            # único rastro un `roto:X` en una pantalla que se mira cuando alguien se acuerda.
+            #
+            # Medido: Sandy Nariño (+57 319 661 5042) eligió «este sábado a las dos» el
+            # 1/10/2026 a las 17:44 de Bogotá, `crear_cita` reventó con un `BrokenPipeError`
+            # del socket de Google, y la promesa quedó colgando 15 h 34 min -- hasta que un
+            # doctor entró por su cuenta desde el panel. La cita se agendó, pero la salvó una
+            # casualidad.
+            #
+            # Es el no negociable 11 por la puerta contraria: allí sobraba el aviso --un
+            # «hazme un código» interrumpía a un humano-- y aquí faltaba. La frase que se le
+            # dice al paciente es la que manda: prometer un humano obliga a avisarlo.
             escalamiento_real = None
+            escalo_el_reventon = False
+            if al_escalar is not None:
+                try:
+                    # El mismo `al_escalar` del camino normal, con lo mismo que recibe allí:
+                    # el motivo y lo que se le respondió al paciente. Así hereda las dos
+                    # guardas del no negociable 26 --la clave de idempotencia del turno y el
+                    # asunto que el doctor ya tiene delante sin responder--, que es lo que
+                    # impide que una racha de reventones se vuelva una racha de Telegrams.
+                    #
+                    # Y hereda su booleano: un aviso que se calla no se cuenta. `escalado_por`
+                    # solo pasa al informe si de verdad se interrumpió a alguien, porque la
+                    # pantalla imprime «se interrumpió al doctor N de M veces» y ese N tiene
+                    # que ser cierto.
+                    if await al_escalar(ctx, escalado_por, respuesta):
+                        escalamiento_real = escalado_por
+                        escalo_el_reventon = True
+                except Exception:  # noqa: BLE001
+                    # Este módulo promete que nunca propaga, y estamos dentro del `except`
+                    # que lo hace verdad: que no se pueda avisar al doctor no puede dejar al
+                    # paciente sin su mensaje. Mismo criterio que `conversacion.responder`
+                    # alrededor de su propio `al_escalar`.
+                    log.exception(
+                        "el turno de %s reventó y tampoco se pudo avisar al doctor",
+                        estado.id_conversacion,
+                    )
 
         # `limites.latencia_maxima`: nunca instantánea, nunca más de un minuto. Se descuenta
         # lo que ya tardó el turno; sumarlo daría respuestas de minuto y medio y el paciente
@@ -1522,6 +1567,7 @@ async def atender(
                 escalado_por=escalamiento_real,
                 frase=frase_del_paciente,
                 telefono=mensaje.telefono,
+                escalo_el_reventon=escalo_el_reventon,
             )
             return Atendido(
                 wamid=mensaje.wamid,
@@ -1549,6 +1595,7 @@ async def atender(
             escalado_por=escalamiento_real,
             frase=frase_del_paciente,
             telefono=mensaje.telefono,
+            escalo_el_reventon=escalo_el_reventon,
         )
         return Atendido(
             wamid=mensaje.wamid,

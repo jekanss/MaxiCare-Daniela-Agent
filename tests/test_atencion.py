@@ -421,6 +421,33 @@ class Turnos:
         return self.llamadas[-1]["entrada"]
 
 
+class EscalarFalso:
+    """Doble de `al_escalar` -- el aviso a los doctores por Telegram que aporta `runtime.py`.
+
+    Guarda con qué se le llamó y contesta lo que se le diga, porque el booleano ES el dato:
+    `True` es «se interrumpió a alguien» y `False` es «el doctor ya tenía este asunto delante
+    y sin responder», que el no negociable 26 manda NO contar como interrupción.
+
+    Casi toda esta suite deja `al_escalar` en `None`, que es lo que corre en el carril de
+    pruebas web: allí no hay a quién avisar. Las pruebas del reventón lo pasan a propósito.
+    """
+
+    def __init__(self, avisado: bool | Exception = True) -> None:
+        self.avisado = avisado
+        #: `(motivo, mensaje_al_paciente)` de cada llamada.
+        self.llamadas: list[tuple[str, str]] = []
+
+    async def __call__(self, ctx, motivo, mensaje_al_paciente):
+        self.llamadas.append((motivo, mensaje_al_paciente))
+        if isinstance(self.avisado, Exception):
+            raise self.avisado
+        return self.avisado
+
+    @property
+    def motivos(self) -> list[str]:
+        return [motivo for motivo, _ in self.llamadas]
+
+
 # ==========================================================================================
 # Andamiaje
 # ==========================================================================================
@@ -2602,12 +2629,15 @@ def test_un_turno_que_revento_deja_un_caso_ROTO_con_el_tipo_y_no_con_el_mensaje(
     """El mensaje de una excepción lleva ids y horas: con él dentro, cada error sería único y
     la tabla no agruparía jamás.
 
-    Y UNA sola tarjeta. El turno reventado NO escala: ese `escalado_por = "dato_faltante"`
-    del camino de reventón es un marcador sintético --`conversacion.responder` lanzó, así que
-    `al_escalar` no corrió y ningún doctor fue avisado--, y pasárselo al informe abría un
-    `humano:dato_faltante` con `escalo=1` además del `ROTO`. Dos daños: dos tarjetas para una
-    historia, y la pantalla imprimiendo «se interrumpió al doctor 1 de N veces» sobre una
-    interrupción que no existió."""
+    Y UNA sola tarjeta, con `escalo = 0` porque aquí NO hay a quién avisar: esta prueba no
+    pasa `al_escalar`, que es el carril de pruebas web. Sin transporte no hay interrupción
+    que contar, y pasarle el `dato_faltante` sintético al informe abriría un
+    `humano:dato_faltante` con `escalo=1` ADEMÁS del `ROTO`: dos tarjetas para una historia,
+    y la pantalla imprimiendo «se interrumpió al doctor 1 de N veces» sobre una interrupción
+    que no existió.
+
+    Con `al_escalar` puesto el doctor SÍ se avisa, y el `escalo` se cuenta en esta misma
+    tarjeta -- nunca en una segunda. Lo fijan las tres de abajo."""
     base, _ = preparar(
         monkeypatch,
         base=BaseFalsa(viva=("conv-viva", 4, True, 0)),
@@ -2616,6 +2646,139 @@ def test_un_turno_que_revento_deja_un_caso_ROTO_con_el_tipo_y_no_con_el_mensaje(
 
     atender(mensaje_texto("me duele"))
 
+    assert [(c["huella"], c["tipo"], c["escalo"]) for c in base.casos] == [
+        ("roto:runtimeerror", "ROTO", 0),
+    ]
+
+
+def test_un_turno_que_revento_AVISA_al_doctor(monkeypatch):
+    """El caso Sandy Nariño (+57 319 661 5042), 1/10/2026 a las 17:44 de Bogotá.
+
+    La paciente eligió «este sábado a las dos», Daniela llamó a `crear_cita`, y el sondeo de
+    `_bloqueo_que_tapa` reventó con un `BrokenPipeError` del socket keep-alive de Google.
+    `crear_cita` es la única tool con `failure_error_function=None`, así que el SDK lo
+    envolvió en `UserError`; `conversacion.responder` lo deja subir a propósito, y por tanto
+    lanzó ANTES de llegar a `al_escalar`.
+
+    Lo que recibió la paciente fue `MENSAJE_SEGURO`: «Ya le paso tu mensaje y te escribe
+    apenas pueda». **Y nadie fue avisado**: cero filas en `escalamientos`, cero Telegram, y
+    como único rastro un `roto:usererror` en una pantalla que se mira cuando alguien se
+    acuerda. Quince horas y media después entró un doctor por su cuenta.
+
+    La promesa es la que obliga: si al paciente se le dice que el doctor le escribe, el
+    doctor tiene que saberlo. Es el no negociable 11 por la puerta contraria -- allí sobraba
+    el aviso (`tarea_ajena` interrumpía a un humano por un «hazme un código»), aquí faltaba.
+    """
+    escalar = EscalarFalso()
+    preparar(monkeypatch, turnos=Turnos(revienta=RuntimeError("la tool 7 falló")))
+    whatsapp = WhatsAppFalso()
+
+    atender(mensaje_texto("Este sabado a las dos esta bien"), whatsapp=whatsapp, al_escalar=escalar)
+
+    assert whatsapp.textos == [conversacion.MENSAJE_SEGURO]
+    assert escalar.motivos == ["dato_faltante"], (
+        "se le prometió al paciente que el doctor le escribe y al doctor no se le avisó"
+    )
+    # Lo que se le dijo al paciente viaja en el aviso: es lo que el doctor necesita leer para
+    # saber qué va a encontrarse cuando entre.
+    assert escalar.llamadas[0][1] == conversacion.MENSAJE_SEGURO
+
+
+def test_el_aviso_del_reventon_se_cuenta_en_la_tarjeta_del_ROTO_y_no_abre_otra(monkeypatch):
+    """Las dos mitades del no negociable 26 a la vez, y por eso van en una sola prueba.
+
+    Ahora que el reventón sí avisa, la interrupción EXISTE y el `N` de «se interrumpió al
+    doctor N de M veces» tiene que contarla. Pero `sin_resolver` promete una historia, una
+    tarjeta: un `humano:dato_faltante` junto al `roto:runtimeerror` serían dos tarjetas para
+    el mismo turno.
+
+    Se resuelve como ya lo resolvían el hueco de conocimiento y el guardrail: el escalamiento
+    se cuenta DENTRO de la tarjeta que explica por qué ocurrió. Aquí la causa es el reventón,
+    así que la cuenta va en el `ROTO`.
+    """
+    base, _ = preparar(
+        monkeypatch,
+        base=BaseFalsa(viva=("conv-viva", 4, True, 0)),
+        turnos=Turnos(revienta=RuntimeError("la tool 7 falló en la conversación abc-123")),
+    )
+
+    atender(mensaje_texto("me duele"), al_escalar=EscalarFalso(avisado=True))
+
+    assert [(c["huella"], c["tipo"], c["escalo"]) for c in base.casos] == [
+        ("roto:runtimeerror", "ROTO", 1),
+    ]
+
+
+def test_un_reventon_cuyo_aviso_se_callo_NO_cuenta_como_interrupcion(monkeypatch):
+    """El falso positivo de la de arriba: `escalo = 1` a secas también la habría pasado.
+
+    `_avisar_a_doctores` se calla cuando el doctor ya tiene ese mismo asunto delante y sin
+    responder. Entonces devuelve `False`, y un aviso que no salió no interrumpió a nadie --
+    da igual que el turno reventara."""
+    base, _ = preparar(
+        monkeypatch,
+        base=BaseFalsa(viva=("conv-viva", 4, True, 0)),
+        turnos=Turnos(revienta=RuntimeError("la tool 7 falló en la conversación abc-123")),
+    )
+
+    atender(mensaje_texto("me duele"), al_escalar=EscalarFalso(avisado=False))
+
+    assert [(c["huella"], c["tipo"], c["escalo"]) for c in base.casos] == [
+        ("roto:runtimeerror", "ROTO", 0),
+    ]
+
+
+def test_un_reventon_al_que_ADEMAS_le_falla_el_envio_cuenta_la_interrupcion_igual(monkeypatch):
+    """El otro sitio al que hay que pasarle `escalo_el_reventon`, y el único camino que lo
+    recorre: `atender` tiene DOS llamadas a `_anotar_resultado` --la del envío fallido y la
+    normal-- y olvidarse de una deja el contador mal solo en el caso raro.
+
+    Aquí el doctor SÍ fue avisado --el aviso sale antes de intentar el envío-- así que la
+    interrupción existió, aunque al paciente no le llegara su mensaje. Y el `ROTO` pasa a ser
+    el del envío, que es el fallo que se vio último.
+    """
+    base, _ = preparar(
+        monkeypatch,
+        base=BaseFalsa(viva=("conv-viva", 4, True, 0)),
+        turnos=Turnos(revienta=RuntimeError("la tool 7 falló")),
+    )
+    escalar = EscalarFalso(avisado=True)
+
+    resultado = atender(
+        mensaje_texto("me duele"),
+        whatsapp=WhatsAppFalso(falla_con=TimeoutError("la Graph API no contestó")),
+        al_escalar=escalar,
+    )
+
+    assert resultado.respondido is False
+    assert escalar.motivos == ["dato_faltante"]
+    assert [(c["huella"], c["tipo"], c["escalo"]) for c in base.casos] == [
+        ("roto:timeouterror", "ROTO", 1),
+    ]
+
+
+def test_si_el_aviso_del_reventon_TAMBIEN_revienta_el_paciente_recibe_su_mensaje(monkeypatch):
+    """Este módulo promete en su docstring que nunca propaga, y esto se añade dentro de un
+    `except` que existe justo para cumplir esa promesa.
+
+    Un fallo avisando al doctor no puede dejar al paciente sin respuesta -- es la misma regla
+    que `conversacion.responder` ya aplica alrededor de `al_escalar`. Y sin interrupción que
+    contar, el `escalo` vuelve a 0."""
+    base, _ = preparar(
+        monkeypatch,
+        base=BaseFalsa(viva=("conv-viva", 4, True, 0)),
+        turnos=Turnos(revienta=RuntimeError("la tool 7 falló en la conversación abc-123")),
+    )
+    whatsapp = WhatsAppFalso()
+
+    resultado = atender(
+        mensaje_texto("me duele"),
+        whatsapp=whatsapp,
+        al_escalar=EscalarFalso(avisado=RuntimeError("Telegram caído")),
+    )
+
+    assert whatsapp.textos == [conversacion.MENSAJE_SEGURO]
+    assert resultado.respondido is True
     assert [(c["huella"], c["tipo"], c["escalo"]) for c in base.casos] == [
         ("roto:runtimeerror", "ROTO", 0),
     ]

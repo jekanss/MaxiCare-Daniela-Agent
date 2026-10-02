@@ -343,6 +343,50 @@ def test_el_hueco_sigue_ganandole_al_guardrail_el_escalamiento():
     assert [(c.tipo, c.escalo) for c in casos] == [("FALTA_DATO", 1), ("GUARDRAIL", 0)]
 
 
+def test_el_escalamiento_del_reventon_se_cuelga_del_ROTO():
+    """Desde el 2/10/2026 el camino del reventon de `atencion` SI avisa al doctor, asi que
+    hay una interrupcion real que contar -- y una sola tarjeta donde contarla.
+
+    Es el mismo reparto que arriba, con el reventon como causa: `roto` explica por que se
+    interrumpio a alguien, y un `humano:dato_faltante` al lado contaria la misma historia
+    otra vez y sumaria la interrupcion dos veces."""
+    casos = casos_del_turno(
+        senales=[], tripwires=[], escalado_por="dato_faltante",
+        motivo="UserError: Error running tool crear_cita", frase="este sabado a las dos",
+        escalo_el_reventon=True,
+    )
+
+    assert [(c.tipo, c.escalo) for c in casos] == [("ROTO", 1)], (
+        f"salieron {[c.huella for c in casos]}"
+    )
+    assert casos[0].huella == "roto:usererror"
+
+
+def test_sin_el_aviso_el_reventon_no_cuenta_interrupcion():
+    """El control de la de arriba. `atencion` deja `escalado_por` en `None` cuando no habia a
+    quien avisar --el carril web-- o cuando `_avisar_a_doctores` se callo porque el doctor ya
+    tenia el asunto delante. En los dos casos la tarjeta sale igual y el contador no."""
+    casos = casos_del_turno(
+        senales=[], tripwires=[], escalado_por=None,
+        motivo="UserError: Error running tool crear_cita", frase="este sabado a las dos",
+    )
+
+    assert [(c.tipo, c.escalo) for c in casos] == [("ROTO", 0)]
+
+
+def test_un_escalamiento_que_NO_viene_del_reventon_sigue_abriendo_su_HUMANO():
+    """La mitad que no se puede perder: un turno que escalo por lo clinico Y encima fallo al
+    enviar son DOS historias --el asunto y la averia-- y el asunto es el que el analista
+    necesita leer. Sin la condicion de `escalo_el_reventon`, el `ROTO` del envio se habria
+    tragado el `humano:clinico`."""
+    casos = casos_del_turno(
+        senales=[], tripwires=[], escalado_por="clinico",
+        motivo="ReadTimeout: la Graph API no contesto", frase="me duele muchisimo",
+    )
+
+    assert [(c.tipo, c.escalo) for c in casos] == [("HUMANO", 1), ("ROTO", 0)]
+
+
 # ==========================================================================================
 # La frase que se guarda como ejemplo
 # ==========================================================================================

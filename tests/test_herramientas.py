@@ -765,6 +765,176 @@ def test_no_se_agenda_dentro_de_un_bloqueo_del_doctor(monkeypatch):
     assert tocada == [], "consumió un cupo por una hora que nunca se pudo agendar"
 
 
+class CalendarioQueNoResponde(CalendarioDoble):
+    """Un `CalendarioDoble` al que `bloqueos` se le cae, como se le cayó a Sandy Nariño.
+
+    Todo lo demás funciona: es la forma exacta del caso del 1/10/2026, donde el socket se
+    murió justo en la lectura previa y no en nada más.
+    """
+
+    def bloqueos(self, desde, hasta):
+        from maxicare_daniela.calendario import ErrorDeCalendario
+
+        raise ErrorDeCalendario(
+            "Google Calendar falló al consultar los bloqueos: BrokenPipeError"
+        )
+
+
+def test_si_no_se_puede_comprobar_el_calendario_crear_cita_NO_mata_el_turno(monkeypatch):
+    """El segundo defecto del caso Sandy Nariño (+57 319 661 5042), 1/10/2026 17:44.
+
+    `crear_cita` es la única tool con `failure_error_function=None`, y el docstring de este
+    módulo acota por qué: «cuando el cupo **ya está tomado** y Calendar se cae, la corrida
+    debe MORIR». Pero `_bloqueo_que_tapa` corre ANTES de tomar el cupo. No hay nada apartado,
+    nada que liberar y ninguna cita a medias que el modelo pudiera confirmar por error: no hay
+    nada que la muerte de la corrida proteja.
+
+    Lo que sí costaba: el turno entero. El SDK envolvía el `ErrorDeCalendario` en un
+    `UserError`, `conversacion.responder` lo deja subir a propósito, y la paciente se quedaba
+    con el mensaje seguro y el historial con un `[user]` sin respuesta --el trinquete del no
+    negociable 28--. Todo por un socket rancio.
+
+    Ahora es un fallo PREVISTO, como «el horario está lleno»: un texto que dice qué no hacer.
+    """
+    calendario = CalendarioQueNoResponde()
+    ctx = contexto(
+        calendario=calendario, ahora=datetime(2026, 9, 15, 8, 0, tzinfo=h.ZONA_BOGOTA)
+    )
+    tocada = []
+
+    async def base_falsa(_ctx, trabajo):
+        tocada.append("la base")
+        return trabajo(BaseFalsa())
+
+    monkeypatch.setattr(h, "_con_base", base_falsa)
+
+    texto = asyncio.run(
+        h._crear_cita(
+            ctx,
+            SolicitudCita(
+                nombre_completo="Sandy Nariño",
+                inicio=datetime(2026, 9, 15, 14, 0, tzinfo=h.ZONA_BOGOTA),
+                tratamiento="valoracion",
+                clave_idempotencia="da-igual",
+            ),
+        )
+    )
+
+    assert "NO" in texto and "confirmes" in texto, f"el texto no prohíbe confirmar: {texto}"
+    assert calendario.eventos == {}, "creó la cita sin poder comprobar el calendario"
+    assert tocada == [], "consumió un cupo por una hora que nunca se pudo comprobar"
+
+
+def test_el_fallo_del_calendario_NO_autoriza_ninguna_hora(monkeypatch):
+    """La red que sostiene a la de arriba, y la razón de que devolver un texto sea seguro aquí.
+
+    El miedo que justifica `failure_error_function=None` es que el modelo lea un texto y le
+    confirme la cita igual. Contra eso hay un segundo cerrojo que no depende de que obedezca:
+    `sin_hora_no_verificada` bloquea el mensaje entero si ninguna tool autorizó esa hora en
+    este turno (no negociable 13). Así que este camino no puede registrar ni una.
+
+    Si alguien le añade un `horas_autorizadas |= ...` «para que pueda explicarse mejor», ese
+    cerrojo se abre y el texto pasa a ser lo único que separa a la paciente de una cita que no
+    existe.
+    """
+    ctx = contexto(
+        calendario=CalendarioQueNoResponde(),
+        ahora=datetime(2026, 9, 15, 8, 0, tzinfo=h.ZONA_BOGOTA),
+    )
+
+    async def base_falsa(_ctx, trabajo):
+        return trabajo(BaseFalsa())
+
+    monkeypatch.setattr(h, "_con_base", base_falsa)
+
+    asyncio.run(
+        h._crear_cita(
+            ctx,
+            SolicitudCita(
+                nombre_completo="Sandy Nariño",
+                inicio=datetime(2026, 9, 15, 14, 0, tzinfo=h.ZONA_BOGOTA),
+                tratamiento="valoracion",
+                clave_idempotencia="da-igual",
+            ),
+        )
+    )
+
+    assert ctx.turno.horas_autorizadas == set(), (
+        "autorizó una hora que nadie pudo comprobar: el guardrail dejaría pasar la "
+        "confirmación de una cita que no existe"
+    )
+
+
+def test_el_fallo_del_calendario_marca_el_turno_para_escalar(monkeypatch):
+    """Y la tercera pata: que un humano se entere SIEMPRE, no si el modelo quiere.
+
+    El texto dice «escala a los doctores», como los otros nueve de este módulo, y eso es una
+    instrucción que se puede desobedecer. Aquí no alcanza: si el modelo se la salta, queda una
+    paciente esperando una hora que nadie va a confirmar. La bandera la lee
+    `conversacion.responder` al cerrar el turno, mismo criterio que la radiografía del no
+    negociable 14c y que la baja comercial del 25.
+    """
+    ctx = contexto(
+        calendario=CalendarioQueNoResponde(),
+        ahora=datetime(2026, 9, 15, 8, 0, tzinfo=h.ZONA_BOGOTA),
+    )
+
+    async def base_falsa(_ctx, trabajo):
+        return trabajo(BaseFalsa())
+
+    monkeypatch.setattr(h, "_con_base", base_falsa)
+
+    asyncio.run(
+        h._crear_cita(
+            ctx,
+            SolicitudCita(
+                nombre_completo="Sandy Nariño",
+                inicio=datetime(2026, 9, 15, 14, 0, tzinfo=h.ZONA_BOGOTA),
+                tratamiento="valoracion",
+                clave_idempotencia="da-igual",
+            ),
+        )
+    )
+
+    assert ctx.turno.calendario_sin_verificar is True
+
+
+def test_un_calendario_que_SI_responde_no_marca_nada(monkeypatch):
+    """El falso positivo de la de arriba: una bandera que se encendiera siempre escalaría cada
+    cita agendada, que es la inundación del no negociable 26 por otra puerta.
+
+    Camino feliz, montado como `test_el_mismo_intento_no_crea_un_SEGUNDO_evento_en_el_calendario`:
+    la reserva ya tiene su cita, así que la tool confirma sin tocar nada más.
+    """
+    ctx = contexto()
+    ya_creada = {
+        "id": "cita-original",
+        "nombre_completo": "Ana Gómez",
+        "tratamiento": "valoracion",
+        "evento_calendar_id": "evt-original",
+    }
+
+    async def base_falsa(_ctx, trabajo):
+        return ((77, 1), ya_creada, [])
+
+    monkeypatch.setattr(h, "_con_base", base_falsa)
+
+    texto = asyncio.run(
+        h._crear_cita(
+            ctx,
+            SolicitudCita(
+                nombre_completo="Ana Gómez",
+                inicio=INICIO,
+                tratamiento="valoracion",
+                clave_idempotencia="da-igual",
+            ),
+        )
+    )
+
+    assert "Cita confirmada" in texto
+    assert ctx.turno.calendario_sin_verificar is False
+
+
 def test_no_se_mueve_una_cita_a_una_hora_bloqueada_por_el_doctor(monkeypatch):
     """Mover una cita encima de la cirugía del doctor es el mismo defecto que crearla ahí.
 

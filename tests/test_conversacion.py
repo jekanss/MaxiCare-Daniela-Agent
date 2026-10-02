@@ -257,6 +257,87 @@ def test_el_archivo_escala_aunque_el_turno_lo_cortara_un_guardrail(monkeypatch):
     assert r.fallo is None, "un `tarea_ajena` no es un fallo, con archivo o sin él"
 
 
+class _ModeloQueNoPudoVerElCalendario(ModeloGuionizado):
+    """Enciende `calendario_sin_verificar` DURANTE la corrida, que es cuando lo hace la tool.
+
+    No vale ponerla a mano antes de llamar a `turno(...)`: `responder` hace
+    `ctx.turno.reiniciar()` antes de correr y la borraría medio milisegundo después -- la
+    misma trampa que documenta `_con_archivo`. La diferencia es QUIÉN la pone: la bandera del
+    archivo llega de `atencion`, antes del turno, y esta la pone `herramientas._crear_cita`
+    dentro de él.
+    """
+
+    def __init__(self, ctx: ContextoDaniela, *turnos) -> None:
+        super().__init__(*turnos)
+        self._ctx = ctx
+
+    async def get_response(self, *a, **k):
+        self._ctx.turno.calendario_sin_verificar = True
+        return await super().get_response(*a, **k)
+
+
+def _agente_sin_calendario(ctx: ContextoDaniela, *turnos) -> Agent:
+    return Agent(
+        name="daniela_de_prueba",
+        model=_ModeloQueNoPudoVerElCalendario(ctx, *turnos),
+        instructions="Responde.",
+        output_type=RespuestaDaniela,
+    )
+
+
+def test_un_calendario_que_no_se_pudo_comprobar_escala_aunque_el_modelo_no_lo_pida():
+    """La tercera pata del arreglo del caso Sandy Nariño, y la que no depende del modelo.
+
+    `crear_cita` le devuelve un texto que acaba en «escala a los doctores», pero eso es una
+    instrucción y una instrucción se puede desobedecer. Si se la salta, queda una paciente
+    esperando que alguien le confirme un horario que nadie va a poder confirmar: la hora no se
+    pudo comprobar, así que la cita no existe y no va a existir sola.
+
+    Mismo criterio que la radiografía (14c), la baja comercial (25) y la deduplicación (26):
+    que un humano se entere no puede colgar de que el modelo obedezca una frase del prompt.
+    """
+    ctx = contexto()
+    agente = _agente_sin_calendario(
+        ctx, responde(respuesta_daniela("Dame un momento y te confirmo ese horario."))
+    )
+
+    r = turno("este sabado a las dos esta bien", agente, ctx)
+
+    assert r.escalado_por == "dato_faltante"
+    assert r.respuesta.mensaje_al_paciente == "Dame un momento y te confirmo ese horario."
+
+
+def test_el_motivo_del_modelo_le_gana_al_del_calendario():
+    """Igual que con el archivo: el motivo ES el asunto con el que deduplica el no negociable
+    26, así que pisar un `clinico` callaría al `clinico` que viniera detrás."""
+    ctx = contexto()
+    agente = _agente_sin_calendario(
+        ctx,
+        responde(
+            respuesta_daniela(
+                "Le paso tu caso al doctor.",
+                requiere_escalamiento=True,
+                motivo_escalamiento="clinico",
+            )
+        ),
+    )
+
+    assert turno("me duele y quiero cita", agente, ctx).escalado_por == "clinico"
+
+
+def test_el_archivo_le_gana_al_calendario_y_no_al_contrario():
+    """Los dos rellenan el mismo hueco, así que el orden entre ellos tenía que decidirse.
+
+    Gana `archivo_recibido` porque el no negociable 14c promete que una imagen escala SIEMPRE
+    con ese motivo, y cambiárselo rompería esa promesa. Lo que importa --que un humano entre--
+    se cumple igual con cualquiera de los dos.
+    """
+    ctx = _con_archivo()
+    agente = _agente_sin_calendario(ctx, responde(respuesta_daniela("Ya lo recibimos.")))
+
+    assert turno("mira esto y agéndame", agente, ctx).escalado_por == "archivo_recibido"
+
+
 # ==========================================================================================
 # Los caminos que importan: cuando algo falla
 # ==========================================================================================

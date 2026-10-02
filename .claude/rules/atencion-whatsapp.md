@@ -617,6 +617,68 @@ estrenar una línea de teléfono. Vive en `reseteo.py`, y `runtime._entregar` lo
   probó. Por eso el botón «reiniciar» no te devuelve a primer contacto: el paciente que te
   inventaste sigue en la tabla y el turno siguiente te reconoce. Para eso está `/clearstate`.
 
+## El reventón: el turno que respondía al paciente y no avisaba a nadie
+
+`atencion.atender` envuelve `conversacion.responder` en un `except Exception` porque este
+módulo promete no propagar nunca. Ese camino hacía dos cosas bien y una mal, y la mala era la
+que importaba: mandaba `MENSAJE_SEGURO`, dejaba el fallo en `mensajes_entrantes` y un `ROTO`
+en el informe — **y no avisaba a ningún doctor**.
+
+El problema es la frase. `MENSAJE_SEGURO` dice, literal:
+
+> Prefiero que esto te lo confirme directamente el doctor para no darte un dato equivocado.
+> **Ya le paso tu mensaje y te escribe apenas pueda.** 🙏
+
+Nadie le pasaba nada a nadie. `conversacion.responder` lanza antes de llegar a su
+`al_escalar`, y el `except` de `atencion` ponía `escalamiento_real = None` y seguía.
+
+**El caso medido, conversación `156ab45c` (+57 319 661 5042, Sandy Nariño):**
+
+```
+01/10 17:38  paciente  «seria posible un sabado en la tarde por horario laboral»
+01/10 17:39  Daniela   ofrece 12:00, 1:00 y 2:00 del sábado 3     ← consultar_disponibilidad OK
+01/10 17:44  paciente  «Este sabado a las dos esta bien» + «Me puedes confirmar direccion»
+                       crear_cita -> _bloqueo_que_tapa -> bloqueos() -> BrokenPipeError
+                       (socket keep-alive de Google, muerto; ultimo uso OK a las 17:39:17)
+                       failure_error_function=None -> UserError -> `except UserError: raise`
+01/10 17:44  Daniela   MENSAJE_SEGURO  ← la promesa
+                       escalamientos: 0 filas · Telegram: 0 · casos: roto:usererror (1)
+             ... 15 h 34 min ...
+02/10 09:18  Santiago  toma la conversación desde el panel, por su cuenta
+02/10 09:22  Santiago  la dirección y «¿Nos vemos mañana?»
+02/10 09:56  paciente  «Si confirmo asistencia» -> Daniela agenda: sábado 3, 2:00 pm
+```
+
+La cita existe. La salvó un humano que entró por casualidad, no el sistema.
+
+Lo que se arregló y lo que no:
+
+- **El aviso se hace en el `except` de `atencion`, con el mismo `al_escalar` del camino
+  normal.** Y no en `conversacion.responder`: su `except UserError: raise` está puesto a
+  propósito —un `output_type` imposible o una tool mal declarada son defectos de
+  configuración, y taparlos los esconde hasta producción— y además el `except` de `atencion`
+  cubre más, porque atrapa también lo que no es del SDK: un fallo de red a mitad de turno, o
+  una tool con un bug.
+- **Hereda las dos guardas del no negociable 26**, que es la mitad que evita el daño nuevo:
+  la clave de idempotencia del turno y el asunto que el doctor ya tiene delante sin responder.
+  Sin eso, una racha de reventones —que es lo normal cuando algo externo se cae— se convierte
+  en una racha de Telegrams, y ahí es donde muere un canal de alertas.
+- **Solo se cuenta el aviso que SALIÓ.** `al_escalar` devuelve un booleano y el informe recibe
+  `escalado_por` únicamente si ese booleano fue `True`. Con `al_escalar` en `None` —el carril
+  de pruebas web, donde no hay a quién avisar— no cambia nada.
+- **El escalamiento se cuenta DENTRO de la tarjeta `ROTO`.** `casos_del_turno` recibe
+  `escalo_el_reventon=True` y con él no abre el `humano:dato_faltante` que abriría si no:
+  mismo reparto que ya tenían el hueco de conocimiento y el guardrail —la causa se queda la
+  cuenta y el síntoma no abre tarjeta—, porque desde `sin_resolver` el `dato_faltante` que
+  pide el modelo y el sintético del reventón son la misma cadena.
+- **Los otros dos defectos del caso ya están cerrados, y viven en
+  `.claude/rules/calendario.md`:** el cliente de Google reintenta UNA vez un socket muerto
+  rehaciendo el servicio (y `events.insert` nunca), y el sondeo previo de
+  `herramientas._bloqueo_que_tapa` devuelve texto en vez de matar la corrida, con tres
+  cerrojos detrás para que seguir vivo no signifique poder confirmar una cita que no existe.
+  Con los tres puestos, este camino del reventón pasa a ser lo que siempre debió ser: la red
+  de lo imprevisto, no el destino de un hipo de red.
+
 ## La regeneración: el freno que se frenaba a sí mismo
 
 Cuando un guardrail de salida salta, `conversacion.responder` regenera UNA vez mandándole al

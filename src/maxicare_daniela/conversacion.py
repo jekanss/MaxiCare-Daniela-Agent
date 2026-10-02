@@ -603,6 +603,22 @@ async def responder(
         resultado.escalado_por = "archivo_recibido"
         log.info("archivo para revisar en %s · se escala por código", ctx.id_conversacion)
 
+    # Y una cita que no se pudo comprobar contra el calendario escala igual, por lo mismo.
+    #
+    # `herramientas._crear_cita` le devuelve al modelo un texto que acaba en «escala a los
+    # doctores», y eso es una instrucción: se puede desobedecer. Lo que queda si se la salta es
+    # un paciente esperando que le confirmen un horario que nadie va a poder confirmar --la
+    # hora no se pudo leer, así que la cita no existe y no va a existir sola--. Es el caso
+    # Sandy Nariño del 1/10/2026 con el turno ya salvado: sin esto, lo que antes costaba un
+    # mensaje seguro pasaría a costar silencio, que es peor.
+    #
+    # Va DESPUÉS del archivo y solo rellena el hueco que quede: el 14c promete que una imagen
+    # escala SIEMPRE con `archivo_recibido`, y cambiarle el motivo rompería esa promesa. Lo
+    # que importa --que un humano entre-- se cumple con cualquiera de los dos.
+    if resultado.escalado_por is None and ctx.turno.calendario_sin_verificar:
+        resultado.escalado_por = "dato_faltante"
+        log.info("calendario sin verificar en %s · se escala por código", ctx.id_conversacion)
+
     _guardar_estado(ctx, resultado)
 
     if resultado.escalado_por is not None and al_escalar is not None:
