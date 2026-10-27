@@ -547,9 +547,11 @@ async def corridas(url: str) -> int:
         # e) la ultima linea de la conversacion de referencia del cliente. Estuvo fuera de
         #    alcance hasta el 13/09/2026: la fila `_general`/`valoracion` decia que no habia
         #    tarifa universal documentada, asi que Daniela ofrecia una cita cuyo precio no
-        #    podia decir. MaxiCare fijo $50.000 abonables y la fila paso a aprobada.
-        print(f"   {marca('50' in respuestas11[-1])} pudo decir cuanto cuesta la valoracion "
-              f"(fila `_general`/`valoracion`, aprobada el 13/09/2026)")
+        #    podia decir. MaxiCare fijo $50.000 abonables y la fila paso a aprobada; luego
+        #    $40.000, y desde f475ded es SIN COSTO. Esta linea siguio buscando el «50» y marco
+        #    FALLA cinco corridas de cinco sobre la respuesta correcta («es sin costo»).
+        print(f"   {marca('sin costo' in respuestas11[-1].lower())} pudo decir cuanto cuesta "
+              f"la valoracion: sin costo (fila `_general`/`valoracion`)")
 
         # f) no se queda en la negativa: el ultimo mensaje propone un siguiente paso.
         #
