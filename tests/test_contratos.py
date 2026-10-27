@@ -331,3 +331,12 @@ def test_una_cita_con_un_tratamiento_fuera_del_vocabulario_se_rechaza():
             tratamiento="lo_que_sea",
             clave_idempotencia="573001112233-2026-10-01T09:00",
         )
+
+
+def test_la_causa_de_cancelar_es_una_lista_cerrada_y_por_defecto_no_se_supone():
+    """`no_lo_dijo` por defecto: inventarle una causa al paciente ensuciaría justo la cuenta
+    que la 032 existe para hacer. Y `clinica` es del código, no del modelo."""
+    c = SolicitudCancelacion(id_cita="cita-882", clave_idempotencia="cita-882")
+    assert c.causa == "no_lo_dijo"
+    with pytest.raises(ValidationError):
+        SolicitudCancelacion(id_cita="c", clave_idempotencia="c", causa="clinica")

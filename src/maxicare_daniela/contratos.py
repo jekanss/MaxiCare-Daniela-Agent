@@ -155,6 +155,21 @@ Barrera = Literal[
     "ninguna",
 ]
 
+#: Por qué se cancela una cita, en lista cerrada (migración 032). La frase del paciente
+#: sigue viajando en `SolicitudCancelacion.motivo`: esto es para CONTAR, aquella para leer.
+#: El CHECK de la 032 admite además `clinica`, que escribe el código cuando la clínica borra
+#: el evento de su calendario y que el modelo no tiene por qué poder elegir.
+#: `otra_fecha` es la que más importa separar: quien no puede ese día no ha perdido el
+#: interés, y una cancelación así es una reprogramación que no llegó a ofrecerse.
+CausaCancelacion = Literal[
+    "otra_fecha",
+    "ya_no_quiere",
+    "salud",
+    "precio",
+    "otro",
+    "no_lo_dijo",
+]
+
 #: Las cuatro rutas de `fallos.escalamiento_humano` más `archivo_recibido`.
 MotivoEscalamiento = Literal[
     "clinico",
@@ -462,6 +477,15 @@ class SolicitudCancelacion(BaseModel):
             "Lo que dijo el paciente, si lo dijo. Alimenta la métrica de recuperaciones."
         ),
     )
+    causa: CausaCancelacion = Field(
+        default="no_lo_dijo",
+        description=(
+            "Por qué cancela, según lo que dijo: 'otra_fecha' si puede ir pero no ese día u "
+            "hora; 'ya_no_quiere' si ya no quiere el tratamiento o lo resolvió en otro lado; "
+            "'salud', 'precio'; 'otro' si dio otra razón; 'no_lo_dijo' si no la dio. No se "
+            "lo preguntes solo para llenar esto."
+        ),
+    )
     clave_idempotencia: str = Field(
         min_length=1,
         max_length=200,
@@ -487,7 +511,10 @@ class SolicitudEscalamiento(BaseModel):
     resumen_para_doctor: str = Field(
         min_length=1,
         max_length=4000,
-        description="Contexto suficiente para que el doctor no tenga que empezar de cero.",
+        description=(
+            "Contexto suficiente para que el doctor no tenga que empezar de cero: qué busca "
+            "el paciente, qué información ya se le dio y qué sigue pendiente o frenándolo."
+        ),
     )
     pregunta_concreta: str = Field(
         min_length=1,
@@ -582,6 +609,36 @@ class DatosDelTurno:
         self.hubo_archivo_para_revisar = False
         self.calendario_sin_verificar = False
         self.senales = []
+
+
+@dataclass(frozen=True)
+class Antecedentes:
+    """Lo que quedó de este NÚMERO en conversaciones anteriores, leído por el código.
+
+    Existe porque la conversación muere a las 24 h y con ella el historial del agente: quien
+    canceló el martes, o se quedó en «lo pienso por el precio», escribía el jueves y Daniela
+    le hablaba como a un desconocido. `estado_oportunidad` se guardaba cada turno y solo su
+    `tratamiento` volvía al prompt, y solo tras una reactivación.
+
+    Todo sale de la base y nunca del modelo, y nada es texto libre: estados y barreras son
+    los `Literal` de arriba, la causa es `CausaCancelacion`, y del relevo solo cruzan la
+    fecha y si salió una cita (no negociable 17). El tratamiento de una cita del relevo lo
+    escribe el doctor sin validar (no negociable 19), así que `agentes` lo filtra contra
+    `vocabulario()` antes de enseñarlo.
+    """
+
+    ultima_cita_tratamiento: str | None = None
+    ultima_cita_inicio: datetime | None = None
+    ultima_cita_estado: str | None = None
+    ultima_cita_asistio: bool | None = None
+    ultima_cita_causa: str | None = None
+    tiene_cita_proxima: bool = False
+    oportunidad_estado: str | None = None
+    oportunidad_barrera: str | None = None
+    oportunidad_tratamiento: str | None = None
+    oportunidad_en: datetime | None = None
+    relevo_en: datetime | None = None
+    relevo_con_cita: bool = False
 
 
 @dataclass
@@ -695,6 +752,10 @@ class ContextoDaniela:
     #: previa`. Sin esto, Daniela le preguntaba el tratamiento a alguien a quien le escribimos
     #: precisamente porque ya lo había dicho.
     tratamiento_pendiente: str | None = None
+
+    #: La historia de este número en conversaciones anteriores. `None` si no hay ninguna o
+    #: si no se pudo leer. Ver `Antecedentes` y `persistencia.antecedentes_del_telefono`.
+    antecedentes: Antecedentes | None = None
 
     #: `True` solo si TODOS los mensajes del turno son quick replies de una plantilla
     #: (`type: "button"` en el webhook de Meta). Lo lee `guardrails.uso_indebido` para no

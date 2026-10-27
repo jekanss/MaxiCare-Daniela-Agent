@@ -120,8 +120,8 @@ respaldo que existía entonces era el 3, que sobre un tratamiento vacío devuelv
 `SIN DATO DOCUMENTADO` le ordena por escrito confirmar con los doctores y escalar. Obedeció.
 
 **El precio de la valoración vive en UNA sola fila a propósito.** La alternativa era
-copiarlo a `valoracion`/`precio`, y se descartó: los $40.000 aplican a cualquier tratamiento
-y se abonan a todos, así que es un hecho general. Copiarlo pondría el mismo precio en dos
+copiarlo a `valoracion`/`precio`, y se descartó: lo que diga esa fila --entonces $40.000,
+hoy «sin costo» (`f475ded`)-- aplica a cualquier tratamiento, así que es un hecho general. Copiarlo pondría el mismo precio en dos
 filas que la clínica edita por separado desde el panel, y un precio en dos sitios es un
 precio que se desincroniza.
 

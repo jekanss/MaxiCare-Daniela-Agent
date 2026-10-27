@@ -182,6 +182,14 @@ function Cabecera({
   )
 }
 
+/** Cada motivo de `panel.riesgos_de_citas`, dicho para quien mira la agenda. */
+function motivoDeRiesgo(motivo: string): string {
+  if (motivo === 'sin_confirmar') return 'no confirmó tras el recordatorio'
+  if (motivo === 'cancelo_o_falto_antes') return 'canceló o faltó antes'
+  if (motivo.startsWith('barrera:')) return `barrera: ${motivo.slice(8).replace(/_/g, ' ')}`
+  return motivo
+}
+
 function TarjetaCita({
   cita,
   pasada,
@@ -250,6 +258,14 @@ function TarjetaCita({
               </span>
             )}
           </div>
+          {/* La etiqueta de riesgo dice el PORQUÉ, no una puntuación: cada motivo es una
+              regla que la clínica puede discutir. Solo ordena a quién llamar primero; no
+              manda nada a nadie. */}
+          {!pasada && cita.riesgo && cita.riesgo.length > 0 && (
+            <p className="text-[10px] font-medium mt-1" style={{ color: '#B45309' }}>
+              ⚠ Riesgo: {cita.riesgo.map(motivoDeRiesgo).join(' · ')}
+            </p>
+          )}
         </div>
         <div className="shrink-0 text-right">
           <p className="text-xs font-medium" style={{ color: '#9CA3AF' }}>{hhmm(cita.inicio)}</p>

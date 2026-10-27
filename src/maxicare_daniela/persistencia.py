@@ -1882,9 +1882,38 @@ def registrar_cita(
                 telefono, tratamiento, inicio, duracion_minutos, evento_calendar_id,
             ),
         )
+        anotar_evento_cita(cur, id_cita, "creada", inicio=inicio)
     if commit:
         conn.commit()
     return id_cita
+
+
+def anotar_evento_cita(
+    cur,
+    id_cita: str,
+    tipo: str,
+    *,
+    inicio: datetime | None = None,
+    causa: str | None = None,
+    asistio: bool | None = None,
+) -> None:
+    """Una fila de `eventos_cita` (032), con el MISMO cursor que hace el cambio.
+
+    El cursor y no la conexión es la frontera: así la fila viaja en la transacción del
+    cambio que cuenta, y si el cambio se deshace ella también. Una bitácora que anotara
+    cancelaciones que se deshicieron contaría citas perdidas que no se perdieron.
+
+    `tipo` lo cierra el CHECK de la 032. Uno inventado revienta aquí, con el cambio dentro.
+    La reprogramación NO pasa por aquí: necesita la hora vieja, y esa sale de la fila
+    antes de que `mover_cita` la pise (ver allí).
+    """
+    cur.execute(
+        """
+        INSERT INTO eventos_cita (cita_id, tipo, inicio, causa_cancelacion, asistio)
+        VALUES (%s, %s, %s, %s, %s)
+        """,
+        (id_cita, tipo, inicio, causa, asistio),
+    )
 
 
 def cita_viva_de_reserva(conn, reserva_id: int) -> dict[str, Any] | None:
@@ -2023,8 +2052,50 @@ def marcar_cita_confirmada(conn, id_cita: str, *, cuando: datetime) -> bool:
             (cuando, id_cita),
         )
         cambio = cur.rowcount > 0
+        # Solo si ESTA llamada cambió algo, por lo mismo que el aviso: el segundo toque del
+        # botón no es una segunda confirmación.
+        if cambio:
+            anotar_evento_cita(cur, id_cita, "confirmada_por_paciente")
     conn.commit()
     return cambio
+
+
+def situacion_para_el_aviso(
+    conn, id_conversacion: str, telefono: str, *, ahora: datetime
+) -> dict[str, Any]:
+    """Lo que ya sabe la base sobre esta oportunidad, para la línea fija del aviso al doctor.
+
+    Sale de `estado_oportunidad` de ESTA conversación --lo último guardado, que es el turno
+    anterior: el de ahora se guarda al cerrarlo-- y de la próxima cita viva del teléfono.
+    Lo arma el código y no el modelo: el resumen del escalamiento lo redacta Daniela, y si
+    se olvida de la barrera el doctor no la ve (auditoría de conversaciones, punto 10).
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT estado, barrera, tratamiento FROM estado_oportunidad "
+            " WHERE conversacion_id = %s",
+            (id_conversacion,),
+        )
+        fila = cur.fetchone()
+        cur.execute(
+            """
+            SELECT inicio, tratamiento FROM citas
+             WHERE telefono = %s
+               AND estado IN ('confirmada', 'reprogramada')
+               AND inicio >= %s
+             ORDER BY inicio
+             LIMIT 1
+            """,
+            (telefono, ahora),
+        )
+        cita = cur.fetchone()
+    return {
+        "estado": fila[0] if fila else None,
+        "barrera": fila[1] if fila else None,
+        "tratamiento": fila[2] if fila else None,
+        "proxima_cita": cita[0] if cita else None,
+        "tratamiento_cita": cita[1] if cita else None,
+    }
 
 
 def citas_activas_de_telefono(
@@ -2078,6 +2149,16 @@ def mover_cita(
     ya salió, y el despachador lo mandaría: sus guardas solo miran lo que hay en la base.
     """
     with conn.cursor() as cur:
+        # La hora vieja se lee de la fila ANTES del UPDATE, en el mismo INSERT: es el único
+        # momento en que todavía existe. Hasta la 032 se perdía aquí, y una cita movida dos
+        # veces y cancelada después parecía una cita cancelada sin más.
+        cur.execute(
+            """
+            INSERT INTO eventos_cita (cita_id, tipo, inicio, inicio_anterior)
+            SELECT id, 'reprogramada', %s, inicio FROM citas WHERE id = %s
+            """,
+            (inicio, id_cita),
+        )
         cur.execute(
             """
             UPDATE citas SET reserva_id = %s, inicio = %s, estado = 'reprogramada',
@@ -2091,19 +2172,38 @@ def mover_cita(
 
 
 def marcar_cita_cancelada(
-    conn, id_cita: str, *, motivo: str | None = None, commit: bool = True
+    conn,
+    id_cita: str,
+    *,
+    motivo: str | None = None,
+    causa: str | None = None,
+    commit: bool = True,
 ) -> None:
     """`commit=False`, por lo mismo que en `mover_cita`: la cancelación y la anulación de los
     recordatorios de esa cita tienen que ser atómicas, o el paciente que canceló recibe la
-    víspera el recordatorio de la cita que canceló."""
+    víspera el recordatorio de la cita que canceló.
+
+    `motivo` es la frase del paciente; `causa`, la lista cerrada de la 032 que la cuenta.
+    El evento se anota solo si la cita NO estaba ya cancelada: cancelar es idempotente
+    (`SolicitudCancelacion.clave_idempotencia`), y una segunda llamada no es una segunda
+    cancelación.
+    """
     with conn.cursor() as cur:
         cur.execute(
             """
+            INSERT INTO eventos_cita (cita_id, tipo, inicio, causa_cancelacion)
+            SELECT id, 'cancelada', inicio, %s FROM citas
+             WHERE id = %s AND estado <> 'cancelada'
+            """,
+            (causa, id_cita),
+        )
+        cur.execute(
+            """
             UPDATE citas SET estado = 'cancelada', motivo_cancelacion = %s,
-                             actualizada_en = now()
+                             causa_cancelacion = %s, actualizada_en = now()
              WHERE id = %s
             """,
-            (motivo, id_cita),
+            (motivo, causa, id_cita),
         )
     if commit:
         conn.commit()
@@ -2489,7 +2589,16 @@ INTENTOS_POR_SERIE_DE_REACTIVACION = 2
 #: 2. Su último mensaje fue hace >= 24 h y < 30 días -- antes sigue en la conversación, y
 #:    «hace unos días nos escribió» sobre algo de hace tres meses es falso: de las cosas por
 #:    las que la gente reporta un número.
-#: 3. No tiene cita FUTURA no cancelada -- a quien ya tiene hora no se le persigue.
+#: 3. No tiene NINGUNA cita, de ningún estado ni fecha -- «sin agendar» significa que nunca
+#:    agendó. Hasta el 26/10/2026 esta condición miraba solo citas FUTURAS no canceladas, y
+#:    eso metía en este tipo a quien canceló, a quien faltó y a quien ASISTIÓ: recibían «¿sigues
+#:    interesado en la consulta que quedó sin agendar?» y Daniela leía en su antecedente que
+#:    nunca tuvo cita (`agentes._LO_QUE_DECIA_LA_REACTIVACION`). Encima el barrido corre este
+#:    tipo ANTES que `cancelada`, y la condición 5 impedía que después le llegara el correcto.
+#:    Lo que se pierde, dicho: un paciente antiguo que pregunta por otro tratamiento y no
+#:    agenda ya no entra aquí. Ese caso merece su propia plantilla, no una que le dice algo
+#:    falso. `_LEADS_QUE_CANCELARON` conserva su filtro de cita FUTURA: allí la cita cancelada
+#:    es justo la que lo convierte en lead.
 #: 4. No pidió la baja, y el contador de envíos fallidos no llegó al tope (R1, por
 #:    duplicado: `seguimientos.decidir` la vuelve a mirar al despachar, pero no hay motivo
 #:    para encolar aquí una fila que esa guarda va a anular de todas formas). El contador
@@ -2583,10 +2692,9 @@ SELECT uc.telefono, uc.conversacion_id, um.cuando AS ultimo_mensaje
    AND um.cuando <= %(ahora)s - interval '24 hours'
    AND um.cuando >  %(ahora)s - interval '{DIAS_DE_VENTANA_DE_CARTERA} days'
    AND NOT EXISTS (
+        -- Condicion 3: CUALQUIER cita, pasada, cancelada o futura. Ver arriba.
         SELECT 1 FROM citas c
          WHERE c.telefono = uc.telefono
-           AND c.inicio > %(ahora)s
-           AND c.estado <> 'cancelada'
    )
    AND NOT EXISTS (
         -- I-1: TODOS los tipos de reactivacion, no solo el de esta consulta -- ver la
@@ -3260,6 +3368,117 @@ def tratamiento_de_la_consulta_previa(conn, telefono: str) -> str | None:
         )
         fila = cur.fetchone()
     return fila[0] if fila else None
+
+
+def antecedentes_del_telefono(
+    conn, telefono: str, *, id_conversacion: str, ahora: datetime
+) -> dict[str, Any] | None:
+    """Lo que quedó de este número FUERA de la conversación en curso. `None` si nada.
+
+    Es lo que alimenta `contratos.Antecedentes`, y por eso devuelve sus campos tal cual.
+    Cuatro preguntas, todas por TELÉFONO como `tratamiento_de_la_consulta_previa`:
+
+    1. **La última cita que ya ocurrió o se canceló.** Ordenada por cuándo PASÓ: una
+       cancelada cuenta desde que se canceló (`actualizada_en`, que `marcar_cita_cancelada`
+       toca), las demás desde su hora. Así, la cita del mes que viene cancelada ayer va
+       delante de la del mes pasado.
+    2. **Si tiene una cita viva por delante.** Solo el sí o el no: el detalle lo da
+       `consultar_citas`, que la contrasta con Calendar (no negociable 20). Darle la hora
+       aquí sería darle una hora que ninguna tool ha verificado en este turno.
+    3. **Lo último que anotó `estado_oportunidad` en OTRA conversación.** La de ahora no:
+       esa ya la ve Daniela en su propio historial.
+    4. **El último relevo de otra conversación**, y si de esa conversación salió una cita
+       después de tomarla. Nada más (no negociable 17).
+
+    Corre en `atencion._leer_estado`, o sea dentro del candado por teléfono y en CADA
+    turno: son cuatro consultas cortas e indexadas (`citas` por teléfono es la 011), y el
+    precio de no tenerlas es hablarle como a un desconocido a quien canceló anteayer.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT tratamiento, inicio, estado, asistio, causa_cancelacion
+              FROM citas
+             WHERE telefono = %(tel)s
+               AND (estado = 'cancelada' OR inicio < %(ahora)s)
+             ORDER BY CASE WHEN estado = 'cancelada' THEN actualizada_en ELSE inicio END DESC
+             LIMIT 1
+            """,
+            {"tel": telefono, "ahora": ahora},
+        )
+        cita = cur.fetchone()
+
+        cur.execute(
+            """
+            SELECT EXISTS (
+                SELECT 1 FROM citas
+                 WHERE telefono = %(tel)s
+                   AND estado IN ('confirmada', 'reprogramada')
+                   AND inicio >= %(ahora)s
+            )
+            """,
+            {"tel": telefono, "ahora": ahora},
+        )
+        proxima = bool(cur.fetchone()[0])
+
+        cur.execute(
+            """
+            SELECT eo.estado, eo.barrera, eo.tratamiento, eo.actualizado_en
+              FROM estado_oportunidad eo
+              JOIN conversaciones c ON c.id = eo.conversacion_id
+             WHERE c.telefono = %(tel)s
+               AND c.id <> %(conv)s
+             ORDER BY eo.actualizado_en DESC
+             LIMIT 1
+            """,
+            {"tel": telefono, "conv": id_conversacion},
+        )
+        oportunidad = cur.fetchone()
+
+        cur.execute(
+            """
+            SELECT c.relevo_activado_en,
+                   EXISTS (
+                       SELECT 1 FROM citas ci
+                        WHERE ci.conversacion_id = c.id
+                          AND ci.creada_en >= c.relevo_activado_en
+                   )
+              FROM conversaciones c
+             WHERE c.telefono = %(tel)s
+               AND c.id <> %(conv)s
+               AND c.relevo_activado_en IS NOT NULL
+             ORDER BY c.relevo_activado_en DESC
+             LIMIT 1
+            """,
+            {"tel": telefono, "conv": id_conversacion},
+        )
+        relevo = cur.fetchone()
+
+    # Una fila de `estado_oportunidad` con los tres defaults no dice nada: la escribe
+    # `conversacion._guardar_estado` en cualquier turno, aunque no se haya entendido nada.
+    if oportunidad and oportunidad[2] == "no_identificado":
+        oportunidad = (oportunidad[0], oportunidad[1], None, oportunidad[3])
+    if oportunidad and (
+        oportunidad[0] == "explorando" and oportunidad[1] == "ninguna" and not oportunidad[2]
+    ):
+        oportunidad = None
+
+    if not (cita or proxima or oportunidad or relevo):
+        return None
+    return {
+        "ultima_cita_tratamiento": cita[0] if cita else None,
+        "ultima_cita_inicio": cita[1] if cita else None,
+        "ultima_cita_estado": cita[2] if cita else None,
+        "ultima_cita_asistio": cita[3] if cita else None,
+        "ultima_cita_causa": cita[4] if cita else None,
+        "tiene_cita_proxima": proxima,
+        "oportunidad_estado": oportunidad[0] if oportunidad else None,
+        "oportunidad_barrera": oportunidad[1] if oportunidad else None,
+        "oportunidad_tratamiento": oportunidad[2] if oportunidad else None,
+        "oportunidad_en": oportunidad[3] if oportunidad else None,
+        "relevo_en": relevo[0] if relevo else None,
+        "relevo_con_cita": bool(relevo[1]) if relevo else False,
+    }
 
 
 def insertar_escalamiento(

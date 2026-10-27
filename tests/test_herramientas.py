@@ -2066,7 +2066,9 @@ def _sincronizando(monkeypatch, ctx, citas, escrituras):
     monkeypatch.setattr(
         persistencia,
         "marcar_cita_cancelada",
-        lambda conn, id_cita, *, motivo=None: escrituras.append(("cancelar", id_cita, motivo)),
+        lambda conn, id_cita, *, motivo=None, causa=None: escrituras.append(
+            ("cancelar", id_cita, motivo)
+        ),
     )
     monkeypatch.setattr(
         persistencia,
@@ -3789,3 +3791,251 @@ def test_el_modelo_solo_puede_escribir_la_nota_nunca_la_fecha_el_origen_o_la_ver
     for nombre in ("registrar_no_contactar", "revocar_no_contactar"):
         propiedades = set(por_nombre[nombre].params_json_schema["properties"])
         assert propiedades == {"nota"}
+
+
+# ==========================================================================================
+# El cierre de la reserva (auditoría de conversaciones, paso 3)
+# ==========================================================================================
+
+
+def test_la_confirmacion_lleva_la_direccion_APROBADA_de_la_sede(monkeypatch):
+    """`_general`/`confirmacion_de_cita` pide la dirección en la confirmación, y dependía de
+    que el modelo se acordara de consultarla. Ahora la pone la tool, y solo si está aprobada."""
+    filas = [
+        persistencia.FilaConocimiento("_general", "sede", "Calle Falsa 123, consultorio 402.", True, None)
+    ]
+    monkeypatch.setattr(persistencia, "leer_conocimiento", lambda conn, t, c=None: filas)
+
+    async def base_falsa(_ctx, trabajo):
+        return trabajo(object())
+
+    monkeypatch.setattr(h, "_con_base", base_falsa)
+
+    texto = asyncio.run(h._cierre_de_la_reserva(contexto()))
+
+    assert "Calle Falsa 123, consultorio 402." in texto
+    assert "puede escribir por aquí para moverla" in texto
+
+
+def test_una_sede_sin_aprobar_no_se_le_da_al_paciente(monkeypatch):
+    filas = [persistencia.FilaConocimiento("_general", "sede", "Borrador", False, "falta")]
+    monkeypatch.setattr(persistencia, "leer_conocimiento", lambda conn, t, c=None: filas)
+
+    async def base_falsa(_ctx, trabajo):
+        return trabajo(object())
+
+    monkeypatch.setattr(h, "_con_base", base_falsa)
+
+    texto = asyncio.run(h._cierre_de_la_reserva(contexto()))
+
+    assert "Borrador" not in texto
+    assert "No hay dirección documentada" in texto
+
+
+def test_si_la_base_falla_la_cita_se_confirma_igual(monkeypatch):
+    """Cuando esto corre la cita YA existe y `crear_cita` no tiene `failure_error_function`:
+    un fallo aquí no puede convertir una cita buena en el mensaje de emergencia."""
+
+    async def revienta(_ctx, trabajo):
+        raise RuntimeError("Neon tuvo un mal minuto")
+
+    monkeypatch.setattr(h, "_con_base", revienta)
+
+    texto = asyncio.run(h._cierre_de_la_reserva(contexto()))
+
+    assert "No hay dirección documentada" in texto
+
+
+# ==========================================================================================
+# confirmar_asistencia (auditoría de conversaciones, paso 6)
+# ==========================================================================================
+
+
+def _cita_para_confirmar(**cambios) -> dict:
+    cita = dict(
+        id="cita-1",
+        nombre_completo="Ana Pérez",
+        telefono="573001112233",
+        paciente_id=None,
+        tratamiento="valoracion",
+        inicio=INICIO,
+        estado="confirmada",
+    )
+    cita.update(cambios)
+    return cita
+
+
+def _preparar_confirmacion(monkeypatch, cita, *, es_nueva=True):
+    """Dobla la base y el aviso al doctor, y devuelve qué se llamó."""
+    visto = {"marcadas": [], "avisos": [], "leida_por_id": None, "por_recordatorio": False}
+
+    def leer(_conn, id_cita):
+        visto["leida_por_id"] = id_cita
+        return cita
+
+    def del_recordatorio(_conn, telefono, *, ahora):
+        visto["por_recordatorio"] = True
+        return cita
+
+    def marcar(_conn, id_cita, *, cuando):
+        visto["marcadas"].append(id_cita)
+        return es_nueva
+
+    monkeypatch.setattr(persistencia, "leer_cita", leer)
+    monkeypatch.setattr(persistencia, "cita_del_ultimo_recordatorio", del_recordatorio)
+    monkeypatch.setattr(persistencia, "marcar_cita_confirmada", marcar)
+
+    from maxicare_daniela import aviso_citas
+
+    monkeypatch.setattr(
+        aviso_citas, "avisar_movimiento_en_segundo_plano", visto["avisos"].append
+    )
+
+    async def base_falsa(_ctx, trabajo):
+        return trabajo(object())
+
+    monkeypatch.setattr(h, "_con_base", base_falsa)
+    return visto
+
+
+def test_confirmar_escribiendo_marca_la_cita_del_recordatorio_y_avisa(monkeypatch):
+    """«Sí, ahí estaré» tiene que dejar la misma huella que el botón: la marca y el aviso."""
+    visto = _preparar_confirmacion(monkeypatch, _cita_para_confirmar())
+    ctx = contexto()
+
+    texto = asyncio.run(h._confirmar_asistencia(ctx, None))
+
+    assert visto["por_recordatorio"] and visto["leida_por_id"] is None
+    assert visto["marcadas"] == ["cita-1"]
+    assert len(visto["avisos"]) == 1
+    assert "Asistencia confirmada" in texto
+    # La hora sale de la base en este turno: el paciente puede oírla sin que el guardrail
+    # de horas bloquee la confirmación.
+    assert ctx.turno.horas_autorizadas
+
+
+def test_confirmar_dos_veces_no_le_cuesta_otro_aviso_al_doctor(monkeypatch):
+    visto = _preparar_confirmacion(monkeypatch, _cita_para_confirmar(), es_nueva=False)
+
+    texto = asyncio.run(h._confirmar_asistencia(contexto(), "cita-1"))
+
+    assert visto["leida_por_id"] == "cita-1"
+    assert visto["avisos"] == []
+    assert "Asistencia confirmada" in texto
+
+
+def test_no_se_confirma_la_cita_de_otro_telefono(monkeypatch):
+    visto = _preparar_confirmacion(
+        monkeypatch, _cita_para_confirmar(telefono="573009999999", paciente_id=77)
+    )
+
+    texto = asyncio.run(h._confirmar_asistencia(contexto(), "cita-1"))
+
+    assert visto["marcadas"] == []
+    assert "NO la confirmes" in texto
+
+
+def test_una_cita_cancelada_no_se_confirma(monkeypatch):
+    """Confirmar una cita cancelada le diría al paciente que lo esperan a una hora que ya
+    puede ser de otro."""
+    visto = _preparar_confirmacion(monkeypatch, _cita_para_confirmar(estado="cancelada"))
+
+    texto = asyncio.run(h._confirmar_asistencia(contexto(), "cita-1"))
+
+    assert visto["marcadas"] == []
+    assert "CANCELADA" in texto
+
+
+def test_una_cita_pasada_no_se_confirma(monkeypatch):
+    visto = _preparar_confirmacion(
+        monkeypatch, _cita_para_confirmar(inicio=AHORA - timedelta(days=1))
+    )
+
+    texto = asyncio.run(h._confirmar_asistencia(contexto(), "cita-1"))
+
+    assert visto["marcadas"] == []
+    assert "ya pasó" in texto
+
+
+def test_sin_cita_que_confirmar_no_se_promete_nada(monkeypatch):
+    visto = _preparar_confirmacion(monkeypatch, None)
+
+    texto = asyncio.run(h._confirmar_asistencia(contexto(), None))
+
+    assert visto["marcadas"] == []
+    assert "NO le digas que quedó confirmada" in texto
+
+
+def test_confirmar_asistencia_esta_registrada_y_sin_el_guardrail_de_identidad():
+    """Registrada, o el modelo no puede llamarla. Y SIN `identidad_antes_de_datos`: el botón
+    hace lo mismo sin identidad, y con el guardrail el paciente sin ficha verificada que
+    contesta «sí» al recordatorio recibiría la respuesta de emergencia."""
+    por_nombre = {t.name: t for t in h.TODAS}
+
+    tool = por_nombre["confirmar_asistencia"]
+
+    assert not tool.tool_input_guardrails
+    assert set(tool.params_json_schema["properties"]) == {"id_cita"}
+
+
+# ==========================================================================================
+# La línea fija del aviso al doctor (auditoría de conversaciones, paso 7)
+# ==========================================================================================
+
+
+def test_la_linea_del_aviso_dice_estado_barrera_tratamiento_y_cita():
+    linea = h.linea_de_situacion(
+        {
+            "estado": "con_barrera",
+            "barrera": "precio",
+            "tratamiento": "implantes",
+            "proxima_cita": INICIO,
+        }
+    )
+
+    assert "Estado: con barrera" in linea
+    assert "Barrera: precio" in linea
+    assert "Tratamiento: implantes" in linea
+    assert f"Cita: {h._formatear_hora(INICIO)}" in linea
+
+
+def test_sin_cita_lo_dice_y_sin_barrera_no_la_nombra():
+    """«Cita: ninguna» es un dato para quien retoma; «Barrera: ninguna» es ruido."""
+    linea = h.linea_de_situacion(
+        {"estado": "explorando", "barrera": "ninguna", "tratamiento": None, "proxima_cita": None}
+    )
+
+    assert "Cita: ninguna" in linea
+    assert "Barrera" not in linea
+    assert "Tratamiento" not in linea
+
+
+def test_el_tratamiento_libre_del_relevo_se_escapa():
+    """El tratamiento de una cita del relevo lo escribe el doctor sin validar, y Telegram
+    rechaza el aviso ENTERO si el HTML no cierra."""
+    linea = h.linea_de_situacion({"tratamiento": "muela <3", "proxima_cita": None})
+
+    assert "<3" not in linea and "&lt;3" in linea
+
+
+def test_la_linea_nunca_tumba_el_aviso():
+    assert h.linea_de_situacion(None) == ""
+    assert h.linea_de_situacion(7) == ""
+
+
+def test_el_aviso_lleva_la_linea_fija_debajo_del_nombre():
+    ctx = contexto(nombre_paciente="Ana")
+    solicitud = SolicitudEscalamiento(
+        motivo="clinico",
+        resumen_para_doctor="Pregunta por implantes.",
+        pregunta_concreta="¿Se la puede valorar?",
+        clave_idempotencia="x",
+    )
+
+    texto = h._aviso_para_doctores(
+        ctx, solicitud, {"estado": "con_barrera", "barrera": "precio", "proxima_cita": None}
+    )
+
+    assert texto.index("Ana") < texto.index("Barrera: precio") < texto.index("Pregunta por")
+    # Sin situación, el aviso sale igual que antes.
+    assert "Estado" not in h._aviso_para_doctores(ctx, solicitud)

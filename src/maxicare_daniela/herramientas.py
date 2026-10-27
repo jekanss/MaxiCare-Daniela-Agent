@@ -1259,12 +1259,57 @@ async def _crear_cita(ctx: ContextoDaniela, solicitud: SolicitudCita) -> str:
             id_cita,
         )
 
+    # El id va el ÚLTIMO, como en las otras dos confirmaciones: `scripts/probar_tools.py` y
+    # `test_tools_neon.py` lo sacan con `rsplit("Id de la cita: ")`, y con texto detrás
+    # leían la dirección como parte del id.
     texto = (
         f"Cita confirmada para {solicitud.nombre_completo}, {_formatear_hora(inicio)}, "
-        f"{solicitud.tratamiento}. Id de la cita: {id_cita}."
+        f"{solicitud.tratamiento}. El espacio queda reservado con el profesional que lo va "
+        "a atender."
+        + await _cierre_de_la_reserva(ctx)
+        + f" Id de la cita: {id_cita}."
     )
     ctx.turno.horas_autorizadas |= horas_de(texto)
+    # La dirección lleva números («#106-26», «consultorio 402») y sale de una ficha aprobada:
+    # se autoriza por lo mismo que lo que devuelve `consultar_base_conocimiento`.
+    ctx.turno.cifras_autorizadas |= cifras_de(texto)
     return texto
+
+
+async def _cierre_de_la_reserva(ctx: ContextoDaniela) -> str:
+    """La dirección de la sede y la puerta para moverla, para la confirmación de la cita.
+
+    `_general`/`confirmacion_de_cita` pide confirmar «con nombre completo, fecha, hora y
+    dirección», y hasta el 26/10/2026 la tool solo daba las tres primeras: la dirección
+    dependía de que el modelo se acordara de consultarla en el mismo turno, y casi nunca lo
+    hacía. Sale de la ficha `_general`/`sede` y solo si está APROBADA; el texto lo escribe
+    la clínica, no este módulo.
+
+    **Nunca lanza.** Cuando esto corre la cita YA existe en Neon y en Calendar, y
+    `crear_cita` va con `failure_error_function=None`: un fallo aquí convertiría una cita
+    buena en el mensaje de emergencia. Sin dirección se dice que no la hay, para que el
+    modelo no la complete de memoria.
+    """
+
+    def leer(conn) -> str | None:
+        filas = persistencia.leer_conocimiento(conn, persistencia.TRATAMIENTO_GENERAL, "sede")
+        aprobadas = [f.contenido.strip() for f in filas if f.aprobado]
+        return aprobadas[0] if aprobadas else None
+
+    try:
+        direccion = await _con_base(ctx, leer)
+    except Exception:  # noqa: BLE001 -- ver el docstring: la cita ya existe y manda ella
+        log.warning("no se pudo leer la dirección de la sede para la confirmación")
+        direccion = None
+    if not isinstance(direccion, str) or not direccion:
+        return (
+            " No hay dirección documentada a mano: no la escribas de memoria; si la pide, "
+            "consulta `consultar_base_conocimiento`."
+        )
+    return (
+        f" Dirección de la sede (de la base de conocimiento, dísela tal cual): {direccion}"
+        " Si le surge algo, puede escribir por aquí para moverla."
+    )
 
 
 def _liberar(ctx: ContextoDaniela, reserva_id: int) -> None:
@@ -1607,7 +1652,11 @@ async def _cancelar_cita(ctx: ContextoDaniela, solicitud: SolicitudCancelacion) 
 
     def aplicar(conn) -> None:
         persistencia.marcar_cita_cancelada(
-            conn, solicitud.id_cita, motivo=solicitud.motivo, commit=False
+            conn,
+            solicitud.id_cita,
+            motivo=solicitud.motivo,
+            causa=solicitud.causa,
+            commit=False,
         )
         # La otra mitad de la cascada, y la que más se nota: sin esto, el paciente que
         # canceló recibe la víspera un recordatorio de la cita que acaba de cancelar. Va en
@@ -1892,7 +1941,54 @@ def _escapar_html(texto: str) -> str:
     return html.escape(texto, quote=False)
 
 
-def _aviso_para_doctores(ctx: ContextoDaniela, solicitud: SolicitudEscalamiento) -> str:
+def linea_de_situacion(situacion: dict[str, Any] | None) -> str:
+    """La línea fija del aviso: estado, barrera, tratamiento y cita. HTML ya escapado.
+
+    La escribe el CÓDIGO con lo que hay en la base, al lado del resumen que redacta el
+    modelo y no en su lugar: el resumen cuenta la conversación, esta línea no depende de que
+    se acuerde. Lo que no se sabe se omite --«Barrera: ninguna» es ruido en un celular--
+    salvo la cita, porque «no tiene ninguna» sí es un dato para quien va a retomar.
+
+    Cadena vacía si no hay nada, o si llega algo que no es la forma esperada: una línea a
+    medias no puede tumbar el aviso.
+    """
+    if not isinstance(situacion, dict):
+        return ""
+    partes = []
+    if situacion.get("estado"):
+        partes.append(f"Estado: {situacion['estado'].replace('_', ' ')}")
+    if situacion.get("barrera") and situacion["barrera"] != "ninguna":
+        partes.append(f"Barrera: {situacion['barrera'].replace('_', ' ')}")
+    if situacion.get("tratamiento"):
+        partes.append(f"Tratamiento: {situacion['tratamiento']}")
+    if situacion.get("proxima_cita") is not None:
+        partes.append(f"Cita: {_formatear_hora(situacion['proxima_cita'])}")
+    else:
+        partes.append("Cita: ninguna")
+    return _escapar_html(" · ".join(partes))
+
+
+async def _situacion_del_aviso(ctx: ContextoDaniela) -> dict[str, Any] | None:
+    """La lee sin propagar: el aviso sale aunque la base tenga un mal minuto."""
+    try:
+        return await _con_base(
+            ctx,
+            lambda conn: persistencia.situacion_para_el_aviso(
+                conn, ctx.id_conversacion, ctx.telefono_completo, ahora=ctx.ahora
+            ),
+        )
+    except Exception:  # noqa: BLE001 -- se pierde una línea, nunca el aviso
+        log.warning(
+            "no se pudo leer la situación de %s para el aviso", ctx.id_conversacion, exc_info=True
+        )
+        return None
+
+
+def _aviso_para_doctores(
+    ctx: ContextoDaniela,
+    solicitud: SolicitudEscalamiento,
+    situacion: dict[str, Any] | None = None,
+) -> str:
     """El texto del escalamiento, con TODO lo ajeno escapado.
 
     No es cosmético, y el coste no es un aviso feo: es un aviso que no existe. Telegram va en
@@ -1908,9 +2004,12 @@ def _aviso_para_doctores(ctx: ContextoDaniela, solicitud: SolicitudEscalamiento)
     verdad son las etiquetas que pone esta función.
     """
     nombre = _escapar_html(ctx.nombre_paciente or "paciente sin identificar")
+    linea = linea_de_situacion(situacion)
     return (
         f"<b>Escalamiento · {_escapar_html(solicitud.motivo)}</b>\n"
-        f"{nombre} · +{ctx.telefono_completo}\n\n"
+        f"{nombre} · +{ctx.telefono_completo}\n"
+        + (f"{linea}\n" if linea else "")
+        + "\n"
         f"{_escapar_html(solicitud.resumen_para_doctor)}\n\n"
         f"<b>Pregunta:</b> {_escapar_html(solicitud.pregunta_concreta)}"
     )
@@ -1982,7 +2081,7 @@ async def _escalar_a_doctores(
     # pueden discutir un caso sin que el paciente vea una palabra; el tema del paciente es un
     # canal en vivo hacia su WhatsApp durante el relevo.
     message_id = await canal.enviar_mensaje(
-        _aviso_para_doctores(ctx, solicitud),
+        _aviso_para_doctores(ctx, solicitud, await _situacion_del_aviso(ctx)),
         tema_id=ctx.tema_general,
         teclado=_teclado_relevo(ctx.id_conversacion),
     )
@@ -2342,7 +2441,7 @@ async def _sincronizar_con_calendar(
 
 def _cancelar_porque_ya_no_esta(cita: dict[str, Any], conn) -> None:
     persistencia.marcar_cita_cancelada(
-        conn, cita["id"], motivo="borrada del calendario por la clínica"
+        conn, cita["id"], motivo="borrada del calendario por la clínica", causa="clinica"
     )
     if cita["reserva_id"]:
         persistencia.liberar_cupo(conn, cita["reserva_id"])
@@ -2540,6 +2639,106 @@ async def consultar_citas(wrapper: RunContextWrapper[ContextoDaniela]) -> str:
 
 
 # ==========================================================================================
+# 10b. confirmar_asistencia
+# ==========================================================================================
+#
+# El botón «Confirmar» del recordatorio lo marca el código solo (`runtime`), pero quien
+# contesta ESCRIBIENDO --«sí, ahí estaré»-- llegaba a Daniela y no había nada que lo
+# anotara: `confirmada_por_paciente_en` se quedaba NULL y la agenda lo contaba como si no
+# hubiera dicho nada (auditoría de conversaciones, punto 13).
+#
+# **No lleva `identidad_antes_de_datos`, y es deliberado.** El botón hace exactamente lo
+# mismo sin identidad: marcar una fecha en una cita de ESTE teléfono, sin mover el cupo ni
+# tocar Calendar. Con el guardrail puesto, el paciente sin ficha verificada que contesta
+# «sí» al recordatorio haría saltar `raise_exception` y recibiría la respuesta de emergencia
+# por confirmar su propia cita. La pertenencia la sigue cuidando `_es_ajena`, por teléfono.
+
+
+def _fallo_confirmar(ctx: RunContextWrapper[Any], error: Exception) -> str:
+    log.error("confirmar_asistencia falló: %s", error)
+    return (
+        "No se pudo dejar anotada la confirmación. La cita sigue en pie igual: no le digas "
+        "que quedó confirmada en el sistema, solo que lo esperan."
+    )
+
+
+async def _confirmar_asistencia(ctx: ContextoDaniela, id_cita: str | None) -> str:
+    def trabajo(conn) -> tuple[dict[str, Any] | None, bool]:
+        if id_cita:
+            cita = persistencia.leer_cita(conn, id_cita)
+        else:
+            # Sin id, la del último recordatorio: es la que el paciente está contestando, y
+            # es la misma búsqueda que usa el botón. Ya filtra viva y futura.
+            cita = persistencia.cita_del_ultimo_recordatorio(
+                conn, ctx.telefono_completo, ahora=ctx.ahora
+            )
+        if cita is None or _es_ajena(ctx, cita):
+            return cita, False
+        if cita["estado"] == "cancelada" or cita["inicio"] < ctx.ahora:
+            return cita, False
+        return cita, persistencia.marcar_cita_confirmada(conn, cita["id"], cuando=ctx.ahora)
+
+    cita, es_nueva = await _con_base(ctx, trabajo)
+
+    if cita is None:
+        return (
+            "No encontré ninguna cita que confirmar. NO le digas que quedó confirmada: "
+            "consulta sus citas."
+        )
+    if _es_ajena(ctx, cita):
+        return "Esa cita no pertenece a este número. NO la confirmes."
+    if cita["estado"] == "cancelada":
+        return (
+            "Esa cita está CANCELADA. NO le digas que lo esperan: pregúntale si quiere "
+            "agendar una nueva."
+        )
+    if cita["inicio"] < ctx.ahora:
+        return "Esa cita ya pasó. NO la confirmes: consulta sus citas."
+
+    # El aviso al doctor, solo si ESTA llamada la marcó: mismo `IS NULL` que deduplica el
+    # botón, así que confirmar escribiendo después de pulsarlo no cuesta tres WhatsApps más.
+    if es_nueva:
+        try:
+            from . import aviso_citas
+
+            aviso_citas.avisar_movimiento_en_segundo_plano(
+                aviso_citas.MovimientoDeAgenda(
+                    asunto=aviso_citas.ASUNTO_CONFIRMADA,
+                    nombre_paciente=cita["nombre_completo"],
+                    telefono_paciente=cita["telefono"],
+                    tratamiento=cita["tratamiento"],
+                    cuando=aviso_citas.cuando_una_cita(cita["inicio"]),
+                )
+            )
+        except Exception:  # noqa: BLE001 -- se pierde un aviso, nunca la confirmación
+            log.exception("la cita %s quedó confirmada; solo falló el aviso", cita["id"])
+
+    texto = (
+        f"Asistencia confirmada para la cita del {_formatear_hora(cita['inicio'])} "
+        f"({cita['tratamiento']}). Id de la cita: {cita['id']}."
+    )
+    # La hora sale de la base en esta llamada: queda autorizada, como en `consultar_citas`.
+    ctx.turno.horas_autorizadas |= horas_de(texto)
+    return texto
+
+
+@function_tool(failure_error_function=_fallo_confirmar)
+async def confirmar_asistencia(
+    wrapper: RunContextWrapper[ContextoDaniela], id_cita: str | None = None
+) -> str:
+    """Deja anotado que el paciente confirmó que va a ir a su cita.
+
+    Úsala cuando confirme con sus palabras («sí», «ahí estaré», «confirmo»), sobre todo
+    después de un recordatorio. No mueve ni cancela nada.
+
+    Args:
+        id_cita: el id de la cita, si lo tienes a la vista. Si no, déjalo vacío y se
+            confirma la cita del último recordatorio que le llegó.
+    """
+    return await _confirmar_asistencia(wrapper.context, id_cita or None)
+
+
+# ==========================================================================================
 # 11. La baja comercial y su revocación
 # ==========================================================================================
 
@@ -2690,6 +2889,7 @@ TODAS = (
     registrar_no_contactar,
     revocar_no_contactar,
     cerrar_seguimiento,
+    confirmar_asistencia,
 )
 
 __all__ = [
@@ -2699,6 +2899,7 @@ __all__ = [
     "ZONA_BOGOTA",
     "cancelar_cita",
     "cerrar_seguimiento",
+    "confirmar_asistencia",
     "consultar_base_conocimiento",
     "consultar_citas",
     "consultar_disponibilidad",

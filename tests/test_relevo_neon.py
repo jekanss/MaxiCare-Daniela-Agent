@@ -82,6 +82,9 @@ def _limpio(esquema):
             # de la conversacion, asi que despues del DELETE no habria a que apuntar).
             cur.execute("DELETE FROM mensajes_entrantes")
             cur.execute("DELETE FROM agent_sessions")
+            # Antes que `citas`: desde que el cierre con cita encola su recordatorio, hay
+            # filas de `seguimientos` colgando de ellas.
+            cur.execute("DELETE FROM seguimientos")
             cur.execute("DELETE FROM citas")
             cur.execute("DELETE FROM reservas")
             cur.execute("DELETE FROM escalamientos")
@@ -929,3 +932,80 @@ def test_un_relevo_vivo_sobre_un_hilo_con_lapida_no_se_encuentra_por_su_tema(esq
 
         persistencia.olvidar_tema(conn, TEL)
         assert persistencia.relevo_por_tema(conn, 4700) is None
+
+
+# ==========================================================================================
+# El cierre con cita encola su recordatorio (auditoría de conversaciones, paso 6)
+# ==========================================================================================
+
+
+class _CalendarioQueAcepta:
+    def crear_evento(self, **_):
+        return "evento-relevo"
+
+
+def _seguimientos_de(url: str, id_cita: str) -> list[tuple]:
+    with persistencia.conectar(url) as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT tipo, fecha_objetivo, conversacion_id::text FROM seguimientos "
+            " WHERE cita_id = %s",
+            (id_cita,),
+        )
+        return cur.fetchall()
+
+
+def _cita_de(url: str, telefono: str) -> str:
+    with persistencia.conectar(url) as conn, conn.cursor() as cur:
+        cur.execute("SELECT id::text FROM citas WHERE telefono = %s", (telefono,))
+        return cur.fetchone()[0]
+
+
+def test_la_cita_que_cierra_un_doctor_lleva_recordatorio_como_las_demas(esquema):
+    """Era la única vía de crear una cita que no lo encolaba, y el hilo se lo decía al doctor.
+    Va en la misma transacción que la cita y cuelga de la conversación del relevo."""
+    conv = _conversacion(esquema)
+    inicio = (datetime.now(relevo.ZONA_BOGOTA) + timedelta(days=10)).replace(
+        hour=10, minute=0, second=0, microsecond=0
+    )
+
+    ok, texto = relevo._agendar(
+        esquema,
+        id_conversacion=conv,
+        telefono=TEL,
+        inicio=inicio,
+        calendario=_CalendarioQueAcepta(),
+        doctor="Dra. Prueba",
+        tratamiento="valoracion",
+    )
+
+    assert ok
+    filas = _seguimientos_de(esquema, _cita_de(esquema, TEL))
+    assert len(filas) == 1
+    tipo, cuando, de_conversacion = filas[0]
+    assert tipo == "recordatorio_cita"
+    assert de_conversacion == conv
+    assert cuando < inicio, "un recordatorio despues de la cita no le sirve a nadie"
+    assert "recordatorio" in texto and "NO entra" not in texto
+
+
+def test_una_cita_inminente_del_relevo_no_lleva_recordatorio_y_el_hilo_lo_dice(esquema):
+    """El falso positivo de la anterior: dentro de una hora no hay recordatorio que mandar,
+    y decirle al doctor que lo habrá sería una promesa falsa."""
+    conv = _conversacion(esquema)
+    inicio = (datetime.now(relevo.ZONA_BOGOTA) + timedelta(hours=1)).replace(
+        second=0, microsecond=0
+    )
+
+    ok, texto = relevo._agendar(
+        esquema,
+        id_conversacion=conv,
+        telefono=TEL,
+        inicio=inicio,
+        calendario=_CalendarioQueAcepta(),
+        doctor="Dra. Prueba",
+        tratamiento="valoracion",
+    )
+
+    assert ok
+    assert _seguimientos_de(esquema, _cita_de(esquema, TEL)) == []
+    assert "demasiado pronto" in texto

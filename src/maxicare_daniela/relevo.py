@@ -62,7 +62,8 @@ import re
 from datetime import datetime
 from typing import Any
 
-from . import persistencia, sin_resolver
+from . import persistencia, seguimientos, sin_resolver
+from .calendario import Jornada
 from .canales import _TIPO_WHATSAPP_DE_TELEGRAM, HiloInvalido
 from .contratos import ZONA_BOGOTA
 from .lectura import nombre_del_tema
@@ -1308,23 +1309,44 @@ def _agendar(
             f"evento no aparece en la agenda: {_escapar(str(e))[:200]}. Créalo a mano.",
         )
 
-    # ESTA VÍA NO PROGRAMA RECORDATORIO, y el hueco se deja visible a propósito.
+    # El recordatorio, como en las otras tres vías que crean una cita (`crear_cita`,
+    # `reprogramar_cita` y la corrección contra Calendar). Hasta la auditoría de
+    # conversaciones de octubre de 2026 esta vía no lo programaba y el hilo se lo decía al
+    # doctor: las citas que cerraba un humano eran las únicas sin recordatorio.
     #
-    # Las otras tres formas de crear una cita --`crear_cita`, `reprogramar_cita` y la
-    # corrección contra Calendar-- encolan la suya. Esta no. Añadirlo aquí es un
-    # `insertar_seguimiento` dentro de este mismo `with`, pero sería una cuarta vía de
-    # escritura en producción que ningún paso de la spec de recordatorios diseñó ni probó, y
-    # el canal del relevo tiene sus propias reglas (no negociables 15, 17 y 19) que nadie ha
-    # contrastado con la cola. Va en su propia tarea, no en una ronda de arreglos.
+    # Lo que se contrastó con las reglas del relevo antes de añadirlo:
+    #   · 15 (Daniela callada mientras hay relevo): la fila nace cuando el relevo YA se está
+    #     cerrando, y si otro relevo está vivo al despacharla, la guarda de relevo del
+    #     despachador la APLAZA, no la manda.
+    #   · 17 (solo cruza la cita): el recordatorio es la cita, con su hora; nada de lo que
+    #     escribió el doctor viaja en él.
+    #   · 21 (se marca antes de enviar): no cambia, es el mismo despachador.
     #
-    # Lo que sí se arregló es la promesa: los dos mensajes que decían «y sus recordatorios»
-    # eran anteriores a que existiera ningún despachador --inocuos entonces, falsos ahora-- y
-    # una promesa falsa a un doctor es peor que una función ausente.
+    # El CUÁNDO se calcula fuera de la transacción, como en `crear_cita`: es una función pura
+    # y un fallo suyo no puede llevarse la cita. Con `None` --la cita es dentro de pocas
+    # horas-- no se encola nada, igual que allí.
+    try:
+        cuando_recordar = seguimientos.momento_del_recordatorio(
+            inicio_cita=inicio,
+            ahora=datetime.now(ZONA_BOGOTA),
+            jornada=Jornada(
+                apertura=operativa.get("hora_apertura", 8),
+                cierre=operativa.get("hora_cierre", 17),
+                cierre_sabado=operativa.get("hora_cierre_sabado", 15),
+                atiende_domingo=bool(operativa.get("atiende_domingo", 0)),
+            ),
+            hora_vispera=operativa.get("hora_recordatorio_vispera", 18),
+            horas_minimas=operativa.get("horas_minimas_para_recordar", 4),
+        )
+    except Exception:  # noqa: BLE001 -- se pierde un recordatorio, nunca la cita
+        log.exception("fallo calculando el recordatorio del relevo de %s", id_conversacion)
+        cuando_recordar = None
+
     with persistencia.conectar(database_url) as conn:
         paciente_id = persistencia.asegurar_paciente(
             conn, nombre_completo=nombre, telefono=telefono
         )
-        persistencia.registrar_cita(
+        id_cita = persistencia.registrar_cita(
             conn,
             reserva_id=cupo[0],
             conversacion_id=id_conversacion,
@@ -1337,15 +1359,38 @@ def _agendar(
             inicio=inicio,
             duracion_minutos=duracion,
             evento_calendar_id=evento,
+            commit=False,
         )
+        # En la MISMA transacción que la cita, como en `crear_cita`: separadas, una caída
+        # entre las dos deja una cita sin recordatorio y nadie se entera. La clave la arma
+        # el código y lleva el id de una cita recién creada, así que no puede repetirse.
+        if cuando_recordar is not None:
+            persistencia.insertar_seguimiento(
+                conn,
+                id_conversacion=id_conversacion,
+                tipo=seguimientos.TIPO_RECORDATORIO,
+                fecha_objetivo=cuando_recordar,
+                clave_idempotencia=f"relevo:recordatorio:{id_cita}",
+                cita_id=id_cita,
+                commit=False,
+            )
+        conn.commit()
 
+    # Lo que se le promete al doctor sale de lo que de verdad quedó encolado: una cita para
+    # dentro de pocas horas no lleva recordatorio, y decirle que sí sería una promesa falsa.
+    if cuando_recordar is not None:
+        nota = f"Al paciente le llegará un recordatorio el {_formatear(cuando_recordar)}."
+    else:
+        nota = (
+            "<i>Es demasiado pronto para un recordatorio automático: si quieres que le "
+            "llegue uno, escríbele tú.</i>"
+        )
     return (
         True,
         f"✅ <b>Cita registrada: {_formatear(inicio)}</b>\n"
         f"{_escapar(tratamiento)}\n"
         "Toma el cupo y está en el calendario de la clínica.\n"
-        "<i>Esta cita NO entra en los recordatorios automáticos: si quieres que le llegue "
-        "uno, escríbele tú.</i>",
+        f"{nota}",
     )
 
 

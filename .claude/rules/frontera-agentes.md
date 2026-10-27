@@ -410,13 +410,17 @@ Y es la demostración de por qué el reparto de arriba es el correcto: MaxiCare 
 criterio clínico **sin que cambiara una línea del prompt sobre qué señales existen**. Solo
 hubo que quitarle al prompt una afirmación que se había adelantado al protocolo.
 
-## La valoración ya tiene tarifa
+## La valoración: hoy es SIN COSTO
+
+**Vigente desde el commit `f475ded`:** la fila `_general`/`valoracion` dice «La valoración es
+sin costo», con la regla de decir siempre «valoración sin costo» y nunca «gratis» ni
+«gratuita». Lo de abajo es historia, y se conserva porque explica de dónde salió la fila.
 
 Estuvo `aprobado: false` hasta el 13/09/2026 —el documento maestro no traía tarifa universal,
 y la fila mezclaba eso con «en periodoncia se reporta entre $80.000 y $150.000»—, así que
 Daniela no podía cerrar ninguna conversación con el precio de la cita que estaba ofreciendo.
-MaxiCare fijó **$50.000, abonables a cualquier tratamiento posterior**, lo que además responde
-la segunda mitad de la nota vieja: quien solo asiste a consulta paga esos $50.000.
+Ese día MaxiCare fijó $50.000 abonables a cualquier tratamiento; después la bajó a $40.000, y
+desde `f475ded` no se cobra.
 
 # Un solo reloj, y viaja en el contexto
 

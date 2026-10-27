@@ -510,6 +510,61 @@ def test_no_califica_quien_ya_tiene_cita_futura(conexion_pruebas):
     assert persistencia.leads_sin_agendar(conexion_pruebas, ahora=AHORA, limite=50) == []
 
 
+def _cita_pasada(conn, conv: str, *, asistio: bool | None = None, cancelada: bool = False) -> str:
+    """Una cita de hace cinco días, con el desenlace que pida la prueba."""
+    id_cita = persistencia.registrar_cita(
+        conn, reserva_id=None, conversacion_id=conv, paciente_id=None,
+        nombre_completo="Marcela Rios", telefono=TELEFONO, tratamiento="limpieza",
+        inicio=AHORA - timedelta(days=5), duracion_minutos=60, evento_calendar_id=None,
+    )
+    if cancelada:
+        persistencia.marcar_cita_cancelada(conn, id_cita, motivo="paciente")
+    if asistio is not None:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE citas SET asistio = %s WHERE id = %s", (asistio, id_cita))
+        conn.commit()
+    return id_cita
+
+
+@pytest.mark.parametrize(
+    "desenlace",
+    [
+        {"cancelada": True},
+        {"asistio": False},
+        {"asistio": True},
+        {},  # pasó y nadie la marcó: sigue siendo alguien que SÍ agendó
+    ],
+    ids=["cancelo", "falto", "asistio", "sin_marcar"],
+)
+def test_no_califica_quien_ya_tuvo_una_cita(conexion_pruebas, desenlace):
+    """«Sin agendar» es quien nunca agendó. Hasta el 26/10/2026 la consulta solo miraba citas
+    FUTURAS, así que estas cuatro personas recibían «¿sigues interesado en la consulta que
+    quedó sin agendar?» y Daniela leía que nunca tuvieron cita. Escribe un mensaje reciente
+    para que la ÚNICA razón de quedar fuera sea la cita: sin ella, la prueba de abajo
+    (`test_si_califica_quien_pregunto_ayer_y_no_agendo`) dice que sí entraría."""
+    conv = persistencia.asegurar_conversacion(conexion_pruebas, telefono=TELEFONO)
+    _mensaje(conexion_pruebas, TELEFONO, cuando=AHORA - timedelta(hours=30))
+    _cita_pasada(conexion_pruebas, conv, **desenlace)
+    assert persistencia.leads_sin_agendar(conexion_pruebas, ahora=AHORA, limite=50) == []
+
+
+def test_quien_cancelo_sigue_entrando_por_SU_consulta(conexion_pruebas):
+    """La otra mitad: excluirlo de `sin_agendar` no puede sacarlo también de `cancelada`, que
+    es el tipo cuyo texto sí es cierto para él."""
+    conv = persistencia.asegurar_conversacion(conexion_pruebas, telefono=TELEFONO)
+    _mensaje(conexion_pruebas, TELEFONO, cuando=AHORA - timedelta(hours=30))
+    id_cita = _cita_pasada(conexion_pruebas, conv, cancelada=True)
+    with conexion_pruebas.cursor() as cur:
+        cur.execute(
+            "UPDATE citas SET actualizada_en = %s WHERE id = %s",
+            (AHORA - timedelta(hours=30), id_cita),
+        )
+    conexion_pruebas.commit()
+    assert persistencia.leads_sin_agendar(conexion_pruebas, ahora=AHORA, limite=50) == []
+    leads = persistencia.leads_que_cancelaron(conexion_pruebas, ahora=AHORA, limite=50)
+    assert [l["telefono"] for l in leads] == [TELEFONO]
+
+
 def test_no_califica_antes_de_las_24h(conexion_pruebas):
     """Escribió hace dos horas: todavía está en la conversación, no es un lead perdido."""
     persistencia.asegurar_conversacion(conexion_pruebas, telefono=TELEFONO)

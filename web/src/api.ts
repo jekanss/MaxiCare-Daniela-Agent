@@ -237,6 +237,10 @@ export type CitaDeAgenda = {
   duracion_minutos: number
   estado: string
   asistio: boolean | null
+  /** Por qué puede no llegar (`panel.riesgos_de_citas`): `sin_confirmar`,
+   *  `barrera:<cual>` o `cancelo_o_falto_antes`. Solo viene en las citas que aún no
+   *  pasaron, y es opcional porque el PATCH de asistencia devuelve la cita sin ella. */
+  riesgo?: string[]
 }
 
 /** Una franja que el doctor bloqueó en Google Calendar. No es una cita de Daniela: no se

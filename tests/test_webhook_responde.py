@@ -660,6 +660,13 @@ def base_falsa(monkeypatch) -> list[dict]:
     monkeypatch.setattr(
         persistencia, "escalamiento_vivo_con_motivo", lambda conn, id_conversacion, motivo: None
     )
+    # Por lo mismo: sin doble, la lectura de la situación revienta contra `ConexionFalsa` y
+    # el aviso sale sin su línea fija por el camino del fallo, no por el normal.
+    monkeypatch.setattr(
+        persistencia,
+        "situacion_para_el_aviso",
+        lambda conn, id_conversacion, telefono, *, ahora: {"proxima_cita": None},
+    )
     return registradas
 
 
@@ -677,6 +684,48 @@ def test_el_aviso_al_doctor_sale_por_telegram_con_lo_que_se_le_dijo_al_paciente(
     assert "clinico" in texto
     assert "+573001112233" in texto
     assert "Déjame confirmarlo" in texto
+
+
+def test_el_aviso_de_la_red_de_seguridad_lleva_estado_barrera_y_cita(monkeypatch, base_falsa):
+    """Auditoría de conversaciones, paso 7. Este camino corre cuando el modelo NO escribió
+    ningún resumen, así que la línea fija es lo único que le dice al doctor qué frenaba al
+    paciente."""
+    monkeypatch.setattr(
+        persistencia,
+        "situacion_para_el_aviso",
+        lambda conn, id_conversacion, telefono, *, ahora: {
+            "estado": "con_barrera",
+            "barrera": "precio",
+            "tratamiento": "implantes",
+            "proxima_cita": None,
+        },
+    )
+    telegram = TelegramFalso()
+    monkeypatch.setattr(runtime, "_telegram", telegram)
+
+    asyncio.run(runtime._avisar_a_doctores(_contexto(), "clinico", "Ya te confirmo."))
+
+    texto = telegram.enviados[0]["texto"]
+    assert "Barrera: precio" in texto
+    assert "Tratamiento: implantes" in texto
+    assert "Cita: ninguna" in texto
+
+
+def test_si_no_se_puede_leer_la_situacion_el_aviso_sale_igual(monkeypatch, base_falsa):
+    """La línea es un añadido: perderla no puede costar el aviso."""
+
+    def revienta(conn, id_conversacion, telefono, *, ahora):
+        raise RuntimeError("Neon tuvo un mal minuto")
+
+    monkeypatch.setattr(persistencia, "situacion_para_el_aviso", revienta)
+    telegram = TelegramFalso()
+    monkeypatch.setattr(runtime, "_telegram", telegram)
+
+    avisado = asyncio.run(runtime._avisar_a_doctores(_contexto(), "clinico", "Ya te confirmo."))
+
+    assert avisado is True
+    assert len(telegram.enviados) == 1
+    assert "Estado" not in telegram.enviados[0]["texto"]
 
 
 def test_el_aviso_del_orquestador_usa_la_clave_del_turno_y_no_una_inventada(

@@ -184,8 +184,13 @@ class BaseFalsa:
         recordatorio: tuple[str, datetime] | None = None,
         caso_revienta: Exception | None = None,
         contacto: dict | Exception | None = None,
+        antecedentes: dict | Exception | None = None,
     ) -> None:
         self.viva = viva
+        #: Lo que devuelve `persistencia.antecedentes_del_telefono`: los campos de
+        #: `contratos.Antecedentes`, `None` si el número no tiene historia, o una `Exception`
+        #: que simula el SQL que `_leer_estado` tiene que degradar.
+        self.antecedentes = antecedentes
         #: Lo que `_anotar_resultado` dejó en `casos_sin_resolver`, en orden. Cada elemento
         #: es el `dict` de argumentos con que se llamó a `persistencia.registrar_caso`.
         self.casos: list[dict] = []
@@ -298,6 +303,14 @@ class BaseFalsa:
             anotar("ultimo_recordatorio", telefono)
             return self.recordatorio
 
+        def antecedentes_del_telefono(conn, telefono, *, id_conversacion, ahora):
+            conn.comprobar()
+            anotar("antecedentes_del_telefono", telefono, id_conversacion)
+            if isinstance(self.antecedentes, Exception):
+                conn.abortar()
+                raise self.antecedentes
+            return None if self.antecedentes is None else dict(self.antecedentes)
+
         def ligar_mensaje_a_conversacion(conn, wamid, id_conversacion):
             conn.comprobar()
             anotar("ligar_mensaje_a_conversacion", wamid, id_conversacion)
@@ -336,6 +349,9 @@ class BaseFalsa:
         monkeypatch.setattr(persistencia, "leer_configuracion", leer_configuracion)
         monkeypatch.setattr(persistencia, "conversacion_tomada", conversacion_tomada)
         monkeypatch.setattr(persistencia, "ultimo_recordatorio", ultimo_recordatorio)
+        monkeypatch.setattr(
+            persistencia, "antecedentes_del_telefono", antecedentes_del_telefono
+        )
         monkeypatch.setattr(
             persistencia, "ligar_mensaje_a_conversacion", ligar_mensaje_a_conversacion
         )
@@ -3123,6 +3139,33 @@ def test_si_asegurar_contacto_revienta_tambien_se_degrada_a_aviso_no_visto(monke
     assert estado.pidio_no_contacto is True
     assert estado.aviso_visto is False
     assert base.conexiones[0].rollbacks == 1
+
+
+def test_los_antecedentes_se_leen_en_la_misma_conexion_y_llegan_al_estado(monkeypatch):
+    """Dentro del candado y en la conexión de siempre: una conexión más por turno es lo que
+    `test_atencion` cuenta (ruling 5). Y por la conversación EN CURSO, que es la que excluye."""
+    base = BaseFalsa(
+        viva=("conv-viva", 2, True, 0),
+        antecedentes={"ultima_cita_estado": "cancelada", "ultima_cita_causa": "precio"},
+    ).instalar(monkeypatch)
+
+    estado = atencion._leer_estado("postgres://nada", TELEFONO, [])
+
+    assert estado.antecedentes.ultima_cita_causa == "precio"
+    assert base.argumentos("antecedentes_del_telefono") == (TELEFONO, "conv-viva")
+    assert len(base.conexiones) == 1
+
+
+def test_si_los_antecedentes_revientan_el_turno_sigue_sin_ellos(monkeypatch):
+    """Son contexto, no el turno: se pierden, con `rollback` para que lo que se lee detrás no
+    herede una transacción abortada -- y sin él, `ligar_mensaje_a_conversacion` revienta."""
+    base = BaseFalsa(antecedentes=RuntimeError("statement timeout")).instalar(monkeypatch)
+
+    estado = atencion._leer_estado("postgres://nada", TELEFONO, ["wamid-1"])
+
+    assert estado.antecedentes is None
+    assert base.conexiones[0].rollbacks == 1
+    assert "ligar_mensaje_a_conversacion" in base.nombres
 
 
 # ==========================================================================================

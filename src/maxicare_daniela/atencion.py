@@ -79,7 +79,13 @@ from . import conversacion, guardrails, ingesta
 from . import lectura as lectura_mod
 from . import persistencia, seguimientos, sin_resolver
 from . import transcripcion as transcripcion_mod
-from .calendario import CalendarioCaido, CalendarioDoble, Jornada, calendario_desde_config
+from .calendario import (
+    ZONA_BOGOTA,
+    CalendarioCaido,
+    CalendarioDoble,
+    Jornada,
+    calendario_desde_config,
+)
 from .canales import Telegram, WhatsApp
 from .config import (
     MARGEN_LECTURA_SEGUNDOS,
@@ -90,7 +96,7 @@ from .config import (
     VENTANA_SILENCIO_SEGUNDOS,
     Config,
 )
-from .contratos import ContextoDaniela, DatosDelTurno, LecturaNoClinica
+from .contratos import Antecedentes, ContextoDaniela, DatosDelTurno, LecturaNoClinica
 from .ingesta import MensajeEntrante
 
 log = logging.getLogger("maxicare.atencion")
@@ -313,6 +319,8 @@ class _Estado:
     #: Sobre qué preguntó la última vez, SOLO cuando lo de arriba es una reactivación. Ver
     #: `persistencia.tratamiento_de_la_consulta_previa`.
     tratamiento_pendiente: str | None = field(default=None)
+    #: La historia del número fuera de esta conversación. Ver `contratos.Antecedentes`.
+    antecedentes: Antecedentes | None = field(default=None)
     #: `None` si la tabla `configuracion` no respondió. No es lo mismo que un diccionario
     #: vacío: quien lo recibe tiene que poder distinguir «no se pudo leer» de «está vacía».
     operativa: dict[str, int] | None = field(default=None)
@@ -445,6 +453,22 @@ def _leer_estado(database_url: str, telefono: str, wamids: list[str]) -> _Estado
             tratamiento_pendiente = persistencia.tratamiento_de_la_consulta_previa(
                 conn, telefono
             )
+        # La historia del número en conversaciones anteriores (bloque ANTECEDENTES). No es
+        # esencial para el turno, así que degrada como `asegurar_contacto`: con `rollback()`
+        # --o las lecturas de abajo heredarían una transacción abortada-- y a `None`, que es
+        # exactamente lo que Daniela tenía antes de que esto existiera.
+        try:
+            crudos = persistencia.antecedentes_del_telefono(
+                conn, telefono, id_conversacion=id_conversacion, ahora=datetime.now(ZONA_BOGOTA)
+            )
+            antecedentes = Antecedentes(**crudos) if crudos else None
+        except Exception:  # noqa: BLE001 -- ver arriba: se pierde contexto, nunca un turno
+            try:
+                conn.rollback()
+            except Exception:  # noqa: BLE001
+                pass
+            log.warning("no se pudieron leer los antecedentes de %s", telefono)
+            antecedentes = None
         # Todos los del grupo, no solo el que abrió el turno: si se ligara solo ese, los
         # demás quedarían en `mensajes_entrantes` sin conversación, y «¿de qué charla
         # salió este mensaje?» dejaría de tener respuesta justo para los mensajes que
@@ -484,6 +508,7 @@ def _leer_estado(database_url: str, telefono: str, wamids: list[str]) -> _Estado
         ultimo_recordatorio_tipo=recordatorio[0] if recordatorio else None,
         ultimo_recordatorio_en=recordatorio[1] if recordatorio else None,
         tratamiento_pendiente=tratamiento_pendiente,
+        antecedentes=antecedentes,
         operativa=operativa,
         pidio_no_contacto=pidio_no_contacto,
         aviso_visto=aviso_visto,
@@ -1378,6 +1403,7 @@ async def atender(
             ultimo_recordatorio_tipo=estado.ultimo_recordatorio_tipo,
             ultimo_recordatorio_en=estado.ultimo_recordatorio_en,
             tratamiento_pendiente=estado.tratamiento_pendiente,
+            antecedentes=estado.antecedentes,
             # Sale del `type` que mandó Meta, nunca del modelo. `all` y no `any`: un solo
             # botón en un grupo que además trae texto libre dejaría ese texto sin evaluar.
             # Ver el campo en `contratos.ContextoDaniela`, que explica qué costó.

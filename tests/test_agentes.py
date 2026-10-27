@@ -89,7 +89,9 @@ def test_daniela_tiene_las_nueve_tools_del_plan_la_decima_y_la_baja_comercial():
 
     `registrar_no_contactar` y `revocar_no_contactar` tampoco están en el plan: son la baja
     comercial, añadida el 16/09/2026. `cerrar_seguimiento` tampoco: es el cierre de una serie
-    de reactivación, añadido el 17/09/2026 (tarea 6).
+    de reactivación, añadido el 17/09/2026 (tarea 6). `confirmar_asistencia` tampoco: es la
+    confirmación escrita de una cita, añadida en octubre de 2026 (auditoría de
+    conversaciones, paso 6).
     """
     nombres = {t.name for t in agentes.daniela.tools}
 
@@ -107,6 +109,7 @@ def test_daniela_tiene_las_nueve_tools_del_plan_la_decima_y_la_baja_comercial():
         "registrar_no_contactar",
         "revocar_no_contactar",
         "cerrar_seguimiento",
+        "confirmar_asistencia",
     }
 
 
@@ -280,6 +283,28 @@ def test_la_valoracion_se_AGENDA_y_no_se_escala():
     assert "Y la AGENDAS" in texto
     assert "`valoracion`" in texto, "no se le dice con qué clave reservarla"
     assert "falta un diagnóstico, no un dato" in texto
+
+
+def test_los_horarios_libres_se_muestran_ANTES_de_pedir_el_nombre():
+    """Reproducido contra la API real el 22/09/2026: «quiero agendar una valoración, ¿qué
+    horarios tienen el próximo lunes?» no recibía ni un horario. Daniela pedía el nombre
+    completo y llamaba `identificar_paciente` con un argumento vacío.
+
+    No era desobediencia: «`identificar_paciente` antes de tocar la agenda de alguien» se
+    leía como «antes de mirar la agenda». Lo que hay detrás lo permite --
+    `consultar_disponibilidad` no lleva guardrail de identidad, y un teléfono sin ficha puede
+    crear su primera cita (no negociable 12)--, así que el arreglo es de redacción. Esta
+    prueba fija que la frase sigue diciendo el orden; si el modelo lo cumple lo mide
+    `scripts/probar_agentes.py`, no esto.
+    """
+    texto = agentes.INSTRUCCIONES_DANIELA
+
+    assert "SUS citas, no los horarios libres de la clínica" in texto
+    assert "se los muestras primero y sin pedirle nada" in texto
+    assert "cuando ya eligió una hora" in texto
+
+    # La regla que no se afloja: mover, cancelar o crear sigue exigiendo identidad.
+    assert "`identificar_paciente` antes de tocar la agenda de alguien" in texto
 
 
 def test_la_valoracion_esta_en_la_lista_que_se_le_ofrece_y_no_identificado_NO():
@@ -1282,7 +1307,7 @@ def test_el_modelo_recibe_las_tools_y_las_instrucciones():
     correr(agentes.daniela, "hola", ctx, guion)
 
     recibido = guion.recibido[0]
-    assert len(recibido["tools"]) == 13
+    assert len(recibido["tools"]) == 14
     assert "MaxiCare" in recibido["instrucciones"]
 
 
@@ -1507,3 +1532,126 @@ def test_el_telefono_de_privacidad_del_prompt_es_el_que_perdona_el_guardrail():
         ).dispara
         is False
     )
+
+
+# ==========================================================================================
+# El paso 3 de la auditoría de conversaciones (26/10/2026): cancelar y el cierre
+# ==========================================================================================
+
+
+def test_no_poder_esa_fecha_es_reprogramar_y_no_cancelar():
+    """La rama que faltaba: quien dice «ese día no puedo» no quiere dejar de venir. Hasta el
+    26/10/2026 recibía la misma pregunta suave que quien ya no quiere el tratamiento, y si
+    contestaba «no» se cancelaba algo que era una reprogramación."""
+    texto = agentes.INSTRUCCIONES_DANIELA
+    plano = " ".join(texto.split())
+    assert "quiere otra hora. Eso es `reprogramar_cita`, no cancelar." in plano
+    assert "Si lo que dice es que YA NO QUIERE" in plano
+    assert "no le ofreces otro horario" in plano
+    # Y la causa va a la tool, sin interrogar al paciente para llenarla.
+    assert "en `causa` la que corresponda a lo que dijo" in plano
+
+
+def test_la_confirmacion_de_una_cita_nueva_lleva_la_direccion_de_la_tool():
+    plano = " ".join(agentes.INSTRUCCIONES_DANIELA.split())
+    assert "Si la acabas de AGENDAR" in plano
+    assert "la dirección tal como viene en el texto de la tool" in plano
+    assert "Si la tool dice que no hay dirección documentada, no la escribas." in plano
+
+
+# ==========================================================================================
+# El paso 5: ANTECEDENTES DE ESTE NÚMERO
+# ==========================================================================================
+
+_AHORA_ANT = datetime(2026, 10, 26, 9, 0, tzinfo=ZONA_BOGOTA)
+
+
+def _prompt_con(antecedentes) -> str:
+    ctx = contexto(ahora=_AHORA_ANT, antecedentes=antecedentes)
+    return asyncio.run(agentes.daniela.get_system_prompt(RunContextWrapper(context=ctx)))
+
+
+def test_sin_antecedentes_no_hay_bloque():
+    assert "ANTECEDENTES DE ESTE NÚMERO" not in _prompt_con(None)
+
+
+def test_la_cancelacion_anterior_llega_con_su_causa_y_sin_hora():
+    texto = _prompt_con(
+        contratos.Antecedentes(
+            ultima_cita_tratamiento="cordales",
+            ultima_cita_inicio=datetime(2026, 10, 20, 14, 0, tzinfo=ZONA_BOGOTA),
+            ultima_cita_estado="cancelada",
+            ultima_cita_causa="otra_fecha",
+        )
+    )
+    bloque = texto.split("ANTECEDENTES DE ESTE NÚMERO", 1)[1]
+    assert "Su última cita (cordales) era para el martes 20 de octubre" in bloque
+    assert "la canceló porque no podía esa fecha" in bloque
+    assert "no le reprochas una cita cancelada" in bloque
+    # Una hora en el prompt sería una hora que ninguna tool autorizó en este turno.
+    assert g.horas_de(bloque.split("\n\n")[0]) == set()
+
+
+def test_la_oportunidad_anterior_y_el_relevo_llegan_como_hechos_cerrados():
+    texto = _prompt_con(
+        contratos.Antecedentes(
+            oportunidad_estado="con_barrera",
+            oportunidad_barrera="precio",
+            oportunidad_tratamiento="implantes",
+            oportunidad_en=datetime(2026, 10, 12, 10, 0, tzinfo=ZONA_BOGOTA),
+            relevo_en=datetime(2026, 10, 14, 16, 0, tzinfo=ZONA_BOGOTA),
+            relevo_con_cita=True,
+            tiene_cita_proxima=True,
+        )
+    )
+    assert "estaba con barrera, preguntaba por implantes, lo frenaba: precio." in texto
+    assert "lo atendió directamente un doctor de la clínica" in texto
+    assert "De esa conversación salió una cita." in texto
+    assert "llama a `consultar_citas` antes de nombrar día u hora" in texto
+
+
+def test_el_tratamiento_libre_del_relevo_NO_cruza_al_prompt():
+    """No negociables 17 y 19: el doctor escribe el tratamiento de su cita sin validar. Si
+    no es una clave de la lista viva, no se enseña."""
+    texto = _prompt_con(
+        contratos.Antecedentes(
+            ultima_cita_tratamiento="control post extracción del 46",
+            ultima_cita_inicio=datetime(2026, 10, 20, 14, 0, tzinfo=ZONA_BOGOTA),
+            ultima_cita_estado="confirmada",
+        )
+    )
+    assert "del 46" not in texto
+    assert "Su última cita fue el martes 20 de octubre; no consta si asistió." in texto
+
+
+def test_la_confirmacion_ESCRITA_tiene_tool_y_el_prompt_la_nombra():
+    """Auditoría de conversaciones, paso 6. Sin la instrucción, la tool existe y el modelo no
+    sabe cuándo llamarla: quien contesta «sí, ahí estaré» seguía sin quedar confirmado.
+    Esto solo comprueba que la frase sigue escrita; que el modelo la siga lo mide
+    `probar_agentes.py`."""
+    texto = agentes.INSTRUCCIONES_DANIELA
+
+    assert "`confirmar_asistencia`" in texto
+    assert "no le digas que quedó confirmada" in texto
+
+
+def test_una_barrera_para_asistir_se_valida_UNA_vez_y_solo_si_la_dijo():
+    """Auditoría de conversaciones, paso 9. La fila `_general`/`confirmacion_de_cita` pide
+    confirmar que la persona puede venir a Bogotá; preguntárselo a todo el mundo sería un
+    interrogatorio. Solo comprueba que la frase sigue escrita."""
+    texto = agentes.INSTRUCCIONES_DANIELA
+
+    assert "CUANDO ALGO LE PUEDE IMPEDIR VENIR" in texto
+    assert "UNA pregunta" in texto
+    assert "Si no te contó nada así, no preguntas" in texto
+
+
+def test_la_financiacion_sale_de_la_base_y_solo_cuando_el_precio_frena():
+    """Distinguir «¿cuánto vale?» de «no me alcanza», y que las condiciones salgan de filas
+    aprobadas: sin la segunda mitad, el prompt empujaría a inventar cuotas."""
+    texto = agentes.INSTRUCCIONES_DANIELA
+
+    assert "`_general` / `financiacion`" in texto
+    assert "`_general` / `medios_pago`" in texto
+    assert "sin hablarle de financiación" in texto
+    assert "No inventas cuotas" in texto

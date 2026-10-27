@@ -37,6 +37,7 @@ interruptor `MAXICARE_DANIELA_RESPONDE`, que lo lee `atender`.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hmac
 import html
 import logging
@@ -739,6 +740,14 @@ def _escapar(texto: str) -> str:
     return html.escape(texto, quote=False)
 
 
+def _situacion_para_el_aviso(ctx: ContextoDaniela) -> dict:
+    """Ver `persistencia.situacion_para_el_aviso`. Sincrónica: siempre en `to_thread`."""
+    with persistencia.conectar(ctx.database_url) as conn:
+        return persistencia.situacion_para_el_aviso(
+            conn, ctx.id_conversacion, ctx.telefono_completo, ahora=ctx.ahora
+        )
+
+
 def _registrar_escalamiento(
     ctx: ContextoDaniela, motivo: str, resumen: str, pregunta: str
 ) -> int | None:
@@ -945,12 +954,29 @@ async def _avisar_a_doctores(
             )
             return False
 
+        # La misma línea fija que lleva el aviso de la tool: estado, barrera, tratamiento y
+        # cita, sacados de la base y no del modelo. Aquí importa más que allí: este camino
+        # corre cuando el modelo no escribió ningún resumen. Si la lectura falla, el aviso
+        # sale sin la línea -- nunca al revés.
+        try:
+            situacion = await asyncio.to_thread(_situacion_para_el_aviso, ctx)
+        except Exception:  # noqa: BLE001
+            log.warning(
+                "no se pudo leer la situación de %s para el aviso",
+                ctx.id_conversacion,
+                exc_info=True,
+            )
+            situacion = None
+        linea = herramientas.linea_de_situacion(situacion)
+
         # El texto lo escribe un modelo a partir de lo que dijo un desconocido, y Telegram
         # va en `parse_mode=HTML`: un `<` sin escapar rompe el mensaje entero, que es el que
         # el doctor necesita leer.
         texto = (
             f"<b>Escalamiento · {_escapar(str(motivo))}</b>\n"
-            f"{_escapar(nombre)} · +{ctx.telefono_completo}\n\n"
+            f"{_escapar(nombre)} · +{ctx.telefono_completo}\n"
+            + (f"{linea}\n" if linea else "")
+            + "\n"
             f"{porque}\n\n"
             f"<b>Lo que se le respondió al paciente:</b>\n"
             f"{_escapar(mensaje_al_paciente)}"
@@ -3087,10 +3113,24 @@ async def api_agenda(dia: str | None = None, quien: dict = Depends(usuario_actua
         sin_marcar = panel.citas_sin_marcar(
             conn, desde=desde - timedelta(days=DIAS_SIN_MARCAR), hasta=desde
         )
+        # La etiqueta de riesgo, en la misma conexión. Solo para las que aún no pasaron: de
+        # una cita pasada ya se sabe si vino, y ahí la marca de asistencia dice más. Si la
+        # consulta falla, el día se pinta sin etiquetas, nunca sin citas.
+        futuras = [str(c["id"]) for c in citas if c["inicio"] >= ahora]
+        try:
+            riesgos = panel.riesgos_de_citas(conn, futuras)
+        except Exception:  # noqa: BLE001
+            log.warning("no se pudo calcular el riesgo del día %s", el_dia, exc_info=True)
+            # La transacción quedó abortada y el `with` intentaría cerrarla con un commit.
+            with contextlib.suppress(Exception):
+                conn.rollback()
+            riesgos = {}
 
     return {
         "dia": el_dia.isoformat(),
-        "citas": [_cita_en_json(c) for c in citas],
+        "citas": [
+            {**_cita_en_json(c), "riesgo": riesgos.get(str(c["id"]), [])} for c in citas
+        ],
         "bloqueos": [
             {"inicio": b.inicio.isoformat(), "fin": b.fin.isoformat(), "titulo": b.titulo}
             for b in bloqueos

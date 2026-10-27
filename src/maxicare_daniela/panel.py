@@ -412,6 +412,72 @@ def citas_del_dia(conn, *, desde: datetime, hasta: datetime) -> list[dict[str, A
         return [_fila_a_cita(f) for f in cur.fetchall()]
 
 
+#: Los motivos de la etiqueta de riesgo, en el orden en que se pintan. Son REGLAS LEGIBLES y
+#: no una puntuación: la clínica tiene que poder discutir cada una, y un peso inventado no
+#: se discute (auditoría de conversaciones, punto 12). Ninguno manda mensajes: la etiqueta
+#: solo ordena a quién llamar primero.
+RIESGO_SIN_CONFIRMAR = "sin_confirmar"
+RIESGO_BARRERA = "barrera"
+RIESGO_ANTECEDENTE = "cancelo_o_falto_antes"
+
+
+def riesgos_de_citas(conn, ids: list[str]) -> dict[str, list[str]]:
+    """Por cada cita, los motivos por los que puede no llegar. Lista vacía si ninguno.
+
+    - `sin_confirmar`: ya le salió el recordatorio y no confirmó --ni con el botón ni
+      escribiendo (`confirmar_asistencia`)--. Sin recordatorio enviado no cuenta: una cita
+      agendada hace cinco minutos no tiene por qué estar confirmada.
+    - `barrera:<cual>`: la conversación donde agendó tiene una barrera anotada. Es la de AHORA
+      en esa conversación y no la del momento exacto de agendar, que no se guarda.
+    - `cancelo_o_falto_antes`: el mismo teléfono tiene una cita anterior cancelada o marcada
+      como no asistida. Una cancelación de la CLÍNICA (`causa_cancelacion = 'clinica'`) no
+      dice nada del paciente y no cuenta.
+    """
+    if not ids:
+        return {}
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT c.id::text,
+                   c.confirmada_por_paciente_en IS NULL AND EXISTS (
+                       SELECT 1 FROM seguimientos s
+                        WHERE s.cita_id = c.id
+                          AND s.tipo = 'recordatorio_cita'
+                          AND s.enviado_en IS NOT NULL
+                   ),
+                   (SELECT eo.barrera FROM estado_oportunidad eo
+                     WHERE eo.conversacion_id = c.conversacion_id),
+                   EXISTS (
+                       SELECT 1 FROM citas o
+                        WHERE o.telefono = c.telefono
+                          AND o.id <> c.id
+                          AND o.inicio < c.inicio
+                          AND (
+                              (o.estado = 'cancelada'
+                               AND o.causa_cancelacion IS DISTINCT FROM 'clinica')
+                              OR o.asistio IS FALSE
+                          )
+                   )
+              FROM citas c
+             WHERE c.id = ANY(%s::uuid[])
+            """,
+            (list(ids),),
+        )
+        filas = cur.fetchall()
+
+    riesgos: dict[str, list[str]] = {}
+    for id_cita, sin_confirmar, barrera, antecedente in filas:
+        motivos = []
+        if sin_confirmar:
+            motivos.append(RIESGO_SIN_CONFIRMAR)
+        if barrera and barrera != "ninguna":
+            motivos.append(f"{RIESGO_BARRERA}:{barrera}")
+        if antecedente:
+            motivos.append(RIESGO_ANTECEDENTE)
+        riesgos[id_cita] = motivos
+    return riesgos
+
+
 def marcar_asistencia(
     conn, *, cita_id: str, valor: bool | None, usuario: str
 ) -> dict[str, Any]:
@@ -464,6 +530,11 @@ def marcar_asistencia(
         )
         _anotar(cur, tabla="citas", clave=id_limpio, anterior=MARCA[anterior],
                 nuevo=MARCA[valor], usuario=usuario)
+        # Y en la historia de la cita (032). No sustituye a la bitácora de arriba: aquella
+        # dice QUIÉN la marcó, esta pone la marca en fila con lo demás que le pasó a la cita.
+        persistencia.anotar_evento_cita(
+            cur, id_limpio, "asistencia_marcada", inicio=cita["inicio"], asistio=valor
+        )
     conn.commit()
 
     cita["asistio"] = valor

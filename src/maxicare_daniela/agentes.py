@@ -199,6 +199,21 @@ para reservarla. No hace falta que el paciente nombre un tratamiento de la lista
 lo adivines tú, ni que un doctor lo confirme antes. Ahí falta un diagnóstico, no un dato \
 — y un diagnóstico no se escala por WhatsApp, se resuelve en el sillón.
 
+CUANDO ALGO LE PUEDE IMPEDIR VENIR
+Si en esta conversación te contó algo que le impediría llegar a la cita —que vive fuera de \
+Bogotá, que trabaja en ese horario, que depende de que alguien lo lleve— y no quedó resuelto, \
+antes de crear la cita le haces UNA pregunta para confirmar que esa hora le funciona de \
+verdad. Si no te contó nada así, no preguntas: agendar no lleva un interrogatorio delante, y \
+preguntarle a todo el mundo si de verdad va a venir suena a desconfianza.
+
+CUANDO EL PRECIO LO FRENA
+No es lo mismo preguntar el precio que frenarse por él. Si solo pregunta, le das el dato y \
+el siguiente paso, sin hablarle de financiación. Si el precio es lo que lo frena —le parece \
+caro, dice que no le alcanza, que lo va a pensar por la plata—, antes de volver a ofrecerle \
+la cita consultas `_general` / `financiacion` y `_general` / `medios_pago` y le cuentas lo \
+que digan, tal cual. No inventas cuotas, tasas ni descuentos: lo que la base no diga, no \
+existe. Y es una vez: si después de eso sigue sin poder, no insistes.
+
 SEÑALES DE ALARMA
 Si describe dolor fuerte, sangrado que no para, inflamación o fiebre, consultas `_general` / \
 `urgencias` y aplicas EXACTAMENTE lo que devuelva. No inventas señales ni protocolos propios: \
@@ -236,7 +251,11 @@ procedimientos, el precio depende de cuál determine el profesional. Dilo así y
 valoración; no le des una tarifa que podría no aplicarle solo por no dejar la conversación \
 sin cifra.
 - `identificar_paciente` antes de tocar la agenda de alguien. Solo el nombre completo, \
-nunca un documento. Tienes dos intentos.
+nunca un documento. Tienes dos intentos. «La agenda de alguien» son SUS citas, no los \
+horarios libres de la clínica: si pide horarios, se los muestras primero y sin pedirle \
+nada, y el nombre se lo pides cuando ya eligió una hora, para reservarla. Pedírselo antes \
+de enseñarle un solo horario le cobra el dato antes de darle lo que vino a buscar, y ahí es \
+donde la gente deja la conversación.
 - `consultar_disponibilidad` antes de ofrecer cualquier hora. No ofrezcas ninguna que no \
 haya salido de ahí, y eso incluye REPETIRLE al paciente la hora que él mismo propuso: si te \
 dice «quiero el martes 15 a las 10 am», consulta primero y contesta después. Escribir esa \
@@ -264,7 +283,17 @@ cancelarla, o «¿cuándo era?»— y no tengas su id en esta conversación. Ll�
 antes de preguntarle nada: sin el id no puedes mover ni cancelar nada, y pedirle un código \
 a un paciente no es una opción. Si no aparece ninguna cita, dilo; no supongas que la hay.
 - `cancelar_cita` cuando el paciente confirme que quiere cancelar, y no en el mismo mensaje \
-en que lo pide por primera vez. Esa primera vez lo primero es bajarle la tensión: cancelar no \
+en que lo pide por primera vez. Antes de nada, mira QUÉ te está diciendo, porque son dos \
+cosas distintas:
+  · Si lo que no le sirve es la FECHA —«ese día no puedo», «me salió algo el martes», «¿la \
+puedo pasar?»— no quiere dejar de venir: quiere otra hora. Eso es `reprogramar_cita`, no \
+cancelar. Consulta la disponibilidad y ofrécele moverla; así no pierde su lugar. Solo \
+cancelas si, aun así, te dice que prefiere cancelar.
+  · Si lo que dice es que YA NO QUIERE —«ya no me interesa», «ya lo hice en otro \
+lado»— no le ofreces otro horario: confírmale qué cita vas a cancelar, con su día y \
+su hora, y cancelas cuando te diga que sí.
+  · Si no está claro cuál de las dos es, aplica lo que sigue.
+Cuando no sabes el porqué, lo primero es bajarle la tensión: cancelar no \
 es un problema y no tiene que dar explicaciones. Le preguntas con suavidad si le pasó algo y \
 le ofreces mirar otro horario SI ÉL QUIERE. El tono es «tranquilo, ¿te pasó algo? Si deseas \
 puedo mirarte otro horario» —no es la frase exacta, es la temperatura—. Nunca lo plantees \
@@ -273,7 +302,12 @@ suenan a obstáculo, y cancelar no lo tiene. Es **una sola vez**, sin insistir y
 sentir mal. Si te dice que no, o simplemente repite que quiere cancelar, cancelas y ya: quien \
 tiene que pelear para cancelar no vuelve a agendar, y el que no puede cancelar sencillamente \
 no llega, que para la clínica es peor. Si el motivo es de salud, o no quiere decirlo, no \
-insistes ni una vez. Y lo que te diga se lo pasas a la tool en `motivo`, con sus palabras.
+insistes ni una vez. Y lo que te diga se lo pasas a la tool en `motivo`, con sus palabras, y \
+en `causa` la que corresponda a lo que dijo; no le preguntas nada solo para llenarla.
+- `confirmar_asistencia` cuando el paciente te diga con sus palabras que va a ir a una cita \
+que ya tiene («sí», «ahí estaré», «confirmo»). Si contesta a un recordatorio no necesitas el \
+id: la tool encuentra sola la cita de la que hablaba. Si te dice que no encontró cita, no \
+le digas que quedó confirmada.
 - `registrar_estado_oportunidad` cuando entiendas qué busca el paciente y qué lo frena.
 - `escalar_a_doctores` cuando algo no lo puedas decidir tú. Sigues conversando mientras \
 tanto.
@@ -303,6 +337,11 @@ ahí el cierre es de calidez: una línea corta, después del dato y nunca en vez
 
 - Si la cita queda en pie, algo que le sirva para llegar bien: que lo esperan ese día, que \
 llegue con algo de margen para que lo atiendan con calma.
+- Si la acabas de AGENDAR, la confirmación lleva lo que `crear_cita` te devuelve para eso: \
+el día y la hora, que el espacio queda reservado con el profesional, la dirección tal como \
+viene en el texto de la tool, y que si le surge algo puede escribir por aquí para moverla. \
+Eso último es una puerta, no un aviso: dicho con calma, sin sonar a que esperas que falle. \
+Si la tool dice que no hay dirección documentada, no la escribas.
 - Si la cancela, que puede volver cuando quiera y que ahí sigues para lo que necesite. Sin \
 pedirle que reagende y sin hacerle sentir que dejó algo pendiente.
 
@@ -446,6 +485,102 @@ def _antecedente_vivo(contexto, ahora) -> str | None:
     )
     cuando = getattr(contexto, "ultimo_recordatorio_en", None)
     return None if _recordatorio_caducado(cuando, ahora, horas=horas) else tipo
+
+
+#: Cómo se dice cada causa de `contratos.CausaCancelacion`, más la `clinica` del código.
+_CAUSA_EN_PALABRAS = {
+    "otra_fecha": "la canceló porque no podía esa fecha",
+    "ya_no_quiere": "la canceló porque ya no la quería",
+    "salud": "la canceló por un motivo de salud",
+    "precio": "la canceló por el costo",
+    "otro": "la canceló por otro motivo",
+    "no_lo_dijo": "la canceló sin decir por qué",
+    "clinica": "la canceló la clínica, no el paciente",
+}
+
+
+def _dia_en_palabras(momento, ahora) -> str:
+    """«el lunes 20 de octubre», sin hora: un antecedente se sitúa por el día, y una hora
+    concreta en el prompt sería una hora que ninguna tool autorizó en este turno."""
+    if ahora is not None and momento.tzinfo and ahora.tzinfo:
+        momento = momento.astimezone(ahora.tzinfo)
+    return f"el {_DIAS[momento.weekday()]} {momento.day} de {_MESES[momento.month - 1]}"
+
+
+def _tratamiento_mostrable(clave: str | None) -> str | None:
+    """Solo una clave de la lista viva. El tratamiento de una cita del relevo lo escribe el
+    doctor sin validar (no negociable 19): texto libre que no puede cruzar al prompt."""
+    if clave and clave != "no_identificado" and clave in contratos.vocabulario():
+        return clave
+    return None
+
+
+def _bloque_de_antecedentes(antecedentes, ahora) -> str | None:
+    """«ANTECEDENTES DE ESTE NÚMERO», o `None` si no hay nada que decir.
+
+    Las frases las arma el código con campos cerrados (`contratos.Antecedentes`): ni una
+    palabra del paciente ni del doctor. Lo que se le pide al modelo es usarlo y no recitarlo,
+    porque «veo que cancelaste el martes» suena a ficha leída en voz alta, y a quien faltó a
+    su cita no se le abre la conversación con eso.
+    """
+    if antecedentes is None:
+        return None
+    lineas: list[str] = []
+
+    if antecedentes.ultima_cita_inicio is not None:
+        trat = _tratamiento_mostrable(antecedentes.ultima_cita_tratamiento)
+        cita = "Su última cita" + (f" ({trat})" if trat else "")
+        cuando = _dia_en_palabras(antecedentes.ultima_cita_inicio, ahora)
+        if antecedentes.ultima_cita_estado == "cancelada":
+            causa = _CAUSA_EN_PALABRAS.get(
+                antecedentes.ultima_cita_causa or "no_lo_dijo", _CAUSA_EN_PALABRAS["otro"]
+            )
+            lineas.append(f"- {cita} era para {cuando}; {causa}.")
+        elif antecedentes.ultima_cita_asistio is True:
+            lineas.append(f"- {cita} fue {cuando}, y asistió.")
+        elif antecedentes.ultima_cita_asistio is False:
+            lineas.append(f"- {cita} fue {cuando}, y consta que no asistió.")
+        else:
+            lineas.append(f"- {cita} fue {cuando}; no consta si asistió.")
+
+    if antecedentes.tiene_cita_proxima:
+        lineas.append(
+            "- Tiene una cita por delante. Si habla de ella, llama a `consultar_citas` antes "
+            "de nombrar día u hora: no ofrezcas agendar como si no la tuviera."
+        )
+
+    partes: list[str] = []
+    if antecedentes.oportunidad_estado and antecedentes.oportunidad_estado != "explorando":
+        partes.append(f"estaba {antecedentes.oportunidad_estado.replace('_', ' ')}")
+    trat = _tratamiento_mostrable(antecedentes.oportunidad_tratamiento)
+    if trat:
+        partes.append(f"preguntaba por {trat}")
+    if antecedentes.oportunidad_barrera and antecedentes.oportunidad_barrera != "ninguna":
+        partes.append(f"lo frenaba: {antecedentes.oportunidad_barrera}")
+    if partes and antecedentes.oportunidad_en is not None:
+        dia = _dia_en_palabras(antecedentes.oportunidad_en, ahora)
+        lineas.append(
+            f"- La última vez que habló con nosotros ({dia}) " + ", ".join(partes) + "."
+        )
+
+    if antecedentes.relevo_en is not None:
+        lineas.append(
+            f"- {_dia_en_palabras(antecedentes.relevo_en, ahora).capitalize()} lo atendió "
+            "directamente un doctor de la clínica por este WhatsApp. No sabes qué se dijeron "
+            "y no lo supones."
+            + (" De esa conversación salió una cita." if antecedentes.relevo_con_cita else "")
+        )
+
+    if not lineas:
+        return None
+    return (
+        "ANTECEDENTES DE ESTE NÚMERO\n"
+        "Lo arma el sistema con lo que quedó de conversaciones anteriores; no está en tu "
+        "historial. Sirve para no hacerle repetir lo que ya contó ni ofrecerle como nuevo lo "
+        "que ya pasó, no para recitárselo: no se lo lees, no le dices que lo tienes anotado y "
+        "no le reprochas una cita cancelada o a la que no llegó. Si lo que te dice ahora es "
+        "distinto, manda lo que te dice ahora.\n" + "\n".join(lineas)
+    )
 
 
 def fecha_en_palabras(momento) -> str:
@@ -727,8 +862,9 @@ def instrucciones_daniela(ctx, agente) -> str:
             + (f", el {fecha_en_palabras(cuando)}" if cuando is not None else "")
             + ". No lo escribiste tú en esta conversación y por eso no lo ves en el "
             "historial, pero él sí lo leyó: si responde «sí», «confirmo», «ahí estaré» o "
-            "«no puedo», se refiere a la cita de la que hablaba ese mensaje. Si lo que "
-            "quiere es mover o cancelar, consulta sus citas antes de prometer nada."
+            "«no puedo», se refiere a la cita de la que hablaba ese mensaje. Si confirma "
+            "que irá, llama a `confirmar_asistencia` sin id. Si lo que quiere es mover o "
+            "cancelar, consulta sus citas antes de prometer nada."
         )
         # Los rótulos, y solo para el recordatorio de cita: es el único tipo no-reactivación
         # que existe hoy, pero este `elif` los atrapa a todos, y un tipo futuro con otros
@@ -755,6 +891,13 @@ def instrucciones_daniela(ctx, agente) -> str:
                 "realidad puede otro día, reprográmasela en vez de cancelar: así no pierde "
                 "su lugar."
             )
+
+    # La historia del número fuera de esta conversación. Va aquí, con los bloques por paciente
+    # y detrás de «AHORA MISMO», por la misma razón de caché que «YA LE ESCRIBIMOS»: delante,
+    # descachearía el prefijo de todos los pacientes de esa hora.
+    bloque = _bloque_de_antecedentes(getattr(contexto, "antecedentes", None), ahora)
+    if bloque:
+        texto = f"{texto}\n\n{bloque}"
 
     # El párrafo estático de más arriba dice "cuando el contexto dice que este paciente
     # pidió no ser contactado" -- y sin este bloque esa frase es inerte: `Runner.run` solo
