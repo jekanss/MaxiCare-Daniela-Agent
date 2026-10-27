@@ -1,6 +1,6 @@
 [project]
 name = "maxicare-daniela"
-version = "0.1.0"
+version = "0.2.0"
 description = "Daniela — agente conversacional de MaxiCare (clínica dental, Puente Largo, Bogotá). Arquitectura en docs/agentes/plan-agentes.json."
 requires-python = ">=3.10"
 dependencies = [
